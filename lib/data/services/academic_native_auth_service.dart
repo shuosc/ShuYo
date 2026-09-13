@@ -131,7 +131,12 @@ class AcademicNativeAuthService {
   Future<void> installCookiesInWebView() async {
     final manager = WebViewCookieManager();
     if (_target == _NativeAuthTarget.academic) {
-      await AcademicAuthService().clearCachedCookiesForReauthentication();
+      // Every campus login starts from the same clean authentication state as
+      // an explicit logout. This removes an expired root-path JSESSIONID before
+      // the callback creates its fresh /jwglxt session, while leaving forum and
+      // WebVPN cookies untouched. Fresh cookies collected above are installed
+      // immediately afterwards.
+      await AcademicAuthService().clearAccount();
     } else if (_target == _NativeAuthTarget.webVpn) {
       await WebVpnSessionStore().clearCachedCookiesForReauthentication();
       await _clearWebVpnAuthCookies(manager);

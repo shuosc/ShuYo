@@ -80,7 +80,6 @@ class AppShell extends StatefulWidget {
     required this.academicLoginSignal,
     required this.forumLoginSignal,
     required this.initialHasAcademicSession,
-    required this.initialAcademicSessionExpired,
     required this.initialAcademicStudentId,
     required this.onboardingController,
     this.initialOpenSchedule = false,
@@ -102,7 +101,6 @@ class AppShell extends StatefulWidget {
   final int academicLoginSignal;
   final int forumLoginSignal;
   final bool initialHasAcademicSession;
-  final bool initialAcademicSessionExpired;
   final String? initialAcademicStudentId;
   final bool initialOpenSchedule;
   final AcademicScheduleCacheState? initialScheduleState;
@@ -163,7 +161,6 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
   bool _webVpnReloginRequired = false;
   late bool _webVpnEnabled;
   late bool _hasAcademicSession;
-  late bool _academicSessionExpired;
   String? _academicStudentId;
   int _seenNotificationBadgeCount = 0;
   int _seenMessageBadgeCount = 0;
@@ -202,7 +199,6 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
     _repo = widget.repository;
     _webVpnEnabled = widget.initialWebVpnEnabled;
     _hasAcademicSession = widget.initialHasAcademicSession;
-    _academicSessionExpired = widget.initialAcademicSessionExpired;
     _academicStudentId = widget.initialAcademicStudentId;
     final demoData = widget.demoData;
     _scheduleRepository = widget.isDemo && demoData != null
@@ -304,7 +300,6 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
     if (mounted) {
       setState(() {
         _hasAcademicSession = true;
-        _academicSessionExpired = false;
       });
     }
     await _loadAcademicStudentId();
@@ -960,7 +955,6 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
     }
     widget.onboardingController.openAccountManager(
       academicLoggedIn: _hasAcademicSession,
-      academicExpired: _academicSessionExpired,
       forumStatus: _forumAccountStatus,
       webVpnEnabled: _webVpnEnabled,
       webVpnServiceStatus: _webVpnServiceStatus,
@@ -999,7 +993,6 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
       if (!mounted) return;
       widget.onboardingController.updateAccountStatus(
         academicLoggedIn: _hasAcademicSession,
-        academicExpired: _academicSessionExpired,
         forumStatus: _forumAccountStatus,
         webVpnEnabled: _webVpnEnabled,
         webVpnServiceStatus: _webVpnServiceStatus,
@@ -1158,6 +1151,15 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
         'post-login sync rejected authentication: $error',
         stackTrace: stackTrace,
       );
+      try {
+        await AcademicAuthService().clearAccount();
+      } on Object catch (clearError, clearStackTrace) {
+        _debugAcademicFlow(
+          'post-login account cleanup failed: $clearError',
+          stackTrace: clearStackTrace,
+        );
+      }
+      if (mounted) _setAcademicAccountSignedOut();
       if (mounted) {
         final summary = await _scheduleRepository.homeSummary();
         if (mounted) {
@@ -2227,20 +2229,9 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
     _cancelForumRecovery();
     setState(() => _reloadingSession = true);
     try {
-      final clearedNames = await AcademicAuthService().clearCookies();
-      await AcademicAccountStore().clear();
-      await ForumAuthService().removeCachedCookieNames(clearedNames);
+      await AcademicAuthService().clearAccount();
       if (!mounted) return false;
-      setState(() {
-        _hasAcademicSession = false;
-        _academicSessionExpired = false;
-        _academicStudentId = null;
-        _reloadingSession = false;
-        if (ForumUrlResolver.usesWebVpn) {
-          _repo.markConnectionUnavailable();
-        }
-      });
-      _syncOnboardingAccountStatus();
+      _setAcademicAccountSignedOut();
       return true;
     } on Object catch (error) {
       if (!mounted) return false;
@@ -2320,7 +2311,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
         repository: _scheduleRepository,
         notificationService: _scheduleNotificationService,
         widgetService: _scheduleWidgetService,
-        onLoginRequired: _reauthenticateExpiredAcademicAccount,
+        onLoginRequired: _handleInvalidAcademicSession,
         initialState: initialState,
         initialDisplayState: initialDisplayState,
         initialLoadError: initialLoadError,
@@ -2578,7 +2569,6 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
     if (result != NativeLoginResult.authenticated || !mounted) return;
     setState(() {
       _hasAcademicSession = true;
-      _academicSessionExpired = false;
     });
     await _loadAcademicStudentId();
     _syncOnboardingAccountStatus();
@@ -2586,12 +2576,39 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
     await _syncScheduleAfterAcademicLogin();
   }
 
-  Future<void> _reauthenticateExpiredAcademicAccount() async {
-    await AcademicAccountStore().markSessionExpired();
+  Future<void> _handleInvalidAcademicSession() async {
+    _cancelForumRecovery();
+    if (mounted) setState(() => _reloadingSession = true);
+    Object? cleanupError;
+    try {
+      await AcademicAuthService().clearAccount();
+    } on Object catch (error) {
+      cleanupError = error;
+    }
     if (!mounted) return;
-    setState(() => _academicSessionExpired = true);
-    _syncOnboardingAccountStatus();
+    _setAcademicAccountSignedOut();
+    if (cleanupError != null) {
+      await _showErrorDialog(
+        title: '校园账户状态清理失败',
+        message: _friendlyError(cleanupError),
+      );
+      return;
+    }
+    _showSnack('校园账户登录已失效，请重新登录');
     await _openAcademicLogin();
+  }
+
+  void _setAcademicAccountSignedOut() {
+    if (!mounted) return;
+    setState(() {
+      _hasAcademicSession = false;
+      _academicStudentId = null;
+      _reloadingSession = false;
+      if (ForumUrlResolver.usesWebVpn) {
+        _repo.markConnectionUnavailable();
+      }
+    });
+    _syncOnboardingAccountStatus();
   }
 
   void _debugAcademicFlow(String message, {StackTrace? stackTrace}) {

@@ -3,6 +3,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:shuyo/core/academic_constants.dart';
 import 'package:shuyo/core/academic_url_resolver.dart';
 import 'package:shuyo/core/forum_url_resolver.dart';
+import 'package:shuyo/data/services/academic_account_store.dart';
 import 'package:shuyo/data/services/academic_auth_service.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 
@@ -113,24 +114,25 @@ void main() {
     );
   });
 
-  test('academic reauthentication preserves the WebVPN session cache',
-      () async {
+  test('academic sign-out preserves WebVPN and schedule caches', () async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString('academic.auth.cached_cookies.direct', 'direct');
     await prefs.setString('academic.auth.cached_cookies.webvpn', 'webvpn');
     await prefs.setBool('academic.auth.explicitly_signed_out', true);
     await prefs.setString('academic.schedule.cache', 'schedule');
+    await prefs.setString(AcademicAccountStore.studentIdKey, '25120001');
     final service = AcademicAuthService(
       cookieLoader: (_) async => const [],
       cookieSetter: (_) async {},
     );
 
-    await service.clearCachedCookiesForReauthentication();
+    await service.clearAccount();
 
     expect(prefs.getString('academic.auth.cached_cookies.direct'), isNull);
     expect(prefs.getString('academic.auth.cached_cookies.webvpn'), 'webvpn');
     expect(prefs.getBool('academic.auth.explicitly_signed_out'), isTrue);
     expect(prefs.getString('academic.schedule.cache'), 'schedule');
+    expect(prefs.getString(AcademicAccountStore.studentIdKey), isNull);
   });
 
   test('does not treat a stale portal token as an authenticated session',

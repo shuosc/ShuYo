@@ -538,6 +538,22 @@ class _NativeLoginPageState extends State<NativeLoginPage> {
         : await auth.validateDirectAcademicSession();
     if (!mounted) return;
     if (status != WebVpnSessionStatus.valid) {
+      if (widget.destination == NativeLoginDestination.academic) {
+        // A callback that cannot produce a valid direct session must leave the
+        // next attempt in the same clean state as an explicit campus logout.
+        try {
+          await auth.clearAccount();
+        } on Object catch (error, stackTrace) {
+          if (kDebugMode) {
+            debugPrint('[SHU_AUTH] failed-login cleanup failed: $error');
+            debugPrintStack(
+              label: '[SHU_AUTH] cleanup stack',
+              stackTrace: stackTrace,
+            );
+          }
+        }
+        if (!mounted) return;
+      }
       _showError(widget.destination == NativeLoginDestination.webVpn
           ? 'WebVPN登录未完成，请重试'
           : '教务系统登录未完成，请重试');

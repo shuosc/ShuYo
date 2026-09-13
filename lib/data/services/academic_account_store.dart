@@ -6,7 +6,9 @@ class AcademicAccountStore {
   }) : _preferencesLoader = preferencesLoader ?? SharedPreferences.getInstance;
 
   static const studentIdKey = 'academic.account.student_id';
-  static const sessionExpiredKey = 'academic.account.session_expired';
+  // Kept only so upgrades can collapse the former "expired account" state
+  // into the canonical signed-out state.
+  static const legacySessionExpiredKey = 'academic.account.session_expired';
 
   final Future<SharedPreferences> Function() _preferencesLoader;
 
@@ -21,26 +23,18 @@ class AcademicAccountStore {
     final preferences = await _preferencesLoader();
     await Future.wait([
       preferences.setString(studentIdKey, normalized),
-      preferences.setBool(sessionExpiredKey, false),
+      preferences.remove(legacySessionExpiredKey),
     ]);
   }
 
-  Future<bool> isSessionExpired() async {
-    return (await _preferencesLoader()).getBool(sessionExpiredKey) ?? false;
-  }
-
-  Future<void> markSessionExpired() async {
-    final preferences = await _preferencesLoader();
-    if (preferences.getString(studentIdKey)?.trim().isNotEmpty == true) {
-      await preferences.setBool(sessionExpiredKey, true);
-    }
-  }
+  Future<bool> hasLegacyExpiredAccount() async =>
+      (await _preferencesLoader()).getBool(legacySessionExpiredKey) == true;
 
   Future<void> clear() async {
     final preferences = await _preferencesLoader();
     await Future.wait([
       preferences.remove(studentIdKey),
-      preferences.remove(sessionExpiredKey),
+      preferences.remove(legacySessionExpiredKey),
     ]);
   }
 }

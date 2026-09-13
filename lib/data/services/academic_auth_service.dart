@@ -10,6 +10,7 @@ import '../../core/academic_constants.dart';
 import '../../core/academic_url_resolver.dart';
 import '../../core/client_user_agent.dart';
 import '../../core/forum_url_resolver.dart';
+import 'academic_account_store.dart';
 import 'http_timeout.dart';
 
 enum WebVpnSessionStatus { valid, loginRequired, unavailable }
@@ -18,6 +19,7 @@ class AcademicAuthService {
   AcademicAuthService({
     WebViewCookieManager? cookieManager,
     Future<SharedPreferences> Function()? preferencesLoader,
+    AcademicAccountStore? accountStore,
     Future<List<WebViewCookie>> Function(Uri domain)? cookieLoader,
     Future<void> Function(WebViewCookie cookie)? cookieSetter,
     Future<WebVpnSessionStatus> Function(String cookieHeader)?
@@ -28,8 +30,9 @@ class AcademicAuthService {
             (cookieLoader == null || cookieSetter == null
                 ? WebViewCookieManager()
                 : null),
-        _preferencesLoader =
-            preferencesLoader ?? SharedPreferences.getInstance {
+        _preferencesLoader = preferencesLoader ?? SharedPreferences.getInstance,
+        _accountStore = accountStore ??
+            AcademicAccountStore(preferencesLoader: preferencesLoader) {
     _cookieLoader =
         cookieLoader ?? (domain) => _cookieManager!.getCookies(domain: domain);
     _cookieSetter = cookieSetter ?? _cookieManager!.setCookie;
@@ -49,12 +52,26 @@ class AcademicAuthService {
 
   final WebViewCookieManager? _cookieManager;
   final Future<SharedPreferences> Function() _preferencesLoader;
+  final AcademicAccountStore _accountStore;
   late final Future<List<WebViewCookie>> Function(Uri domain) _cookieLoader;
   late final Future<void> Function(WebViewCookie cookie) _cookieSetter;
   late final Future<WebVpnSessionStatus> Function(String cookieHeader)
       _webVpnSessionValidator;
   late final Future<WebVpnSessionStatus> Function(String cookieHeader)
       _directSessionValidator;
+
+  /// Clears every piece of state that makes the campus account appear signed
+  /// in. Schedule data, forum cookies, and WebVPN cookies are intentionally
+  /// outside this account boundary.
+  Future<void> clearAccount() async {
+    try {
+      await clearCookies();
+    } finally {
+      // Account identity must never survive a confirmed invalid session, even
+      // if an individual platform-cookie operation fails.
+      await _accountStore.clear();
+    }
+  }
 
   Future<Set<String>> clearCookies() async {
     // Academic logout only owns the direct jwxt session. WebVPN and forum
@@ -98,17 +115,6 @@ class AcademicAuthService {
       prefs.setBool(_explicitlySignedOutKey, true),
     ]);
     return clearedSharedNames;
-  }
-
-  /// Drops cookies persisted by a previous campus session before a fresh
-  /// authentication callback is installed. Unlike [clearCookies], this does
-  /// not mark the user as signed out or touch the cached schedule.
-  Future<void> clearCachedCookiesForReauthentication() async {
-    final prefs = await _preferencesLoader();
-    await Future.wait([
-      prefs.remove(_cachedDirectCookiesKey),
-    ]);
-    _debug('cleared cached cookies for reauthentication');
   }
 
   /// Clears the persistent logout marker after a user completes login.

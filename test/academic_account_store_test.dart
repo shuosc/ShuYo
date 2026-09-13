@@ -5,28 +5,47 @@ import 'package:shuyo/data/services/academic_account_store.dart';
 void main() {
   setUp(() => SharedPreferences.setMockInitialValues({}));
 
-  test('academic account expiration persists until a successful login',
-      () async {
+  test('saving an account removes the legacy expiration marker', () async {
+    SharedPreferences.setMockInitialValues({
+      AcademicAccountStore.legacySessionExpiredKey: true,
+    });
     final store = AcademicAccountStore();
     await store.saveStudentId('25120001');
-    expect(await store.isSessionExpired(), isFalse);
-
-    await store.markSessionExpired();
     expect(await store.loadStudentId(), '25120001');
-    expect(await store.isSessionExpired(), isTrue);
-
-    await store.saveStudentId('25120001');
-    expect(await store.isSessionExpired(), isFalse);
+    final preferences = await SharedPreferences.getInstance();
+    expect(
+      preferences.containsKey(AcademicAccountStore.legacySessionExpiredKey),
+      isFalse,
+    );
   });
 
-  test('logout removes both the account and its expiration state', () async {
+  test('detects a legacy expired account for startup migration', () async {
+    SharedPreferences.setMockInitialValues({
+      AcademicAccountStore.studentIdKey: '25120001',
+      AcademicAccountStore.legacySessionExpiredKey: true,
+    });
     final store = AcademicAccountStore();
-    await store.saveStudentId('25120001');
-    await store.markSessionExpired();
+
+    expect(await store.hasLegacyExpiredAccount(), isTrue);
+    await store.clear();
+    expect(await store.loadStudentId(), isNull);
+    expect(await store.hasLegacyExpiredAccount(), isFalse);
+  });
+
+  test('logout removes the account and legacy expiration state', () async {
+    SharedPreferences.setMockInitialValues({
+      AcademicAccountStore.studentIdKey: '25120001',
+      AcademicAccountStore.legacySessionExpiredKey: true,
+    });
+    final store = AcademicAccountStore();
 
     await store.clear();
 
     expect(await store.loadStudentId(), isNull);
-    expect(await store.isSessionExpired(), isFalse);
+    final preferences = await SharedPreferences.getInstance();
+    expect(
+      preferences.containsKey(AcademicAccountStore.legacySessionExpiredKey),
+      isFalse,
+    );
   });
 }

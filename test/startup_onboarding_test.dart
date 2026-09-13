@@ -11,7 +11,6 @@ void main() {
   Widget app({
     required bool completed,
     bool academicLoggedIn = false,
-    bool academicExpired = false,
     ForumAccountStatus forumStatus = ForumAccountStatus.signedOut,
     StartupOnboardingController? controller,
     Future<bool> Function()? onAcademicLogout,
@@ -22,7 +21,6 @@ void main() {
       home: StartupOnboarding(
         initiallyCompleted: completed,
         initialAcademicLoggedIn: academicLoggedIn,
-        initialAcademicExpired: academicExpired,
         initialForumStatus: forumStatus,
         onAcademicLoginCompleted: () {},
         onForumLoginCompleted: () {},
@@ -235,27 +233,6 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('主页'), findsOneWidget);
     expect(find.text('登录'), findsNothing);
-  });
-
-  testWidgets('account manager distinguishes an expired academic session',
-      (tester) async {
-    final controller = StartupOnboardingController();
-    await tester.pumpWidget(app(
-      completed: true,
-      academicLoggedIn: true,
-      academicExpired: true,
-      controller: controller,
-    ));
-    controller.openAccountManager(
-      academicLoggedIn: true,
-      academicExpired: true,
-      forumStatus: ForumAccountStatus.signedOut,
-    );
-    await tester.pumpAndSettle();
-
-    expect(find.text('上大校园账户'), findsOneWidget);
-    expect(find.text('已过期'), findsOneWidget);
-    expect(find.text('已登录'), findsNothing);
   });
 
   testWidgets('account manager shows persistent WebVPN controls and status',

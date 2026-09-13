@@ -23,7 +23,6 @@ enum ForumAccountStatus {
 
 class StartupOnboardingController extends ChangeNotifier {
   bool _academicLoggedIn = false;
-  bool _academicExpired = false;
   ForumAccountStatus _forumStatus = ForumAccountStatus.signedOut;
   VoidCallback? _onForumReconnect;
   VoidCallback? _onDismissAccountManager;
@@ -39,7 +38,6 @@ class StartupOnboardingController extends ChangeNotifier {
   bool _disposed = false;
 
   bool get academicLoggedIn => _academicLoggedIn;
-  bool get academicExpired => _academicExpired;
   ForumAccountStatus get forumStatus => _forumStatus;
   int get openRequest => _openRequest;
   bool get accountManagerOpen => _accountManagerOpen;
@@ -48,14 +46,12 @@ class StartupOnboardingController extends ChangeNotifier {
 
   void openAccountManager({
     required bool academicLoggedIn,
-    bool academicExpired = false,
     required ForumAccountStatus forumStatus,
     bool webVpnEnabled = false,
     WebVpnServiceStatus webVpnServiceStatus =
         const WebVpnServiceStatus.unknown(),
   }) {
     _academicLoggedIn = academicLoggedIn;
-    _academicExpired = academicExpired;
     _forumStatus = forumStatus;
     _webVpnEnabled = webVpnEnabled;
     _webVpnServiceStatus = webVpnServiceStatus;
@@ -82,23 +78,19 @@ class StartupOnboardingController extends ChangeNotifier {
 
   void updateAccountStatus({
     required bool academicLoggedIn,
-    bool? academicExpired,
     required ForumAccountStatus forumStatus,
     bool? webVpnEnabled,
     WebVpnServiceStatus? webVpnServiceStatus,
   }) {
     final nextEnabled = webVpnEnabled ?? _webVpnEnabled;
     final nextStatus = webVpnServiceStatus ?? _webVpnServiceStatus;
-    final nextAcademicExpired = academicExpired ?? _academicExpired;
     if (_academicLoggedIn == academicLoggedIn &&
-        _academicExpired == nextAcademicExpired &&
         _forumStatus == forumStatus &&
         _webVpnEnabled == nextEnabled &&
         identical(_webVpnServiceStatus, nextStatus)) {
       return;
     }
     _academicLoggedIn = academicLoggedIn;
-    _academicExpired = nextAcademicExpired;
     _forumStatus = forumStatus;
     _webVpnEnabled = nextEnabled;
     _webVpnServiceStatus = nextStatus;
@@ -164,7 +156,6 @@ class StartupOnboarding extends StatefulWidget {
     required this.child,
     required this.initiallyCompleted,
     required this.initialAcademicLoggedIn,
-    this.initialAcademicExpired = false,
     required this.initialForumStatus,
     required this.onAcademicLoginCompleted,
     required this.onForumLoginCompleted,
@@ -179,7 +170,6 @@ class StartupOnboarding extends StatefulWidget {
   final Widget child;
   final bool initiallyCompleted;
   final bool initialAcademicLoggedIn;
-  final bool initialAcademicExpired;
   final ForumAccountStatus initialForumStatus;
   final VoidCallback onAcademicLoginCompleted;
   final VoidCallback onForumLoginCompleted;
@@ -210,7 +200,6 @@ class _StartupOnboardingState extends State<StartupOnboarding>
   bool _webVpnExpanded = false;
   bool _changingWebVpn = false;
   late bool _academicLoggedIn = widget.initialAcademicLoggedIn;
-  late bool _academicExpired = widget.initialAcademicExpired;
   late ForumAccountStatus _forumStatus = widget.initialForumStatus;
   late bool _webVpnEnabled = widget.controller.webVpnEnabled;
   late WebVpnServiceStatus _webVpnServiceStatus =
@@ -263,9 +252,6 @@ class _StartupOnboardingState extends State<StartupOnboarding>
       _academicLoggedIn = widget.initialAcademicLoggedIn;
       if (_academicLoggedIn) _showForumCampusAccountHint = false;
     }
-    if (widget.initialAcademicExpired != oldWidget.initialAcademicExpired) {
-      _academicExpired = widget.initialAcademicExpired;
-    }
     if (widget.initialForumStatus != oldWidget.initialForumStatus) {
       _forumStatus = widget.initialForumStatus;
     }
@@ -277,7 +263,6 @@ class _StartupOnboardingState extends State<StartupOnboarding>
     if (!shouldOpen) {
       setState(() {
         _academicLoggedIn = widget.controller.academicLoggedIn;
-        _academicExpired = widget.controller.academicExpired;
         _forumStatus = widget.controller.forumStatus;
         _webVpnEnabled = widget.controller.webVpnEnabled;
         _webVpnServiceStatus = widget.controller.webVpnServiceStatus;
@@ -294,7 +279,6 @@ class _StartupOnboardingState extends State<StartupOnboarding>
       _accountManagerMode = true;
       _page = 2;
       _academicLoggedIn = widget.controller.academicLoggedIn;
-      _academicExpired = widget.controller.academicExpired;
       _forumStatus = widget.controller.forumStatus;
       _webVpnEnabled = widget.controller.webVpnEnabled;
       _webVpnServiceStatus = widget.controller.webVpnServiceStatus;
@@ -385,7 +369,6 @@ class _StartupOnboardingState extends State<StartupOnboarding>
     if (result != NativeLoginResult.authenticated || !mounted) return;
     setState(() {
       _academicLoggedIn = true;
-      _academicExpired = false;
       _showForumCampusAccountHint = false;
     });
     widget.onAcademicLoginCompleted();
@@ -804,21 +787,13 @@ class _StartupOnboardingState extends State<StartupOnboarding>
             icon: Icons.school_outlined,
             title: '上大校园账户',
             description: '用于访问课程表等教务服务',
-            statusLabel: _academicExpired
-                ? '已过期'
-                : _academicLoggedIn
-                    ? '已登录'
-                    : null,
-            statusColor:
-                _academicExpired ? Theme.of(context).colorScheme.error : null,
-            onTap: _academicExpired
-                ? _openAcademicLogin
-                : _academicLoggedIn
-                    ? (widget.onAcademicLogout == null &&
-                            !widget.controller.canLogoutAcademic
-                        ? null
-                        : _logoutAcademic)
-                    : _openAcademicLogin,
+            statusLabel: _academicLoggedIn ? '已登录' : null,
+            onTap: _academicLoggedIn
+                ? (widget.onAcademicLogout == null &&
+                        !widget.controller.canLogoutAcademic
+                    ? null
+                    : _logoutAcademic)
+                : _openAcademicLogin,
           ),
           if (_accountManagerMode) ...[
             _forumAccountTile(context),
