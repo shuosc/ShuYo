@@ -499,7 +499,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
     _openingScheduleFromWidget = true;
     try {
       final navigation = _openAcademicSystem(
-        animated: false,
+        animatePush: false,
         initialState: initialLaunch ? widget.initialScheduleState : null,
         initialDisplayState:
             initialLaunch ? widget.initialScheduleDisplayState : null,
@@ -2301,13 +2301,13 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
   }
 
   Future<void> _openAcademicSystem({
-    bool animated = true,
+    bool animatePush = true,
     AcademicScheduleCacheState? initialState,
     AcademicScheduleDisplayState? initialDisplayState,
     String? initialLoadError,
   }) async {
     final route = shuyoRoute<void>(
-      animated: animated,
+      animatePush: animatePush,
       builder: (context) => AcademicSchedulePage(
         repository: _scheduleRepository,
         notificationService: _scheduleNotificationService,
