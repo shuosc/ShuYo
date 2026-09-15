@@ -79,9 +79,15 @@ class _ShuYoRouteSurface extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return ColoredBox(
-      color: Theme.of(context).scaffoldBackgroundColor,
-      child: child,
+    // RenderFractionalTranslation, which backs SlideTransition, only shifts the
+    // paint offset and creates no layer. Without a repaint boundary the whole
+    // page is re-recorded on every frame of the transition; this boundary lets
+    // the recorded layer be reused and only re-composited.
+    return RepaintBoundary(
+      child: ColoredBox(
+        color: Theme.of(context).scaffoldBackgroundColor,
+        child: child,
+      ),
     );
   }
 }

@@ -99,7 +99,8 @@ class CampusReachabilityService {
           return const CampusReachabilityResult(
             status: CampusReachabilityStatus.reachable,
           );
-        })().timeout(timeout);
+        })()
+            .timeout(timeout);
       });
     } finally {
       client.close(force: true);

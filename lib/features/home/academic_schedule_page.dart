@@ -2123,9 +2123,7 @@ List<CourseSession> _sessionsIncludingNonCurrentWeek(
   }).toList()
     ..sort((a, b) {
       final weekday = a.weekday.compareTo(b.weekday);
-      return weekday != 0
-          ? weekday
-          : a.startSection.compareTo(b.startSection);
+      return weekday != 0 ? weekday : a.startSection.compareTo(b.startSection);
     });
 
   // Current-week courses are painted last as an additional safeguard so they
