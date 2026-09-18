@@ -1,7 +1,6 @@
 import 'dart:async';
 import 'dart:io';
 
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:home_widget/home_widget.dart';
@@ -973,10 +972,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
       return ForumAccountStatus.webVpnLoginRequired;
     }
     if (!_repo.hasLocalAccount) {
-      return defaultTargetPlatform == TargetPlatform.iOS &&
-              !ForumUrlResolver.usesWebVpn
-          ? ForumAccountStatus.directLoginUnavailable
-          : ForumAccountStatus.signedOut;
+      return ForumAccountStatus.signedOut;
     }
     if (_checkingForumConnection || _reloadingSession) {
       return ForumAccountStatus.connecting;
@@ -2131,11 +2127,6 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
       return;
     }
     if (_reloadingSession) return;
-    if (defaultTargetPlatform == TargetPlatform.iOS &&
-        !ForumUrlResolver.usesWebVpn) {
-      _showSnack('iOS暂时仅支持开启webvpn访问');
-      return;
-    }
     if (ForumUrlResolver.usesWebVpn) {
       final status = await _validateWebVpnSessionForForum();
       if (!mounted) return;

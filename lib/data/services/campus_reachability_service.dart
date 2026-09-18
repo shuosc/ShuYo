@@ -82,7 +82,7 @@ class CampusReachabilityService {
       });
     }
     final client = HttpClient()..connectionTimeout = timeout;
-    if (defaultTargetPlatform == TargetPlatform.android) {
+    if (CertificatePolicy.supportsForumException) {
       client.badCertificateCallback = (certificate, host, port) {
         return CertificatePolicy.allowsHost(host);
       };

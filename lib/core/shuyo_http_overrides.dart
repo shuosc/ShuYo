@@ -1,14 +1,12 @@
 import 'dart:io';
 
-import 'package:flutter/foundation.dart';
-
 import 'certificate_policy.dart';
 
 class ShuYoHttpOverrides extends HttpOverrides {
   @override
   HttpClient createHttpClient(SecurityContext? context) {
     final client = super.createHttpClient(context);
-    if (defaultTargetPlatform == TargetPlatform.android) {
+    if (CertificatePolicy.supportsForumException) {
       client.badCertificateCallback = (certificate, host, port) {
         return CertificatePolicy.allowsHost(host);
       };

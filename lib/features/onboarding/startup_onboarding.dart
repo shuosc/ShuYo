@@ -1,6 +1,5 @@
 import 'dart:async';
 
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
@@ -18,7 +17,6 @@ enum ForumAccountStatus {
   webVpnLoginRequired,
   waitingForAcademicLogin,
   reauthenticationRequired,
-  directLoginUnavailable,
 }
 
 class StartupOnboardingController extends ChangeNotifier {
@@ -196,7 +194,6 @@ class _StartupOnboardingState extends State<StartupOnboarding>
   late bool _visible = !widget.initiallyCompleted;
   bool _accountManagerMode = false;
   bool _showForumCampusAccountHint = false;
-  bool _showForumDirectUnavailableHint = false;
   bool _webVpnExpanded = false;
   bool _changingWebVpn = false;
   late bool _academicLoggedIn = widget.initialAcademicLoggedIn;
@@ -267,9 +264,6 @@ class _StartupOnboardingState extends State<StartupOnboarding>
         _webVpnEnabled = widget.controller.webVpnEnabled;
         _webVpnServiceStatus = widget.controller.webVpnServiceStatus;
         if (_academicLoggedIn) _showForumCampusAccountHint = false;
-        if (_forumStatus != ForumAccountStatus.directLoginUnavailable) {
-          _showForumDirectUnavailableHint = false;
-        }
       });
       return;
     }
@@ -283,7 +277,6 @@ class _StartupOnboardingState extends State<StartupOnboarding>
       _webVpnEnabled = widget.controller.webVpnEnabled;
       _webVpnServiceStatus = widget.controller.webVpnServiceStatus;
       _showForumCampusAccountHint = false;
-      _showForumDirectUnavailableHint = false;
     });
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted && _pageController.hasClients) {
@@ -392,10 +385,6 @@ class _StartupOnboardingState extends State<StartupOnboarding>
   }
 
   Future<void> _openForumLogin() async {
-    if (defaultTargetPlatform == TargetPlatform.iOS && !_webVpnEnabled) {
-      _showPanelNotice('iOS暂时仅支持开启webvpn访问');
-      return;
-    }
     if (_showForumCampusAccountHint) {
       setState(() => _showForumCampusAccountHint = false);
     }
@@ -472,11 +461,6 @@ class _StartupOnboardingState extends State<StartupOnboarding>
     if (!mounted || !_academicLoggedIn) return;
     setState(() => _forumStatus = ForumAccountStatus.connecting);
     widget.controller.reconnectForum();
-  }
-
-  void _showDirectForumUnavailableHint() {
-    if (_showForumDirectUnavailableHint) return;
-    setState(() => _showForumDirectUnavailableHint = true);
   }
 
   void _showPanelNotice(String message) {
@@ -798,7 +782,6 @@ class _StartupOnboardingState extends State<StartupOnboarding>
           if (_accountManagerMode) ...[
             _forumAccountTile(context),
             _forumCampusAccountHint(context),
-            _forumDirectUnavailableHint(context),
             _webVpnSection(context),
           ],
         ],
@@ -1005,40 +988,6 @@ class _StartupOnboardingState extends State<StartupOnboarding>
     );
   }
 
-  Widget _forumDirectUnavailableHint(BuildContext context) {
-    final colors = Theme.of(context).colorScheme;
-    return AnimatedSwitcher(
-      duration: const Duration(milliseconds: 220),
-      transitionBuilder: (child, animation) => SizeTransition(
-        sizeFactor: animation,
-        alignment: Alignment.topCenter,
-        child: FadeTransition(opacity: animation, child: child),
-      ),
-      child: _showForumDirectUnavailableHint
-          ? Padding(
-              key: const ValueKey('forum-direct-unavailable-hint'),
-              padding: const EdgeInsets.fromLTRB(56, 0, 4, 12),
-              child: Row(
-                children: [
-                  Icon(Icons.info_outline, size: 16, color: colors.error),
-                  const SizedBox(width: 7),
-                  Expanded(
-                    child: Text(
-                      'iOS暂时仅支持开启webvpn访问',
-                      style: TextStyle(
-                        color: colors.error,
-                        fontSize: 13,
-                        height: 1.35,
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            )
-          : const SizedBox(key: ValueKey('forum-direct-unavailable-hidden')),
-    );
-  }
-
   Widget _forumAccountTile(BuildContext context) {
     final colors = Theme.of(context).colorScheme;
     final (label, color, busy, onTap) = switch (_forumStatus) {
@@ -1085,12 +1034,6 @@ class _StartupOnboardingState extends State<StartupOnboarding>
           colors.error,
           false,
           _openForumLogin as VoidCallback,
-        ),
-      ForumAccountStatus.directLoginUnavailable => (
-          '暂不可登录',
-          colors.error,
-          false,
-          _showDirectForumUnavailableHint,
         ),
     };
     return _accountTile(

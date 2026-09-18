@@ -115,30 +115,20 @@ void main() {
     expect(find.text('跳过'), findsNothing);
   });
 
-  testWidgets('blocks direct forum login with certificate notice',
+  testWidgets('iOS signed-out account opens the native forum login',
       (tester) async {
     final controller = StartupOnboardingController();
-    await tester.pumpWidget(app(
-      completed: true,
-      academicLoggedIn: true,
-      forumStatus: ForumAccountStatus.directLoginUnavailable,
-      controller: controller,
-    ));
+    await tester.pumpWidget(app(completed: true, controller: controller));
     controller.openAccountManager(
       academicLoggedIn: true,
-      forumStatus: ForumAccountStatus.directLoginUnavailable,
+      forumStatus: ForumAccountStatus.signedOut,
+      webVpnEnabled: false,
     );
     await tester.pumpAndSettle();
-
-    expect(find.text('暂不可登录'), findsOneWidget);
     await tester.tap(find.text('乐乎账户'));
     await tester.pumpAndSettle();
-    expect(
-      find.text('iOS暂时仅支持开启webvpn访问'),
-      findsOneWidget,
-    );
-    expect(find.byType(NativeLoginPage), findsNothing);
-  });
+    expect(find.byType(NativeLoginPage), findsOneWidget);
+  }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
 
   testWidgets('second and third pages can return to the previous page',
       (tester) async {

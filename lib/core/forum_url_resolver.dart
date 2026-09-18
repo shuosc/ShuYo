@@ -1,4 +1,5 @@
 import 'forum_constants.dart';
+import 'wecom_constants.dart';
 
 enum ForumAccessMode { direct, webVpn }
 
@@ -56,6 +57,49 @@ class ForumUrlResolver {
 
   static bool isKnownForumHost(String host) =>
       host == ForumConstants.host || host == webVpnHost;
+
+  /// Keep OAuth's registered redirect URI intact while fetching the actual
+  /// callback through WebVPN. The gateway rewrites redirect_uri to its proxy,
+  /// which breaks the forum's authorization-code exchange.
+  static Uri? resolveOAuthNavigation(Uri uri) {
+    if (!usesWebVpn || uri.scheme != 'https') return null;
+    final target = WeComOAuthTarget.forum;
+    final ssoHost = Uri.parse(WeComConstants.ssoBase).host;
+    final ssoHosts = {
+      ssoHost,
+      WeComConstants.forumSsoHost,
+      WeComConstants.forumWebVpnSsoHost,
+      WeComConstants.webVpnNewssoProxyHost,
+    };
+    if (ssoHosts.contains(uri.host) &&
+        uri.path == WeComConstants.authorizePath &&
+        uri.queryParameters['client_id'] == target.clientId &&
+        uri.queryParameters['response_type'] == 'code') {
+      final callback = Uri.tryParse(uri.queryParameters['redirect_uri'] ?? '');
+      if (callback == null ||
+          callback.scheme != 'https' ||
+          !isKnownForumHost(callback.host) ||
+          callback.path != '/auth/oauth2_basic/callback') {
+        return null;
+      }
+      final resolved = uri.replace(
+        host: ssoHost,
+        queryParameters: {
+          ...uri.queryParameters,
+          'redirect_uri': target.redirectUri,
+        },
+      );
+      return resolved == uri ? null : resolved;
+    }
+    if (uri.host == ForumConstants.host &&
+        uri.path == '/auth/oauth2_basic/callback' &&
+        (uri.queryParameters.containsKey('code') ||
+            uri.queryParameters.containsKey('error')) &&
+        uri.queryParameters.containsKey('state')) {
+      return uri.replace(host: webVpnHost);
+    }
+    return null;
+  }
 
   static Uri _resolveAbsoluteUri(Uri uri) {
     if (usesWebVpn && uri.host == ForumConstants.host) {
