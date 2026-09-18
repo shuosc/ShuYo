@@ -123,6 +123,7 @@ void main() {
       AcademicNativeAuthService.webVpnTokenPathsNeedingInstall(
         const [],
         'valid-token',
+        targetHost: 'https-bbs-shu-edu-cn-443.webvpn.shu.edu.cn',
       ),
       {'/'},
     );
@@ -145,8 +146,88 @@ void main() {
           ),
         ],
         'valid-token',
+        targetHost: 'https-bbs-shu-edu-cn-443.webvpn.shu.edu.cn',
       ),
       {'/auth', '/'},
     );
+  });
+
+  group('WebVPN proxy cookie scope', () {
+    const proxy = 'https-bbs-shu-edu-cn-443.webvpn.shu.edu.cn';
+
+    test('readable parent tokens do not prove WebKit will send them', () {
+      expect(
+        AcademicNativeAuthService.webVpnTokenPathsNeedingInstall(
+          const [
+            WebViewCookie(
+              name: 'webvpn-token',
+              value: 'valid-token',
+              domain: 'shu.edu.cn',
+            ),
+            WebViewCookie(
+              name: 'webvpn-token',
+              value: 'valid-token',
+              domain: 'webvpn.shu.edu.cn',
+            ),
+          ],
+          'valid-token',
+          targetHost: proxy,
+        ),
+        {'/'},
+      );
+    });
+
+    test('an existing target root token needs no rewrite on either platform',
+        () {
+      for (final domain in [proxy, '.$proxy', 'https://$proxy/auth']) {
+        expect(
+          AcademicNativeAuthService.webVpnTokenPathsNeedingInstall(
+            [
+              WebViewCookie(
+                  name: 'webvpn-token', value: 'valid-token', domain: domain)
+            ],
+            'valid-token',
+            targetHost: proxy,
+          ),
+          isEmpty,
+        );
+      }
+    });
+
+    test('a correct root token does not hide a stale path-specific shadow', () {
+      expect(
+        AcademicNativeAuthService.webVpnTokenPathsNeedingInstall(
+          const [
+            WebViewCookie(
+                name: 'webvpn-token', value: 'valid-token', domain: proxy),
+            WebViewCookie(
+                name: 'webvpn-token',
+                value: 'old-token',
+                domain: proxy,
+                path: '/auth'),
+          ],
+          'valid-token',
+          targetHost: proxy,
+        ),
+        {'/', '/auth'},
+      );
+    });
+
+    test('a path-scoped token still needs a root token for later requests', () {
+      expect(
+        AcademicNativeAuthService.webVpnTokenPathsNeedingInstall(
+          const [
+            WebViewCookie(
+                name: 'webvpn-token',
+                value: 'valid-token',
+                domain: proxy,
+                path: '/auth')
+          ],
+          'valid-token',
+          targetHost: proxy,
+        ),
+        {'/', '/auth'},
+      );
+    });
   });
 }

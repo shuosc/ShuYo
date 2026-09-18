@@ -444,7 +444,11 @@ class AcademicNativeAuthService {
             (cookie) => cookie.name == 'webvpn-token',
           )
           .toList();
-      final paths = webVpnTokenPathsNeedingInstall(tokenCookies, token);
+      final paths = webVpnTokenPathsNeedingInstall(
+        tokenCookies,
+        token,
+        targetHost: target.host,
+      );
       for (final path in paths) {
         await manager.setCookie(
           WebViewCookie(
@@ -482,22 +486,38 @@ class AcademicNativeAuthService {
   @visibleForTesting
   static Set<String> webVpnTokenPathsNeedingInstall(
     Iterable<WebViewCookie> cookies,
-    String expectedToken,
-  ) {
+    String expectedToken, {
+    required String targetHost,
+  }) {
     final tokenCookies =
         cookies.where((cookie) => cookie.name == 'webvpn-token').toList();
-    final current = selectNonEmptyCookieValue(tokenCookies, 'webvpn-token');
-    final hasEmptyShadow = tokenCookies.any((cookie) => cookie.value.isEmpty);
-    if (current != null &&
-        _cookieValueMatches(expectedToken, current) &&
-        !hasEmptyShadow) {
+    // WKWebView's getCookies includes parent-domain cookies even when they
+    // are host-only and WebKit will not send them to this proxy. Require an
+    // explicit root-path copy for the target host, not merely a readable
+    // parent token. Android can report the queried URL as the cookie domain.
+    final targetCookies = tokenCookies.where((cookie) {
+      final domain = (cookie.domain.startsWith('https://') ||
+              cookie.domain.startsWith('http://'))
+          ? Uri.tryParse(cookie.domain)?.host
+          : cookie.domain.replaceFirst(RegExp(r'^\.'), '');
+      return domain == targetHost;
+    }).toList();
+    final hasRootToken = targetCookies.any(
+      (cookie) =>
+          (cookie.path.isEmpty || cookie.path == '/') &&
+          _cookieValueMatches(expectedToken, cookie.value),
+    );
+    final hasStaleShadow = targetCookies.any(
+      (cookie) => !_cookieValueMatches(expectedToken, cookie.value),
+    );
+    if (hasRootToken && !hasStaleShadow) {
       return const {};
     }
-    final paths = tokenCookies
-        .map((cookie) => cookie.path.isEmpty ? '/' : cookie.path)
-        .toSet();
-    if (paths.isEmpty) paths.add('/');
-    return paths;
+    return {
+      '/',
+      for (final cookie in targetCookies)
+        cookie.path.isEmpty ? '/' : cookie.path,
+    };
   }
 
   /// Password login bootstraps Discourse natively and therefore carries a
@@ -753,7 +773,10 @@ class AcademicNativeAuthService {
           'location=${location == null ? '-' : _safeLocation(location)}',
         );
       }
-      final next = _redirectTarget(response, uri);
+      var next = _redirectTarget(response, uri);
+      if (_target == _NativeAuthTarget.forum && next != null) {
+        next = ForumUrlResolver.resolveOAuthNavigation(next) ?? next;
+      }
       await response.drain<void>().timeout(HttpTimeout.normal);
       if (next == null) {
         if (uri.path.contains(_newssoPathMarker)) return uri;

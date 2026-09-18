@@ -1,8 +1,6 @@
 import 'dart:async';
 import 'dart:io';
 
-import 'package:flutter/foundation.dart';
-
 import '../../core/forum_constants.dart';
 import '../../core/certificate_policy.dart';
 import 'http_timeout.dart';
@@ -34,7 +32,7 @@ class ForumReachabilityService {
 
   Future<ForumReachabilityResult> checkDirectBbsReachability() async {
     final client = HttpClient()..connectionTimeout = timeout;
-    if (defaultTargetPlatform == TargetPlatform.android) {
+    if (CertificatePolicy.supportsForumException) {
       client.badCertificateCallback = (certificate, host, port) {
         return CertificatePolicy.allowsHost(host);
       };

@@ -6,15 +6,17 @@ import 'forum_url_resolver.dart';
 class CertificatePolicy {
   const CertificatePolicy._();
 
-  // Temporary workaround for the forum's expired certificate during MVP tests.
+  // Compatibility workaround until the campus forum renews its certificate.
   // Do not broaden this to OAuth or arbitrary hosts.
   static const allowInvalidForumCertificate =
       bool.fromEnvironment('LEHU_ALLOW_INVALID_FORUM_CERT', defaultValue: true);
 
+  static bool get supportsForumException =>
+      defaultTargetPlatform == TargetPlatform.android ||
+      defaultTargetPlatform == TargetPlatform.iOS;
+
   static bool allowsHost(String host) {
-    // iOS/WebKit performs certificate validation in the system security
-    // stack. Keep the temporary invalid-certificate exception Android-only.
-    return defaultTargetPlatform == TargetPlatform.android &&
+    return supportsForumException &&
         allowInvalidForumCertificate &&
         !ForumUrlResolver.usesWebVpn &&
         host.toLowerCase() == ForumConstants.host;

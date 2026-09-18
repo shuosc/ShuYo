@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 import 'package:webview_flutter_android/webview_flutter_android.dart';
+import 'package:webview_flutter_wkwebview/webview_flutter_wkwebview.dart';
 
 import '../../core/certificate_policy.dart';
 import '../../core/client_user_agent.dart';
@@ -90,6 +91,8 @@ class _ForumOAuthCompletionPageState extends State<ForumOAuthCompletionPage> {
   bool _completed = false;
   bool _checkingSession = false;
   bool _forumReached = false;
+  bool _callbackFinished = false;
+  final Set<String> _replacedNavigationUrls = {};
   bool _registrationActive = false;
   bool _registrationCompletionReached = false;
   bool _webViewProbeInFlight = false;
@@ -117,11 +120,17 @@ class _ForumOAuthCompletionPageState extends State<ForumOAuthCompletionPage> {
             _handleNavigation(url, event: 'started');
           },
           onPageFinished: (url) {
+            if (!_replacedNavigationUrls.contains(url)) {
+              _replacedNavigationUrls.clear();
+            }
+            _currentUri = Uri.tryParse(url);
             _handleNavigation(url, event: 'finished');
             unawaited(_checkSession());
           },
           onNavigationRequest: (request) {
-            _currentUri = Uri.tryParse(request.url);
+            if (request.isMainFrame) {
+              _currentUri = Uri.tryParse(request.url);
+            }
             if (kDebugMode) {
               final uri = Uri.tryParse(request.url);
               debugPrint(
@@ -131,14 +140,19 @@ class _ForumOAuthCompletionPageState extends State<ForumOAuthCompletionPage> {
             }
             return _handleNavigationRequest(request);
           },
-          // WKWebView (iOS) must use the system trust store without a
-          // certificate-bypass callback. Android keeps the existing
-          // temporary workaround.
-          onSslAuthError: defaultTargetPlatform == TargetPlatform.android
+          // Both mobile platforms use the same host-scoped certificate policy.
+          onSslAuthError: CertificatePolicy.supportsForumException
               ? _handleSslAuthError
               : null,
+          onHttpError: _handleHttpError,
           onWebResourceError: (error) {
             if (error.isForMainFrame == false) return;
+            // Replacing the direct OAuth callback with its WebVPN URL cancels
+            // the original WebKit navigation. These are cancellation signals,
+            // not failures of the replacement page.
+            if (_consumeReplacedNavigationError(error)) {
+              return;
+            }
             final failedUrl = error.url ?? _currentUri?.toString();
             final failedUri =
                 failedUrl == null ? null : Uri.tryParse(failedUrl);
@@ -307,7 +321,14 @@ class _ForumOAuthCompletionPageState extends State<ForumOAuthCompletionPage> {
     }
     if (ForumUrlResolver.isKnownForumHost(uri.host.toLowerCase())) {
       _forumReached = true;
-      if (uri.path.startsWith('/auth/failure')) {
+      if (event == 'finished' &&
+          (uri.path == '/auth/oauth2_basic/callback' ||
+              isForumRegistrationCompletionUri(uri))) {
+        _callbackFinished = true;
+      }
+      if (uri.path.startsWith('/auth/failure') ||
+          (uri.path == '/auth/oauth2_basic/callback' &&
+              uri.queryParameters.containsKey('error'))) {
         _fail('乐乎论坛拒绝了本次登录，请返回后重试');
       }
     }
@@ -319,6 +340,13 @@ class _ForumOAuthCompletionPageState extends State<ForumOAuthCompletionPage> {
 
   NavigationDecision _handleNavigationRequest(NavigationRequest request) {
     final uri = Uri.tryParse(request.url);
+    final replacement =
+        uri == null ? null : ForumUrlResolver.resolveOAuthNavigation(uri);
+    if (request.isMainFrame && replacement != null) {
+      _replacedNavigationUrls.add(request.url);
+      unawaited(_loadReplacementNavigation(replacement));
+      return NavigationDecision.prevent;
+    }
     if (uri != null &&
         request.isMainFrame &&
         _isRepeatedWebVpnLoginRedirect(uri)) {
@@ -340,6 +368,27 @@ class _ForumOAuthCompletionPageState extends State<ForumOAuthCompletionPage> {
     return NavigationDecision.prevent;
   }
 
+  Future<void> _loadReplacementNavigation(Uri uri) async {
+    try {
+      await _controller.loadRequest(uri);
+    } on Object {
+      _fail('无法加载论坛认证页面，请返回后重试');
+    }
+  }
+
+  bool _consumeReplacedNavigationError(WebResourceError error) {
+    if (defaultTargetPlatform != TargetPlatform.iOS ||
+        (error.errorCode != -999 && error.errorCode != 102) ||
+        _replacedNavigationUrls.isEmpty) {
+      return false;
+    }
+    // WebKit sometimes omits the failing URL. Consume at most one expected
+    // cancellation; an unrelated URL must still follow normal error handling.
+    return _replacedNavigationUrls.remove(
+      error.url ?? _replacedNavigationUrls.first,
+    );
+  }
+
   bool _isRepeatedWebVpnLoginRedirect(Uri uri) {
     if (!ForumUrlResolver.usesWebVpn || !_forumReached) return false;
     final portalHost = Uri.parse(ForumUrlResolver.webVpnPortalUrl).host;
@@ -349,8 +398,32 @@ class _ForumOAuthCompletionPageState extends State<ForumOAuthCompletionPage> {
         uri.path.startsWith('/auth/login');
   }
 
+  void _handleHttpError(HttpResponseError error) {
+    final status = error.response?.statusCode;
+    if (kDebugMode) {
+      debugPrint('[FORUM_AUTH_CALLBACK] http-error status=$status');
+    }
+    final current = _currentUri;
+    final failed = error.request?.uri ?? error.response?.uri ?? current;
+    if (status == null ||
+        status < 400 ||
+        current == null ||
+        failed == null ||
+        failed.host != current.host ||
+        failed.path != current.path) {
+      return;
+    }
+    if (!ForumUrlResolver.isKnownForumHost(current.host) ||
+        current.path != '/auth/oauth2_basic/callback') {
+      return;
+    }
+    _fail('论坛登录页面返回错误（HTTP $status），请稍后重试');
+  }
+
   void _handleSslAuthError(SslAuthError error) {
-    final uri = _sslErrorUri(error) ?? _currentUri;
+    // Use the challenged host, never the page URL: a subresource may belong
+    // to a different host from the currently displayed forum page.
+    final uri = _sslErrorUri(error);
     if (kDebugMode) {
       debugPrint(
         '[FORUM_AUTH_CALLBACK] ssl-error '
@@ -392,11 +465,16 @@ class _ForumOAuthCompletionPageState extends State<ForumOAuthCompletionPage> {
     if (platform is AndroidSslAuthError) {
       return Uri.tryParse(platform.url);
     }
+    if (platform is WebKitSslAuthError) {
+      return Uri(scheme: 'https', host: platform.host, port: platform.port);
+    }
     return null;
   }
 
   Future<void> _checkSession() async {
-    if (_completed || _checkingSession || !_forumReached) return;
+    if (_completed || _error != null || _checkingSession || !_forumReached) {
+      return;
+    }
     _checkingSession = true;
     try {
       // While the user is completing first-time forum registration, do not
@@ -410,7 +488,8 @@ class _ForumOAuthCompletionPageState extends State<ForumOAuthCompletionPage> {
         return;
       }
       if (ForumUrlResolver.usesWebVpn) {
-        await _checkWebVpnCallbackCookie();
+        if (!_callbackFinished) return;
+        await _checkWebViewSession();
         return;
       }
       await _authService.refreshFromWebView();
@@ -437,27 +516,6 @@ class _ForumOAuthCompletionPageState extends State<ForumOAuthCompletionPage> {
     }
   }
 
-  Future<void> _checkWebVpnCallbackCookie() async {
-    final cookies = await WebViewCookieManager().getCookies(
-      domain: ForumUrlResolver.baseUri,
-    );
-    final authenticated = cookies.any(
-      (cookie) =>
-          cookie.name == 'authentication_data' &&
-          isAuthenticatedForumCallbackCookie(cookie.value),
-    );
-    if (kDebugMode) {
-      debugPrint(
-        '[FORUM_AUTH_CALLBACK] webvpn callback-cookie '
-        'authenticated=$authenticated '
-        'names=${cookies.map((cookie) => cookie.name).where((name) => name.isNotEmpty).toSet().toList()..sort()}',
-      );
-    }
-    if (!authenticated || _finalizingWebViewSession) return;
-    _finalizingWebViewSession = true;
-    unawaited(_completeWebViewSession());
-  }
-
   Future<void> _checkWebViewSession() async {
     if (_webViewProbeInFlight) return;
     _webViewProbeInFlight = true;
@@ -468,6 +526,7 @@ class _ForumOAuthCompletionPageState extends State<ForumOAuthCompletionPage> {
     try {
       await _controller.runJavaScript('''
 (async function() {
+  if (window.location.origin !== ${jsonEncode(ForumUrlResolver.baseUrl)}) return;
   try {
     const response = await fetch('/session/current.json', {credentials: 'include'});
     const body = await response.text();
@@ -479,13 +538,13 @@ class _ForumOAuthCompletionPageState extends State<ForumOAuthCompletionPage> {
     $_sessionProbeChannel.postMessage(JSON.stringify({
       status: response.status,
       currentUser: currentUser,
-      url: window.location.href
+      url: window.location.origin + window.location.pathname
     }));
   } catch (error) {
     $_sessionProbeChannel.postMessage(JSON.stringify({
       status: 0,
       currentUser: false,
-      url: window.location.href
+      url: window.location.origin + window.location.pathname
     }));
   }
 })()
@@ -502,7 +561,12 @@ class _ForumOAuthCompletionPageState extends State<ForumOAuthCompletionPage> {
     _webViewProbeInFlight = false;
     _webViewProbeTimeout?.cancel();
     _webViewProbeTimeout = null;
-    if (_completed || !_registrationActive || !_registrationCompletionReached) {
+    if (_completed ||
+        _error != null ||
+        !mounted ||
+        (ForumUrlResolver.usesWebVpn && !_callbackFinished) ||
+        (!ForumUrlResolver.usesWebVpn &&
+            (!_registrationActive || !_registrationCompletionReached))) {
       return;
     }
     Map<String, dynamic>? payload;
@@ -521,6 +585,13 @@ class _ForumOAuthCompletionPageState extends State<ForumOAuthCompletionPage> {
       return;
     }
     if (payload == null) return;
+    final uri = Uri.tryParse(payload['url']?.toString() ?? '');
+    if (uri == null ||
+        !uri.hasAuthority ||
+        uri.scheme != 'https' ||
+        uri.origin != ForumUrlResolver.baseUri.origin) {
+      return;
+    }
     final status = payload['status'];
     final currentUser = payload['currentUser'] == true;
     if (kDebugMode) {
@@ -547,6 +618,19 @@ class _ForumOAuthCompletionPageState extends State<ForumOAuthCompletionPage> {
 
   Future<void> _completeWebViewSession() async {
     try {
+      // A JavaScript channel's payload is page-controlled. Also check the
+      // actual top-level document before importing its browser session.
+      final current = Uri.tryParse(await _controller.currentUrl() ?? '');
+      if (!mounted ||
+          _completed ||
+          _error != null ||
+          current == null ||
+          !current.hasAuthority ||
+          current.scheme != 'https' ||
+          current.origin != ForumUrlResolver.baseUri.origin) {
+        _finalizingWebViewSession = false;
+        return;
+      }
       await _authService.refreshFromWebView();
       await _authService.persistLastCookieHeader();
       _finish(ForumOAuthCompletionResult.loggedIn);
@@ -559,7 +643,7 @@ class _ForumOAuthCompletionPageState extends State<ForumOAuthCompletionPage> {
   }
 
   void _finish(ForumOAuthCompletionResult result) {
-    if (_completed || !mounted) return;
+    if (_completed || _error != null || !mounted) return;
     _completed = true;
     _sessionPollTimer?.cancel();
     _timeoutTimer?.cancel();

@@ -1,6 +1,5 @@
 import 'dart:io';
 
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:home_widget/home_widget.dart';
@@ -354,11 +353,6 @@ class _ShuYoAppState extends State<ShuYoApp> with WidgetsBindingObserver {
 }
 
 ForumAccountStatus _forumAccountStatus(ForumRepository repository) {
-  if (defaultTargetPlatform == TargetPlatform.iOS &&
-      !ForumUrlResolver.usesWebVpn &&
-      !repository.hasLocalAccount) {
-    return ForumAccountStatus.directLoginUnavailable;
-  }
   return switch (repository.connectionState) {
     ForumConnectionState.firstUse => ForumAccountStatus.signedOut,
     ForumConnectionState.cachedOffline =>
