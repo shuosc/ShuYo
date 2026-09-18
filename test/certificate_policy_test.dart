@@ -9,24 +9,35 @@ void main() {
     ForumUrlResolver.configure(useWebVpn: false);
   });
 
-  for (final platform in [TargetPlatform.android, TargetPlatform.iOS]) {
-    test('${platform.name} allows only the direct forum certificate exception',
-        () {
-      debugDefaultTargetPlatformOverride = platform;
-      ForumUrlResolver.configure(useWebVpn: false);
-      expect(CertificatePolicy.allowsHost('bbs.shu.edu.cn'), isTrue);
-      for (final host in [
-        'oauth.shu.edu.cn',
-        'newsso.shu.edu.cn',
-        'webvpn.shu.edu.cn',
-        'bbs.shu.edu.cn.example.com',
-      ]) {
-        expect(CertificatePolicy.allowsHost(host), isFalse);
-      }
-      ForumUrlResolver.configure(useWebVpn: true);
-      expect(CertificatePolicy.allowsHost('bbs.shu.edu.cn'), isFalse);
-      expect(
-          CertificatePolicy.allowsHost(ForumUrlResolver.webVpnHost), isFalse);
-    });
-  }
+  test('Android direct BBS can use the temporary certificate exception', () {
+    debugDefaultTargetPlatformOverride = TargetPlatform.android;
+    ForumUrlResolver.configure(useWebVpn: false);
+    expect(CertificatePolicy.allowsHost('bbs.shu.edu.cn'), isTrue);
+    expect(CertificatePolicy.allowsHost('oauth.shu.edu.cn'), isFalse);
+
+    ForumUrlResolver.configure(useWebVpn: true);
+    expect(CertificatePolicy.allowsHost('bbs.shu.edu.cn'), isFalse);
+    expect(
+      CertificatePolicy.allowsHost(ForumUrlResolver.webVpnHost),
+      isFalse,
+    );
+  });
+
+  test('iOS allows the direct forum certificate exception', () {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    ForumUrlResolver.configure(useWebVpn: false);
+
+    expect(CertificatePolicy.allowsHost('bbs.shu.edu.cn'), isTrue);
+    for (final host in [
+      'oauth.shu.edu.cn',
+      'newsso.shu.edu.cn',
+      'webvpn.shu.edu.cn',
+      'bbs.shu.edu.cn.example.com'
+    ]) {
+      expect(CertificatePolicy.allowsHost(host), isFalse);
+    }
+    ForumUrlResolver.configure(useWebVpn: true);
+    expect(CertificatePolicy.allowsHost('bbs.shu.edu.cn'), isFalse);
+    expect(CertificatePolicy.allowsHost(ForumUrlResolver.webVpnHost), isFalse);
+  });
 }

@@ -36,6 +36,24 @@ bool isForumRegistrationCompletionUri(Uri uri) {
   return path == '/' || path == '/latest' || path == '/latest/';
 }
 
+@visibleForTesting
+bool isAuthenticatedForumCallbackCookie(String value) {
+  var decoded = value;
+  for (var attempt = 0; attempt < 2; attempt++) {
+    try {
+      decoded = Uri.decodeComponent(decoded);
+    } on FormatException {
+      break;
+    }
+  }
+  try {
+    final data = jsonDecode(decoded);
+    return data is Map && data['authenticated'] == true;
+  } on Object {
+    return false;
+  }
+}
+
 bool _isForumRegistrationFlowUri(Uri uri) {
   if (uri.scheme != 'https' ||
       !ForumUrlResolver.isActiveForumHost(uri.host.toLowerCase())) {

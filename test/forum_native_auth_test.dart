@@ -127,6 +127,22 @@ void main() {
     );
   });
 
+  test('recognizes the authenticated OAuth callback cookie', () {
+    expect(
+      isAuthenticatedForumCallbackCookie(
+        '%7B%22authenticated%22%3Atrue%2C%22awaiting_activation%22%3Afalse%7D',
+      ),
+      isTrue,
+    );
+    expect(
+      isAuthenticatedForumCallbackCookie(
+        '%7B%22authenticated%22%3Afalse%7D',
+      ),
+      isFalse,
+    );
+    expect(isAuthenticatedForumCallbackCookie('not-json'), isFalse);
+  });
+
   testWidgets('registration placeholder does not submit an API request',
       (tester) async {
     await tester.pumpWidget(
