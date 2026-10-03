@@ -91,11 +91,8 @@ class AcademicScheduleWidgetService {
       };
     }
 
-    final activeWeek = _activeWeekFromState(
-      schedule,
-      weekState,
-      now: capturedAt,
-    );
+    final activeWeek =
+        weekState.weekForDate(capturedAt).clamp(0, schedule.vacationWeek);
 
     return {
       'schema': 1,
@@ -172,16 +169,6 @@ class AcademicScheduleWidgetService {
   }
 
   static String _pad(int value) => value.toString().padLeft(2, '0');
-
-  static int _activeWeekFromState(
-    AcademicSchedule schedule,
-    ScheduleWeekState state, {
-    required DateTime now,
-  }) {
-    final todayMonday = AcademicScheduleRepository.startOfWeek(now);
-    final offset = todayMonday.difference(state.anchorMonday).inDays ~/ 7;
-    return (state.currentWeek + offset).clamp(0, schedule.vacationWeek);
-  }
 
   static bool get _supportsHomeWidget {
     if (kIsWeb) {

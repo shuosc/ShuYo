@@ -16,6 +16,8 @@ void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
   const channel = MethodChannel('test.shuyo/early_class_alarms');
+  const liveActivityChannel =
+      MethodChannel('work.shuyo.app/course_live_activity');
 
   late List<Map<Object?, Object?>> syncedAlarms;
   late List<String> methodCalls;
@@ -28,6 +30,12 @@ void main() {
     syncedAlarms = [];
     methodCalls = [];
     alarmAuthorized = true;
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(liveActivityChannel, (call) async {
+      return call.method == 'isAvailable'
+          ? false
+          : {'activitiesEnabled': false};
+    });
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(channel, (call) async {
       methodCalls.add(call.method);
@@ -50,6 +58,8 @@ void main() {
     debugDefaultTargetPlatformOverride = null;
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(channel, null);
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(liveActivityChannel, null);
   });
 
   test('AlarmKit sync schedules only each morning earliest class', () async {

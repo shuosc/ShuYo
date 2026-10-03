@@ -5,8 +5,79 @@ import 'package:shuyo/data/repositories/academic_schedule_repository.dart';
 import 'package:shuyo/data/services/academic_auth_service.dart';
 import 'package:shuyo/data/services/academic_account_store.dart';
 import 'package:shuyo/data/services/academic_schedule_api_client.dart';
+import 'package:shuyo/data/services/academic_schedule_widget_service.dart';
+import 'package:timezone/data/latest.dart' as timezone_data;
+import 'package:timezone/timezone.dart' as timezone;
 
 void main() {
+  setUpAll(timezone_data.initializeTimeZones);
+
+  test('calendar weeks advance on Monday across the year boundary', () {
+    final state = ScheduleWeekState(
+      currentWeek: 3,
+      anchorMonday: DateTime(2025, 12, 29),
+    );
+
+    expect(state.weekForDate(DateTime(2025, 12, 28, 23, 59)), 2);
+    expect(state.weekForDate(DateTime(2026, 1, 4, 23, 59)), 3);
+    expect(state.weekForDate(DateTime(2026, 1, 5)), 4);
+    expect(state.weekForDate(DateTime(2025, 12, 1)), -1);
+  });
+
+  test('calendar weeks ignore UTC offsets and DST elapsed hours', () {
+    final newYork = timezone.getLocation('America/New_York');
+    final tokyo = timezone.getLocation('Asia/Tokyo');
+    final state = ScheduleWeekState(
+      currentWeek: 4,
+      anchorMonday: timezone.TZDateTime(newYork, 2026, 3, 2),
+    );
+    final afterSpringForward = timezone.TZDateTime(newYork, 2026, 3, 9);
+
+    // The two calendar Mondays are only 167 elapsed hours apart.
+    expect(afterSpringForward.difference(state.anchorMonday).inHours, 167);
+    expect(state.weekForDate(afterSpringForward), 5);
+    expect(state.weekForDate(DateTime.utc(2026, 3, 9)), 5);
+    expect(state.weekForDate(timezone.TZDateTime(tokyo, 2026, 3, 9)), 5);
+    expect(
+        state.weekForDate(timezone.TZDateTime(tokyo, 2026, 3, 8, 23, 59)), 4);
+
+    final autumnState = ScheduleWeekState(
+      currentWeek: 8,
+      anchorMonday: timezone.TZDateTime(newYork, 2026, 11, 2),
+    );
+    final beforeFallBack = timezone.TZDateTime(newYork, 2026, 10, 26);
+    expect(beforeFallBack.difference(autumnState.anchorMonday).inHours, -169);
+    expect(autumnState.weekForDate(beforeFallBack), 7);
+  });
+
+  test('repository and widget clamp the shared calendar week consistently', () {
+    final repository = AcademicScheduleRepository();
+    final state = ScheduleWeekState(
+      currentWeek: 1,
+      anchorMonday: timezone.TZDateTime(
+        timezone.getLocation('America/New_York'),
+        2026,
+        3,
+        2,
+      ),
+    );
+    for (final (date, expected) in [
+      (DateTime.utc(2026, 2, 16), 0),
+      (DateTime.utc(2026, 3, 8, 23, 59), 1),
+      (DateTime.utc(2026, 3, 9), 2),
+      (DateTime.utc(2027, 1, 1), _schedule.vacationWeek),
+    ]) {
+      expect(repository.activeWeekFromState(_schedule, state, now: date),
+          expected);
+      final snapshot = AcademicScheduleWidgetService.buildSnapshot(
+        schedule: _schedule,
+        weekState: state,
+        now: date,
+      );
+      expect(snapshot['activeWeek'], expected);
+    }
+  });
+
   test(
       'cached schedule remains after expiration and is hidden for another account',
       () async {

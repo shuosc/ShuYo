@@ -15,6 +15,18 @@ class ScheduleWeekState {
   final int currentWeek;
   final DateTime anchorMonday;
 
+  /// Returns the unclamped teaching week for the date's calendar fields.
+  ///
+  /// UTC dates are used only for calendar arithmetic, not to convert either
+  /// value's instant or timezone. This keeps whole weeks stable across DST.
+  int weekForDate(DateTime date) {
+    final day = DateTime.utc(date.year, date.month, date.day);
+    final monday = day.subtract(Duration(days: day.weekday - 1));
+    final anchor =
+        DateTime.utc(anchorMonday.year, anchorMonday.month, anchorMonday.day);
+    return currentWeek + monday.difference(anchor).inDays ~/ 7;
+  }
+
   DateTime get firstWeekStart =>
       anchorMonday.subtract(Duration(days: (currentWeek - 1) * 7));
 }
@@ -134,9 +146,9 @@ class AcademicScheduleRepository {
     ScheduleWeekState state, {
     DateTime? now,
   }) {
-    final todayMonday = startOfWeek(now ?? DateTime.now());
-    final offset = todayMonday.difference(state.anchorMonday).inDays ~/ 7;
-    return (state.currentWeek + offset).clamp(0, schedule.vacationWeek);
+    return state
+        .weekForDate(now ?? DateTime.now())
+        .clamp(0, schedule.vacationWeek);
   }
 
   DateTime dateForWeekday({

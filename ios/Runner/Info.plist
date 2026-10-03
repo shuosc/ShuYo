@@ -45,6 +45,8 @@
 	<string>将 ShuYo 中的图片保存到系统相册。</string>
 	<key>NSAlarmKitUsageDescription</key>
 	<string>用于为早课自动设置系统闹钟。</string>
+	<key>NSSupportsLiveActivities</key>
+	<true/>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

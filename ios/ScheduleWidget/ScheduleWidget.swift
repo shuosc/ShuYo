@@ -3,7 +3,16 @@ import WidgetKit
 
 private let appGroupID = "group.work.shuyo.app"
 private let snapshotKey = "academic_schedule_widget_snapshot"
-private let scheduleURL = URL(string: "shuyo://schedule?homeWidget")
+let scheduleURL = URL(string: "shuyo://schedule?homeWidget")
+
+enum ScheduleWidgetPalette {
+  static let lightAccent = Color(red: 41 / 255.0, green: 148 / 255.0, blue: 242 / 255.0)
+  static let darkAccent = Color(red: 65 / 255.0, green: 174 / 255.0, blue: 242 / 255.0)
+
+  static func accent(for colorScheme: ColorScheme) -> Color {
+    colorScheme == .dark ? darkAccent : lightAccent
+  }
+}
 
 private struct ScheduleSnapshot: Decodable {
   let hasSchedule: Bool
@@ -395,9 +404,7 @@ private struct ScheduleWidgetView: View {
   }
 
   private var accentColor: Color {
-    colorScheme == .dark
-      ? Color(red: 65 / 255, green: 174 / 255, blue: 242 / 255)
-      : Color(red: 41 / 255, green: 148 / 255, blue: 242 / 255)
+    ScheduleWidgetPalette.accent(for: colorScheme)
   }
 }
 
@@ -412,7 +419,6 @@ private extension View {
   }
 }
 
-@main
 struct ScheduleWidget: Widget {
   let kind = "ScheduleWidget"
 
@@ -423,5 +429,16 @@ struct ScheduleWidget: Widget {
     .configurationDisplayName("ShuYo课表")
     .description("查看当前、下一节与明日课程。")
     .supportedFamilies([.systemSmall, .systemMedium, .systemLarge])
+  }
+}
+
+@main
+struct ShuYoWidgetBundle: WidgetBundle {
+  @WidgetBundleBuilder
+  var body: some Widget {
+    ScheduleWidget()
+    if #available(iOSApplicationExtension 26.0, *) {
+      CourseLiveActivity()
+    }
   }
 }

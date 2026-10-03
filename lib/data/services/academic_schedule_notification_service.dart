@@ -12,18 +12,22 @@ class AcademicScheduleNotificationSettings {
   const AcademicScheduleNotificationSettings({
     required this.enabled,
     required this.leadMinutes,
+    this.liveActivityEnabled = false,
   });
 
   final bool enabled;
   final int leadMinutes;
+  final bool liveActivityEnabled;
 
   AcademicScheduleNotificationSettings copyWith({
     bool? enabled,
     int? leadMinutes,
+    bool? liveActivityEnabled,
   }) {
     return AcademicScheduleNotificationSettings(
       enabled: enabled ?? this.enabled,
       leadMinutes: leadMinutes ?? this.leadMinutes,
+      liveActivityEnabled: liveActivityEnabled ?? this.liveActivityEnabled,
     );
   }
 }
@@ -58,14 +62,19 @@ class AcademicScheduleNotificationService {
     Future<SharedPreferences> Function()? preferencesLoader,
     FlutterLocalNotificationsPlugin? notifications,
     MethodChannel? alarmChannel,
+    MethodChannel? liveActivityChannel,
   })  : _repository = repository,
         _preferencesLoader = preferencesLoader ?? SharedPreferences.getInstance,
         _notifications = notifications ?? FlutterLocalNotificationsPlugin(),
         _alarmChannel = alarmChannel ??
-            const MethodChannel('work.shuyo.app/early_class_alarms');
+            const MethodChannel('work.shuyo.app/early_class_alarms'),
+        _liveActivityChannel = liveActivityChannel ??
+            const MethodChannel('work.shuyo.app/course_live_activity');
 
   static const _enabledKey = 'academic.schedule.notifications.enabled';
   static const _leadMinutesKey = 'academic.schedule.notifications.leadMinutes';
+  static const _liveActivityEnabledKey =
+      'academic.schedule.liveActivity.enabled';
   static const _alarmEnabledKey = 'academic.schedule.alarms.enabled';
   static const _alarmLeadMinutesKey = 'academic.schedule.alarms.leadMinutes';
   static const _alarmVibrationEnabledKey =
@@ -73,31 +82,44 @@ class AcademicScheduleNotificationService {
   static const _channelId = 'course_reminders';
   static const _baseNotificationId = 420000;
   static const _maxPendingReminders = 64;
+  static const _maxLiveActivities = 64;
+  // Keeps a just-started course so a resume can update its activity.
+  static const _liveActivityRetention = Duration(minutes: 5);
 
   final AcademicScheduleRepository _repository;
   final Future<SharedPreferences> Function() _preferencesLoader;
   final FlutterLocalNotificationsPlugin _notifications;
   final MethodChannel _alarmChannel;
+  final MethodChannel _liveActivityChannel;
   bool _initialized = false;
+  int _settingsRevision = 0;
+  Future<void> _reminderSync = Future<void>.value();
 
   Future<AcademicScheduleNotificationSettings> loadSettings() async {
     final prefs = await _preferencesLoader();
+    final enabled = prefs.getBool(_enabledKey) ?? false;
     return AcademicScheduleNotificationSettings(
       // Keep reminders disabled until the user turns them on manually.
-      enabled: prefs.getBool(_enabledKey) ?? false,
+      enabled: enabled,
       leadMinutes: prefs.getInt(_leadMinutesKey) ?? 20,
+      liveActivityEnabled:
+          enabled && (prefs.getBool(_liveActivityEnabledKey) ?? false),
     );
   }
 
   Future<AcademicScheduleNotificationSettings> saveSettings(
     AcademicScheduleNotificationSettings settings,
   ) async {
+    _settingsRevision++;
     final prefs = await _preferencesLoader();
     final normalized = settings.copyWith(
       leadMinutes: settings.leadMinutes.clamp(15, 120),
+      liveActivityEnabled: settings.enabled && settings.liveActivityEnabled,
     );
     await prefs.setBool(_enabledKey, normalized.enabled);
     await prefs.setInt(_leadMinutesKey, normalized.leadMinutes);
+    await prefs.setBool(
+        _liveActivityEnabledKey, normalized.liveActivityEnabled);
     return normalized;
   }
 
@@ -116,9 +138,63 @@ class AcademicScheduleNotificationService {
         next = next.copyWith(enabled: false);
       }
     }
-    final saved = await saveSettings(next);
+    await saveSettings(next);
     await syncScheduleReminders(requestPermission: false);
-    return saved;
+    // Syncing turns Live Activities off when the system disallows them.
+    return loadSettings();
+  }
+
+  Future<bool> supportsCourseLiveActivities() async {
+    if (kIsWeb || defaultTargetPlatform != TargetPlatform.iOS) {
+      return false;
+    }
+    try {
+      return await _liveActivityChannel.invokeMethod<bool>('isAvailable') ??
+          false;
+    } on MissingPluginException {
+      return false;
+    } on PlatformException {
+      return false;
+    }
+  }
+
+  Future<Set<String>> _syncCourseLiveActivities(DateTime now) async {
+    final settingsRevision = _settingsRevision;
+    final settings = await loadSettings();
+    final enabled = settings.liveActivityEnabled;
+    final supported = !kIsWeb && defaultTargetPlatform == TargetPlatform.iOS;
+    final courses = enabled && supported
+        ? await _upcomingLiveActivities(settings.leadMinutes, now)
+        : const <Object>[];
+    Map<String, Object?>? response;
+    if (supported) {
+      try {
+        response = await _liveActivityChannel
+            .invokeMapMethod<String, Object?>('sync', {
+          'enabled': enabled,
+          'courses': courses,
+        });
+      } on MissingPluginException {
+        // A missing native implementation is unsupported, not a retryable
+        // ActivityKit failure.
+      }
+    }
+    // Unsupported platform, missing native implementation, and a disallowed
+    // system all fall back to ordinary reminders through this single write.
+    if (enabled && response?['activitiesEnabled'] != true) {
+      final prefs = await _preferencesLoader();
+      // An older native response must not overwrite settings saved while this
+      // sync was awaiting ActivityKit. The next queued sync uses those settings.
+      if (settingsRevision == _settingsRevision) {
+        await prefs.setBool(_liveActivityEnabledKey, false);
+      }
+    }
+    if (!enabled || response?['activitiesEnabled'] != true) {
+      return const <String>{};
+    }
+    return (response?['scheduledOccurrenceIDs'] as List? ?? const [])
+        .whereType<String>()
+        .toSet();
   }
 
   Future<bool> supportsEarlyClassAlarms() async {
@@ -240,13 +316,34 @@ class AcademicScheduleNotificationService {
     return count;
   }
 
-  Future<int> syncScheduleReminders({bool requestPermission = false}) async {
+  Future<int> syncScheduleReminders(
+      {bool requestPermission = false, DateTime? now}) async {
+    final operation = _reminderSync.then((_) => _syncScheduleReminders(
+          requestPermission: requestPermission,
+          now: now,
+        ));
+    // Serialize edits and settings changes; an older sync must not rearm a
+    // reminder after a newer request has cancelled it.
+    _reminderSync = operation.then<void>((_) {}, onError: (Object error) {});
+    return operation;
+  }
+
+  Future<int> _syncScheduleReminders(
+      {required bool requestPermission, DateTime? now}) async {
+    final instant = now ?? DateTime.now();
     try {
       await syncEarlyClassAlarms();
     } on PlatformException {
       // Local notification syncing remains independent of AlarmKit.
     }
     await _ensureInitialized();
+    var liveActivityOccurrences = const <String>{};
+    try {
+      liveActivityOccurrences = await _syncCourseLiveActivities(instant);
+    } on PlatformException {
+      // Keep Live Activities enabled for retry, and use ordinary reminders until
+      // the native implementation confirms which courses it has reserved.
+    }
     await _cancelCourseReminders();
 
     final settings = await loadSettings();
@@ -270,13 +367,18 @@ class AcademicScheduleNotificationService {
     if (schedule == null) {
       return 0;
     }
-    final weekState = await _repository.loadWeekState();
+    final weekState = await _repository.loadWeekState(
+        now: timezone.TZDateTime.from(instant, timezone.local));
     final reminders = _upcomingReminders(
       schedule: schedule,
       weekState: weekState,
       leadMinutes: settings.leadMinutes,
-      now: DateTime.now(),
-    ).take(_maxPendingReminders).toList();
+      now: instant,
+    )
+        .where((reminder) =>
+            !liveActivityOccurrences.contains(reminder.occurrenceID))
+        .take(_maxPendingReminders)
+        .toList();
 
     for (var index = 0; index < reminders.length; index++) {
       final reminder = reminders[index];
@@ -402,81 +504,29 @@ class AcademicScheduleNotificationService {
     required bool vibrationEnabled,
     required DateTime now,
   }) sync* {
-    final shanghaiNow = timezone.TZDateTime.from(now, timezone.local);
-    final today =
-        DateTime(shanghaiNow.year, shanghaiNow.month, shanghaiNow.day);
-    final alarms = <_EarlyClassAlarm>[];
-    final maxDays = schedule.maxWeek * 7 + 7;
-
-    for (var dayOffset = 0; dayOffset < maxDays; dayOffset++) {
-      final day = today.add(Duration(days: dayOffset));
-      final week = _rawWeekForDate(weekState, day);
-      if (week < 1) {
-        continue;
-      }
-      if (schedule.isVacationWeek(week)) {
-        break;
-      }
-
-      CourseSession? earliest;
-      for (final session in schedule.sessions) {
-        final range =
-            AcademicScheduleRepository.sectionTimes[session.startSection];
-        final isMorning = range != null && range.$1 < 12;
-        if (session.weekday == day.weekday &&
-            session.occursInWeek(week) &&
-            isMorning &&
-            (earliest == null ||
-                session.startSection < earliest.startSection)) {
-          earliest = session;
-        }
-      }
+    for (final day in _upcomingCourseDays(schedule, weekState, now)) {
+      final earliest =
+          day.where((course) => course.start.hour < 12).firstOrNull;
       if (earliest == null) {
         continue;
       }
-
-      final range =
-          AcademicScheduleRepository.sectionTimes[earliest.startSection]!;
-      final start = timezone.TZDateTime(
-        timezone.local,
-        day.year,
-        day.month,
-        day.day,
-        range.$1,
-        range.$2,
-      );
-      final endRange =
-          AcademicScheduleRepository.sectionTimes[earliest.endSection];
-      final end = endRange == null
-          ? null
-          : timezone.TZDateTime(
-              timezone.local,
-              day.year,
-              day.month,
-              day.day,
-              endRange.$3,
-              endRange.$4,
-            );
-      final fireTime = start.subtract(Duration(minutes: leadMinutes));
-      if (fireTime.isAfter(shanghaiNow.add(const Duration(seconds: 30)))) {
-        alarms.add(
-          _EarlyClassAlarm(
-            id: '${earliest.id}-${start.millisecondsSinceEpoch}',
-            title: earliest.courseName.isEmpty ? '早课' : earliest.courseName,
-            fireTime: fireTime,
-            courseTime: start,
-            courseEndTime: end,
-            sectionText: earliest.sectionText,
-            campus: earliest.campus,
-            location: earliest.location,
-            teacherName: earliest.teacherName,
-            vibrationEnabled: vibrationEnabled,
-          ),
+      final session = earliest.session;
+      final fireTime = earliest.start.subtract(Duration(minutes: leadMinutes));
+      if (fireTime.isAfter(now.add(const Duration(seconds: 30)))) {
+        yield _EarlyClassAlarm(
+          id: earliest.id,
+          title: session.courseName.isEmpty ? '早课' : session.courseName,
+          fireTime: fireTime,
+          courseTime: earliest.start,
+          courseEndTime: earliest.end,
+          sectionText: session.sectionText,
+          campus: session.campus,
+          location: session.location,
+          teacherName: session.teacherName,
+          vibrationEnabled: vibrationEnabled,
         );
       }
     }
-
-    yield* alarms;
   }
 
   Iterable<_CourseReminder> _upcomingReminders({
@@ -484,45 +534,97 @@ class AcademicScheduleNotificationService {
     required ScheduleWeekState weekState,
     required int leadMinutes,
     required DateTime now,
-  }) sync* {
-    final reminders = <_CourseReminder>[];
-    final today = DateTime(now.year, now.month, now.day);
+  }) {
+    return _upcomingCourseDays(schedule, weekState, now)
+        .expand((day) => day)
+        .map((course) => _CourseReminder(
+              occurrenceID: course.id,
+              session: course.session,
+              fireTime: course.start.subtract(Duration(minutes: leadMinutes)),
+            ))
+        .where((reminder) =>
+            reminder.fireTime.isAfter(now.add(const Duration(seconds: 30))));
+  }
+
+  Future<List<Map<String, Object>>> _upcomingLiveActivities(
+    int leadMinutes,
+    DateTime now,
+  ) async {
+    final schedule = await _repository.loadCachedSchedule();
+    if (schedule == null) {
+      return const [];
+    }
+    final weekState = await _repository.loadWeekState(
+        now: timezone.TZDateTime.from(now, timezone.local));
+    return _upcomingCourseDays(schedule, weekState, now)
+        .expand((day) => day)
+        .where((course) =>
+            course.end != null &&
+            course.start.add(_liveActivityRetention).isAfter(now))
+        .take(_maxLiveActivities)
+        .map((course) => {
+              'occurrenceID': course.id,
+              'courseName': course.session.courseName.isEmpty
+                  ? '课程'
+                  : course.session.courseName,
+              'location': course.session.location.isEmpty
+                  ? '地点待定'
+                  : course.session.location,
+              'campus': course.session.campus,
+              'startsAt': course.start.millisecondsSinceEpoch,
+              'endsAt': course.end!.millisecondsSinceEpoch,
+              'visibleFrom': course.start
+                  .subtract(Duration(minutes: leadMinutes))
+                  .millisecondsSinceEpoch,
+              'expiresAt': course.start
+                  .add(_liveActivityRetention)
+                  .millisecondsSinceEpoch,
+            })
+        .toList();
+  }
+
+  /// Course occurrences in Shanghai time, by teaching day from today, sorted
+  /// by start time.
+  Iterable<List<_CourseOccurrence>> _upcomingCourseDays(
+    AcademicSchedule schedule,
+    ScheduleWeekState weekState,
+    DateTime now,
+  ) sync* {
+    final shanghaiNow = timezone.TZDateTime.from(now, timezone.local);
+    // Calendar arithmetic uses UTC dates to avoid the device's timezone/DST.
+    final today =
+        DateTime.utc(shanghaiNow.year, shanghaiNow.month, shanghaiNow.day);
     final maxDays = schedule.maxWeek * 7 + 7;
     for (var dayOffset = 0; dayOffset < maxDays; dayOffset++) {
       final day = today.add(Duration(days: dayOffset));
-      final week = _rawWeekForDate(weekState, day);
+      final week = weekState.weekForDate(day);
       if (week < 1) {
         continue;
       }
       if (schedule.isVacationWeek(week)) {
         break;
       }
-      final sessions = schedule.sessions.where(
-        (session) =>
-            session.weekday == day.weekday && session.occursInWeek(week),
-      );
-      for (final session in sessions) {
-        final start = AcademicScheduleRepository.sectionStartTime(
-          session.startSection,
-          day,
-        );
-        if (start == null) {
+      timezone.TZDateTime at(int hour, int minute) => timezone.TZDateTime(
+          timezone.local, day.year, day.month, day.day, hour, minute);
+      final courses = <_CourseOccurrence>[];
+      for (final session in schedule.sessions) {
+        final startRange =
+            AcademicScheduleRepository.sectionTimes[session.startSection];
+        if (session.weekday != day.weekday ||
+            !session.occursInWeek(week) ||
+            startRange == null) {
           continue;
         }
-        final fireTime = start.subtract(Duration(minutes: leadMinutes));
-        if (fireTime.isAfter(now.add(const Duration(seconds: 30)))) {
-          reminders.add(_CourseReminder(session: session, fireTime: fireTime));
-        }
+        final endRange =
+            AcademicScheduleRepository.sectionTimes[session.endSection];
+        courses.add(_CourseOccurrence(
+          session: session,
+          start: at(startRange.$1, startRange.$2),
+          end: endRange == null ? null : at(endRange.$3, endRange.$4),
+        ));
       }
+      yield courses..sort((a, b) => a.start.compareTo(b.start));
     }
-    reminders.sort((a, b) => a.fireTime.compareTo(b.fireTime));
-    yield* reminders;
-  }
-
-  int _rawWeekForDate(ScheduleWeekState state, DateTime date) {
-    final monday = AcademicScheduleRepository.startOfWeek(date);
-    final offset = monday.difference(state.anchorMonday).inDays ~/ 7;
-    return state.currentWeek + offset;
   }
 
   static const _notificationDetails = NotificationDetails(
@@ -538,12 +640,28 @@ class AcademicScheduleNotificationService {
   );
 }
 
+class _CourseOccurrence {
+  const _CourseOccurrence({
+    required this.session,
+    required this.start,
+    required this.end,
+  });
+
+  final CourseSession session;
+  final DateTime start;
+  final DateTime? end;
+
+  String get id => '${session.id}-${start.millisecondsSinceEpoch}';
+}
+
 class _CourseReminder {
   const _CourseReminder({
+    required this.occurrenceID,
     required this.session,
     required this.fireTime,
   });
 
+  final String occurrenceID;
   final CourseSession session;
   final DateTime fireTime;
 

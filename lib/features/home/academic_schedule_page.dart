@@ -1176,7 +1176,7 @@ class _AcademicSchedulePageState extends State<AcademicSchedulePage> {
               ),
             ),
             child: Material(
-              color: Colors.transparent,
+              type: MaterialType.transparency,
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
@@ -1245,6 +1245,8 @@ class _AcademicSchedulePageState extends State<AcademicSchedulePage> {
     final initial = await widget.notificationService.loadSettings();
     final alarmsSupported =
         await widget.notificationService.supportsEarlyClassAlarms();
+    final liveActivitiesSupported =
+        await widget.notificationService.supportsCourseLiveActivities();
     final alarmInitial = alarmsSupported
         ? await widget.notificationService.loadAlarmSettings()
         : const AcademicScheduleAlarmSettings(enabled: false, leadMinutes: 20);
@@ -1262,6 +1264,7 @@ class _AcademicSchedulePageState extends State<AcademicSchedulePage> {
       builder: (context) => _NotificationSettingsSheet(
         initial: initial,
         alarmsSupported: alarmsSupported,
+        liveActivitiesSupported: liveActivitiesSupported,
         alarmInitial: alarmInitial,
         notificationService: widget.notificationService,
         alarmRingtoneName: alarmRingtoneName,
@@ -1333,6 +1336,19 @@ class _AcademicSchedulePageState extends State<AcademicSchedulePage> {
             ? '课程提醒已开启，提前 ${savedRegular.leadMinutes} 分钟'
             : '课程提醒已关闭',
       );
+    }
+
+    if (requestedRegular.liveActivityEnabled &&
+        savedRegular.enabled &&
+        !savedRegular.liveActivityEnabled) {
+      messages.add('实时活动暂不可用，课程将使用普通通知提醒');
+    } else if (initialRegular.liveActivityEnabled !=
+            savedRegular.liveActivityEnabled ||
+        (savedRegular.liveActivityEnabled &&
+            initialRegular.leadMinutes != savedRegular.leadMinutes)) {
+      messages.add(savedRegular.liveActivityEnabled
+          ? '课程实时活动已开启，提前 ${savedRegular.leadMinutes} 分钟显示'
+          : '课程实时活动已关闭');
     }
 
     if (requestedAlarm != null && savedAlarm != null) {
@@ -1892,6 +1908,7 @@ class _NotificationSettingsSheet extends StatefulWidget {
   const _NotificationSettingsSheet({
     required this.initial,
     required this.alarmsSupported,
+    required this.liveActivitiesSupported,
     required this.alarmInitial,
     required this.notificationService,
     required this.alarmRingtoneName,
@@ -1899,6 +1916,7 @@ class _NotificationSettingsSheet extends StatefulWidget {
 
   final AcademicScheduleNotificationSettings initial;
   final bool alarmsSupported;
+  final bool liveActivitiesSupported;
   final AcademicScheduleAlarmSettings alarmInitial;
   final AcademicScheduleNotificationService notificationService;
   final String? alarmRingtoneName;
@@ -1911,6 +1929,7 @@ class _NotificationSettingsSheet extends StatefulWidget {
 class _NotificationSettingsSheetState
     extends State<_NotificationSettingsSheet> {
   late bool _enabled;
+  late bool _liveActivityEnabled;
   late int _leadMinutes;
   late bool _alarmEnabled;
   late int _alarmLeadMinutes;
@@ -1922,6 +1941,7 @@ class _NotificationSettingsSheetState
   void initState() {
     super.initState();
     _enabled = widget.initial.enabled;
+    _liveActivityEnabled = _enabled && widget.initial.liveActivityEnabled;
     _leadMinutes = widget.initial.leadMinutes;
     _alarmEnabled = widget.alarmInitial.enabled;
     _alarmLeadMinutes = widget.alarmInitial.leadMinutes;
@@ -1953,161 +1973,196 @@ class _NotificationSettingsSheetState
           color: colors.surface,
           borderRadius: const BorderRadius.vertical(top: Radius.circular(8)),
         ),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
+        child: Material(
+          type: MaterialType.transparency,
+          child: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Expanded(
-                  child: Text(
-                    '通知设置',
-                    style: TextStyle(
-                      color: colors.textPrimary,
-                      fontSize: 16.5,
-                      fontWeight: FontWeight.w600,
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        '通知设置',
+                        style: TextStyle(
+                          color: colors.textPrimary,
+                          fontSize: 16.5,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
                     ),
-                  ),
+                    IconButton(
+                      tooltip: '关闭',
+                      onPressed: () => Navigator.of(context).pop(),
+                      icon: const Icon(Icons.close),
+                    ),
+                  ],
                 ),
-                IconButton(
-                  tooltip: '关闭',
-                  onPressed: () => Navigator.of(context).pop(),
-                  icon: const Icon(Icons.close),
+                SwitchListTile(
+                  contentPadding: EdgeInsets.zero,
+                  title: _titleWithInfo(
+                    '课程开始前提醒',
+                    tooltip: '提醒说明',
+                    onPressed: () => _showReminderLimitInfo(context),
+                  ),
+                  value: _enabled,
+                  onChanged: (value) => setState(() {
+                    _enabled = value;
+                    if (!value) {
+                      _liveActivityEnabled = false;
+                    }
+                  }),
+                ),
+                if (_enabled && widget.liveActivitiesSupported)
+                  SwitchListTile(
+                    contentPadding: EdgeInsets.zero,
+                    title: _titleWithInfo(
+                      '课程实时活动',
+                      tooltip: '实时活动说明',
+                      onPressed: () => _showLiveActivityInfo(context),
+                    ),
+                    value: _liveActivityEnabled,
+                    onChanged: (value) =>
+                        setState(() => _liveActivityEnabled = value),
+                  ),
+                if (_enabled) ...[
+                  const SizedBox(height: 6),
+                  DropdownButtonFormField<int>(
+                    initialValue: _leadMinutes,
+                    decoration: const InputDecoration(
+                      labelText: '提前时间',
+                      border: OutlineInputBorder(),
+                    ),
+                    items: [
+                      for (final value in minuteOptions)
+                        DropdownMenuItem(
+                          value: value,
+                          child: Text('$value 分钟'),
+                        ),
+                    ],
+                    onChanged: (value) {
+                      if (value != null) {
+                        setState(() => _leadMinutes = value);
+                      }
+                    },
+                  ),
+                ],
+                if (widget.alarmsSupported) ...[
+                  SwitchListTile(
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text('早课闹钟'),
+                    value: _alarmEnabled,
+                    onChanged: (value) => setState(() => _alarmEnabled = value),
+                  ),
+                  if (_alarmEnabled)
+                    DropdownButtonFormField<int>(
+                      initialValue: _alarmLeadMinutes,
+                      decoration: const InputDecoration(
+                        labelText: '提前时间',
+                        border: OutlineInputBorder(),
+                      ),
+                      items: [
+                        for (final value in minuteOptions)
+                          DropdownMenuItem(
+                            value: value,
+                            child: Text('$value 分钟'),
+                          ),
+                      ],
+                      onChanged: (value) {
+                        if (value != null) {
+                          setState(() => _alarmLeadMinutes = value);
+                        }
+                      },
+                    ),
+                  if (_alarmEnabled)
+                    SwitchListTile(
+                      contentPadding: EdgeInsets.zero,
+                      title: const Text('开启震动'),
+                      value: _alarmVibrationEnabled,
+                      onChanged: (value) =>
+                          setState(() => _alarmVibrationEnabled = value),
+                    ),
+                  if (_alarmEnabled &&
+                      widget.notificationService
+                          .supportsAlarmRingtoneCustomization)
+                    ListTile(
+                      contentPadding: EdgeInsets.zero,
+                      title: const Text('闹钟铃声'),
+                      subtitle: Text(
+                        _alarmRingtoneName ?? '默认',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      trailing: _pickingAlarmRingtone
+                          ? const SizedBox.square(
+                              dimension: 20,
+                              child:
+                                  CircularProgressIndicator(strokeWidth: 2.5),
+                            )
+                          : const Icon(Icons.chevron_right),
+                      enabled: !_pickingAlarmRingtone,
+                      onTap: _pickAlarmRingtone,
+                    ),
+                ],
+                const SizedBox(height: 16),
+                SizedBox(
+                  width: double.infinity,
+                  child: FilledButton(
+                    onPressed: () {
+                      Navigator.of(context).pop(
+                        _ScheduleNotificationSettingsResult(
+                          regular: AcademicScheduleNotificationSettings(
+                            enabled: _enabled,
+                            leadMinutes: _leadMinutes,
+                            liveActivityEnabled:
+                                _enabled && _liveActivityEnabled,
+                          ),
+                          alarm: widget.alarmsSupported
+                              ? AcademicScheduleAlarmSettings(
+                                  enabled: _alarmEnabled,
+                                  leadMinutes: _alarmLeadMinutes,
+                                  vibrationEnabled: _alarmVibrationEnabled,
+                                )
+                              : null,
+                        ),
+                      );
+                    },
+                    child: const Text('保存'),
+                  ),
                 ),
               ],
             ),
-            SwitchListTile(
-              contentPadding: EdgeInsets.zero,
-              title: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  const Text('课程开始前提醒'),
-                  Transform.translate(
-                    offset: const Offset(-3, -1),
-                    child: Opacity(
-                      opacity: 0.65,
-                      child: IconButton(
-                        tooltip: '提醒说明',
-                        visualDensity: VisualDensity.compact,
-                        padding: EdgeInsets.zero,
-                        constraints: const BoxConstraints(
-                          minWidth: 26,
-                          minHeight: 26,
-                        ),
-                        icon: const Icon(Icons.info_outline, size: 18),
-                        onPressed: () => _showReminderLimitInfo(context),
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-              value: _enabled,
-              onChanged: (value) => setState(() => _enabled = value),
-            ),
-            if (_enabled) ...[
-              const SizedBox(height: 6),
-              DropdownButtonFormField<int>(
-                initialValue: _leadMinutes,
-                decoration: const InputDecoration(
-                  labelText: '提前时间',
-                  border: OutlineInputBorder(),
-                ),
-                items: [
-                  for (final value in minuteOptions)
-                    DropdownMenuItem(
-                      value: value,
-                      child: Text('$value 分钟'),
-                    ),
-                ],
-                onChanged: (value) {
-                  if (value != null) {
-                    setState(() => _leadMinutes = value);
-                  }
-                },
-              ),
-            ],
-            if (widget.alarmsSupported) ...[
-              SwitchListTile(
-                contentPadding: EdgeInsets.zero,
-                title: const Text('早课闹钟'),
-                value: _alarmEnabled,
-                onChanged: (value) => setState(() => _alarmEnabled = value),
-              ),
-              if (_alarmEnabled)
-                DropdownButtonFormField<int>(
-                  initialValue: _alarmLeadMinutes,
-                  decoration: const InputDecoration(
-                    labelText: '提前时间',
-                    border: OutlineInputBorder(),
-                  ),
-                  items: [
-                    for (final value in minuteOptions)
-                      DropdownMenuItem(
-                        value: value,
-                        child: Text('$value 分钟'),
-                      ),
-                  ],
-                  onChanged: (value) {
-                    if (value != null) {
-                      setState(() => _alarmLeadMinutes = value);
-                    }
-                  },
-                ),
-              if (_alarmEnabled)
-                SwitchListTile(
-                  contentPadding: EdgeInsets.zero,
-                  title: const Text('开启震动'),
-                  value: _alarmVibrationEnabled,
-                  onChanged: (value) =>
-                      setState(() => _alarmVibrationEnabled = value),
-                ),
-              if (_alarmEnabled &&
-                  widget.notificationService.supportsAlarmRingtoneCustomization)
-                ListTile(
-                  contentPadding: EdgeInsets.zero,
-                  title: const Text('闹钟铃声'),
-                  subtitle: Text(
-                    _alarmRingtoneName ?? '默认',
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                  trailing: _pickingAlarmRingtone
-                      ? const SizedBox.square(
-                          dimension: 20,
-                          child: CircularProgressIndicator(strokeWidth: 2.5),
-                        )
-                      : const Icon(Icons.chevron_right),
-                  enabled: !_pickingAlarmRingtone,
-                  onTap: _pickAlarmRingtone,
-                ),
-            ],
-            const SizedBox(height: 16),
-            SizedBox(
-              width: double.infinity,
-              child: FilledButton(
-                onPressed: () {
-                  Navigator.of(context).pop(
-                    _ScheduleNotificationSettingsResult(
-                      regular: AcademicScheduleNotificationSettings(
-                        enabled: _enabled,
-                        leadMinutes: _leadMinutes,
-                      ),
-                      alarm: widget.alarmsSupported
-                          ? AcademicScheduleAlarmSettings(
-                              enabled: _alarmEnabled,
-                              leadMinutes: _alarmLeadMinutes,
-                              vibrationEnabled: _alarmVibrationEnabled,
-                            )
-                          : null,
-                    ),
-                  );
-                },
-                child: const Text('保存'),
-              ),
-            ),
-          ],
+          ),
         ),
       ),
+    );
+  }
+
+  Widget _titleWithInfo(
+    String title, {
+    required String tooltip,
+    required VoidCallback onPressed,
+  }) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Flexible(child: Text(title)),
+        Transform.translate(
+          offset: const Offset(-3, -1),
+          child: Opacity(
+            opacity: 0.65,
+            child: IconButton(
+              tooltip: tooltip,
+              visualDensity: VisualDensity.compact,
+              padding: EdgeInsets.zero,
+              constraints: const BoxConstraints(minWidth: 26, minHeight: 26),
+              icon: const Icon(Icons.info_outline, size: 18),
+              onPressed: onPressed,
+            ),
+          ),
+        ),
+      ],
     );
   }
 
@@ -2118,6 +2173,26 @@ class _NotificationSettingsSheetState
         title: const Text('课程提醒说明'),
         content: const Text(
           '系统最多同时保留 64 条最近的课程提醒。打开 ShuYo 后，应用会自动补充后续提醒。\n\n因此记得时不时上线一下哦~',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('知道了'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _showLiveActivityInfo(BuildContext context) async {
+    await showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('课程实时活动说明'),
+        content: const Text(
+          '开启后，已预约的课程会在锁屏和灵动岛显示地点和开课倒计时，不再发送对应的普通课程通知。实时活动创建失败的课程仍使用普通课程通知。\n\n'
+          '提前时间沿用“课程开始前提醒”的设置。关闭“课程开始前提醒”也会关闭实时活动。\n\n'
+          '打开 ShuYo 后，应用会自动补充后续课程的实时活动预约。',
         ),
         actions: [
           TextButton(

@@ -12,6 +12,7 @@ import UserNotifications
 @objc class AppDelegate: FlutterAppDelegate, FlutterImplicitEngineDelegate {
   private var pendingImageSaveResult: FlutterResult?
   private var earlyClassAlarmSyncTask: Task<Void, Never>?
+  private let courseLiveActivityController = CourseLiveActivityController()
 
   private static let earlyClassAlarmIdsKey = "early_class_alarm_ids"
 
@@ -41,6 +42,12 @@ import UserNotifications
       binaryMessenger: engineBridge.applicationRegistrar.messenger()
     ).setMethodCallHandler { [weak self] call, result in
       self?.handleEarlyClassAlarm(call: call, result: result)
+    }
+    FlutterMethodChannel(
+      name: "work.shuyo.app/course_live_activity",
+      binaryMessenger: engineBridge.applicationRegistrar.messenger()
+    ).setMethodCallHandler { [weak self] call, result in
+      self?.courseLiveActivityController.handle(call, result: result)
     }
   }
 
