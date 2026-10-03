@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shuyo/data/models/announcement.dart';
 import 'package:shuyo/data/repositories/announcement_repository.dart';
@@ -7,10 +8,11 @@ import 'package:shuyo/features/home/announcements_page.dart';
 const _listTitle = '关于开展实验室安全检查的通知';
 const _detailBody = '各单位请于本周五前完成自查。';
 const _imageUrl = 'https://www.shu.edu.cn/__local/0/94/a.png';
+const _listUrl = 'https://www.shu.edu.cn/info/1051/1.htm';
 
 const _listItem = AnnouncementListItem(
   title: _listTitle,
-  url: 'https://www.shu.edu.cn/info/1051/1.htm',
+  url: _listUrl,
 );
 
 class _FakeAnnouncementRepository extends AnnouncementRepository {
@@ -40,14 +42,27 @@ _FakeAnnouncementRepository _repositoryWith({
   List<AnnouncementContentBlock> blocks = const [
     AnnouncementContentBlock.text(_detailBody),
   ],
+  String dateText = '',
+  String department = '',
+  String author = '',
+  String listDateText = '',
 }) {
   return _FakeAnnouncementRepository(
-    items: const [_listItem],
+    items: [
+      AnnouncementListItem(
+        title: _listTitle,
+        url: _listUrl,
+        dateText: listDateText,
+      ),
+    ],
     details: {
       _listTitle: AnnouncementDetail(
         title: _listTitle,
         url: _listItem.url,
         blocks: blocks,
+        dateText: dateText,
+        department: department,
+        author: author,
       ),
     },
   );
@@ -143,5 +158,136 @@ void main() {
       return;
     }
     expect(tester.getSize(placeholder).height, greaterThan(0));
+  });
+
+  testWidgets('metadata renders the date, department and author',
+      (tester) async {
+    final repository = _repositoryWith(
+      dateText: '2026.09.20',
+      department: '后勤保障部',
+      author: '钱杰妮',
+    );
+    await _openDetail(tester, repository);
+    await tester.pumpAndSettle();
+
+    expect(find.text('2026.09.20'), findsOneWidget);
+    expect(find.text('后勤保障部'), findsOneWidget);
+    expect(find.text('钱杰妮'), findsOneWidget);
+  });
+
+  testWidgets('metadata is borderless rather than drawn as chips',
+      (tester) async {
+    final repository = _repositoryWith(
+      dateText: '2026.09.20',
+      department: '后勤保障部',
+      author: '钱杰妮',
+    );
+    await _openDetail(tester, repository);
+    await tester.pumpAndSettle();
+
+    // A pill would read as something tappable, so the metadata stays plain:
+    // no decorated ancestor behind any of the three labels.
+    for (final label in ['2026.09.20', '后勤保障部', '钱杰妮']) {
+      expect(
+        find.ancestor(
+          of: find.text(label),
+          matching: find.byType(DecoratedBox),
+        ),
+        findsNothing,
+        reason: '$label should not sit inside a chip shell',
+      );
+    }
+  });
+
+  testWidgets('each metadata item carries its own icon', (tester) async {
+    final repository = _repositoryWith(
+      dateText: '2026.09.20',
+      department: '后勤保障部',
+      author: '钱杰妮',
+    );
+    await _openDetail(tester, repository);
+    await tester.pumpAndSettle();
+
+    expect(find.byIcon(Icons.event_outlined), findsOneWidget);
+    expect(find.byIcon(Icons.apartment_outlined), findsOneWidget);
+    expect(find.byIcon(Icons.edit_outlined), findsOneWidget);
+  });
+
+  testWidgets('an empty metadata field is skipped', (tester) async {
+    final repository = _repositoryWith(dateText: '2026.09.20');
+    await _openDetail(tester, repository);
+    await tester.pumpAndSettle();
+
+    expect(find.byIcon(Icons.event_outlined), findsOneWidget);
+    expect(find.byIcon(Icons.apartment_outlined), findsNothing);
+    expect(find.byIcon(Icons.edit_outlined), findsNothing);
+  });
+
+  testWidgets('a repeated department is not rendered twice', (tester) async {
+    final repository = _repositoryWith(
+      dateText: '2026.09.20',
+      department: '后勤保障部',
+      author: '后勤保障部',
+    );
+    await _openDetail(tester, repository);
+    await tester.pumpAndSettle();
+
+    expect(find.text('后勤保障部'), findsOneWidget);
+    expect(find.byIcon(Icons.apartment_outlined), findsOneWidget);
+    expect(find.byIcon(Icons.edit_outlined), findsNothing);
+  });
+
+  testWidgets('the list marks the date with the same icon as the detail',
+      (tester) async {
+    final repository = _repositoryWith(listDateText: '2026.09.20');
+    await tester.pumpWidget(
+      MaterialApp(home: AnnouncementsPage(repository: repository)),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('2026.09.20'), findsOneWidget);
+    expect(find.byIcon(Icons.event_outlined), findsOneWidget);
+  });
+
+  testWidgets('the app bar exposes a share action', (tester) async {
+    await _openDetail(tester, _repositoryWith());
+    await tester.pumpAndSettle();
+
+    expect(find.byTooltip('分享'), findsOneWidget);
+    expect(find.byIcon(Icons.ios_share), findsOneWidget);
+    // Refreshing was moved out of the app bar.
+    expect(find.byTooltip('刷新'), findsNothing);
+  });
+
+  testWidgets('the action row copies the article link', (tester) async {
+    final clipboard = <MethodCall>[];
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      SystemChannels.platform,
+      (call) async {
+        if (call.method == 'Clipboard.setData') {
+          clipboard.add(call);
+        }
+        return null;
+      },
+    );
+    addTearDown(() {
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        SystemChannels.platform,
+        null,
+      );
+    });
+
+    await _openDetail(tester, _repositoryWith());
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('复制链接'));
+    await tester.pumpAndSettle();
+
+    expect(clipboard, hasLength(1));
+    expect(
+      (clipboard.single.arguments as Map<Object?, Object?>)['text'],
+      _listItem.url,
+    );
+    expect(find.text('链接已复制'), findsOneWidget);
   });
 }

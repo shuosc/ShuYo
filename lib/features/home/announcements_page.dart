@@ -1,6 +1,9 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:share_plus/share_plus.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../../data/models/announcement.dart';
 import '../../data/repositories/announcement_repository.dart';
@@ -210,7 +213,16 @@ class _AnnouncementDetailPageState extends State<AnnouncementDetailPage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('公告详情')),
+      appBar: AppBar(
+        title: const Text('公告详情'),
+        actions: [
+          IconButton(
+            tooltip: '分享',
+            onPressed: _share,
+            icon: const Icon(Icons.ios_share),
+          ),
+        ],
+      ),
       body: FutureBuilder<AnnouncementDetail>(
         future: _future,
         builder: (context, snapshot) {
@@ -220,11 +232,7 @@ class _AnnouncementDetailPageState extends State<AnnouncementDetailPage> {
           if (snapshot.hasError) {
             return _AnnouncementErrorState(
               message: '公告详情加载失败，请稍后重试',
-              onRetry: () async {
-                setState(() {
-                  _future = _load();
-                });
-              },
+              onRetry: _refresh,
             );
           }
           final detail = snapshot.data!;
@@ -274,11 +282,71 @@ class _AnnouncementDetailPageState extends State<AnnouncementDetailPage> {
                     imageIndex: imageIndexByBlock[index] ?? 0,
                   );
                 }),
+              const SizedBox(height: 12),
+              Divider(height: 1, color: colors.border),
+              const SizedBox(height: 18),
+              _AnnouncementActions(
+                onOpenOriginal: () => _openOriginal(detail.url),
+                onCopyLink: () => _copyLink(detail.url),
+              ),
             ],
           );
         },
       ),
     );
+  }
+
+  Future<void> _refresh() async {
+    final future = _load();
+    // The block body matters: an arrow body would return the assigned Future
+    // from the setState callback, which Flutter rejects.
+    setState(() {
+      _future = future;
+    });
+    await future;
+  }
+
+  /// Opens the platform share sheet with the notice title and its link.
+  ///
+  /// Uses the list item rather than the parsed detail so the button also works
+  /// while the body is still loading. [sharePositionOrigin] anchors the iPad
+  /// popover to the share button and is ignored elsewhere.
+  Future<void> _share() async {
+    final box = context.findRenderObject() as RenderBox?;
+    try {
+      await SharePlus.instance.share(
+        ShareParams(
+          text: '${widget.item.title}\n${widget.item.url}',
+          subject: widget.item.title,
+          sharePositionOrigin:
+              box == null ? null : box.localToGlobal(Offset.zero) & box.size,
+        ),
+      );
+    } on Object {
+      if (mounted) _showSnack('分享失败，请稍后重试');
+    }
+  }
+
+  Future<void> _openOriginal(String url) async {
+    final uri = Uri.tryParse(url.trim());
+    if (uri == null || !uri.hasScheme) {
+      _showSnack('原文链接无效');
+      return;
+    }
+    if (!await launchUrl(uri, mode: LaunchMode.externalApplication)) {
+      _showSnack('无法打开原文链接');
+    }
+  }
+
+  Future<void> _copyLink(String url) async {
+    await Clipboard.setData(ClipboardData(text: url));
+    _showSnack('链接已复制');
+  }
+
+  void _showSnack(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context)
+        .showSnackBar(SnackBar(content: Text(message)));
   }
 
   Widget _blockWidget(
@@ -433,12 +501,28 @@ class _AnnouncementTile extends StatelessWidget {
                   ],
                   if (item.dateText.isNotEmpty) ...[
                     const SizedBox(height: 8),
-                    Text(
-                      item.dateText,
-                      style: TextStyle(
-                        color: colors.textMuted,
-                        fontSize: 12.5,
-                      ),
+                    // Same icon as the detail metadata, so the date reads the
+                    // same in both places. Flexible keeps a long date from
+                    // overflowing the tile.
+                    Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(
+                          Icons.event_outlined,
+                          size: 13,
+                          color: colors.textMuted,
+                        ),
+                        const SizedBox(width: 4),
+                        Flexible(
+                          child: Text(
+                            item.dateText,
+                            style: TextStyle(
+                              color: colors.textMuted,
+                              fontSize: 12.5,
+                            ),
+                          ),
+                        ),
+                      ],
                     ),
                   ],
                 ],
@@ -460,17 +544,110 @@ class _AnnouncementMetadata extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final parts = [
-      if (detail.dateText.isNotEmpty) detail.dateText,
-      if (detail.department.isNotEmpty) detail.department,
-      if (detail.author.isNotEmpty) detail.author,
-    ];
-    if (parts.isEmpty) {
-      return const SizedBox.shrink();
-    }
-    return Text(
-      parts.join(' · '),
-      style: TextStyle(color: context.shuyoColors.textTertiary, fontSize: 13),
+    return Wrap(
+      spacing: 14,
+      runSpacing: 8,
+      children: [
+        if (detail.dateText.isNotEmpty)
+          _AnnouncementMetaItem(
+            label: detail.dateText,
+            icon: Icons.event_outlined,
+          ),
+        if (detail.department.isNotEmpty)
+          _AnnouncementMetaItem(
+            label: detail.department,
+            icon: Icons.apartment_outlined,
+          ),
+        // Notices often repeat the department name in the author field, which
+        // would print the same text twice.
+        if (detail.author.isNotEmpty && detail.author != detail.department)
+          _AnnouncementMetaItem(
+            label: detail.author,
+            icon: Icons.edit_outlined,
+          ),
+      ],
+    );
+  }
+}
+
+/// One piece of article metadata: a muted icon followed by its label.
+///
+/// Deliberately borderless. Nothing else in the detail body is outlined, and a
+/// filled pill would read as something tappable, which this is not.
+class _AnnouncementMetaItem extends StatelessWidget {
+  const _AnnouncementMetaItem({
+    required this.label,
+    required this.icon,
+  });
+
+  final String label;
+  final IconData icon;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = context.shuyoColors;
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Icon(icon, size: 13, color: colors.textMuted),
+        const SizedBox(width: 4),
+        // Flexible lets a long department name wrap instead of overflowing.
+        Flexible(
+          child: Text(
+            label,
+            style: TextStyle(
+              color: colors.textTertiary,
+              fontSize: 12.5,
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+/// Trailing actions of the detail body: open the source page on the school
+/// website, or copy its link for sharing.
+class _AnnouncementActions extends StatelessWidget {
+  const _AnnouncementActions({
+    required this.onOpenOriginal,
+    required this.onCopyLink,
+  });
+
+  final VoidCallback onOpenOriginal;
+  final VoidCallback onCopyLink;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = context.shuyoColors;
+    return Row(
+      children: [
+        Expanded(
+          child: OutlinedButton.icon(
+            onPressed: onOpenOriginal,
+            icon: const Icon(Icons.open_in_new, size: 18),
+            label: const Text('查看原文'),
+            style: OutlinedButton.styleFrom(
+              foregroundColor: colors.accent,
+              side: BorderSide(color: colors.borderStrong),
+              padding: const EdgeInsets.symmetric(vertical: 12),
+            ),
+          ),
+        ),
+        const SizedBox(width: 12),
+        Expanded(
+          child: OutlinedButton.icon(
+            onPressed: onCopyLink,
+            icon: const Icon(Icons.link, size: 18),
+            label: const Text('复制链接'),
+            style: OutlinedButton.styleFrom(
+              foregroundColor: colors.textSecondary,
+              side: BorderSide(color: colors.borderStrong),
+              padding: const EdgeInsets.symmetric(vertical: 12),
+            ),
+          ),
+        ),
+      ],
     );
   }
 }
