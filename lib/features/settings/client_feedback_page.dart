@@ -582,7 +582,7 @@ class _TicketTile extends StatelessWidget {
                   runSpacing: 8,
                   children: [
                     _SmallBadge(
-                        text: ticket.lookupToken.isEmpty ? '账户反馈' : '旧版反馈'),
+                        text: ticket.lookupToken.isEmpty ? '认证反馈' : '旧版反馈'),
                     _SmallBadge(text: ticket.status),
                     _SmallBadge(text: TimeFormat.compact(ticket.updatedAt)),
                     if (ticket.replies.isNotEmpty)

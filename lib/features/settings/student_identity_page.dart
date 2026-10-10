@@ -26,13 +26,17 @@ class _StudentIdentityPageState extends State<StudentIdentityPage> {
   }
 
   void _refresh() {
-    if (mounted) setState(() => _session = _load());
+    if (mounted) {
+      setState(() {
+        _session = _load();
+      });
+    }
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('ShuYo 身份')),
+      appBar: AppBar(title: const Text('认证状态')),
       body: FutureBuilder<StudentIdentitySession?>(
         future: _session,
         builder: (context, snapshot) {
@@ -57,15 +61,11 @@ class _StudentIdentityPageState extends State<StudentIdentityPage> {
                 const SizedBox(height: 10),
                 OutlinedButton(
                   onPressed: _busy ? null : _signOut,
-                  child: const Text('退出这台设备'),
+                  child: const Text('撤销当前设备的认证'),
                 ),
                 TextButton(
                   onPressed: _busy ? null : _revokeAll,
-                  child: const Text('退出所有设备'),
-                ),
-                TextButton(
-                  onPressed: _busy ? null : _deleteAccount,
-                  child: const Text('删除 ShuYo 账户'),
+                  child: const Text('撤销全部设备的认证'),
                 ),
               ],
               if (_message != null) ...[
@@ -89,12 +89,21 @@ class _StudentIdentityPageState extends State<StudentIdentityPage> {
         if (!mounted || !await _confirmIdentityConsent()) return;
         await widget.service.grantConsent();
       }
-      await widget.service.bindCurrentStudent();
+      await widget.service.bindCurrentStudent(manual: true);
       if (mounted) setState(() => _message = '身份已认证');
       _refresh();
     } on Object {
+      StudentIdentitySession? confirmed;
+      try {
+        confirmed = await widget.service.checkCurrentSession();
+      } on Object {
+        // The original failure remains the result when the follow-up check
+        // cannot establish a valid session.
+      }
       if (mounted) {
-        setState(() => _message = '当前暂时无法验证您的身份，请稍后再试');
+        setState(() =>
+            _message = confirmed == null ? '当前暂时无法验证您的身份，请稍后再试' : '身份已认证');
+        if (confirmed != null) _refresh();
       }
     } finally {
       if (mounted) setState(() => _busy = false);
@@ -139,10 +148,10 @@ class _StudentIdentityPageState extends State<StudentIdentityPage> {
     setState(() => _busy = true);
     try {
       await widget.service.signOut();
-      if (mounted) setState(() => _message = '已退出这台设备的 ShuYo 身份。');
+      if (mounted) setState(() => _message = '当前设备的认证已撤销。');
       _refresh();
     } on Object {
-      if (mounted) setState(() => _message = '退出失败，请稍后重试。');
+      if (mounted) setState(() => _message = '撤销失败，请稍后重试。');
     } finally {
       if (mounted) setState(() => _busy = false);
     }
@@ -152,8 +161,8 @@ class _StudentIdentityPageState extends State<StudentIdentityPage> {
     final confirmed = await showDialog<bool>(
           context: context,
           builder: (context) => AlertDialog(
-            title: const Text('退出所有设备？'),
-            content: const Text('所有设备上的 ShuYo 身份都会失效；以后需重新登录学校并核实学号。'),
+            title: const Text('撤销全部设备的认证？'),
+            content: const Text('所有设备的认证都会失效。之后需要手动重新认证，才能使用相关功能。'),
             actions: [
               TextButton(
                 onPressed: () => Navigator.of(context).pop(false),
@@ -161,7 +170,7 @@ class _StudentIdentityPageState extends State<StudentIdentityPage> {
               ),
               FilledButton(
                 onPressed: () => Navigator.of(context).pop(true),
-                child: const Text('退出所有设备'),
+                child: const Text('确认撤销'),
               ),
             ],
           ),
@@ -171,49 +180,12 @@ class _StudentIdentityPageState extends State<StudentIdentityPage> {
     setState(() => _busy = true);
     try {
       await widget.service.revokeAllDevices();
-      if (mounted) setState(() => _message = '所有设备已退出。');
+      if (mounted) setState(() => _message = '全部设备的认证已撤销。');
       _refresh();
     } on StudentIdentityException catch (error) {
       if (mounted) setState(() => _message = error.message);
     } on Object {
       if (mounted) setState(() => _message = '操作失败，请稍后重试。');
-    } finally {
-      if (mounted) setState(() => _busy = false);
-    }
-  }
-
-  Future<void> _deleteAccount() async {
-    final confirmed = await showDialog<bool>(
-          context: context,
-          builder: (context) => AlertDialog(
-            title: const Text('删除 ShuYo 账户？'),
-            content: const Text(
-              '将删除服务器保存的加密学号与所有设备的 ShuYo 身份。'
-              '不会删除校园账户或手机上的课表。此操作不能撤销。',
-            ),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.of(context).pop(false),
-                child: const Text('取消'),
-              ),
-              FilledButton(
-                onPressed: () => Navigator.of(context).pop(true),
-                child: const Text('删除账户'),
-              ),
-            ],
-          ),
-        ) ??
-        false;
-    if (!confirmed || !mounted) return;
-    setState(() => _busy = true);
-    try {
-      await widget.service.deleteAccount();
-      if (mounted) setState(() => _message = 'ShuYo 账户已删除。');
-      _refresh();
-    } on StudentIdentityException catch (error) {
-      if (mounted) setState(() => _message = error.message);
-    } on Object {
-      if (mounted) setState(() => _message = '删除失败，请稍后重试。');
     } finally {
       if (mounted) setState(() => _busy = false);
     }

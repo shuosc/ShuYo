@@ -213,7 +213,7 @@ class ClientBackendRepository {
     if (ticket.lookupToken.isEmpty) {
       final session = await _studentIdentityService?.checkCurrentSession();
       if (session == null) {
-        throw const StudentIdentityException('请先完成 ShuYo 身份核验。');
+        throw const StudentIdentityException('请先完成学生身份认证。');
       }
       return _apiClient.fetchStudentFeedback(session.token, ticket.id);
     }
@@ -239,11 +239,11 @@ class ClientBackendRepository {
     final identity = _studentIdentityService;
     if (identity != null) {
       if (!await identity.ensureForProtectedAction()) {
-        throw const StudentIdentityException('请先登录校园账户并完成 ShuYo 身份核验。');
+        throw const StudentIdentityException('请先登录校园账户并完成学生身份认证。');
       }
       final session = await identity.loadLocalSession();
       if (session == null) {
-        throw const StudentIdentityException('请先完成 ShuYo 身份核验。');
+        throw const StudentIdentityException('请先完成学生身份认证。');
       }
       final draft = ClientFeedbackDraft(
         title: title,
@@ -284,7 +284,7 @@ class ClientBackendRepository {
     }
     final session = await _studentIdentityService?.checkCurrentSession();
     if (session == null) {
-      throw const StudentIdentityException('请先完成 ShuYo 身份核验。');
+      throw const StudentIdentityException('请先完成学生身份认证。');
     }
     return _apiClient.closeStudentFeedback(session.token, ticket.id);
   }

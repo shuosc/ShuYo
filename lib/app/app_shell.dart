@@ -904,6 +904,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
           hasAcademicAccount: _hasAcademicSession,
           hasWebVpnSession: hasWebVpnSession,
           onAcademicLogout: _logoutAcademicAccount,
+          studentIdentityService: _studentIdentityService,
           isDemo: widget.isDemo,
           onExitDemo: widget.onExitDemo,
         ),

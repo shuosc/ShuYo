@@ -4,11 +4,13 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../../core/academic_url_resolver.dart';
 import '../../core/wecom_constants.dart';
 import '../../data/services/academic_native_auth_service.dart';
 import '../../data/services/academic_account_store.dart';
 import '../../data/services/academic_auth_service.dart';
 import '../../data/services/academic_progress_api_client.dart';
+import '../../data/services/student_identity_service.dart';
 import '../../data/services/there_booking_client.dart';
 import '../../data/services/unified_account_service.dart';
 import '../../data/services/verification_delivery_service.dart';
@@ -18,7 +20,7 @@ import '../../shared/navigation/shuyo_route.dart';
 import '../../shared/theme/shuyo_theme.dart';
 import 'wecom_scan_page.dart';
 
-enum NativeLoginDestination { academic, webVpn, there }
+enum NativeLoginDestination { academic, webVpn, there, dataDeletion }
 
 enum NativeLoginResult { authenticated, demo }
 
@@ -39,17 +41,25 @@ class NativeLoginPage extends StatefulWidget {
   const NativeLoginPage({
     super.key,
     this.destination = NativeLoginDestination.academic,
-  });
+  }) : studentIdentityService = null;
 
   const NativeLoginPage.webVpn({
     super.key,
-  }) : destination = NativeLoginDestination.webVpn;
+  })  : destination = NativeLoginDestination.webVpn,
+        studentIdentityService = null;
 
   const NativeLoginPage.there({
     super.key,
-  }) : destination = NativeLoginDestination.there;
+  })  : destination = NativeLoginDestination.there,
+        studentIdentityService = null;
+
+  const NativeLoginPage.dataDeletion({
+    super.key,
+    required this.studentIdentityService,
+  }) : destination = NativeLoginDestination.dataDeletion;
 
   final NativeLoginDestination destination;
+  final StudentIdentityService? studentIdentityService;
 
   @override
   State<NativeLoginPage> createState() => _NativeLoginPageState();
@@ -62,6 +72,7 @@ class _NativeLoginPageState extends State<NativeLoginPage> {
         NativeLoginDestination.webVpn => AcademicNativeAuthService.forWebVpn(),
         NativeLoginDestination.academic => AcademicNativeAuthService(),
         NativeLoginDestination.there => AcademicNativeAuthService.forThere(),
+        NativeLoginDestination.dataDeletion => AcademicNativeAuthService(),
       };
   final _verificationDeliveryService = VerificationDeliveryService();
   final _weComAuthService = WeComAuthService();
@@ -140,6 +151,8 @@ class _NativeLoginPageState extends State<NativeLoginPage> {
   Widget _credentials() {
     final colors = context.shuyoColors;
     final academic = widget.destination == NativeLoginDestination.academic;
+    final dataDeletion =
+        widget.destination == NativeLoginDestination.dataDeletion;
     final there = widget.destination == NativeLoginDestination.there;
     return Form(
       child: LayoutBuilder(
@@ -159,11 +172,13 @@ class _NativeLoginPageState extends State<NativeLoginPage> {
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
                       Text(
-                        academic
-                            ? '上大校园账户'
-                            : there
-                                ? '登录图书馆预约'
-                                : 'WebVPN服务',
+                        dataDeletion
+                            ? '验证学校身份'
+                            : academic
+                                ? '上大校园账户'
+                                : there
+                                    ? '登录图书馆预约'
+                                    : 'WebVPN服务',
                         textAlign: TextAlign.center,
                         style: Theme.of(context)
                             .textTheme
@@ -174,11 +189,13 @@ class _NativeLoginPageState extends State<NativeLoginPage> {
                       Padding(
                         padding: const EdgeInsets.symmetric(horizontal: 28),
                         child: Text(
-                          academic
-                              ? '使用上海大学统一认证账户来访问各类校园服务'
-                              : there
-                                  ? '使用上海大学统一认证账户来访问图书馆预约'
-                                  : '使用上海大学统一认证账户来访问WebVPN服务',
+                          dataDeletion
+                              ? '重新登录上海大学账户，以确认本人操作'
+                              : academic
+                                  ? '使用上海大学统一认证账户来访问各类校园服务'
+                                  : there
+                                      ? '使用上海大学统一认证账户来访问图书馆预约'
+                                      : '使用上海大学统一认证账户来访问WebVPN服务',
                           textAlign: TextAlign.center,
                           style: TextStyle(color: colors.textSecondary),
                         ),
@@ -290,24 +307,26 @@ class _NativeLoginPageState extends State<NativeLoginPage> {
                         ),
                         child: _buttonContent('继续'),
                       ),
-                      const SizedBox(height: 12),
-                      OutlinedButton.icon(
-                        onPressed: _busy ? null : _startWeComLogin,
-                        icon: const Icon(Icons.qr_code_scanner_outlined),
-                        label: const Text('使用企业微信登录'),
-                        style: OutlinedButton.styleFrom(
-                          minimumSize: const Size.fromHeight(50),
+                      if (!dataDeletion) ...[
+                        const SizedBox(height: 12),
+                        OutlinedButton.icon(
+                          onPressed: _busy ? null : _startWeComLogin,
+                          icon: const Icon(Icons.qr_code_scanner_outlined),
+                          label: const Text('使用企业微信登录'),
+                          style: OutlinedButton.styleFrom(
+                            minimumSize: const Size.fromHeight(50),
+                          ),
                         ),
-                      ),
-                      const SizedBox(height: 8),
-                      Text(
-                        '使用企业微信扫码或跳转至企业微信登录',
-                        textAlign: TextAlign.center,
-                        style: TextStyle(
-                          fontSize: 12,
-                          color: colors.textTertiary,
+                        const SizedBox(height: 8),
+                        Text(
+                          '使用企业微信扫码或跳转至企业微信登录',
+                          textAlign: TextAlign.center,
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: colors.textTertiary,
+                          ),
                         ),
-                      ),
+                      ],
                     ],
                   ),
                 ),
@@ -570,7 +589,8 @@ class _NativeLoginPageState extends State<NativeLoginPage> {
     if (!mounted) return;
     setState(() => _busy = true);
     try {
-      if (widget.destination != NativeLoginDestination.academic) {
+      if (widget.destination != NativeLoginDestination.academic &&
+          widget.destination != NativeLoginDestination.dataDeletion) {
         final currentStudentId = await AcademicAccountStore().loadStudentId();
         if (!mounted) return;
         if (currentStudentId != null &&
@@ -685,6 +705,7 @@ class _NativeLoginPageState extends State<NativeLoginPage> {
         NativeLoginDestination.webVpn => WeComOAuthTarget.webVpn,
         NativeLoginDestination.academic => WeComOAuthTarget.academic,
         NativeLoginDestination.there => WeComOAuthTarget.there,
+        NativeLoginDestination.dataDeletion => WeComOAuthTarget.academic,
       };
 
   Future<void> _sendCode() async {
@@ -742,6 +763,30 @@ class _NativeLoginPageState extends State<NativeLoginPage> {
     Uri callbackUri, {
     WeComRedeemResult? weComRedeem,
   }) async {
+    if (widget.destination == NativeLoginDestination.dataDeletion) {
+      try {
+        await _authService.completeLogin(callbackUri, publish: false);
+        final schoolUri = AcademicUrlResolver.uri(
+            AcademicProgressApiClient.studentIdentityPath);
+        final schoolCookie = _authService.cookieHeaderFor(schoolUri);
+        if (schoolCookie.isEmpty) {
+          _showError('学校登录未完成，请重试');
+          return;
+        }
+        final grant = await widget.studentIdentityService!.beginDataDeletion(
+          schoolCookie: schoolCookie,
+          expectedStudentId: _studentId.text.trim(),
+        );
+        _closeWith(grant);
+      } on AcademicNativeAuthException catch (error) {
+        _showError(error.message);
+      } on StudentIdentityException catch (error) {
+        _showError(error.message);
+      } on Object {
+        _showError('身份验证失败，请稍后再试');
+      }
+      return;
+    }
     if (widget.destination == NativeLoginDestination.webVpn &&
         weComRedeem?.accountName?.trim().isNotEmpty == true) {
       final currentStudentId = await AcademicAccountStore().loadStudentId();
@@ -861,7 +906,7 @@ class _NativeLoginPageState extends State<NativeLoginPage> {
   ///
   /// 只有密码登录成功时才请求系统保存密码；必须先结束上下文再清空输入框，
   /// 否则系统读到的是空密码。
-  void _closeWith(NativeLoginResult result, {bool savePassword = false}) {
+  void _closeWith(Object result, {bool savePassword = false}) {
     if (!mounted || _routeClosed) return;
     TextInput.finishAutofillContext(shouldSave: savePassword);
     _password.clear();

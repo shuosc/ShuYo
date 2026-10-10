@@ -435,7 +435,7 @@ void main() {
     expect(find.text('未认证'), findsOneWidget);
     await tester.tap(find.text('未认证'));
     await tester.pumpAndSettle();
-    expect(find.text('ShuYo 身份'), findsOneWidget);
+    expect(find.text('认证状态'), findsOneWidget);
     await tester.tap(find.text('尝试认证'));
     await tester.pumpAndSettle();
     expect(find.text('身份验证'), findsOneWidget);

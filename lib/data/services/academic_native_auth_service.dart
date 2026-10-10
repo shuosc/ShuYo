@@ -104,6 +104,10 @@ class AcademicNativeAuthService {
   List<({Cookie cookie, String domain, String path})> get sessionCookies =>
       _cookieStore.entries;
 
+  /// Reads only cookies collected by this login attempt, without publishing
+  /// them to the app's campus session.
+  String cookieHeaderFor(Uri uri) => _cookieStore.headerFor(uri);
+
   /// 把外部登录流程（如企业微信扫码）取得的会话 Cookie 并入本次认证会话。
   ///
   /// 企业微信扫码走的是独立的 `WeComAuthService`，不会经过本类的
@@ -346,17 +350,17 @@ class AcademicNativeAuthService {
   /// A hidden WebView used to load [callbackUri] only so the platform cookie
   /// store received its `Set-Cookie` headers. Following the redirect chain
   /// reaches the same session, because no step of the exchange depends on page
-  /// script. The collected cookies are published to the shared jar before this
-  /// method returns.
-  Future<void> completeLogin(Uri callbackUri) {
+  /// script. The collected cookies are published to the shared jar unless this
+  /// is a one-time data deletion verification.
+  Future<void> completeLogin(Uri callbackUri, {bool publish = true}) {
     return _runAuthenticationStage(
       'complete-login',
       HttpTimeout.oauthCompletion,
-      () => _completeLogin(callbackUri),
+      () => _completeLogin(callbackUri, publish: publish),
     );
   }
 
-  Future<void> _completeLogin(Uri callbackUri) async {
+  Future<void> _completeLogin(Uri callbackUri, {required bool publish}) async {
     switch (_target) {
       case _NativeAuthTarget.academic:
         await _completeAcademicLogin(callbackUri);
@@ -370,7 +374,7 @@ class AcademicNativeAuthService {
       case _NativeAuthTarget.webVpn:
         await _completeWebVpnLogin(callbackUri);
     }
-    await publishSessionCookies();
+    if (publish) await publishSessionCookies();
   }
 
   /// Follows the jwxt callback until it reaches a page only a live session can

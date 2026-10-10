@@ -17,6 +17,7 @@ import '../../data/repositories/client_backend_repository.dart';
 import '../../data/services/academic_schedule_notification_service.dart';
 import '../../data/services/app_store_version_service.dart';
 import '../../data/services/client_settings_service.dart';
+import '../../data/services/student_identity_service.dart';
 import '../../shared/shuyo_text_styles.dart';
 import '../../shared/navigation/shuyo_route.dart';
 import '../../shared/theme/shuyo_theme.dart';
@@ -25,6 +26,7 @@ import '../../shared/widgets/client_update_prompt.dart';
 import '../../shared/widgets/empty_state.dart';
 import '../../shared/widgets/webvpn_toggle.dart';
 import 'client_feedback_page.dart';
+import 'privacy_data_page.dart';
 import '../onboarding/startup_onboarding.dart';
 
 class ClientSettingsPage extends StatelessWidget {
@@ -45,6 +47,7 @@ class ClientSettingsPage extends StatelessWidget {
     this.hasAcademicAccount = false,
     this.hasWebVpnSession = false,
     this.onAcademicLogout,
+    this.studentIdentityService,
     this.isDemo = false,
     this.onExitDemo,
   });
@@ -64,6 +67,7 @@ class ClientSettingsPage extends StatelessWidget {
   final bool hasAcademicAccount;
   final bool hasWebVpnSession;
   final Future<bool> Function()? onAcademicLogout;
+  final StudentIdentityService? studentIdentityService;
   final bool isDemo;
   final Future<void> Function()? onExitDemo;
 
@@ -121,6 +125,17 @@ class ClientSettingsPage extends StatelessWidget {
               ),
             ),
           ),
+          if (!isDemo && studentIdentityService != null)
+            _SettingsRow(
+              title: '隐私与数据',
+              onTap: () => Navigator.of(context).push<void>(
+                shuyoRoute(
+                  builder: (_) => PrivacyDataPage(
+                    identityService: studentIdentityService!,
+                  ),
+                ),
+              ),
+            ),
           _SettingsRow(
             title: '关于ShuYo',
             onTap: () => Navigator.of(context).push<void>(

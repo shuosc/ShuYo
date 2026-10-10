@@ -62,6 +62,37 @@ class StudentIdentitySession {
   }
 }
 
+class StudentDataDeletionGrant {
+  const StudentDataDeletionGrant({
+    required this.token,
+    required this.studentId,
+    required this.maskedStudentId,
+    required this.expiresAt,
+  });
+
+  final String token;
+  final String studentId;
+  final String maskedStudentId;
+  final DateTime expiresAt;
+
+  static StudentDataDeletionGrant? fromJson(
+    Object? value, {
+    required String studentId,
+  }) {
+    if (value is! Map) return null;
+    final token = value['token']?.toString() ?? '';
+    final masked = value['maskedStudentId']?.toString() ?? '';
+    final expiresAt = DateTime.tryParse(value['expiresAt']?.toString() ?? '');
+    if (token.isEmpty || masked.isEmpty || expiresAt == null) return null;
+    return StudentDataDeletionGrant(
+      token: token,
+      studentId: studentId,
+      maskedStudentId: masked,
+      expiresAt: expiresAt,
+    );
+  }
+}
+
 class StudentIdentityService extends ChangeNotifier {
   StudentIdentityService({
     SecureAppStore? secureStore,
@@ -80,6 +111,10 @@ class StudentIdentityService extends ChangeNotifier {
   static const _pendingRevocationsKey = 'shuyo.student.pending_revocations.v1';
   static const _consentKey = 'shuyo.student.identity.consent.v1';
   static const _consentChoiceKey = 'shuyo.student.identity.choice.v1';
+  static const _manualReverificationKey =
+      'shuyo.student.identity.manual_reverification.v1';
+  static const _pendingEnrollmentKey =
+      'shuyo.student.identity.pending_enrollment.v1';
 
   final SecureAppStore _secureStore;
   final AcademicAccountStore _accountStore;
@@ -121,13 +156,21 @@ class StudentIdentityService extends ChangeNotifier {
     final prefs = await _preferencesLoader();
     await prefs.setBool(_consentKey, true);
     await prefs.setBool(_consentChoiceKey, true);
+    await prefs.setBool(_pendingEnrollmentKey, true);
   }
 
   Future<void> declineConsent() async {
     final prefs = await _preferencesLoader();
     await prefs.setBool(_consentKey, false);
     await prefs.setBool(_consentChoiceKey, true);
+    await prefs.remove(_pendingEnrollmentKey);
   }
+
+  Future<bool> _requiresManualReverification() async =>
+      (await _preferencesLoader()).getBool(_manualReverificationKey) ?? false;
+
+  Future<void> _requireManualReverification() async =>
+      (await _preferencesLoader()).setBool(_manualReverificationKey, true);
 
   Future<void> refreshLocalStatus() async {
     try {
@@ -169,14 +212,21 @@ class StudentIdentityService extends ChangeNotifier {
         return;
       }
       if (!await hasConsent()) return;
-      await bindCurrentStudent();
+      if (await _requiresManualReverification()) return;
+      if ((await _preferencesLoader()).getBool(_pendingEnrollmentKey) != true) {
+        return;
+      }
+      await bindCurrentStudent(manual: true);
     } on Object {
       // ShuYo identity is independent of the campus login and local schedule.
     }
   }
 
   Future<StudentIdentitySession> bindCurrentStudent(
-      {bool force = false}) async {
+      {bool force = false, bool manual = false}) async {
+    if (!manual && await _requiresManualReverification()) {
+      throw const StudentIdentityException('请手动重新认证。');
+    }
     final epoch = _epoch;
     final studentId = await _accountStore.loadStudentId();
     if (studentId == null) {
@@ -205,6 +255,7 @@ class StudentIdentityService extends ChangeNotifier {
         'schoolCookie': schoolCookie,
         'expectedStudentId': studentId,
         'deviceLabel': Platform.isIOS ? 'iPhone' : 'Android',
+        'userInitiated': manual,
       },
     );
     final data = response['data'];
@@ -231,6 +282,16 @@ class StudentIdentityService extends ChangeNotifier {
       throw const StudentIdentityException('校园账户已退出，请重新核验。');
     }
     _setVerified(true);
+    if (manual) {
+      try {
+        final preferences = await _preferencesLoader();
+        await preferences.remove(_manualReverificationKey);
+        await preferences.remove(_pendingEnrollmentKey);
+      } on Object {
+        // The session is already saved. A preference cleanup error must not
+        // turn a successful verification into a reported failure.
+      }
+    }
     return session;
   }
 
@@ -248,6 +309,7 @@ class StudentIdentityService extends ChangeNotifier {
     } on StudentIdentityException catch (error) {
       if (error.code == 'unauthorized') {
         await _secureStore.delete(_sessionKey);
+        await _requireManualReverification();
         _setVerified(false);
         return null;
       }
@@ -255,15 +317,12 @@ class StudentIdentityService extends ChangeNotifier {
     }
   }
 
-  /// Call before a feature that requires a verified student. A valid ShuYo
-  /// session is reused; only an absent or rejected session triggers a single
-  /// campus verification attempt after the user has consented.
+  /// Call before a feature that requires a verified student. A valid session
+  /// is reused; an absent or revoked session needs a user-initiated renewal.
   Future<bool> ensureForProtectedAction() async {
     if (!await hasConsent()) return false;
     try {
-      if (await checkCurrentSession() != null) return true;
-      await bindCurrentStudent();
-      return true;
+      return await checkCurrentSession() != null;
     } on Object {
       return false;
     }
@@ -271,6 +330,8 @@ class StudentIdentityService extends ChangeNotifier {
 
   Future<void> signOut() async {
     _epoch++;
+    await _requireManualReverification();
+    await (await _preferencesLoader()).remove(_pendingEnrollmentKey);
     await _clearCurrentSession();
   }
 
@@ -283,19 +344,58 @@ class StudentIdentityService extends ChangeNotifier {
       token: session.token,
     );
     _epoch++;
+    await _requireManualReverification();
+    await (await _preferencesLoader()).remove(_pendingEnrollmentKey);
     await _secureStore.delete(_sessionKey);
     _setVerified(false);
   }
 
-  Future<void> deleteAccount() async {
-    final session = await loadLocalSession();
-    if (session == null) return;
-    await _request('DELETE', '/api/v1/student/account', token: session.token);
+  Future<StudentDataDeletionGrant> beginDataDeletion({
+    required String schoolCookie,
+    required String expectedStudentId,
+  }) async {
+    final response = await _request(
+      'POST',
+      '/api/v1/student/data-deletion/verify',
+      body: {
+        'schoolCookie': schoolCookie,
+        'expectedStudentId': expectedStudentId,
+      },
+    );
+    final grant = StudentDataDeletionGrant.fromJson(
+      response['data'],
+      studentId: expectedStudentId.trim().toUpperCase(),
+    );
+    if (grant == null) {
+      throw const StudentIdentityException('服务器未返回删除验证结果。');
+    }
+    return grant;
+  }
+
+  Future<void> completeDataDeletion(StudentDataDeletionGrant grant) async {
+    await _request('DELETE', '/api/v1/student/data',
+        body: {'token': grant.token});
     _epoch++;
-    await _secureStore.delete(_sessionKey);
-    await (await _preferencesLoader()).remove(_consentKey);
-    await (await _preferencesLoader()).remove(_consentChoiceKey);
-    _setVerified(false);
+    try {
+      final localSession = await loadLocalSession();
+      final currentStudentId = await _accountStore.loadStudentId();
+      final localStudentId = localSession?.studentId ?? currentStudentId;
+      if (localStudentId != null &&
+          localStudentId.toUpperCase() != grant.studentId) {
+        return;
+      }
+      await _secureStore.delete(_sessionKey);
+      final preferences = await _preferencesLoader();
+      await preferences.remove(_consentKey);
+      await preferences.remove(_consentChoiceKey);
+      await preferences.remove(_pendingEnrollmentKey);
+      await preferences.setBool(_manualReverificationKey, true);
+      _setVerified(false);
+    } on Object {
+      // The server has already deleted the data; a local storage failure must
+      // not report the deletion as unsuccessful.
+      _setVerified(false);
+    }
   }
 
   Future<void> _clearCurrentSession() async {
@@ -355,7 +455,7 @@ class StudentIdentityService extends ChangeNotifier {
     String method,
     String path, {
     String? token,
-    Map<String, String>? body,
+    Map<String, Object?>? body,
   }) async {
     final uri = Uri.parse('${ClientBackendConstants.baseUrl}$path');
     final request = http.Request(method, uri);
@@ -368,7 +468,7 @@ class StudentIdentityService extends ChangeNotifier {
     final response = await HttpTimeout.request(
       _httpClient.send(request).then(http.Response.fromStream),
       timeout: const Duration(seconds: 15),
-      message: 'ShuYo 身份核验超时，请稍后再试',
+      message: '认证超时，请稍后再试',
     );
     if (response.statusCode == 204) return {};
     Map<String, dynamic> decoded;

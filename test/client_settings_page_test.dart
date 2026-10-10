@@ -14,6 +14,7 @@ import 'package:shuyo/data/services/academic_schedule_notification_service.dart'
 import 'package:shuyo/data/services/academic_schedule_api_client.dart';
 import 'package:shuyo/data/services/academic_auth_service.dart';
 import 'package:shuyo/data/services/client_settings_service.dart';
+import 'package:shuyo/data/services/student_identity_service.dart';
 import 'package:shuyo/features/settings/client_settings_page.dart';
 import 'package:shuyo/features/onboarding/startup_onboarding.dart';
 import 'package:shuyo/shared/widgets/webvpn_toggle.dart';
@@ -24,6 +25,24 @@ import 'package:shuyo/shared/theme/shuyo_theme.dart';
 void main() {
   setUp(() => SharedPreferences.setMockInitialValues({}));
   tearDown(() => debugDefaultTargetPlatformOverride = null);
+
+  testWidgets('privacy and deletion stay separate from authentication status',
+      (tester) async {
+    final identity = StudentIdentityService();
+    addTearDown(identity.dispose);
+    await _pumpSettings(tester, studentIdentityService: identity);
+    await tester.tap(find.text('隐私与数据'));
+    await tester.pumpAndSettle();
+    expect(
+        find.text(
+            'ShuYo 通过核实学号来确认你的上海大学学生身份。撤销设备认证后，服务器会保留你使用反馈、课表分享等功能产生的数据。'),
+        findsOneWidget);
+    await tester.tap(find.text('删除 ShuYo 数据'));
+    await tester.pumpAndSettle();
+    expect(find.text('删除后，你的设备认证将全部失效；服务器当前保存的学号认证记录、反馈、活跃记录、课表分享码将被清除。'),
+        findsOneWidget);
+    expect(find.text('验证学校身份并继续'), findsOneWidget);
+  });
 
   testWidgets('custom theme opens without a photo and disables opacity',
       (tester) async {
@@ -593,6 +612,7 @@ Future<void> _pumpSettings(
   CustomBackground? customBackground,
   Future<void> Function(String)? onThemeChanged,
   Future<void> Function(CustomBackground)? onCustomBackgroundChanged,
+  StudentIdentityService? studentIdentityService,
 }) async {
   final controller = webVpnController ?? StartupOnboardingController();
   if (webVpnController == null) addTearDown(controller.dispose);
@@ -621,6 +641,7 @@ Future<void> _pumpSettings(
         hasAcademicAccount: hasAcademicAccount,
         hasWebVpnSession: hasWebVpnSession,
         onAcademicLogout: onAcademicLogout,
+        studentIdentityService: studentIdentityService,
         isDemo: isDemo,
       ),
     ),

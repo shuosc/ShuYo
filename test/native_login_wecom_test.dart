@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shuyo/core/wecom_constants.dart';
 import 'package:shuyo/data/services/wecom_auth_service.dart';
+import 'package:shuyo/data/services/student_identity_service.dart';
 import 'package:shuyo/features/auth/native_login_page.dart';
 
 /// 企微扫码登录 WebVPN 的产物：握手已在扫码页内完成，回调地址是落地页。
@@ -67,6 +68,19 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('登录图书馆预约'), findsOneWidget);
     expect(find.text('使用企业微信登录'), findsOneWidget);
+  });
+
+  testWidgets('data deletion uses a separate school login without QR reuse',
+      (tester) async {
+    final identity = StudentIdentityService();
+    addTearDown(identity.dispose);
+    await tester.pumpWidget(MaterialApp(
+      home: NativeLoginPage.dataDeletion(studentIdentityService: identity),
+    ));
+    await tester.pumpAndSettle();
+    expect(find.text('验证学校身份'), findsOneWidget);
+    expect(find.text('重新登录上海大学账户，以确认本人操作'), findsOneWidget);
+    expect(find.text('使用企业微信登录'), findsNothing);
   });
 
   for (final page in const [
