@@ -41,7 +41,7 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('删除后，你的设备认证将全部失效；服务器当前保存的学号认证记录、反馈、活跃记录、课表分享码将被清除。'),
         findsOneWidget);
-    expect(find.text('验证学校身份并继续'), findsOneWidget);
+    expect(find.text('验证身份并继续'), findsOneWidget);
   });
 
   testWidgets('custom theme opens without a photo and disables opacity',
