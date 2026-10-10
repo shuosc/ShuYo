@@ -69,6 +69,83 @@ void main() {
     expect(find.text('使用企业微信登录'), findsOneWidget);
   });
 
+  for (final page in const [
+    NativeLoginPage(),
+    NativeLoginPage.webVpn(),
+    NativeLoginPage.there(),
+  ]) {
+    testWidgets('${page.destination.name} shows hints without changing rows',
+        (tester) async {
+      await tester.pumpWidget(MaterialApp(home: page));
+      await tester.pumpAndSettle();
+
+      final fields = find.byType(TextFormField);
+      final continueButton = find.widgetWithText(FilledButton, '继续');
+      final buttonBefore = tester.getRect(continueButton);
+      final dividerBefore = tester.getRect(find.byType(Divider));
+      final studentIdLabelColor =
+          tester.widget<Text>(find.text('学/工号')).style?.color;
+      final passwordLabelColor =
+          tester.widget<Text>(find.text('密码')).style?.color;
+
+      expect(tester.widget<FilledButton>(continueButton).onPressed, isNotNull);
+      await tester.tap(continueButton);
+      await tester.pumpAndSettle();
+      expect(find.text('请输入学/工号'), findsOneWidget);
+      expect(tester.getRect(find.byType(Divider)), dividerBefore);
+      expect(tester.getRect(continueButton), buttonBefore);
+      expect(tester.widget<Text>(find.text('学/工号')).style?.color,
+          studentIdLabelColor);
+      expect(tester.widget<Text>(find.text('密码')).style?.color,
+          passwordLabelColor);
+
+      await tester.enterText(fields.first, '123456');
+      await tester.pumpAndSettle();
+      expect(find.text('请输入学/工号'), findsNothing);
+      expect(find.text('请输入密码'), findsOneWidget);
+      expect(tester.widget<FilledButton>(continueButton).onPressed, isNotNull);
+      expect(tester.getRect(find.byType(Divider)), dividerBefore);
+      expect(tester.getRect(continueButton), buttonBefore);
+
+      await tester.enterText(fields.last, 'password');
+      await tester.pumpAndSettle();
+      expect(find.text('请输入密码'), findsNothing);
+      expect(tester.widget<FilledButton>(continueButton).onPressed, isNotNull);
+      expect(tester.getRect(continueButton), buttonBefore);
+    });
+  }
+
+  testWidgets('login hint fades in without moving the continue button',
+      (tester) async {
+    await tester.pumpWidget(const MaterialApp(home: NativeLoginPage()));
+    await tester.pumpAndSettle();
+
+    final continueButton = find.widgetWithText(FilledButton, '继续');
+    final buttonBefore = tester.getRect(continueButton);
+    await tester.tap(continueButton);
+    await tester.pump();
+
+    final hintFade = find.ancestor(
+      of: find.text('请输入学/工号'),
+      matching: find.byType(FadeTransition),
+    );
+    double hintOpacity() => tester
+        .widgetList<FadeTransition>(hintFade)
+        .map((fade) => fade.opacity.value)
+        .reduce((current, next) => current < next ? current : next);
+    expect(hintOpacity(), 0);
+
+    await tester.pump(const Duration(milliseconds: 90));
+    final midwayOpacity = hintOpacity();
+    expect(midwayOpacity, greaterThan(0));
+    expect(midwayOpacity, lessThan(1));
+    expect(tester.getRect(continueButton), buttonBefore);
+
+    await tester.pumpAndSettle();
+    expect(hintOpacity(), 1);
+    expect(tester.getRect(continueButton), buttonBefore);
+  });
+
   testWidgets(
       'credential card keeps labels and reveals password action on focus',
       (tester) async {

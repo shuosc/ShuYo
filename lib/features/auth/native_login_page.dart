@@ -66,16 +66,19 @@ class _NativeLoginPageState extends State<NativeLoginPage> {
   final _verificationDeliveryService = VerificationDeliveryService();
   final _weComAuthService = WeComAuthService();
   final _studentId = TextEditingController();
+  final _studentIdFocusNode = FocusNode();
   final _password = TextEditingController();
   final _passwordFocusNode = FocusNode();
   final _code = TextEditingController();
-  final _credentialsKey = GlobalKey<FormState>();
-  final _verificationKey = GlobalKey<FormState>();
+  final _codeFocusNode = FocusNode();
 
   int _step = 0;
   bool _busy = false;
   bool _routeClosed = false;
   bool _passwordVisible = false;
+  bool _studentIdError = false;
+  bool _passwordError = false;
+  bool _codeError = false;
   AcademicLoginChallenge? _challenge;
   AcademicVerificationMethod _method = AcademicVerificationMethod.wecom;
   Timer? _countdownTimer;
@@ -95,10 +98,12 @@ class _NativeLoginPageState extends State<NativeLoginPage> {
     _authServiceInstance?.dispose();
     _weComAuthService.dispose();
     _studentId.dispose();
+    _studentIdFocusNode.dispose();
     _password.dispose();
     _passwordFocusNode.removeListener(_onPasswordFocusChanged);
     _passwordFocusNode.dispose();
     _code.dispose();
+    _codeFocusNode.dispose();
     super.dispose();
   }
 
@@ -137,7 +142,6 @@ class _NativeLoginPageState extends State<NativeLoginPage> {
     final academic = widget.destination == NativeLoginDestination.academic;
     final there = widget.destination == NativeLoginDestination.there;
     return Form(
-      key: _credentialsKey,
       child: LayoutBuilder(
         builder: (context, constraints) => SingleChildScrollView(
           key: const ValueKey('credentials'),
@@ -192,6 +196,7 @@ class _NativeLoginPageState extends State<NativeLoginPage> {
                               label: '学/工号',
                               field: TextFormField(
                                 controller: _studentId,
+                                focusNode: _studentIdFocusNode,
                                 enabled: !_busy,
                                 keyboardType: TextInputType.text,
                                 autocorrect: false,
@@ -200,11 +205,13 @@ class _NativeLoginPageState extends State<NativeLoginPage> {
                                 textInputAction: TextInputAction.next,
                                 onTapOutside: (_) =>
                                     FocusScope.of(context).unfocus(),
+                                onChanged: (value) {
+                                  if (_studentIdError &&
+                                      value.trim().isNotEmpty) {
+                                    setState(() => _studentIdError = false);
+                                  }
+                                },
                                 decoration: _credentialDecoration(),
-                                validator: (value) =>
-                                    value?.trim().isEmpty == true
-                                        ? '请输入学/工号'
-                                        : null,
                               ),
                             ),
                             Divider(
@@ -228,6 +235,11 @@ class _NativeLoginPageState extends State<NativeLoginPage> {
                                 onTapOutside: (_) =>
                                     _passwordFocusNode.unfocus(),
                                 onFieldSubmitted: (_) => _submitCredentials(),
+                                onChanged: (value) {
+                                  if (_passwordError && value.isNotEmpty) {
+                                    setState(() => _passwordError = false);
+                                  }
+                                },
                                 decoration: _credentialDecoration(
                                   suffixIcon: IgnorePointer(
                                     ignoring: !_passwordFocusNode.hasFocus,
@@ -258,14 +270,19 @@ class _NativeLoginPageState extends State<NativeLoginPage> {
                                     ),
                                   ),
                                 ),
-                                validator: (value) =>
-                                    value?.isEmpty == true ? '请输入密码' : null,
                               ),
                             ),
                           ],
                         ),
                       ),
-                      const SizedBox(height: 28),
+                      _validationSlot(
+                        _studentIdError
+                            ? '请输入学/工号'
+                            : _passwordError
+                                ? '请输入密码'
+                                : null,
+                        height: 28,
+                      ),
                       FilledButton(
                         onPressed: _busy ? null : _submitCredentials,
                         style: FilledButton.styleFrom(
@@ -326,6 +343,59 @@ class _NativeLoginPageState extends State<NativeLoginPage> {
     );
   }
 
+  Widget _validationSlot(String? message, {required double height}) {
+    final colors = context.shuyoColors;
+    final textScaler = MediaQuery.textScalerOf(context);
+    return SizedBox(
+      height: textScaler.scale(height),
+      child: AnimatedSwitcher(
+        duration: const Duration(milliseconds: 180),
+        switchInCurve: Curves.easeOut,
+        switchOutCurve: Curves.easeIn,
+        layoutBuilder: (currentChild, previousChildren) => Stack(
+          alignment: Alignment.centerLeft,
+          children: [
+            ...previousChildren,
+            if (currentChild != null) currentChild,
+          ],
+        ),
+        child: message == null
+            ? const SizedBox(key: ValueKey('validation-empty'))
+            : SizedBox(
+                key: ValueKey(message),
+                width: double.infinity,
+                child: Padding(
+                  padding: const EdgeInsets.only(left: 16),
+                  child: Align(
+                    alignment: Alignment.centerLeft,
+                    child: Semantics(
+                      liveRegion: true,
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(
+                            Icons.error_outline,
+                            size: 14,
+                            color: colors.danger,
+                          ),
+                          const SizedBox(width: 5),
+                          Text(
+                            message,
+                            style: TextStyle(
+                              fontSize: 12,
+                              color: colors.danger,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+      ),
+    );
+  }
+
   InputDecoration _credentialDecoration({Widget? suffixIcon}) {
     return InputDecoration(
       suffixIcon: suffixIcon,
@@ -343,7 +413,6 @@ class _NativeLoginPageState extends State<NativeLoginPage> {
     final methods = _challenge?.methods ?? const {};
     final colors = context.shuyoColors;
     return Form(
-      key: _verificationKey,
       child: LayoutBuilder(
         builder: (context, constraints) => SingleChildScrollView(
           key: const ValueKey('verification'),
@@ -417,12 +486,18 @@ class _NativeLoginPageState extends State<NativeLoginPage> {
                           padding: const EdgeInsets.only(left: 16, right: 8),
                           child: TextFormField(
                             controller: _code,
+                            focusNode: _codeFocusNode,
                             enabled: !_busy,
                             keyboardType: TextInputType.number,
                             autofillHints: const [AutofillHints.oneTimeCode],
                             maxLength: 6,
                             textInputAction: TextInputAction.done,
                             onFieldSubmitted: (_) => _verifyCode(),
+                            onChanged: (value) {
+                              if (_codeError && value.trim().length == 6) {
+                                setState(() => _codeError = false);
+                              }
+                            },
                             decoration: _credentialDecoration(
                               suffixIcon: TextButton(
                                 onPressed:
@@ -441,12 +516,13 @@ class _NativeLoginPageState extends State<NativeLoginPage> {
                               hintText: '验证码',
                               counterText: '',
                             ),
-                            validator: (value) =>
-                                value?.trim().length == 6 ? null : '请输入6位验证码',
                           ),
                         ),
                       ),
-                      const SizedBox(height: 24),
+                      _validationSlot(
+                        _codeError ? '请输入6位验证码' : null,
+                        height: 24,
+                      ),
                       FilledButton(
                         onPressed: _busy ? null : _verifyCode,
                         style: FilledButton.styleFrom(
@@ -473,7 +549,16 @@ class _NativeLoginPageState extends State<NativeLoginPage> {
   }
 
   Future<void> _submitCredentials() async {
-    if (_busy || _credentialsKey.currentState?.validate() != true) {
+    if (_busy) return;
+    final studentIdError = _studentId.text.trim().isEmpty;
+    final passwordError = _password.text.isEmpty;
+    setState(() {
+      _studentIdError = studentIdError;
+      _passwordError = passwordError;
+    });
+    if (studentIdError || passwordError) {
+      (studentIdError ? _studentIdFocusNode : _passwordFocusNode)
+          .requestFocus();
       return;
     }
     // 演示模式完全离线，在发起网络请求之前处理。
@@ -625,7 +710,13 @@ class _NativeLoginPageState extends State<NativeLoginPage> {
   }
 
   Future<void> _verifyCode() async {
-    if (_busy || _verificationKey.currentState?.validate() != true) return;
+    if (_busy) return;
+    final codeError = _code.text.trim().length != 6;
+    setState(() => _codeError = codeError);
+    if (codeError) {
+      _codeFocusNode.requestFocus();
+      return;
+    }
     setState(() => _busy = true);
     try {
       final callbackUri = await _authService.verifyCode(
