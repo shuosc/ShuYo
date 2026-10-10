@@ -150,7 +150,7 @@ class _ContentListState extends State<_ContentList>
                                 ? Icons.lightbulb_outline
                                 : Icons.campaign_outlined,
                             title: '暂无${widget.kind.label}',
-                            message: '下拉可刷新。',
+                            message: '下拉刷新',
                           ),
                         ],
                       )
