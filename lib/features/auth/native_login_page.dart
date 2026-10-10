@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../../core/wecom_constants.dart';
 import '../../data/services/academic_native_auth_service.dart';
@@ -73,6 +74,7 @@ class _NativeLoginPageState extends State<NativeLoginPage> {
 
   int _step = 0;
   bool _busy = false;
+  bool _routeClosed = false;
   bool _passwordVisible = false;
   AcademicLoginChallenge? _challenge;
   AcademicVerificationMethod _method = AcademicVerificationMethod.wecom;
@@ -105,17 +107,25 @@ class _NativeLoginPageState extends State<NativeLoginPage> {
     return PopScope(
       canPop: _step == 0,
       onPopInvokedWithResult: (didPop, result) {
-        if (!didPop && !_busy) setState(() => _step--);
+        if (didPop) {
+          _routeClosed = true;
+          TextInput.finishAutofillContext(shouldSave: false);
+          return;
+        }
+        if (!_busy) setState(() => _step--);
       },
       child: Scaffold(
         appBar: AppBar(),
         body: SafeArea(
-          child: AnimatedSwitcher(
-            duration: const Duration(milliseconds: 260),
-            child: switch (_step) {
-              0 => _credentials(),
-              _ => _verification(),
-            },
+          child: AutofillGroup(
+            onDisposeAction: AutofillContextAction.cancel,
+            child: AnimatedSwitcher(
+              duration: const Duration(milliseconds: 260),
+              child: switch (_step) {
+                0 => _credentials(),
+                _ => _verification(),
+              },
+            ),
           ),
         ),
       ),
@@ -184,6 +194,8 @@ class _NativeLoginPageState extends State<NativeLoginPage> {
                                 controller: _studentId,
                                 enabled: !_busy,
                                 keyboardType: TextInputType.text,
+                                autocorrect: false,
+                                enableSuggestions: false,
                                 autofillHints: const [AutofillHints.username],
                                 textInputAction: TextInputAction.next,
                                 onTapOutside: (_) =>
@@ -208,7 +220,11 @@ class _NativeLoginPageState extends State<NativeLoginPage> {
                                 focusNode: _passwordFocusNode,
                                 enabled: !_busy,
                                 obscureText: !_passwordVisible,
+                                keyboardType: TextInputType.visiblePassword,
+                                autocorrect: false,
+                                enableSuggestions: false,
                                 autofillHints: const [AutofillHints.password],
+                                textInputAction: TextInputAction.done,
                                 onTapOutside: (_) =>
                                     _passwordFocusNode.unfocus(),
                                 onFieldSubmitted: (_) => _submitCredentials(),
@@ -481,7 +497,6 @@ class _NativeLoginPageState extends State<NativeLoginPage> {
       }
       final result = await _authService.login(
           username: _studentId.text.trim(), password: _password.text);
-      _password.clear();
       if (!mounted) return;
       if (result.callbackUri != null) {
         await _completeLogin(result.callbackUri!);
@@ -526,13 +541,14 @@ class _NativeLoginPageState extends State<NativeLoginPage> {
     } finally {
       if (mounted) setState(() => _busy = false);
     }
-    if (!mounted) return;
-    Navigator.of(context).pop(NativeLoginResult.demo);
+    _closeWith(NativeLoginResult.demo);
   }
 
   Future<void> _startWeComLogin() async {
     if (_busy) return;
     if (!mounted) return;
+    TextInput.finishAutofillContext(shouldSave: false);
+    _password.clear();
     setState(() => _busy = true);
     try {
       if (widget.destination == NativeLoginDestination.there) {
@@ -687,9 +703,8 @@ class _NativeLoginPageState extends State<NativeLoginPage> {
           _showError('图书馆预约账号与当前校园账户不一致');
           return;
         }
-        if (mounted) {
-          Navigator.of(context).pop(NativeLoginResult.authenticated);
-        }
+        _closeWith(NativeLoginResult.authenticated,
+            savePassword: weComRedeem == null);
       } on ThereBookingException catch (error) {
         _showError(error.message);
       } on Object {
@@ -747,7 +762,20 @@ class _NativeLoginPageState extends State<NativeLoginPage> {
           : _studentId.text;
       await AcademicAccountStore().saveStudentId(studentId);
     }
-    if (mounted) Navigator.of(context).pop(NativeLoginResult.authenticated);
+    _closeWith(NativeLoginResult.authenticated,
+        savePassword: weComRedeem == null);
+  }
+
+  /// 结束自动填充上下文并带着 [result] 关闭登录页。
+  ///
+  /// 只有密码登录成功时才请求系统保存密码；必须先结束上下文再清空输入框，
+  /// 否则系统读到的是空密码。
+  void _closeWith(NativeLoginResult result, {bool savePassword = false}) {
+    if (!mounted || _routeClosed) return;
+    TextInput.finishAutofillContext(shouldSave: savePassword);
+    _password.clear();
+    _code.clear();
+    Navigator.of(context).pop(result);
   }
 
   String _methodHint(Map<AcademicVerificationMethod, String> methods) {
