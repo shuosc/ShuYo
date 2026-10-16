@@ -48,7 +48,9 @@ void main() {
     expect(repository.searches, 1);
 
     await tester.pumpAndSettle();
-    expect(find.text('没有空教室'), findsOneWidget);
+    // A result without any room is reported as missing data rather than as
+    // "no free rooms", so the two cases stay distinguishable.
+    expect(find.text('暂无教室数据'), findsOneWidget);
   });
 
   testWidgets('a cold open waits for the options before showing the controls',
