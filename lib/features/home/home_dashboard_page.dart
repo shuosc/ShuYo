@@ -19,6 +19,7 @@ class HomeDashboardPage extends StatelessWidget {
     required this.onOpenAnnouncements,
     required this.onOpenEmptyClassroom,
     this.onOpenLibraryBooking,
+    required this.onOpenOtp,
     required this.todayCourseContent,
     required this.announcementContent,
     this.isDemo = false,
@@ -33,6 +34,7 @@ class HomeDashboardPage extends StatelessWidget {
   final VoidCallback onOpenAnnouncements;
   final VoidCallback onOpenEmptyClassroom;
   final VoidCallback? onOpenLibraryBooking;
+  final VoidCallback onOpenOtp;
   final String todayCourseContent;
   final String announcementContent;
   final bool isDemo;
@@ -112,6 +114,12 @@ class HomeDashboardPage extends StatelessWidget {
           title: '图书馆预约',
           content: '预约场馆座位',
           onTap: onOpenLibraryBooking,
+        ),
+        _HomeRow(
+          icon: Icons.password,
+          title: '动态口令',
+          content: '查看并复制 OTP 令牌',
+          onTap: onOpenOtp,
         ),
       ],
     );

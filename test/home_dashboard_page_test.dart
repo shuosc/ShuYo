@@ -28,6 +28,7 @@ void main() {
           onOpenAcademicSystem: () {},
           onOpenAnnouncements: () {},
           onOpenEmptyClassroom: () {},
+          onOpenOtp: () {},
           todayCourseContent: '今日无课',
           announcementContent: '查看公告',
         ),
@@ -85,6 +86,7 @@ void main() {
             onOpenAcademicSystem: () {},
             onOpenAnnouncements: () {},
             onOpenEmptyClassroom: () {},
+            onOpenOtp: () {},
             todayCourseContent: '今日无课',
             announcementContent: '查看公告',
           ),
@@ -98,6 +100,7 @@ void main() {
     expect(find.text('今日课程'), findsOneWidget);
     expect(find.text('空教室查询'), findsOneWidget);
     expect(find.text('图书馆预约'), findsOneWidget);
+    expect(find.text('动态口令'), findsOneWidget);
     expect(find.text('课程评价'), findsNothing);
     expect(find.textContaining('论坛'), findsNothing);
     final firstContainer = tester.widget<Container>(
@@ -109,7 +112,7 @@ void main() {
           .first,
     );
     expect((firstContainer.decoration as BoxDecoration).border, isNotNull);
-    for (final title in ['今日课程', '通知公告', '空教室查询', '图书馆预约']) {
+    for (final title in ['今日课程', '通知公告', '空教室查询', '图书馆预约', '动态口令']) {
       final row = tester.widget<Container>(
         find
             .ancestor(

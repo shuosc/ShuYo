@@ -4,11 +4,13 @@ import '../models/academic_ranking.dart';
 import '../models/announcement.dart';
 import '../models/announcement_source.dart';
 import '../models/classroom.dart';
+import '../models/otp_token.dart';
 import '../repositories/academic_schedule_repository.dart';
 import '../repositories/academic_progress_repository.dart';
 import '../repositories/academic_ranking_repository.dart';
 import '../repositories/announcement_repository.dart';
 import '../repositories/classroom_repository.dart';
+import '../repositories/otp_token_repository.dart';
 
 class DemoAcademicScheduleRepository extends AcademicScheduleRepository {
   DemoAcademicScheduleRepository(this.schedule);
@@ -248,5 +250,29 @@ class DemoClassroomRepository extends ClassroomRepository {
         startSection: query.startSection,
         endSection: query.endSection,
         floors: floors);
+  }
+}
+
+class DemoOtpTokenRepository extends OtpTokenRepository {
+  DemoOtpTokenRepository({DateTime Function()? now})
+      : _now = now ?? DateTime.now;
+
+  static const period = 30;
+
+  final DateTime Function() _now;
+
+  /// Keeps the same code for one rotation window and counts the window down,
+  /// so the demo page behaves like the real one without hitting the network.
+  @override
+  Future<OtpToken> fetchToken() async {
+    final now = _now();
+    final rotation = now.millisecondsSinceEpoch ~/ (period * 1000);
+    final remaining = period - (now.millisecondsSinceEpoch ~/ 1000) % period;
+    return OtpToken(
+      code: (rotation % 1000000).toString().padLeft(6, '0'),
+      account: 'DEMO0001',
+      remaining: remaining,
+      period: period,
+    );
   }
 }

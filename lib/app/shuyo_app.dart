@@ -7,6 +7,7 @@ import 'package:home_widget/home_widget.dart';
 import '../core/client_app_info.dart';
 import '../core/app_tab.dart';
 import '../core/classroom_url_resolver.dart';
+import '../core/otp_url_resolver.dart';
 import '../data/demo/demo_data_bundle.dart';
 import '../data/demo/demo_repositories.dart';
 import '../data/demo/demo_session.dart';
@@ -211,6 +212,7 @@ class _ShuYoAppState extends State<ShuYoApp> with WidgetsBindingObserver {
     ClassroomUrlResolver.configure(
       useWebVpn: networkSettings.webVpnEnabled,
     );
+    OtpUrlResolver.configure(useWebVpn: networkSettings.webVpnEnabled);
     final academicAccountStore = AcademicAccountStore();
     await academicAccountStore.rememberExistingAccounts();
     if (await academicAccountStore.hasLegacyExpiredAccount()) {
