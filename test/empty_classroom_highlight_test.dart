@@ -61,6 +61,10 @@ const _occupiedFloorRooms = [
 ];
 
 class _ClassroomRepository extends ClassroomRepository {
+  _ClassroomRepository({this.onlyOccupied = false});
+
+  final bool onlyOccupied;
+
   @override
   Future<ClassroomSearchOptions> loadOptions({
     bool forceRefresh = false,
@@ -94,15 +98,17 @@ class _ClassroomRepository extends ClassroomRepository {
       startSection: query.startSection,
       endSection: query.endSection,
       floors: [
-        ClassroomFloorAvailability(
-          floor: floor,
-          rooms: floor.rooms,
-          availableRooms: floor.rooms
-              .where(
-                (room) => room.isFreeFor(query.startSection, query.endSection),
-              )
-              .toList(),
-        ),
+        if (!onlyOccupied)
+          ClassroomFloorAvailability(
+            floor: floor,
+            rooms: floor.rooms,
+            availableRooms: floor.rooms
+                .where(
+                  (room) =>
+                      room.isFreeFor(query.startSection, query.endSection),
+                )
+                .toList(),
+          ),
         ClassroomFloorAvailability(
           floor: occupiedFloor,
           rooms: occupiedFloor.rooms,
@@ -119,7 +125,7 @@ void main() {
     ShuYoThemes.systemDarkId,
   ]) {
     testWidgets(
-      'highlight toggle follows the selected range in $themeId',
+      'rooms are highlighted by availability for the selected range in $themeId',
       (tester) async {
         tester.view.physicalSize = const Size(360, 640);
         tester.view.devicePixelRatio = 1;
@@ -140,20 +146,10 @@ void main() {
         await tester.pumpAndSettle();
 
         expect(find.text('A101'), findsOneWidget);
-        expect(find.text('A102'), findsNothing);
-        expect(find.text('A201'), findsNothing);
-        expect(find.byType(TextField), findsNothing);
-        expect(
-          tester.widget<FilterChip>(find.byType(FilterChip)).selected,
-          isFalse,
-        );
-
-        await tester.tap(find.text('高亮空闲'));
-        await tester.pumpAndSettle();
-
-        expect(find.text('A101'), findsOneWidget);
         expect(find.text('A102'), findsOneWidget);
         expect(find.text('A201'), findsOneWidget);
+        expect(find.byType(TextField), findsNothing);
+        expect(find.byType(FilterChip), findsNothing);
         expect(
           tester
               .widget<ActionChip>(
@@ -214,11 +210,9 @@ void main() {
           theme.colors.surfaceAlt,
         );
 
-        await tester.tap(find.text('高亮空闲'));
-        await tester.pumpAndSettle();
-        expect(find.text('A101'), findsNothing);
+        expect(find.text('A101'), findsOneWidget);
         expect(find.text('A102'), findsOneWidget);
-        expect(find.text('A201'), findsNothing);
+        expect(find.text('A201'), findsOneWidget);
 
         await tester.tap(find.byTooltip('搜索课程、教师或教室'));
         await tester.pumpAndSettle();
@@ -228,5 +222,34 @@ void main() {
         expect(find.byType(TextField), findsNothing);
       },
     );
+
+    testWidgets('occupied rooms remain visible by default in $themeId',
+        (tester) async {
+      final theme = ShuYoThemes.byId(themeId);
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: theme.themeData(),
+          home: EmptyClassroomPage(
+            repository: _ClassroomRepository(onlyOccupied: true),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('0 间教室空闲 · 共 1 间'), findsOneWidget);
+      expect(find.text('A201'), findsOneWidget);
+      expect(find.text('没有空教室'), findsNothing);
+      expect(
+        tester
+            .widget<ActionChip>(
+              find.ancestor(
+                of: find.text('A201'),
+                matching: find.byType(ActionChip),
+              ),
+            )
+            .backgroundColor,
+        theme.colors.surfaceAlt,
+      );
+    });
   }
 }

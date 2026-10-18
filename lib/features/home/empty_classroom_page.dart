@@ -41,7 +41,6 @@ class _EmptyClassroomPageState extends State<EmptyClassroomPage> {
   String _keyword = '';
   bool _initialSelectionApplied = false;
   bool _showSearch = false;
-  bool _highlightAvailable = false;
 
   @override
   void initState() {
@@ -189,9 +188,6 @@ class _EmptyClassroomPageState extends State<EmptyClassroomPage> {
             child: _ClassroomResultList(
               result: snapshot.data!,
               keyword: _keyword,
-              highlightAvailable: _highlightAvailable,
-              onHighlightChanged: (value) =>
-                  setState(() => _highlightAvailable = value),
             ),
           );
         }
@@ -1032,14 +1028,10 @@ class _ClassroomResultList extends StatelessWidget {
   const _ClassroomResultList({
     required this.result,
     required this.keyword,
-    required this.highlightAvailable,
-    required this.onHighlightChanged,
   });
 
   final _ClassroomQueryResult result;
   final String keyword;
-  final bool highlightAvailable;
-  final ValueChanged<bool> onHighlightChanged;
 
   @override
   Widget build(BuildContext context) {
@@ -1066,47 +1058,22 @@ class _ClassroomResultList extends StatelessWidget {
           const SizedBox(height: 18),
           _CourseMatches(matches: matches),
         ] else ...[
-          Row(
-            children: [
-              Expanded(
-                child: Text(
-                  '${result.availableCount} 间教室空闲 · 共 ${result.totalRooms} 间',
-                  style: TextStyle(color: colors.textTertiary),
-                ),
-              ),
-              const SizedBox(width: 16),
-              FilterChip(
-                label: const Text('高亮空闲'),
-                selected: highlightAvailable,
-                onSelected: onHighlightChanged,
-                selectedColor: colors.accentSoft,
-                checkmarkColor: colors.onAccentSoft,
-                labelStyle: TextStyle(
-                  color: highlightAvailable
-                      ? colors.onAccentSoft
-                      : colors.textSecondary,
-                ),
-                side: BorderSide(
-                  color: highlightAvailable ? colors.accent : colors.border,
-                ),
-              ),
-            ],
+          Text(
+            '${result.availableCount} 间教室空闲 · 共 ${result.totalRooms} 间',
+            style: TextStyle(color: colors.textTertiary),
           ),
-          if (highlightAvailable)
-            Text(
-              '主题色为空闲 · 灰色为已占用',
-              style: TextStyle(color: colors.textTertiary, fontSize: 12),
-            ),
+          Text(
+            '主题色为空闲 · 灰色为已占用',
+            style: TextStyle(color: colors.textTertiary, fontSize: 12),
+          ),
           const SizedBox(height: 12),
-          if (result.totalRooms == 0 ||
-              (result.availableCount == 0 && !highlightAvailable))
+          if (result.totalRooms == 0)
             Padding(
               padding: const EdgeInsets.only(top: 48),
               child: EmptyState(
                 icon: Icons.event_busy_outlined,
-                title: result.totalRooms == 0 ? '暂无教室数据' : '没有空教室',
-                message:
-                    result.totalRooms == 0 ? '当前范围没有返回教室。' : '当前范围在所选节次没有可用教室。',
+                title: '暂无教室数据',
+                message: '当前范围没有返回教室。',
               ),
             )
           else
@@ -1114,7 +1081,6 @@ class _ClassroomResultList extends StatelessWidget {
               _BuildingAvailableRooms(
                 result: item,
                 showBuildingName: result.results.length > 1,
-                highlightAvailable: highlightAvailable,
               ),
         ],
       ],
@@ -1126,22 +1092,16 @@ class _BuildingAvailableRooms extends StatelessWidget {
   const _BuildingAvailableRooms({
     required this.result,
     required this.showBuildingName,
-    required this.highlightAvailable,
   });
 
   final ClassroomAvailabilityResult result;
   final bool showBuildingName;
-  final bool highlightAvailable;
 
   @override
   Widget build(BuildContext context) {
     final colors = context.shuyoColors;
     final visibleFloors = result.floors
-        .where(
-          (floor) => highlightAvailable
-              ? floor.rooms.isNotEmpty
-              : floor.availableRooms.isNotEmpty,
-        )
+        .where((floor) => floor.rooms.isNotEmpty)
         .toList(growable: false);
     if (visibleFloors.isEmpty) {
       return const SizedBox.shrink();
@@ -1153,8 +1113,7 @@ class _BuildingAvailableRooms extends StatelessWidget {
         children: [
           if (showBuildingName) ...[
             Text(
-              '${result.building.name} · 空闲 ${result.availableCount}'
-              '${highlightAvailable ? '/${result.totalRooms}' : ''} 间',
+              '${result.building.name} · 空闲 ${result.availableCount}/${result.totalRooms} 间',
               style: ShuYoTextStyles.title(
                 color: colors.textPrimary,
                 size: 15.5,
@@ -1168,7 +1127,6 @@ class _BuildingAvailableRooms extends StatelessWidget {
               floor: floor,
               startSection: result.startSection,
               endSection: result.endSection,
-              highlightAvailable: highlightAvailable,
             ),
         ],
       ),
@@ -1236,13 +1194,11 @@ class _FloorAvailableRooms extends StatelessWidget {
     required this.floor,
     required this.startSection,
     required this.endSection,
-    required this.highlightAvailable,
   });
 
   final ClassroomFloorAvailability floor;
   final int startSection;
   final int endSection;
-  final bool highlightAvailable;
 
   @override
   Widget build(BuildContext context) {
@@ -1253,8 +1209,7 @@ class _FloorAvailableRooms extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Text(
-            '${floor.floor.name} · 空闲 ${floor.availableRooms.length}'
-            '${highlightAvailable ? '/${floor.totalRooms}' : ''} 间',
+            '${floor.floor.name} · 空闲 ${floor.availableRooms.length}/${floor.totalRooms} 间',
             style: TextStyle(
               color: colors.textPrimary,
               fontSize: 14.5,
@@ -1266,13 +1221,11 @@ class _FloorAvailableRooms extends StatelessWidget {
             spacing: 8,
             runSpacing: 8,
             children: [
-              for (final room
-                  in highlightAvailable ? floor.rooms : floor.availableRooms)
+              for (final room in floor.rooms)
                 _RoomChip(
                   room: room,
                   startSection: startSection,
                   endSection: endSection,
-                  highlightAvailable: highlightAvailable,
                 ),
             ],
           ),
@@ -1287,13 +1240,11 @@ class _RoomChip extends StatelessWidget {
     required this.room,
     required this.startSection,
     required this.endSection,
-    required this.highlightAvailable,
   });
 
   final ClassroomRoom room;
   final int startSection;
   final int endSection;
-  final bool highlightAvailable;
 
   @override
   Widget build(BuildContext context) {
@@ -1304,22 +1255,14 @@ class _RoomChip extends StatelessWidget {
       avatar: Icon(
         isAvailable ? Icons.meeting_room_outlined : Icons.event_busy_outlined,
         size: 17,
-        color: highlightAvailable
-            ? (isAvailable ? colors.onAccentSoft : colors.textMuted)
-            : null,
+        color: isAvailable ? colors.onAccentSoft : colors.textMuted,
       ),
-      backgroundColor: highlightAvailable
-          ? (isAvailable ? colors.accentSoft : colors.surfaceAlt)
-          : null,
-      side: highlightAvailable
-          ? BorderSide(color: isAvailable ? colors.accent : colors.border)
-          : null,
-      labelStyle: highlightAvailable
-          ? TextStyle(
-              color: isAvailable ? colors.onAccentSoft : colors.textMuted,
-              fontWeight: isAvailable ? FontWeight.w600 : FontWeight.normal,
-            )
-          : null,
+      backgroundColor: isAvailable ? colors.accentSoft : colors.surfaceAlt,
+      side: BorderSide(color: isAvailable ? colors.accent : colors.border),
+      labelStyle: TextStyle(
+        color: isAvailable ? colors.onAccentSoft : colors.textMuted,
+        fontWeight: isAvailable ? FontWeight.w600 : FontWeight.normal,
+      ),
       tooltip: '${room.name} · ${isAvailable ? '空闲' : '已占用'}',
       onPressed: () => _showRoomSheet(context),
     );
