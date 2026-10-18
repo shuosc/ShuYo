@@ -34,6 +34,8 @@ class _EmptyClassroomPageState extends State<EmptyClassroomPage> {
   late DateTime _selectedDate = widget.initialDate ?? DateTime.now();
   bool _refreshingOptions = false;
   String _keyword = '';
+  bool _showSearch = false;
+  bool _highlightAvailable = false;
 
   @override
   void initState() {
@@ -47,6 +49,16 @@ class _EmptyClassroomPageState extends State<EmptyClassroomPage> {
       appBar: AppBar(
         title: const Text('空教室'),
         actions: [
+          IconButton(
+            tooltip: _showSearch ? '关闭搜索' : '搜索课程、教师或教室',
+            onPressed: () => setState(() {
+              _showSearch = !_showSearch;
+              if (!_showSearch) {
+                _keyword = '';
+              }
+            }),
+            icon: Icon(_showSearch ? Icons.search_off : Icons.search),
+          ),
           IconButton(
             tooltip: '刷新',
             onPressed: _refreshingOptions ? null : _refresh,
@@ -66,7 +78,8 @@ class _EmptyClassroomPageState extends State<EmptyClassroomPage> {
         builder: (context, snapshot) {
           if (snapshot.connectionState != ConnectionState.done) {
             return const Center(
-                child: CircularProgressIndicator(strokeWidth: 3));
+              child: CircularProgressIndicator(strokeWidth: 3),
+            );
           }
           if (snapshot.hasError) {
             return EmptyState(
@@ -98,6 +111,7 @@ class _EmptyClassroomPageState extends State<EmptyClassroomPage> {
                 selectedBuilding: _selectedBuilding,
                 selectedRange: _selectedRange,
                 selectedDate: _selectedDate,
+                showSearch: _showSearch,
                 ranges: widget.repository.defaultRanges(options.sections),
                 onCampusChanged: _setCampus,
                 onBuildingChanged: _setBuilding,
@@ -145,6 +159,9 @@ class _EmptyClassroomPageState extends State<EmptyClassroomPage> {
           child: _ClassroomResultList(
             result: snapshot.data!,
             keyword: _keyword,
+            highlightAvailable: _highlightAvailable,
+            onHighlightChanged: (value) =>
+                setState(() => _highlightAvailable = value),
           ),
         );
       },
@@ -161,11 +178,20 @@ class _EmptyClassroomPageState extends State<EmptyClassroomPage> {
       if (!mounted) {
         return;
       }
+      final campus = _validCampus(options);
+      final ranges = widget.repository.defaultRanges(options.sections);
       setState(() {
         _options = options;
-        _selectedCampus = _validCampus(options);
-        _selectedBuilding = _validBuilding(options);
-        _selectedRange ??= widget.repository.defaultRangeFor(options);
+        _selectedCampus = campus;
+        _selectedBuilding = _validBuilding(options, campus: campus);
+        if (_selectedRange == null ||
+            !ranges.any(
+              (range) =>
+                  range.start == _selectedRange!.start &&
+                  range.end == _selectedRange!.end,
+            )) {
+          _selectedRange = widget.repository.defaultRangeFor(options);
+        }
       });
       _search(forceRefresh: force);
     } on ClassroomWebVpnAuthException {
@@ -193,8 +219,10 @@ class _EmptyClassroomPageState extends State<EmptyClassroomPage> {
     return names.isEmpty ? null : names.first;
   }
 
-  ClassroomBuilding? _validBuilding(ClassroomSearchOptions options) {
-    final campus = _selectedCampus;
+  ClassroomBuilding? _validBuilding(
+    ClassroomSearchOptions options, {
+    required String? campus,
+  }) {
     final current = _selectedBuilding;
     if (current == null && _resultFuture != null) {
       return null;
@@ -220,8 +248,9 @@ class _EmptyClassroomPageState extends State<EmptyClassroomPage> {
     final keepAllBuildings = _selectedBuilding == null;
     setState(() {
       _selectedCampus = value;
-      _selectedBuilding =
-          keepAllBuildings || buildings.isEmpty ? null : buildings.first;
+      _selectedBuilding = keepAllBuildings || buildings.isEmpty
+          ? null
+          : buildings.first;
     });
     _search();
   }
@@ -254,6 +283,7 @@ class _EmptyClassroomPageState extends State<EmptyClassroomPage> {
     }
     final future = _searchBuildings(
       buildings: buildings,
+      date: _selectedDate,
       range: range,
       forceRefresh: forceRefresh,
     );
@@ -276,6 +306,7 @@ class _EmptyClassroomPageState extends State<EmptyClassroomPage> {
 
   Future<_ClassroomQueryResult> _searchBuildings({
     required List<ClassroomBuilding> buildings,
+    required DateTime date,
     required ClassroomSectionRange range,
     required bool forceRefresh,
   }) async {
@@ -285,7 +316,7 @@ class _EmptyClassroomPageState extends State<EmptyClassroomPage> {
         final result = await widget.repository.search(
           ClassroomAvailabilityQuery(
             building: building,
-            date: _selectedDate,
+            date: date,
             startSection: range.start,
             endSection: range.end,
           ),
@@ -298,7 +329,7 @@ class _EmptyClassroomPageState extends State<EmptyClassroomPage> {
       rethrow;
     }
     return _ClassroomQueryResult(
-      date: _selectedDate,
+      date: date,
       startSection: range.start,
       endSection: range.end,
       results: results,
@@ -404,6 +435,7 @@ class _SearchControls extends StatelessWidget {
     required this.selectedBuilding,
     required this.selectedRange,
     required this.selectedDate,
+    required this.showSearch,
     required this.ranges,
     required this.onCampusChanged,
     required this.onBuildingChanged,
@@ -417,6 +449,7 @@ class _SearchControls extends StatelessWidget {
   final ClassroomBuilding? selectedBuilding;
   final ClassroomSectionRange? selectedRange;
   final DateTime selectedDate;
+  final bool showSearch;
   final List<ClassroomSectionRange> ranges;
   final ValueChanged<String?> onCampusChanged;
   final ValueChanged<ClassroomBuilding?> onBuildingChanged;
@@ -428,8 +461,10 @@ class _SearchControls extends StatelessWidget {
   Widget build(BuildContext context) {
     final colors = context.shuyoColors;
     final campusBuildings = options.buildings
-        .where((building) =>
-            selectedCampus == null || building.campusName == selectedCampus)
+        .where(
+          (building) =>
+              selectedCampus == null || building.campusName == selectedCampus,
+        )
         .toList(growable: false);
     return DecoratedBox(
       decoration: BoxDecoration(
@@ -445,6 +480,7 @@ class _SearchControls extends StatelessWidget {
                   child: DropdownButtonFormField<String>(
                     key: ValueKey('campus-$selectedCampus'),
                     initialValue: selectedCampus,
+                    isExpanded: true,
                     decoration: const InputDecoration(
                       labelText: '校区',
                       border: OutlineInputBorder(),
@@ -454,7 +490,7 @@ class _SearchControls extends StatelessWidget {
                       for (final campus in options.campusNames)
                         DropdownMenuItem(
                           value: campus,
-                          child: Text(campus),
+                          child: Text(campus, overflow: TextOverflow.ellipsis),
                         ),
                     ],
                     onChanged: onCampusChanged,
@@ -467,20 +503,21 @@ class _SearchControls extends StatelessWidget {
                       'building-$selectedCampus-${selectedBuilding?.id ?? 0}',
                     ),
                     initialValue: selectedBuilding?.id ?? 0,
+                    isExpanded: true,
                     decoration: const InputDecoration(
                       labelText: '教学楼',
                       border: OutlineInputBorder(),
                       isDense: true,
                     ),
                     items: [
-                      const DropdownMenuItem(
-                        value: 0,
-                        child: Text('全部教学楼'),
-                      ),
+                      const DropdownMenuItem(value: 0, child: Text('全部教学楼')),
                       for (final building in campusBuildings)
                         DropdownMenuItem(
                           value: building.id,
-                          child: Text(building.name),
+                          child: Text(
+                            building.name,
+                            overflow: TextOverflow.ellipsis,
+                          ),
                         ),
                     ],
                     onChanged: (id) => onBuildingChanged(
@@ -519,9 +556,7 @@ class _SearchControls extends StatelessWidget {
                         firstDate: DateTime.now().subtract(
                           const Duration(days: 30),
                         ),
-                        lastDate: DateTime.now().add(
-                          const Duration(days: 180),
-                        ),
+                        lastDate: DateTime.now().add(const Duration(days: 180)),
                       );
                       if (picked != null) {
                         onDateChanged(picked);
@@ -534,66 +569,72 @@ class _SearchControls extends StatelessWidget {
               ],
             ),
             const SizedBox(height: 10),
-            for (var rowStart = 0; rowStart < ranges.length; rowStart += 3) ...[
-              if (rowStart > 0) const SizedBox(height: 6),
-              Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  for (var column = 0; column < 3; column++) ...[
-                    if (column > 0) const SizedBox(width: 8),
-                    Expanded(
-                      child: rowStart + column < ranges.length
-                          ? _rangeButton(context, ranges[rowStart + column])
-                          : const SizedBox.shrink(),
-                    ),
-                  ],
-                ],
-              ),
-            ],
-            const SizedBox(height: 10),
-            TextField(
+            DropdownButtonFormField<int>(
+              key: ValueKey('range-${selectedRange?.start}'),
+              initialValue: selectedRange?.start,
+              isExpanded: true,
               decoration: const InputDecoration(
-                hintText: '搜索课程、教师或教室',
-                prefixIcon: Icon(Icons.search),
+                labelText: '节次',
                 border: OutlineInputBorder(),
                 isDense: true,
               ),
-              textInputAction: TextInputAction.search,
-              onChanged: onKeywordChanged,
+              items: [
+                for (final range in ranges)
+                  DropdownMenuItem(
+                    value: range.start,
+                    child: Text(
+                      _rangeLabel(range),
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+              ],
+              onChanged: (start) {
+                for (final range in ranges) {
+                  if (range.start == start) {
+                    onRangeChanged(range);
+                    break;
+                  }
+                }
+              },
             ),
+            if (showSearch) ...[
+              const SizedBox(height: 10),
+              TextField(
+                autofocus: true,
+                decoration: const InputDecoration(
+                  hintText: '搜索课程、教师或教室',
+                  prefixIcon: Icon(Icons.search),
+                  border: OutlineInputBorder(),
+                  isDense: true,
+                ),
+                textInputAction: TextInputAction.search,
+                onChanged: onKeywordChanged,
+              ),
+            ],
           ],
         ),
       ),
     );
   }
 
-  Widget _rangeButton(BuildContext context, ClassroomSectionRange range) {
-    final colors = context.shuyoColors;
-    final selected =
-        selectedRange?.start == range.start && selectedRange?.end == range.end;
-    return MergeSemantics(
-      child: Semantics(
-        selected: selected,
-        inMutuallyExclusiveGroup: true,
-        child: OutlinedButton(
-          style: OutlinedButton.styleFrom(
-            minimumSize: const Size(0, 48),
-            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
-            foregroundColor:
-                selected ? colors.onAccentSoft : colors.textPrimary,
-            backgroundColor: selected ? colors.accentSoft : colors.surface,
-            side: BorderSide(
-              color: selected ? colors.accent : colors.borderStrong,
-              width: selected ? 2 : 1,
-            ),
-            shape:
-                RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-          ),
-          onPressed: () => onRangeChanged(range),
-          child: Text(range.label, textAlign: TextAlign.center),
-        ),
-      ),
-    );
+  String _rangeLabel(ClassroomSectionRange range) {
+    String? startTime;
+    String? endTime;
+    for (final section in options.sections) {
+      if (section.index == range.start) {
+        startTime = section.startTime;
+      }
+      if (section.index == range.end) {
+        endTime = section.endTime;
+      }
+    }
+    if (startTime == null ||
+        startTime.isEmpty ||
+        endTime == null ||
+        endTime.isEmpty) {
+      return range.label;
+    }
+    return '${range.label} · $startTime–$endTime';
   }
 }
 
@@ -620,10 +661,14 @@ class _ClassroomResultList extends StatelessWidget {
   const _ClassroomResultList({
     required this.result,
     required this.keyword,
+    required this.highlightAvailable,
+    required this.onHighlightChanged,
   });
 
   final _ClassroomQueryResult result;
   final String keyword;
+  final bool highlightAvailable;
+  final ValueChanged<bool> onHighlightChanged;
 
   @override
   Widget build(BuildContext context) {
@@ -646,25 +691,52 @@ class _ClassroomResultList extends StatelessWidget {
         ),
         const SizedBox(height: 5),
         if (normalizedKeyword.isNotEmpty) ...[
-          Text(
-            '已按全天课程搜索，忽略当前节次',
-            style: TextStyle(color: colors.textTertiary),
-          ),
+          Text('已按全天课程搜索，忽略当前节次', style: TextStyle(color: colors.textTertiary)),
           const SizedBox(height: 18),
           _CourseMatches(matches: matches),
         ] else ...[
-          Text(
-            '可用 ${result.availableCount} / ${result.totalRooms} 间',
-            style: TextStyle(color: colors.textTertiary),
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  '${result.availableCount} 间教室空闲 · 共 ${result.totalRooms} 间',
+                  style: TextStyle(color: colors.textTertiary),
+                ),
+              ),
+              const SizedBox(width: 16),
+              FilterChip(
+                label: const Text('高亮空闲'),
+                selected: highlightAvailable,
+                onSelected: onHighlightChanged,
+                selectedColor: colors.accentSoft,
+                checkmarkColor: colors.onAccentSoft,
+                labelStyle: TextStyle(
+                  color: highlightAvailable
+                      ? colors.onAccentSoft
+                      : colors.textSecondary,
+                ),
+                side: BorderSide(
+                  color: highlightAvailable ? colors.accent : colors.border,
+                ),
+              ),
+            ],
           ),
-          const SizedBox(height: 18),
-          if (result.availableCount == 0)
-            const Padding(
-              padding: EdgeInsets.only(top: 48),
+          if (highlightAvailable)
+            Text(
+              '主题色为空闲 · 灰色为已占用',
+              style: TextStyle(color: colors.textTertiary, fontSize: 12),
+            ),
+          const SizedBox(height: 12),
+          if (result.totalRooms == 0 ||
+              (result.availableCount == 0 && !highlightAvailable))
+            Padding(
+              padding: const EdgeInsets.only(top: 48),
               child: EmptyState(
                 icon: Icons.event_busy_outlined,
-                title: '没有空教室',
-                message: '当前范围在所选节次没有可用教室。',
+                title: result.totalRooms == 0 ? '暂无教室数据' : '没有空教室',
+                message: result.totalRooms == 0
+                    ? '当前范围没有返回教室。'
+                    : '当前范围在所选节次没有可用教室。',
               ),
             )
           else
@@ -672,6 +744,7 @@ class _ClassroomResultList extends StatelessWidget {
               _BuildingAvailableRooms(
                 result: item,
                 showBuildingName: result.results.length > 1,
+                highlightAvailable: highlightAvailable,
               ),
         ],
       ],
@@ -683,18 +756,24 @@ class _BuildingAvailableRooms extends StatelessWidget {
   const _BuildingAvailableRooms({
     required this.result,
     required this.showBuildingName,
+    required this.highlightAvailable,
   });
 
   final ClassroomAvailabilityResult result;
   final bool showBuildingName;
+  final bool highlightAvailable;
 
   @override
   Widget build(BuildContext context) {
     final colors = context.shuyoColors;
-    final availableFloors = result.floors
-        .where((floor) => floor.availableRooms.isNotEmpty)
+    final visibleFloors = result.floors
+        .where(
+          (floor) => highlightAvailable
+              ? floor.rooms.isNotEmpty
+              : floor.availableRooms.isNotEmpty,
+        )
         .toList(growable: false);
-    if (availableFloors.isEmpty) {
+    if (visibleFloors.isEmpty) {
       return const SizedBox.shrink();
     }
     return Padding(
@@ -704,7 +783,8 @@ class _BuildingAvailableRooms extends StatelessWidget {
         children: [
           if (showBuildingName) ...[
             Text(
-              '${result.building.name} · ${result.availableCount}间',
+              '${result.building.name} · 空闲 ${result.availableCount}'
+              '${highlightAvailable ? '/${result.totalRooms}' : ''} 间',
               style: ShuYoTextStyles.title(
                 color: colors.textPrimary,
                 size: 15.5,
@@ -713,11 +793,12 @@ class _BuildingAvailableRooms extends StatelessWidget {
             ),
             const SizedBox(height: 12),
           ],
-          for (final floor in availableFloors)
+          for (final floor in visibleFloors)
             _FloorAvailableRooms(
               floor: floor,
               startSection: result.startSection,
               endSection: result.endSection,
+              highlightAvailable: highlightAvailable,
             ),
         ],
       ),
@@ -785,11 +866,13 @@ class _FloorAvailableRooms extends StatelessWidget {
     required this.floor,
     required this.startSection,
     required this.endSection,
+    required this.highlightAvailable,
   });
 
   final ClassroomFloorAvailability floor;
   final int startSection;
   final int endSection;
+  final bool highlightAvailable;
 
   @override
   Widget build(BuildContext context) {
@@ -800,7 +883,8 @@ class _FloorAvailableRooms extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Text(
-            '${floor.floor.name} · ${floor.availableRooms.length}间',
+            '${floor.floor.name} · 空闲 ${floor.availableRooms.length}'
+            '${highlightAvailable ? '/${floor.totalRooms}' : ''} 间',
             style: TextStyle(
               color: colors.textPrimary,
               fontSize: 14.5,
@@ -812,11 +896,13 @@ class _FloorAvailableRooms extends StatelessWidget {
             spacing: 8,
             runSpacing: 8,
             children: [
-              for (final room in floor.availableRooms)
+              for (final room
+                  in highlightAvailable ? floor.rooms : floor.availableRooms)
                 _RoomChip(
                   room: room,
                   startSection: startSection,
                   endSection: endSection,
+                  highlightAvailable: highlightAvailable,
                 ),
             ],
           ),
@@ -831,17 +917,40 @@ class _RoomChip extends StatelessWidget {
     required this.room,
     required this.startSection,
     required this.endSection,
+    required this.highlightAvailable,
   });
 
   final ClassroomRoom room;
   final int startSection;
   final int endSection;
+  final bool highlightAvailable;
 
   @override
   Widget build(BuildContext context) {
+    final colors = context.shuyoColors;
+    final isAvailable = room.isFreeFor(startSection, endSection);
     return ActionChip(
       label: Text(room.name),
-      avatar: const Icon(Icons.meeting_room_outlined, size: 17),
+      avatar: Icon(
+        isAvailable ? Icons.meeting_room_outlined : Icons.event_busy_outlined,
+        size: 17,
+        color: highlightAvailable
+            ? (isAvailable ? colors.onAccentSoft : colors.textMuted)
+            : null,
+      ),
+      backgroundColor: highlightAvailable
+          ? (isAvailable ? colors.accentSoft : colors.surfaceAlt)
+          : null,
+      side: highlightAvailable
+          ? BorderSide(color: isAvailable ? colors.accent : colors.border)
+          : null,
+      labelStyle: highlightAvailable
+          ? TextStyle(
+              color: isAvailable ? colors.onAccentSoft : colors.textMuted,
+              fontWeight: isAvailable ? FontWeight.w600 : FontWeight.normal,
+            )
+          : null,
+      tooltip: '${room.name} · ${isAvailable ? '空闲' : '已占用'}',
       onPressed: () => _showRoomSheet(context),
     );
   }
@@ -946,10 +1055,7 @@ bool _isSameDay(DateTime a, DateTime b) {
   return a.year == b.year && a.month == b.month && a.day == b.day;
 }
 
-ClassroomBuilding? _buildingById(
-  List<ClassroomBuilding> buildings,
-  int? id,
-) {
+ClassroomBuilding? _buildingById(List<ClassroomBuilding> buildings, int? id) {
   for (final building in buildings) {
     if (building.id == id) {
       return building;
