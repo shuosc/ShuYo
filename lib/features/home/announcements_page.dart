@@ -51,13 +51,28 @@ class AnnouncementsPage extends StatefulWidget {
 }
 
 class _AnnouncementsPageState extends State<AnnouncementsPage> {
-  Future<_LoadedAnnouncementList>? _future;
+  final ScrollController _scrollController = ScrollController();
   AnnouncementSource? _source;
+  _LoadedAnnouncementList? _loaded;
+  Object? _loadError;
+  bool _isBusy = true;
+  bool _loadingMore = false;
+  bool _hasMore = false;
+  int _requestGeneration = 0;
 
   @override
   void initState() {
     super.initState();
+    _scrollController.addListener(_onScroll);
     _initialize();
+  }
+
+  @override
+  void dispose() {
+    _scrollController
+      ..removeListener(_onScroll)
+      ..dispose();
+    super.dispose();
   }
 
   Future<void> _initialize() async {
@@ -68,15 +83,14 @@ class _AnnouncementsPageState extends State<AnnouncementsPage> {
       source = AnnouncementSource.official;
     }
     if (!mounted) return;
-    setState(() {
-      _source = source;
-      _future = _loadList(source);
-    });
+    setState(() => _source = source);
+    await _fetchPage(source, forceRefresh: true);
   }
 
   Future<_LoadedAnnouncementList> _loadList(
     AnnouncementSource source, {
     bool forceRefresh = false,
+    bool loadNextPage = false,
   }) async {
     final media = MediaQuery.maybeOf(context);
     final firstScreenHeight = media == null
@@ -89,16 +103,22 @@ class _AnnouncementsPageState extends State<AnnouncementsPage> {
     final items = await widget.repository.fetchAnnouncements(
       source: source,
       forceRefresh: forceRefresh,
+      loadNextPage: loadNextPage,
     );
     final firstScreenCount =
-        (firstScreenHeight / 148).ceil().clamp(0, items.length);
+        (firstScreenHeight / 120).ceil().clamp(0, items.length);
     final firstItems = items.take(firstScreenCount).toList();
+    final previewItems =
+        firstItems.where((item) => !_isExternalAnnouncement(item)).toList();
     final previews = await Future.wait(
-      firstItems.map(widget.repository.loadPreview),
+      previewItems.map(widget.repository.loadPreview),
     );
+    final previewsByUrl = {
+      for (var index = 0; index < previewItems.length; index++)
+        previewItems[index].url: previews[index],
+    };
     return _LoadedAnnouncementList(items, {
-      for (var index = 0; index < firstItems.length; index++)
-        firstItems[index].url: previews[index],
+      for (final item in firstItems) item.url: previewsByUrl[item.url],
     });
   }
 
@@ -117,71 +137,121 @@ class _AnnouncementsPageState extends State<AnnouncementsPage> {
               icon: const Icon(Icons.format_list_bulleted),
             ),
         ],
+        bottom: PreferredSize(
+          preferredSize: const Size.fromHeight(3),
+          child: _isBusy
+              ? const LinearProgressIndicator(minHeight: 3)
+              : const SizedBox(height: 3),
+        ),
       ),
-      body: _future == null ? const _AnnouncementLoadingState() : _buildList(),
+      body: _buildList(),
     );
   }
 
   Widget _buildList() {
-    return FutureBuilder<_LoadedAnnouncementList>(
-      future: _future,
-      builder: (context, snapshot) {
-        if (snapshot.connectionState != ConnectionState.done) {
-          return const _AnnouncementLoadingState();
-        }
-        if (snapshot.hasError) {
-          return _AnnouncementErrorState(
-            message: _friendlyError(snapshot.error!),
-            onRetry: _refresh,
-          );
-        }
-        final loaded = snapshot.data!;
-        final items = loaded.items;
-        if (items.isEmpty) {
-          return RefreshIndicator(
-            onRefresh: _refresh,
-            child: ListView(
-              physics: const AlwaysScrollableScrollPhysics(),
-              children: const [
-                SizedBox(height: 96),
-                EmptyState(
-                  icon: Icons.campaign_outlined,
-                  title: '暂无公告',
-                  message: '该来源近半年没有可展示的通知公告。',
-                ),
-              ],
+    final loaded = _loaded;
+    if (loaded == null) {
+      final error = _loadError;
+      return error == null
+          ? const _AnnouncementLoadingState()
+          : _AnnouncementErrorState(
+              message: _friendlyError(error),
+              onRetry: _refresh,
+            );
+    }
+    final items = loaded.items;
+    if (items.isEmpty) {
+      return RefreshIndicator(
+        onRefresh: _refresh,
+        child: ListView(
+          controller: _scrollController,
+          physics: const AlwaysScrollableScrollPhysics(),
+          children: const [
+            SizedBox(height: 96),
+            EmptyState(
+              icon: Icons.campaign_outlined,
+              title: '暂无公告',
+              message: '该来源暂时没有可展示的通知公告。',
             ),
+          ],
+        ),
+      );
+    }
+    final rows = _announcementRows(items);
+    return RefreshIndicator(
+      onRefresh: _refresh,
+      child: ListView.separated(
+        controller: _scrollController,
+        physics: const AlwaysScrollableScrollPhysics(),
+        scrollCacheExtent: const ScrollCacheExtent.pixels(0),
+        padding: const EdgeInsets.fromLTRB(0, 8, 0, 24),
+        separatorBuilder: (context, index) {
+          if (index + 1 >= rows.length ||
+              rows[index] is _AnnouncementMonthHeader ||
+              rows[index + 1] is _AnnouncementMonthHeader ||
+              CustomBackgroundScope.maybeOf(context) != null) {
+            return const SizedBox.shrink();
+          }
+          return Divider(height: 1, color: context.shuyoColors.border);
+        },
+        itemCount: rows.length,
+        itemBuilder: (context, index) {
+          final row = rows[index];
+          if (row is _AnnouncementMonthHeader) {
+            return _AnimatedAnnouncementMonthHeader(
+              label: row.label,
+              index: row.index,
+            );
+          }
+          final itemRow = row as _AnnouncementItemRow;
+          final item = itemRow.item;
+          return _AnnouncementTile(
+            key: ValueKey(item.url),
+            index: itemRow.index,
+            item: item,
+            repository: widget.repository,
+            external: _isExternalAnnouncement(item),
+            initialPreviewReady: loaded.initialPreviews.containsKey(item.url),
+            initialPreview: loaded.initialPreviews[item.url],
+            onTap: () => _openAnnouncement(item),
           );
-        }
-        return RefreshIndicator(
-          onRefresh: _refresh,
-          child: ListView.separated(
-            physics: const AlwaysScrollableScrollPhysics(),
-            scrollCacheExtent: const ScrollCacheExtent.pixels(0),
-            padding: const EdgeInsets.fromLTRB(0, 8, 0, 24),
-            itemBuilder: (context, index) {
-              return _AnnouncementTile(
-                key: ValueKey(items[index].url),
-                index: index,
-                item: items[index],
-                repository: widget.repository,
-                initialPreviewReady:
-                    loaded.initialPreviews.containsKey(items[index].url),
-                initialPreview: loaded.initialPreviews[items[index].url],
-                onTap: () => _openDetail(items[index]),
-              );
-            },
-            separatorBuilder: (context, index) {
-              if (CustomBackgroundScope.maybeOf(context) != null) {
-                return const SizedBox.shrink();
-              }
-              return Divider(height: 1, color: context.shuyoColors.border);
-            },
-            itemCount: items.length,
-          ),
-        );
-      },
+        },
+      ),
     );
+  }
+
+  List<Object> _announcementRows(List<AnnouncementListItem> items) {
+    final rows = <Object>[];
+    String? previousMonth;
+    for (var index = 0; index < items.length; index++) {
+      final item = items[index];
+      final date = item.publishedAt;
+      if (date == null) {
+        rows.add(_AnnouncementItemRow(index, item));
+        previousMonth = null;
+        continue;
+      }
+      final month = '${date.year}年${date.month}月';
+      if (month != previousMonth) {
+        rows.add(_AnnouncementMonthHeader(month, index));
+        previousMonth = month;
+      }
+      rows.add(_AnnouncementItemRow(index, item));
+    }
+    return rows;
+  }
+
+  void _onScroll() {
+    if (!_scrollController.hasClients) {
+      return;
+    }
+    if (_scrollController.position.extentAfter > 280 ||
+        !_hasMore ||
+        _loadingMore ||
+        _isBusy) {
+      return;
+    }
+    unawaited(_loadNextPage());
   }
 
   Future<void> _chooseSource() async {
@@ -241,18 +311,89 @@ class _AnnouncementsPageState extends State<AnnouncementsPage> {
     if (!mounted || choice == null) return;
     setState(() {
       _source = choice;
-      _future = _loadList(choice);
+      _loaded = null;
+      _loadError = null;
+      _hasMore = false;
+      _isBusy = true;
     });
+    await _fetchPage(choice, forceRefresh: true);
   }
 
   Future<void> _refresh() async {
     final source = _source;
-    if (source == null) return;
-    final future = _loadList(source, forceRefresh: true);
+    if (source == null || _isBusy) return;
+    await _fetchPage(source, forceRefresh: true);
+  }
+
+  Future<void> _loadNextPage() async {
+    final source = _source;
+    if (source == null || !_hasMore || _isBusy || _loadingMore) return;
+    final generation = _requestGeneration;
     setState(() {
-      _future = future;
+      _loadingMore = true;
+      _isBusy = true;
     });
-    await future;
+    try {
+      final loaded = await _loadList(source, loadNextPage: true);
+      if (!mounted || generation != _requestGeneration) return;
+      setState(() {
+        _loaded = loaded;
+        _hasMore = widget.repository.hasMoreAnnouncements(source: source);
+      });
+    } on Object catch (error) {
+      if (mounted && generation == _requestGeneration) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(_friendlyError(error))),
+        );
+      }
+    } finally {
+      if (mounted && generation == _requestGeneration) {
+        setState(() {
+          _loadingMore = false;
+          _isBusy = false;
+        });
+        _scheduleLoadMoreCheck();
+      }
+    }
+  }
+
+  void _scheduleLoadMoreCheck() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _onScroll();
+    });
+  }
+
+  Future<void> _fetchPage(
+    AnnouncementSource source, {
+    bool forceRefresh = false,
+  }) async {
+    final generation = ++_requestGeneration;
+    setState(() {
+      _isBusy = true;
+      _loadError = null;
+      _loadingMore = false;
+    });
+    try {
+      final loaded = await _loadList(source, forceRefresh: forceRefresh);
+      if (!mounted || generation != _requestGeneration) return;
+      setState(() {
+        _loaded = loaded;
+        _hasMore = widget.repository.hasMoreAnnouncements(source: source);
+      });
+    } on Object catch (error) {
+      if (!mounted || generation != _requestGeneration) return;
+      if (_loaded == null) {
+        setState(() => _loadError = error);
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(_friendlyError(error))),
+        );
+      }
+    } finally {
+      if (mounted && generation == _requestGeneration) {
+        setState(() => _isBusy = false);
+      }
+    }
   }
 
   void _openDetail(AnnouncementListItem item) {
@@ -264,6 +405,31 @@ class _AnnouncementsPageState extends State<AnnouncementsPage> {
         ),
       ),
     );
+  }
+
+  void _openAnnouncement(AnnouncementListItem item) {
+    if (_isExternalAnnouncement(item)) {
+      unawaited(_openExternalAnnouncement(item.url));
+      return;
+    }
+    _openDetail(item);
+  }
+
+  Future<void> _openExternalAnnouncement(String url) async {
+    var opened = false;
+    try {
+      opened = await launchUrl(
+        Uri.parse(url),
+        mode: LaunchMode.externalApplication,
+      );
+    } on Object {
+      // Keep the list available when the system cannot open the URL.
+    }
+    if (!opened && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('无法打开公告链接')),
+      );
+    }
   }
 
   String _friendlyError(Object error) {
@@ -279,6 +445,118 @@ class _LoadedAnnouncementList {
 
   final List<AnnouncementListItem> items;
   final Map<String, String?> initialPreviews;
+}
+
+class _AnnouncementMonthHeader {
+  const _AnnouncementMonthHeader(this.label, this.index);
+
+  final String label;
+  final int index;
+}
+
+class _AnimatedAnnouncementMonthHeader extends StatefulWidget {
+  const _AnimatedAnnouncementMonthHeader({
+    required this.label,
+    required this.index,
+  });
+
+  final String label;
+  final int index;
+
+  @override
+  State<_AnimatedAnnouncementMonthHeader> createState() =>
+      _AnimatedAnnouncementMonthHeaderState();
+}
+
+class _AnimatedAnnouncementMonthHeaderState
+    extends State<_AnimatedAnnouncementMonthHeader>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _entrance;
+  Timer? _entranceTimer;
+
+  @override
+  void initState() {
+    super.initState();
+    _entrance = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 280),
+    );
+    _startEntrance();
+  }
+
+  @override
+  void didUpdateWidget(covariant _AnimatedAnnouncementMonthHeader oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.label != widget.label || oldWidget.index != widget.index) {
+      _startEntrance();
+    }
+  }
+
+  void _startEntrance() {
+    _entranceTimer?.cancel();
+    _entrance.reset();
+    _entranceTimer = Timer(
+      Duration(milliseconds: (widget.index % 6) * 55),
+      () {
+        if (mounted) _entrance.forward();
+      },
+    );
+  }
+
+  @override
+  void dispose() {
+    _entranceTimer?.cancel();
+    _entrance.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return SlideTransition(
+      position: Tween<Offset>(
+        begin: const Offset(0.12, 0),
+        end: Offset.zero,
+      ).animate(CurvedAnimation(
+        parent: _entrance,
+        curve: Curves.easeOutCubic,
+      )),
+      child: FadeTransition(
+        opacity: _entrance,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 18, 16, 4),
+          child: Text(
+            widget.label,
+            style: ShuYoTextStyles.meta(
+              color: context.shuyoColors.textSecondary,
+              size: 12.5,
+              weight: FontWeight.w600,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _AnnouncementItemRow {
+  const _AnnouncementItemRow(this.index, this.item);
+
+  final int index;
+  final AnnouncementListItem item;
+}
+
+bool _isExternalAnnouncement(AnnouncementListItem item) {
+  final uri = Uri.tryParse(item.url);
+  if (uri == null ||
+      !uri.hasAuthority ||
+      (uri.scheme != 'http' && uri.scheme != 'https')) {
+    return true;
+  }
+  final host = uri.host.toLowerCase();
+  if (host == 'mp.weixin.qq.com') return false;
+  final sourceUri =
+      Uri.tryParse(AnnouncementSource.byId(item.sourceId).listUrl);
+  return sourceUri == null || host != sourceUri.host.toLowerCase();
 }
 
 class _AnnouncementSourceMenu extends StatefulWidget {
@@ -826,6 +1104,7 @@ class _AnnouncementTile extends StatefulWidget {
     required this.index,
     required this.item,
     required this.repository,
+    required this.external,
     required this.initialPreviewReady,
     required this.initialPreview,
     required this.onTap,
@@ -834,6 +1113,7 @@ class _AnnouncementTile extends StatefulWidget {
   final int index;
   final AnnouncementListItem item;
   final AnnouncementRepository repository;
+  final bool external;
   final bool initialPreviewReady;
   final String? initialPreview;
   final VoidCallback onTap;
@@ -868,6 +1148,7 @@ class _AnnouncementTileState extends State<_AnnouncementTile>
         oldWidget.item.summary != widget.item.summary ||
         oldWidget.initialPreviewReady != widget.initialPreviewReady ||
         oldWidget.initialPreview != widget.initialPreview ||
+        oldWidget.external != widget.external ||
         oldWidget.repository != widget.repository) {
       _loadPreview();
     }
@@ -882,6 +1163,12 @@ class _AnnouncementTileState extends State<_AnnouncementTile>
     _resolvedPreview = widget.item.summary.isNotEmpty
         ? widget.item.summary
         : widget.initialPreview;
+    if (widget.external) {
+      _previewReady = true;
+      _resolvedPreview = null;
+      _startEntrance();
+      return;
+    }
     if (_previewReady) {
       _startEntrance();
       return;
@@ -923,7 +1210,7 @@ class _AnnouncementTileState extends State<_AnnouncementTile>
   Widget build(BuildContext context) {
     if (!_previewReady) {
       return const SizedBox(
-        height: 148,
+        height: 104,
         child: Center(
           child: SizedBox(
             width: 18,
@@ -957,60 +1244,61 @@ class _AnnouncementTileState extends State<_AnnouncementTile>
     ].join(' · ');
     return InkWell(
       onTap: widget.onTap,
-      child: ConstrainedBox(
-        constraints: const BoxConstraints(minHeight: 148),
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 15),
-          child: Row(
-            children: [
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    Text(
-                      item.title,
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
-                      style: ShuYoTextStyles.title(
-                        color: colors.textPrimary,
-                        size: 16,
-                        height: 1.26,
-                        weight: FontWeight.w500,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 18),
+        child: Row(
+          children: [
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Text(
+                    item.title,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: ShuYoTextStyles.title(
+                      color: colors.textPrimary,
+                      size: 16,
+                      height: 1.26,
+                      weight: FontWeight.w500,
+                    ),
+                  ),
+                  if (preview != null && preview.isNotEmpty)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 6),
+                      child: Text(
+                        preview,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          color: colors.textTertiary,
+                          fontSize: 14.5,
+                          height: 1.46,
+                        ),
                       ),
                     ),
-                    if (preview != null && preview.isNotEmpty)
-                      Padding(
-                        padding: const EdgeInsets.only(top: 7),
-                        child: Text(
-                          preview,
-                          maxLines: 2,
-                          overflow: TextOverflow.ellipsis,
-                          style: TextStyle(
-                            color: colors.textTertiary,
-                            fontSize: 14.5,
-                            height: 1.46,
-                          ),
+                  if (metadata.isNotEmpty)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 8),
+                      child: Text(
+                        metadata,
+                        style: TextStyle(
+                          color: colors.textMuted,
+                          fontSize: 12.5,
                         ),
                       ),
-                    if (metadata.isNotEmpty)
-                      Padding(
-                        padding: const EdgeInsets.only(top: 8),
-                        child: Text(
-                          metadata,
-                          style: TextStyle(
-                            color: colors.textMuted,
-                            fontSize: 12.5,
-                          ),
-                        ),
-                      ),
-                  ],
-                ),
+                    ),
+                ],
               ),
-              const SizedBox(width: 10),
-              Icon(Icons.chevron_right, color: colors.textMuted),
-            ],
-          ),
+            ),
+            const SizedBox(width: 10),
+            Icon(
+              widget.external ? Icons.open_in_new : Icons.chevron_right,
+              size: widget.external ? 18 : 24,
+              color: colors.textMuted,
+            ),
+          ],
         ),
       ),
     );

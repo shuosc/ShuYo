@@ -39,6 +39,7 @@ class _FakeAnnouncementRepository extends AnnouncementRepository {
   Future<List<AnnouncementListItem>> fetchAnnouncements({
     AnnouncementSource? source,
     bool forceRefresh = false,
+    bool loadNextPage = false,
   }) async {
     requestedSources.add((source ?? currentDefault).id);
     return items;
@@ -177,7 +178,7 @@ void main() {
         Theme.of(tester.element(star)).colorScheme.primary);
     expect(find.text(_listTitle), findsOneWidget);
 
-    await tester.tap(find.byTooltip('收藏本科生处'));
+    await tester.tap(find.byTooltip('收藏本科生工作处'));
     await tester.pumpAndSettle();
     expect(repository.favoriteIds, {'bksy', 'xgb'});
     expect(find.byIcon(Icons.star), findsNWidgets(4));
