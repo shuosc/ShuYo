@@ -18,6 +18,7 @@ enum AnnouncementListFormat {
   listRLb,
   filmNotice,
   contentBoxList,
+  unorderedList,
 }
 
 enum AnnouncementSourceGroup { campus, college }
@@ -62,19 +63,19 @@ class AnnouncementSource {
     ),
     AnnouncementSource(
       id: 'xgb',
-      name: '本科生处',
+      name: '本科生工作处',
       listUrl: 'https://xgb.shu.edu.cn/xgdt/tzgg.htm',
       format: AnnouncementListFormat.artList,
     ),
     AnnouncementSource(
       id: 'dwygb',
-      name: '研究生工作部',
+      name: '研究生工作处',
       listUrl: 'https://dwygb.shu.edu.cn/xwzx/tzgg.htm',
       format: AnnouncementListFormat.artList,
     ),
     AnnouncementSource(
       id: 'gs',
-      name: '研究生院 · 培养管理',
+      name: '研究生院',
       listUrl: 'https://gs.shu.edu.cn/xwlb/py.htm',
       format: AnnouncementListFormat.vsbTable,
     ),
@@ -88,7 +89,27 @@ class AnnouncementSource {
       id: 'lib',
       name: '图书馆',
       listUrl: 'https://lib.shu.edu.cn/sho/ggxx.htm',
+      additionalListUrls: ['https://lib.shu.edu.cn/sho/zydt.htm'],
+      columnNames: ['通知公告', '资源动态'],
       format: AnnouncementListFormat.rightList,
+    ),
+    AnnouncementSource(
+      id: 'kyglb',
+      name: '科研管理部',
+      listUrl: 'https://kyglb.shu.edu.cn/dhl/tzgg.htm',
+      format: AnnouncementListFormat.unorderedList,
+    ),
+    AnnouncementSource(
+      id: 'baoweichu',
+      name: '保卫处',
+      listUrl: 'https://baoweichu.shu.edu.cn/ggl.htm',
+      format: AnnouncementListFormat.onlyList,
+    ),
+    AnnouncementSource(
+      id: 'its',
+      name: '信息化工作办公室',
+      listUrl: 'https://newits.shu.edu.cn/index/tzgg.htm',
+      format: AnnouncementListFormat.onlyList,
     ),
     AnnouncementSource(
       id: 'cie',

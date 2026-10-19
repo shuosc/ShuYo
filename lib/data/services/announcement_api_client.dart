@@ -27,101 +27,110 @@ class AnnouncementApiException implements Exception {
   }
 }
 
+class AnnouncementPageBatch {
+  const AnnouncementPageBatch(
+      {required this.items, required this.nextPageUrls});
+
+  final List<AnnouncementListItem> items;
+  final List<String?> nextPageUrls;
+}
+
 class AnnouncementApiClient {
   AnnouncementApiClient({http.Client? httpClient})
       : _httpClient = httpClient ?? IOClient(HttpClient());
-
-  static const maxPages = 3;
-  static const maxItems = 30;
-  static const maxAge = Duration(days: 180);
 
   final http.Client _httpClient;
 
   Future<List<AnnouncementListItem>> fetchAnnouncements({
     AnnouncementSource source = AnnouncementSource.official,
+  }) async =>
+      (await fetchPage(source: source)).items;
+
+  Future<AnnouncementPageBatch> fetchPage({
+    AnnouncementSource source = AnnouncementSource.official,
+    List<String?>? pageUrls,
   }) async {
-    final columns =
-        await Future.wait(List.generate(source.listUrls.length, (index) async {
-      final startUrl = source.listUrls[index];
-      final column =
-          index < source.columnNames.length ? source.columnNames[index] : '';
-      try {
-        return (
-          items: await _fetchColumn(startUrl, source, column),
-          error: null as Object?
-        );
-      } on Object catch (error) {
-        return (items: <AnnouncementListItem>[], error: error);
-      }
-    }));
-    if (columns.every((column) => column.error != null)) {
-      throw columns.first.error!;
+    final requestedUrls = pageUrls ?? source.listUrls;
+    final columns = await Future.wait(List.generate(
+      requestedUrls.length,
+      (index) async {
+        final pageUrl = requestedUrls[index];
+        if (pageUrl == null) {
+          return (
+            items: <AnnouncementListItem>[],
+            nextPageUrl: null as String?,
+            error: null as Object?,
+          );
+        }
+        final column =
+            index < source.columnNames.length ? source.columnNames[index] : '';
+        try {
+          final response = await _getHtml(pageUrl);
+          final html = _decodeHtml(response);
+          final items = parseAnnouncementList(html,
+              baseUrl: pageUrl, source: source, column: column);
+          if (items.isEmpty) {
+            throw const AnnouncementApiException(
+              '公告页面结构已变化，请稍后再试',
+            );
+          }
+          return (
+            items: items,
+            nextPageUrl: _nextPageUrl(html, baseUrl: pageUrl, source: source),
+            error: null as Object?,
+          );
+        } on Object catch (error) {
+          return (
+            items: <AnnouncementListItem>[],
+            nextPageUrl: pageUrl,
+            error: error,
+          );
+        }
+      },
+    ));
+    final activeColumns = requestedUrls.whereType<String>().length;
+    final failedColumns = [
+      for (var index = 0; index < columns.length; index++)
+        if (requestedUrls[index] != null && columns[index].error != null)
+          columns[index],
+    ];
+    if (activeColumns > 0 && failedColumns.length == activeColumns) {
+      throw failedColumns.first.error!;
     }
     final found = columns.expand((column) => column.items);
 
-    final today = DateTime.now();
-    final cutoff =
-        DateTime(today.year, today.month, today.day).subtract(maxAge);
     final unique = <String, AnnouncementListItem>{};
     for (final item in found) {
-      if (item.publishedAt != null && item.publishedAt!.isBefore(cutoff)) {
-        continue;
-      }
-      unique.putIfAbsent(item.url, () => item);
+      unique.putIfAbsent(_announcementUrlKey(item.url), () => item);
     }
     final items = unique.values.toList();
     final sourceOrder = {
       for (var index = 0; index < items.length; index++)
-        items[index].url: index,
+        _announcementUrlKey(items[index].url): index,
     };
     items.sort((a, b) {
       final left = a.publishedAt;
       final right = b.publishedAt;
       if (left == null) {
         return right == null
-            ? sourceOrder[a.url]!.compareTo(sourceOrder[b.url]!)
+            ? sourceOrder[_announcementUrlKey(a.url)]!
+                .compareTo(sourceOrder[_announcementUrlKey(b.url)]!)
             : 1;
       }
       if (right == null) return -1;
       final dateOrder = right.compareTo(left);
       return dateOrder != 0
           ? dateOrder
-          : sourceOrder[a.url]!.compareTo(sourceOrder[b.url]!);
+          : sourceOrder[_announcementUrlKey(a.url)]!
+              .compareTo(sourceOrder[_announcementUrlKey(b.url)]!);
     });
-    return items.take(maxItems).toList(growable: false);
-  }
-
-  Future<List<AnnouncementListItem>> _fetchColumn(
-    String startUrl,
-    AnnouncementSource source,
-    String column,
-  ) async {
-    final found = <AnnouncementListItem>[];
-    final visited = <String>{};
-    String? pageUrl = startUrl;
-    final pageLimit = source.listUrls.length > 1 ? 2 : maxPages;
-    for (var page = 0; page < pageLimit && pageUrl != null; page++) {
-      if (!visited.add(pageUrl)) break;
-      http.Response response;
-      try {
-        response = await _getHtml(pageUrl);
-      } on Object {
-        if (found.isEmpty) rethrow;
-        break;
-      }
-      final html = _decodeHtml(response);
-      final pageItems = parseAnnouncementList(html,
-          baseUrl: pageUrl, source: source, column: column);
-      if (pageItems.isEmpty) {
-        if (found.isEmpty) {
-          throw const AnnouncementApiException('公告页面结构已变化，请稍后再试');
-        }
-        break;
-      }
-      found.addAll(pageItems);
-      pageUrl = _nextPageUrl(html, baseUrl: pageUrl, source: source);
-    }
-    return found;
+    return AnnouncementPageBatch(
+      items: items,
+      nextPageUrls: [
+        for (var index = 0; index < columns.length; index++)
+          requestedUrls[index] == null ? null : columns[index].nextPageUrl,
+      ],
+    );
   }
 
   Future<AnnouncementDetail> fetchDetail(AnnouncementListItem item) async {
@@ -202,6 +211,9 @@ class AnnouncementApiClient {
               .querySelector('div.content-box.fr.zsxx')
               ?.querySelectorAll('li[id^="line_u"]') ??
           const <dom.Element>[],
+      AnnouncementListFormat.unorderedList =>
+        document.querySelector('div.list.fl > ul')?.querySelectorAll('li') ??
+            const <dom.Element>[],
     };
     final items = <AnnouncementListItem>[];
     for (final row in rows) {
@@ -245,6 +257,7 @@ class AnnouncementApiClient {
         AnnouncementListFormat.filmNotice ||
         AnnouncementListFormat.contentBoxList =>
           null,
+        AnnouncementListFormat.unorderedList => row.querySelector('span'),
         AnnouncementListFormat.onlyList => null,
       };
       final rawDate = switch (source.format) {
@@ -317,7 +330,8 @@ class AnnouncementApiClient {
       AnnouncementListFormat.centreList => 'a.Next',
       AnnouncementListFormat.rightList => 'div.right-list a',
       AnnouncementListFormat.rightListUl ||
-      AnnouncementListFormat.listPage =>
+      AnnouncementListFormat.listPage ||
+      AnnouncementListFormat.unorderedList =>
         'span.p_pages a',
       AnnouncementListFormat.vsbNewList ||
       AnnouncementListFormat.sjList ||
@@ -649,4 +663,9 @@ class _AnnouncementMetadata {
   final String dateText;
   final String author;
   final String department;
+}
+
+String _announcementUrlKey(String url) {
+  final uri = Uri.tryParse(url.trim());
+  return uri == null ? url.trim() : uri.replace(fragment: '').toString();
 }

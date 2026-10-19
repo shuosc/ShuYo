@@ -178,7 +178,9 @@ class DemoAnnouncementRepository extends AnnouncementRepository {
 
   @override
   Future<List<AnnouncementListItem>> fetchAnnouncements(
-          {AnnouncementSource? source, bool forceRefresh = false}) async =>
+          {AnnouncementSource? source,
+          bool forceRefresh = false,
+          bool loadNextPage = false}) async =>
       items;
 
   @override
