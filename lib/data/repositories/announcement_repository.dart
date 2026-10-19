@@ -47,6 +47,8 @@ class AnnouncementRepository {
   final Duration autoRefreshInterval;
 
   final Map<String, List<AnnouncementListItem>> _memoryLists = {};
+  final Map<String, List<String?>> _nextPageUrls = {};
+  final Map<String, Set<String>> _visitedPageUrls = {};
   final Map<String, String?> _previews = {};
   final Map<String, Future<String?>> _pendingPreviews = {};
   final Map<String, AnnouncementDetail> _recentDetails = {};
@@ -183,42 +185,68 @@ class AnnouncementRepository {
     if (decoded is! List) {
       return const <AnnouncementListItem>[];
     }
-    final today = DateTime.now();
-    final cutoff = DateTime(today.year, today.month, today.day)
-        .subtract(AnnouncementApiClient.maxAge);
     final items = decoded
         .whereType<JsonMap>()
         .map(AnnouncementListItem.fromJson)
-        .where((item) =>
-            item.publishedAt == null || !item.publishedAt!.isBefore(cutoff))
         .toList();
-    items.sort((a, b) {
-      final left = a.publishedAt;
-      final right = b.publishedAt;
-      if (left == null) return right == null ? 0 : 1;
-      if (right == null) return -1;
-      return right.compareTo(left);
-    });
-    final recent =
-        items.take(AnnouncementApiClient.maxItems).toList(growable: false);
+    final recent = _mergeAnnouncements(const [], items);
     _memoryLists[selected.id] = recent;
     return recent;
+  }
+
+  bool hasMoreAnnouncements({AnnouncementSource? source}) {
+    final id = source?.id;
+    if (id == null) return false;
+    return _nextPageUrls[id]?.any((url) => url != null) ?? false;
   }
 
   Future<List<AnnouncementListItem>> fetchAnnouncements({
     AnnouncementSource? source,
     bool forceRefresh = false,
+    bool loadNextPage = false,
   }) async {
     final selected = source ?? await defaultSource();
+    final cached = await loadCachedAnnouncements(source: selected);
+    if (loadNextPage) {
+      final nextPageUrls = _nextPageUrls[selected.id];
+      if (nextPageUrls == null || !nextPageUrls.any((url) => url != null)) {
+        return cached;
+      }
+      try {
+        final visited = _visitedPageUrls.putIfAbsent(
+          selected.id,
+          () => selected.listUrls.toSet(),
+        )..addAll(nextPageUrls.whereType<String>());
+        final page = await _apiClient.fetchPage(
+          source: selected,
+          pageUrls: nextPageUrls,
+        );
+        _nextPageUrls[selected.id] = [
+          for (final next in page.nextPageUrls)
+            if (next != null && !visited.contains(next)) next else null,
+        ];
+        final merged = _mergeAnnouncements(cached, page.items);
+        await _saveList(selected, merged);
+        return merged;
+      } on Object {
+        if (cached.isNotEmpty) return cached;
+        rethrow;
+      }
+    }
     if (!forceRefresh && !await _shouldAutoRefresh(selected)) {
       return loadCachedAnnouncements(source: selected);
     }
     try {
-      final items = await _apiClient.fetchAnnouncements(source: selected);
+      final page = await _apiClient.fetchPage(source: selected);
+      final visited = _visitedPageUrls[selected.id] = selected.listUrls.toSet();
+      _nextPageUrls[selected.id] = [
+        for (final next in page.nextPageUrls)
+          if (next != null && !visited.contains(next)) next else null,
+      ];
+      final items = _mergeAnnouncements(cached, page.items);
       await _saveList(selected, items);
       return items;
     } on Object {
-      final cached = await loadCachedAnnouncements(source: selected);
       if (cached.isNotEmpty) {
         return cached;
       }
@@ -279,11 +307,12 @@ class AnnouncementRepository {
     AnnouncementSource source,
     List<AnnouncementListItem> items,
   ) async {
-    _memoryLists[source.id] = items;
+    final uniqueItems = _mergeAnnouncements(const [], items);
+    _memoryLists[source.id] = uniqueItems;
     final prefs = await _preferencesLoader();
     await prefs.setString(
       '$_listCacheKey.${source.id}',
-      jsonEncode(items.map((item) => item.toJson()).toList()),
+      jsonEncode(uniqueItems.map((item) => item.toJson()).toList()),
     );
     await prefs.setString(
       '$_lastRefreshKey.${source.id}',
@@ -291,4 +320,63 @@ class AnnouncementRepository {
     );
     await prefs.setInt('$_cacheVersionKey.${source.id}', _cacheVersion);
   }
+
+  List<AnnouncementListItem> _mergeAnnouncements(
+    Iterable<AnnouncementListItem> existing,
+    Iterable<AnnouncementListItem> incoming,
+  ) {
+    final byUrl = <String, AnnouncementListItem>{};
+    void merge(AnnouncementListItem item) {
+      final key = _announcementUrlKey(item.url);
+      final previous = byUrl[key];
+      if (previous == null) {
+        byUrl[key] = item;
+        return;
+      }
+      byUrl[key] = AnnouncementListItem(
+        title: item.title.isNotEmpty ? item.title : previous.title,
+        url: previous.url,
+        summary: item.summary.isNotEmpty ? item.summary : previous.summary,
+        dateText: item.dateText.isNotEmpty ? item.dateText : previous.dateText,
+        publishedAt: item.publishedAt ?? previous.publishedAt,
+        sourceId: item.sourceId.isNotEmpty ? item.sourceId : previous.sourceId,
+        column: item.column.isNotEmpty ? item.column : previous.column,
+      );
+    }
+
+    for (final item in existing) {
+      merge(item);
+    }
+    for (final item in incoming) {
+      merge(item);
+    }
+    final items = byUrl.values.toList();
+    final order = {
+      for (var index = 0; index < items.length; index++)
+        _announcementUrlKey(items[index].url): index,
+    };
+    items.sort((a, b) {
+      final left = a.publishedAt;
+      final right = b.publishedAt;
+      if (left == null) {
+        return right == null
+            ? order[_announcementUrlKey(a.url)]!
+                .compareTo(order[_announcementUrlKey(b.url)]!)
+            : 1;
+      }
+      if (right == null) return -1;
+      final byDate = right.compareTo(left);
+      return byDate != 0
+          ? byDate
+          : order[_announcementUrlKey(a.url)]!
+              .compareTo(order[_announcementUrlKey(b.url)]!);
+    });
+    return items;
+  }
+}
+
+String _announcementUrlKey(String url) {
+  final uri = Uri.tryParse(url.trim());
+  if (uri == null) return url.trim();
+  return uri.replace(fragment: '').toString();
 }

@@ -11,7 +11,7 @@ import 'package:shuyo/data/repositories/announcement_repository.dart';
 import 'package:shuyo/data/services/announcement_api_client.dart';
 
 void main() {
-  test('all seven source profiles extract dated article links', () {
+  test('campus and department sources extract dated article links', () {
     final samples = <String, String>{
       'shu': '<div class="ej_main"><div class="list"><ul><li><a '
           'href="/info/1.htm"><p class="bt">官网通知</p><p class="sj">'
@@ -32,32 +32,58 @@ void main() {
           '</li></ul></div>',
       'lib': '<div class="right-list"><ul><li><a href="/info/7.htm">'
           '图书馆通知</a><span>2026-10-06</span></li></ul></div>',
+      'kyglb': '<div class="list fl"><ul><li><a href="/info/8.htm">'
+          '科研管理通知</a><span>2026-10-06</span></li></ul></div>',
+      'baoweichu': '<div class="only-list1"><ul><li>'
+          '<a href="/info/9.htm">保卫处通知</a> 2026-10-06</li></ul></div>',
+      'its': '<div class="only-list1"><ul><li id="line_u4_0">'
+          '<a href="../info/1095/6422.htm" target="_blank">'
+          '网络故障紧急通知</a><span>2026-09-22</span>'
+          '</li></ul></div>',
     };
 
-    for (final source
-        in AnnouncementSource.inGroup(AnnouncementSourceGroup.campus)) {
+    for (final entry in samples.entries) {
+      final source = AnnouncementSource.byId(entry.key);
       final items = AnnouncementApiClient.parseAnnouncementList(
-        samples[source.id]!,
+        entry.value,
         baseUrl: source.listUrl,
         source: source,
       );
       expect(items, hasLength(1), reason: source.id);
       expect(items.single.url,
           startsWith('https://${Uri.parse(source.listUrl).host}/'));
-      expect(items.single.publishedAt, DateTime(2026, 10, 6));
+      expect(items.single.publishedAt,
+          source.id == 'its' ? DateTime(2026, 9, 22) : DateTime(2026, 10, 6));
       expect(items.single.sourceId, source.id);
     }
   });
 
   test('college catalog and additional HTML layouts parse correctly', () {
     expect(AnnouncementSource.inGroup(AnnouncementSourceGroup.campus),
-        hasLength(7));
+        hasLength(10));
     expect(AnnouncementSource.inGroup(AnnouncementSourceGroup.college),
         hasLength(33));
     expect(
         AnnouncementSource.all.any((source) => source.id == 'modart'), isFalse);
     expect(
         AnnouncementSource.all.any((source) => source.id == 'shvfs'), isFalse);
+    final library = AnnouncementSource.byId('lib');
+    expect(library.listUrls, [
+      'https://lib.shu.edu.cn/sho/ggxx.htm',
+      'https://lib.shu.edu.cn/sho/zydt.htm'
+    ]);
+    expect(library.columnNames, ['通知公告', '资源动态']);
+    final resourceUpdates = AnnouncementApiClient.parseAnnouncementList(
+      '<div class="right-list"><ul><li id="line_u6_0">'
+      '<a href="../info/1023/6924.htm">数据库试用通知</a>'
+      '<span>2026/04/20</span></li></ul></div>',
+      baseUrl: library.listUrls[1],
+      source: library,
+      column: library.columnNames[1],
+    );
+    expect(resourceUpdates.single.url,
+        'https://lib.shu.edu.cn/info/1023/6924.htm');
+    expect(resourceUpdates.single.column, '资源动态');
     final samples = <String, String>{
       'cie': '<ul class="listPage"><li><a href="/info/1.htm">学院通知'
           '</a><span>2026/10/06</span></li></ul>',
@@ -311,7 +337,8 @@ void main() {
     expect(pdf.value, 'https://gs.shu.edu.cn/__local/notice.pdf');
   });
 
-  test('fetch follows next link and retains teacher-titled notices', () async {
+  test('fetches one source page at a time and returns the next-page cursor',
+      () async {
     final today = DateTime.now();
     final date = '${today.year}-${today.month.toString().padLeft(2, '0')}-'
         '${today.day.toString().padLeft(2, '0')}';
@@ -337,17 +364,24 @@ void main() {
       }),
     );
 
-    final items = await client.fetchAnnouncements(
+    final firstPage = await client.fetchPage(
       source: AnnouncementSource.byId('bksy'),
     );
+    expect(requested, hasLength(1));
+    expect(firstPage.items.map((item) => item.title), ['关于教师教学设计竞赛的通知']);
+    expect(
+        firstPage.nextPageUrls, ['https://bksy.shu.edu.cn/index/tzgg/2.htm']);
+
+    final secondPage = await client.fetchPage(
+      source: AnnouncementSource.byId('bksy'),
+      pageUrls: firstPage.nextPageUrls,
+    );
     expect(requested, hasLength(2));
-    expect(items.map((item) => item.title), [
-      '关于教师教学设计竞赛的通知',
-      '本科生选课通知',
-    ]);
+    expect(secondPage.items.map((item) => item.title), ['本科生选课通知']);
   });
 
-  test('fetch stops after three pages and returns at most thirty items',
+  test(
+      'each page fetch is complete and the list can continue past thirty items',
       () async {
     final today = DateTime.now();
     final date = '${today.year}.${today.month}.${today.day}';
@@ -368,9 +402,18 @@ void main() {
       }),
     );
 
-    final items = await client.fetchAnnouncements();
-    expect(requests, 3);
-    expect(items, hasLength(30));
+    final firstPage = await client.fetchPage();
+    expect(requests, 1);
+    expect(firstPage.items, hasLength(15));
+    final secondPage = await client.fetchPage(
+      pageUrls: firstPage.nextPageUrls,
+    );
+    expect(requests, 2);
+    expect(secondPage.items, hasLength(15));
+    expect(
+      {...firstPage.items, ...secondPage.items}.length,
+      30,
+    );
   });
 
   test('default source and cached lists are independent', () async {
@@ -501,6 +544,24 @@ void main() {
 
 class _FakeAnnouncementApiClient extends AnnouncementApiClient {
   final requested = <String>[];
+
+  @override
+  Future<AnnouncementPageBatch> fetchPage({
+    AnnouncementSource source = AnnouncementSource.official,
+    List<String?>? pageUrls,
+  }) async {
+    requested.add(source.id);
+    return AnnouncementPageBatch(
+      items: [
+        AnnouncementListItem(
+          title: '${source.name}新通知',
+          url: '${source.listUrl}/new',
+          sourceId: source.id,
+        ),
+      ],
+      nextPageUrls: List<String?>.filled(source.listUrls.length, null),
+    );
+  }
 
   @override
   Future<List<AnnouncementListItem>> fetchAnnouncements({
