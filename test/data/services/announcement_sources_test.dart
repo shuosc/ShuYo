@@ -178,7 +178,7 @@ void main() {
     }
   });
 
-  test('new school list formats and two computer columns parse', () {
+  test('new school list formats and computer notice source parse', () {
     const addedIds = <String>{
       'cs',
       'ai',
@@ -227,20 +227,8 @@ void main() {
       expect(items.single.publishedAt, DateTime(2026, 10, 6));
     }
     final computer = AnnouncementSource.byId('cs');
-    expect(computer.listUrls, hasLength(2));
-    expect(computer.columnNames, ['新闻动态', '重要通知']);
-    final news = AnnouncementApiClient.parseAnnouncementList(
-      '<div class="xw-lt"><li><a href="https://mp.weixin.qq.com/s/x">'
-      '<div class="xw-tx"><h3>学院新闻</h3><p>新闻摘要</p></div>'
-      '<div class="xw-date"><b>05</b><span>2026-10</span></div>'
-      '</a></li></div>',
-      baseUrl: computer.listUrls.first,
-      source: computer,
-      column: '新闻动态',
-    );
-    expect(news.single.summary, '新闻摘要');
-    expect(news.single.column, '新闻动态');
-    expect(news.single.publishedAt, DateTime(2026, 10, 5));
+    expect(computer.listUrls, ['https://cs.shu.edu.cn/index/zytz.htm']);
+    expect(computer.columnNames, ['重要通知']);
   });
 
   test('undated college lists keep source order without guessing from titles',
