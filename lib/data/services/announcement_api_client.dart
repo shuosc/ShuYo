@@ -141,6 +141,7 @@ class AnnouncementApiClient {
       fallbackTitle: item.title,
       fallbackDateText: item.dateText,
       fallbackPublishedAt: item.publishedAt,
+      sourceId: item.sourceId,
     );
   }
 
@@ -151,7 +152,7 @@ class AnnouncementApiClient {
     String column = '',
   }) {
     final document = html_parser.parse(html);
-    final rows = switch (source.format) {
+    final rows = switch (source.adapter.listFormat) {
       AnnouncementListFormat.shuHome => document
               .querySelector('.ej_main .list')
               ?.querySelectorAll('ul > li > a') ??
@@ -217,16 +218,17 @@ class AnnouncementApiClient {
     };
     final items = <AnnouncementListItem>[];
     for (final row in rows) {
-      final anchor = switch (source.format) {
+      final anchor = switch (source.adapter.listFormat) {
         AnnouncementListFormat.artList => row.querySelector('a.linkfont1'),
         AnnouncementListFormat.filmNotice =>
           row.querySelector('a.notice-title'),
         _ => row.localName == 'a' ? row : row.querySelector('a'),
       };
-      if (anchor == null && source.format != AnnouncementListFormat.mbaList) {
+      if (anchor == null &&
+          source.adapter.listFormat != AnnouncementListFormat.mbaList) {
         continue;
       }
-      final titleNode = switch (source.format) {
+      final titleNode = switch (source.adapter.listFormat) {
         AnnouncementListFormat.shuHome => row.querySelector('.bt'),
         AnnouncementListFormat.artList => row.querySelector('a.linkfont1'),
         AnnouncementListFormat.mbaList => row.querySelector('div.news-title'),
@@ -235,7 +237,7 @@ class AnnouncementApiClient {
         AnnouncementListFormat.listPageList => anchor?.querySelector('p'),
         _ => anchor,
       };
-      final dateNode = switch (source.format) {
+      final dateNode = switch (source.adapter.listFormat) {
         AnnouncementListFormat.shuHome => row.querySelector('.sj'),
         AnnouncementListFormat.artList => row.querySelector('span.linkfont1'),
         AnnouncementListFormat.vsbTable => _secondTableCell(row),
@@ -260,7 +262,7 @@ class AnnouncementApiClient {
         AnnouncementListFormat.unorderedList => row.querySelector('span'),
         AnnouncementListFormat.onlyList => null,
       };
-      final rawDate = switch (source.format) {
+      final rawDate = switch (source.adapter.listFormat) {
         AnnouncementListFormat.mbaList => _mbaDate(row),
         AnnouncementListFormat.xwLt => _xwLtDate(row),
         _ => _cleanText(dateNode?.text),
@@ -268,13 +270,14 @@ class AnnouncementApiClient {
       var title = _cleanText(titleNode?.text);
       if (rawDate.isNotEmpty &&
           title.endsWith(rawDate) &&
-          (source.format == AnnouncementListFormat.sjList ||
-              source.format == AnnouncementListFormat.rightListUl ||
-              source.format == AnnouncementListFormat.vsbNewList ||
-              source.format == AnnouncementListFormat.bareSpanList)) {
+          (source.adapter.listFormat == AnnouncementListFormat.sjList ||
+              source.adapter.listFormat == AnnouncementListFormat.rightListUl ||
+              source.adapter.listFormat == AnnouncementListFormat.vsbNewList ||
+              source.adapter.listFormat ==
+                  AnnouncementListFormat.bareSpanList)) {
         title = title.substring(0, title.length - rawDate.length).trim();
       }
-      final href = source.format == AnnouncementListFormat.mbaList
+      final href = source.adapter.listFormat == AnnouncementListFormat.mbaList
           ? RegExp(r'''window\.open\(["']([^"']+)["']''')
                   .firstMatch(row.attributes['onclick'] ?? '')
                   ?.group(1) ??
@@ -284,15 +287,16 @@ class AnnouncementApiClient {
       if (title.isEmpty || url.isEmpty) continue;
       final dateInput = rawDate.isNotEmpty
           ? rawDate
-          : source.format == AnnouncementListFormat.filmNotice ||
-                  source.format == AnnouncementListFormat.contentBoxList
+          : source.adapter.listFormat == AnnouncementListFormat.filmNotice ||
+                  source.adapter.listFormat ==
+                      AnnouncementListFormat.contentBoxList
               ? ''
               : row.text;
       final publishedAt = _parseDate(dateInput);
       items.add(AnnouncementListItem(
         title: title,
         url: url,
-        summary: switch (source.format) {
+        summary: switch (source.adapter.listFormat) {
           AnnouncementListFormat.shuHome =>
             _cleanText(row.querySelector('.zy')?.text),
           AnnouncementListFormat.xwLt =>
@@ -322,7 +326,7 @@ class AnnouncementApiClient {
     required AnnouncementSource source,
   }) {
     final document = html_parser.parse(html);
-    final selector = switch (source.format) {
+    final selector = switch (source.adapter.listFormat) {
       AnnouncementListFormat.shuHome => 'span.p_pages a',
       AnnouncementListFormat.onlyList => 'div.fanye a',
       AnnouncementListFormat.artList => 'a.Next',
@@ -403,6 +407,7 @@ class AnnouncementApiClient {
   static AnnouncementDetail parseAnnouncementDetail(
     String html, {
     required String url,
+    String sourceId = AnnouncementSource.officialId,
     String fallbackTitle = '',
     String fallbackDateText = '',
     DateTime? fallbackPublishedAt,
@@ -413,12 +418,17 @@ class AnnouncementApiClient {
       root?.querySelector('h1')?.text ??
           document.querySelector('#activity-name')?.text,
     );
-    final metadata = _parseMetadata(root?.querySelector('.xx'));
+    final metadata = _parseMetadata(
+      root?.querySelector('.xx'),
+      document: document,
+      adapter: AnnouncementSource.byId(sourceId).adapter,
+    );
     final dateText =
         metadata.dateText.isNotEmpty ? metadata.dateText : fallbackDateText;
     final contentRoot = root?.querySelector('.v_news_content') ??
         document.querySelector('.v_news_content') ??
         document.querySelector('#vsb_content') ??
+        document.querySelector('div[id^="vsb_content_"]') ??
         document.querySelector('#js_content');
     final blocks = contentRoot == null
         ? <AnnouncementContentBlock>[]
@@ -508,20 +518,48 @@ class AnnouncementApiClient {
     void visit(dom.Element element) {
       final tag = element.localName;
       if (tag == 'style' || tag == 'script') return;
+      if (tag == 'table' && element.classes.contains('shuArticle')) {
+        for (final child in element.children) {
+          visit(child);
+        }
+        return;
+      }
       if (tag == 'table') {
-        final rows = element
-            .querySelectorAll('tr')
-            .map((row) {
-              return row.children
-                  .where((cell) =>
-                      cell.localName == 'td' || cell.localName == 'th')
-                  .map((cell) => _cleanText(_visibleText(cell)))
-                  .toList();
-            })
-            .where((row) => row.any((cell) => cell.isNotEmpty))
-            .toList();
-        if (rows.isNotEmpty) {
-          blocks.add(AnnouncementContentBlock.table(rows));
+        if (_isSingleCellLayoutTable(element)) {
+          for (final child in element.children) {
+            visit(child);
+          }
+          return;
+        }
+        final table = _parseTable(element);
+        if (table.rows.isNotEmpty) {
+          blocks.add(AnnouncementContentBlock.structuredTable(
+            rows: table.rows,
+            cells: table.cells,
+          ));
+        }
+        for (final image in element.querySelectorAll('img')) {
+          addImage(image);
+        }
+        for (final anchor in element.querySelectorAll('a[href]')) {
+          addLink(anchor);
+        }
+        return;
+      }
+      if (tag == 'div' &&
+          !element.children.any((child) => const {
+                'div',
+                'p',
+                'table',
+                'ul',
+                'ol',
+                'li',
+                'h2',
+                'h3'
+              }.contains(child.localName))) {
+        final text = _cleanText(_visibleText(element));
+        if (text.isNotEmpty) {
+          blocks.add(AnnouncementContentBlock.text(text));
         }
         for (final image in element.querySelectorAll('img')) {
           addImage(image);
@@ -540,10 +578,9 @@ class AnnouncementApiClient {
         return;
       }
       if (tag == 'p' || tag == 'li' || tag == 'h2' || tag == 'h3') {
-        final text = _cleanText(_visibleText(element));
+        final text = _cleanText(_visibleTextWithoutAnchors(element));
         final anchors = element.querySelectorAll('a[href]');
-        if (text.isNotEmpty &&
-            !(anchors.length == 1 && _cleanText(anchors.single.text) == text)) {
+        if (text.isNotEmpty) {
           blocks.add(AnnouncementContentBlock.text(
             tag == 'li' ? '• $text' : text,
           ));
@@ -571,6 +608,24 @@ class AnnouncementApiClient {
     return blocks;
   }
 
+  static bool _isSingleCellLayoutTable(dom.Element table) {
+    final rows = table.querySelectorAll('tr').where((row) {
+      return row.parent == table || row.parent?.parent == table;
+    }).toList();
+    if (rows.length != 1) return false;
+
+    final cells = rows.single.children.where((cell) {
+      return cell.localName == 'td' || cell.localName == 'th';
+    });
+    if (cells.length != 1) return false;
+
+    // Older Word-exported articles use a one-cell table as a layout wrapper
+    // around paragraphs and sometimes a separate, real data table.
+    const blockTags = {'div', 'p', 'table', 'ul', 'ol', 'li', 'h2', 'h3'};
+    return cells.single.children
+        .any((child) => blockTags.contains(child.localName));
+  }
+
   static String _visibleText(dom.Node node) {
     if (node is dom.Text) return node.text;
     if (node is! dom.Element ||
@@ -581,7 +636,156 @@ class AnnouncementApiClient {
     return node.nodes.map(_visibleText).join(' ');
   }
 
-  static _AnnouncementMetadata _parseMetadata(dom.Element? element) {
+  static String _visibleTextWithoutAnchors(dom.Node node) {
+    if (node is dom.Text) return node.text;
+    if (node is! dom.Element ||
+        node.localName == 'script' ||
+        node.localName == 'style' ||
+        node.localName == 'a') {
+      return '';
+    }
+    return node.nodes.map(_visibleTextWithoutAnchors).join(' ');
+  }
+
+  static _ParsedAnnouncementTable _parseTable(dom.Element table) {
+    final occupied = <List<bool>>[];
+    final cells = <AnnouncementTableCell>[];
+    final rows = table.querySelectorAll('tr').where((row) {
+      return row.parent == table || row.parent?.parent == table;
+    });
+    var rowIndex = 0;
+    for (final row in rows) {
+      while (occupied.length <= rowIndex) {
+        occupied.add(<bool>[]);
+      }
+      var columnIndex = 0;
+      final rowCells = row.children
+          .where((cell) => cell.localName == 'td' || cell.localName == 'th');
+      for (final cell in rowCells) {
+        while (columnIndex < occupied[rowIndex].length &&
+            occupied[rowIndex][columnIndex]) {
+          columnIndex++;
+        }
+        final text = _cleanText(_visibleText(cell));
+        final columnSpan = int.tryParse(cell.attributes['colspan'] ?? '') ?? 1;
+        final rowSpan = int.tryParse(cell.attributes['rowspan'] ?? '') ?? 1;
+        final safeColumnSpan = columnSpan.clamp(1, 64).toInt();
+        final safeRowSpan = rowSpan.clamp(1, 1000).toInt();
+        cells.add(AnnouncementTableCell(
+          row: rowIndex,
+          column: columnIndex,
+          text: text,
+          rowSpan: safeRowSpan,
+          columnSpan: safeColumnSpan,
+          textAlignment: _tableTextAlignment(cell),
+          verticalAlignment: _tableVerticalAlignment(cell),
+        ));
+        for (var rowOffset = 0; rowOffset < safeRowSpan; rowOffset++) {
+          final targetRow = rowIndex + rowOffset;
+          while (occupied.length <= targetRow) {
+            occupied.add(<bool>[]);
+          }
+          for (var columnOffset = 0;
+              columnOffset < safeColumnSpan;
+              columnOffset++) {
+            final targetColumn = columnIndex + columnOffset;
+            while (occupied[targetRow].length <= targetColumn) {
+              occupied[targetRow].add(false);
+            }
+            occupied[targetRow][targetColumn] = true;
+          }
+        }
+        columnIndex += safeColumnSpan;
+      }
+      rowIndex++;
+    }
+    final columnCount = occupied.fold<int>(
+      0,
+      (count, row) => row.length > count ? row.length : count,
+    );
+    final textGrid = List.generate(
+      occupied.length,
+      (_) => List<String>.filled(columnCount, ''),
+    );
+    for (final cell in cells) {
+      if (cell.row < textGrid.length && cell.column < columnCount) {
+        textGrid[cell.row][cell.column] = cell.text;
+      }
+    }
+    return _ParsedAnnouncementTable(
+      rows: textGrid,
+      cells: cells,
+    );
+  }
+
+  static String _tableTextAlignment(dom.Element cell) {
+    String? explicitAlignment(dom.Element element) {
+      final attribute = _normalizedAlignment(element.attributes['align']);
+      if (attribute != null) return attribute;
+      if (element.localName == 'center') return 'center';
+      return RegExp(r'(?:^|;)\s*text-align\s*:\s*(left|center|right|justify)\b',
+              caseSensitive: false)
+          .firstMatch(element.attributes['style'] ?? '')
+          ?.group(1)
+          ?.toLowerCase();
+    }
+
+    String? descendantAlignment;
+    for (final descendant in cell.querySelectorAll('*')) {
+      descendantAlignment =
+          explicitAlignment(descendant) ?? descendantAlignment;
+    }
+    if (descendantAlignment != null) return descendantAlignment;
+    for (dom.Element? current = cell;
+        current != null;
+        current = current.parent) {
+      final alignment = explicitAlignment(current);
+      if (alignment != null) return alignment;
+      if (current.localName == 'table') break;
+    }
+    return 'left';
+  }
+
+  static String _tableVerticalAlignment(dom.Element cell) {
+    String? explicitAlignment(dom.Element element) {
+      final attribute = (element.attributes['valign'] ?? '').toLowerCase();
+      if (const {'top', 'middle', 'bottom'}.contains(attribute)) {
+        return attribute;
+      }
+      return RegExp(
+        r'(?:^|;)\s*vertical-align\s*:\s*(top|middle|bottom)\b',
+        caseSensitive: false,
+      ).firstMatch(element.attributes['style'] ?? '')?.group(1)?.toLowerCase();
+    }
+
+    String? descendantAlignment;
+    for (final descendant in cell.querySelectorAll('*')) {
+      descendantAlignment =
+          explicitAlignment(descendant) ?? descendantAlignment;
+    }
+    if (descendantAlignment != null) return descendantAlignment;
+    for (dom.Element? current = cell;
+        current != null;
+        current = current.parent) {
+      final alignment = explicitAlignment(current);
+      if (alignment != null) return alignment;
+      if (current.localName == 'table') break;
+    }
+    return 'middle';
+  }
+
+  static String? _normalizedAlignment(String? value) {
+    final alignment = (value ?? '').toLowerCase();
+    return const {'left', 'center', 'right', 'justify'}.contains(alignment)
+        ? alignment
+        : null;
+  }
+
+  static _AnnouncementMetadata _parseMetadata(
+    dom.Element? element, {
+    required dom.Document document,
+    required AnnouncementSourceAdapter adapter,
+  }) {
     var dateText = '';
     var author = '';
     var department = '';
@@ -589,10 +793,36 @@ class AnnouncementApiClient {
       final text = _cleanText(span.text);
       if (text.startsWith('发布时间：')) {
         dateText = text.substring('发布时间：'.length).trim();
-      } else if (text.startsWith('投稿：')) {
-        author = text.substring('投稿：'.length).trim();
       } else if (text.startsWith('部门：')) {
         department = text.substring('部门：'.length).trim();
+      } else if (text.startsWith('部门:')) {
+        department = text.substring('部门:'.length).trim();
+      }
+    }
+    final labelElements = <dom.Element>{
+      for (final selector in adapter.authorLabelSelectors)
+        ...document.querySelectorAll(selector),
+    };
+    for (final span in labelElements) {
+      final text = _cleanText(span.text);
+      if (!_isAuthorLabel(text)) continue;
+      author = _authorValue(text);
+      if (author.isEmpty) {
+        final next = _cleanText(span.nextElementSibling?.text);
+        if (next.isNotEmpty) author = next;
+      }
+      if (author.isNotEmpty) break;
+    }
+    if (author.isEmpty) {
+      for (final selector in adapter.authorValueSelectors) {
+        for (final element in document.querySelectorAll(selector)) {
+          final candidate = _cleanText(element.text);
+          if (candidate.isEmpty) continue;
+          author =
+              _isAuthorLabel(candidate) ? _authorValue(candidate) : candidate;
+          if (author.isNotEmpty) break;
+        }
+        if (author.isNotEmpty) break;
       }
     }
     return _AnnouncementMetadata(
@@ -600,6 +830,23 @@ class AnnouncementApiClient {
       author: author,
       department: department,
     );
+  }
+
+  static bool _isAuthorLabel(String value) =>
+      value.startsWith('投稿：') ||
+      value.startsWith('投稿:') ||
+      value.startsWith('作者：') ||
+      value.startsWith('作者:') ||
+      value.startsWith('供稿：') ||
+      value.startsWith('供稿:') ||
+      value.startsWith('发布人：') ||
+      value.startsWith('发布人:') ||
+      value.startsWith('发布者：') ||
+      value.startsWith('发布者:');
+
+  static String _authorValue(String value) {
+    final separator = value.indexOf(RegExp('[:：]'));
+    return separator < 0 ? '' : value.substring(separator + 1).trim();
   }
 
   static DateTime? _parseDate(String value) {
@@ -651,6 +898,13 @@ class AnnouncementApiClient {
   static String _decodeHtml(http.Response response) {
     return utf8.decode(response.bodyBytes, allowMalformed: true);
   }
+}
+
+class _ParsedAnnouncementTable {
+  const _ParsedAnnouncementTable({required this.rows, required this.cells});
+
+  final List<List<String>> rows;
+  final List<AnnouncementTableCell> cells;
 }
 
 class _AnnouncementMetadata {
