@@ -215,6 +215,8 @@ class AnnouncementApiClient {
       AnnouncementListFormat.unorderedList =>
         document.querySelector('div.list.fl > ul')?.querySelectorAll('li') ??
             const <dom.Element>[],
+      AnnouncementListFormat.shvfsNews =>
+        document.querySelectorAll('ul.news-main-list > li.pr'),
     };
     final items = <AnnouncementListItem>[];
     for (final row in rows) {
@@ -222,6 +224,8 @@ class AnnouncementApiClient {
         AnnouncementListFormat.artList => row.querySelector('a.linkfont1'),
         AnnouncementListFormat.filmNotice =>
           row.querySelector('a.notice-title'),
+        AnnouncementListFormat.shvfsNews =>
+          row.querySelector('div.news-go-more a[href]'),
         _ => row.localName == 'a' ? row : row.querySelector('a'),
       };
       if (anchor == null &&
@@ -235,6 +239,8 @@ class AnnouncementApiClient {
         AnnouncementListFormat.nestedListUl => row.querySelector('.whitespace'),
         AnnouncementListFormat.xwLt => row.querySelector('h3'),
         AnnouncementListFormat.listPageList => anchor?.querySelector('p'),
+        AnnouncementListFormat.shvfsNews =>
+          row.querySelector('div.news-item-info h2'),
         _ => anchor,
       };
       final dateNode = switch (source.adapter.listFormat) {
@@ -260,6 +266,8 @@ class AnnouncementApiClient {
         AnnouncementListFormat.contentBoxList =>
           null,
         AnnouncementListFormat.unorderedList => row.querySelector('span'),
+        AnnouncementListFormat.shvfsNews =>
+          row.querySelector('div.news-item-info > span'),
         AnnouncementListFormat.onlyList => null,
       };
       final rawDate = switch (source.adapter.listFormat) {
@@ -305,6 +313,8 @@ class AnnouncementApiClient {
             _cleanText(anchor?.querySelector('span')?.text),
           AnnouncementListFormat.filmNotice =>
             _cleanText(row.querySelector('.notice-content')?.text),
+          AnnouncementListFormat.shvfsNews =>
+            _cleanText(row.querySelector('div.news-item-info > p')?.text),
           _ => '',
         },
         dateText: publishedAt == null
@@ -330,7 +340,7 @@ class AnnouncementApiClient {
       AnnouncementListFormat.shuHome => 'span.p_pages a',
       AnnouncementListFormat.onlyList => 'div.fanye a',
       AnnouncementListFormat.artList => 'a.Next',
-      AnnouncementListFormat.vsbTable => 'span.p_next a',
+      AnnouncementListFormat.vsbTable => 'a.Next, span.p_next a',
       AnnouncementListFormat.centreList => 'a.Next',
       AnnouncementListFormat.rightList => 'div.right-list a, a.Next',
       AnnouncementListFormat.rightListUl ||
@@ -350,10 +360,14 @@ class AnnouncementApiClient {
         'a.Next',
       AnnouncementListFormat.xwLt => 'span.p_pages a',
       AnnouncementListFormat.filmNotice => 'span.p_next a',
+      AnnouncementListFormat.shvfsNews => 'ul.yiiPager li.next a',
     };
     final links = document.querySelectorAll(selector);
     for (final link in links) {
-      if (_cleanText(link.text) != '下页' && _cleanText(link.text) != '下一页') {
+      if (_cleanText(link.text) != '下页' &&
+          _cleanText(link.text) != '下一页' &&
+          !(source.adapter.listFormat == AnnouncementListFormat.shvfsNews &&
+              _cleanText(link.text) == '加载更多')) {
         continue;
       }
       final next = _resolveUrl(baseUrl, link.attributes['href'] ?? '');
@@ -413,6 +427,7 @@ class AnnouncementApiClient {
     DateTime? fallbackPublishedAt,
   }) {
     final document = html_parser.parse(html);
+    final isShvfsNews = sourceId == 'shvfs';
     final root = document.querySelector('.nry');
     // WeChat-specific title parsing is disabled so unsupported details can use
     // the original-link fallback.
@@ -420,18 +435,30 @@ class AnnouncementApiClient {
     //   root?.querySelector('h1')?.text ??
     //       document.querySelector('#activity-name')?.text,
     // );
-    final title = _cleanText(root?.querySelector('h1')?.text);
-    final metadata = _parseMetadata(
-      root?.querySelector('.xx'),
-      document: document,
-      adapter: AnnouncementSource.byId(sourceId).adapter,
-    );
+    final title = _cleanText(isShvfsNews
+        ? document.querySelector('header.n-detail-title > h2')?.text
+        : root?.querySelector('h1')?.text);
+    final metadata = isShvfsNews
+        ? _AnnouncementMetadata(
+            dateText: _cleanText(
+              document.querySelector('header.n-detail-title > p')?.text,
+            ).replaceFirst(RegExp(r'^时间\s*[:：]\s*'), ''),
+            author: '',
+            department: '',
+          )
+        : _parseMetadata(
+            root?.querySelector('.xx'),
+            document: document,
+            adapter: AnnouncementSource.byId(sourceId).adapter,
+          );
     final dateText =
         metadata.dateText.isNotEmpty ? metadata.dateText : fallbackDateText;
-    final contentRoot = root?.querySelector('.v_news_content') ??
-        document.querySelector('.v_news_content') ??
-        document.querySelector('#vsb_content') ??
-        document.querySelector('div[id^="vsb_content_"]');
+    final contentRoot = isShvfsNews
+        ? document.querySelector('div.news-detail-infowrap')
+        : root?.querySelector('.v_news_content') ??
+            document.querySelector('.v_news_content') ??
+            document.querySelector('#vsb_content') ??
+            document.querySelector('div[id^="vsb_content_"]');
     // WeChat-specific body parsing is disabled:
     // document.querySelector('#js_content');
     final blocks = contentRoot == null
@@ -486,7 +513,9 @@ class AnnouncementApiClient {
     }
 
     void addLink(dom.Element anchor) {
-      final link = _resolveUrl(baseUrl, anchor.attributes['href'] ?? '');
+      final href = anchor.attributes['href'] ?? '';
+      final link =
+          href.startsWith('mailto:') ? href : _resolveUrl(baseUrl, href);
       if (link.isEmpty || !linked.add(link)) return;
       blocks.add(AnnouncementContentBlock.link(
         link,
@@ -561,15 +590,13 @@ class AnnouncementApiClient {
                 'h2',
                 'h3'
               }.contains(child.localName))) {
-        final text = _cleanText(_visibleText(element));
+        final parts = _inlineParts(element, baseUrl);
+        final text = parts.map((part) => part.text).join();
         if (text.isNotEmpty) {
-          blocks.add(AnnouncementContentBlock.text(text));
+          blocks.add(AnnouncementContentBlock.text(text, parts: parts));
         }
         for (final image in element.querySelectorAll('img')) {
           addImage(image);
-        }
-        for (final anchor in element.querySelectorAll('a[href]')) {
-          addLink(anchor);
         }
         return;
       }
@@ -582,18 +609,37 @@ class AnnouncementApiClient {
         return;
       }
       if (tag == 'p' || tag == 'li' || tag == 'h2' || tag == 'h3') {
-        final text = _cleanText(_visibleTextWithoutAnchors(element));
         final anchors = element.querySelectorAll('a[href]');
+        if (anchors.isNotEmpty && anchors.every(_isAttachmentAnchor)) {
+          var surroundingText = element.text;
+          for (final anchor in anchors) {
+            surroundingText = surroundingText.replaceFirst(anchor.text, '');
+          }
+          final text = _cleanText(surroundingText);
+          if (text.isNotEmpty) {
+            blocks.add(
+                AnnouncementContentBlock.text(tag == 'li' ? '• $text' : text));
+          }
+          for (final anchor in anchors) {
+            addLink(anchor);
+          }
+          for (final image in element.querySelectorAll('img')) {
+            addImage(image);
+          }
+          return;
+        }
+        final parts = _inlineParts(element, baseUrl);
+        final text = parts.map((part) => part.text).join();
         if (text.isNotEmpty) {
           blocks.add(AnnouncementContentBlock.text(
             tag == 'li' ? '• $text' : text,
+            parts: tag == 'li'
+                ? [const AnnouncementInlinePart('• '), ...parts]
+                : parts,
           ));
         }
         for (final image in element.querySelectorAll('img')) {
           addImage(image);
-        }
-        for (final anchor in anchors) {
-          addLink(anchor);
         }
         return;
       }
@@ -610,6 +656,121 @@ class AnnouncementApiClient {
       if (text.isNotEmpty) blocks.add(AnnouncementContentBlock.text(text));
     }
     return blocks;
+  }
+
+  static bool _isAttachmentAnchor(dom.Element anchor) {
+    final href = anchor.attributes['href'] ?? '';
+    if (href.contains('DownloadAttachUrl')) return true;
+    final path = Uri.tryParse(href)?.path.toLowerCase() ?? '';
+    return RegExp(r'\.(?:pdf|docx?|xlsx?|pptx?|zip|rar|7z)$').hasMatch(path);
+  }
+
+  static List<AnnouncementInlinePart> _inlineParts(
+      dom.Element element, String baseUrl) {
+    final raw = <AnnouncementInlinePart>[];
+    void appendRaw(AnnouncementInlinePart part) {
+      if (raw.isNotEmpty && raw.last.url == part.url) {
+        final previous = raw.removeLast();
+        raw.add(
+            AnnouncementInlinePart(previous.text + part.text, url: part.url));
+      } else {
+        raw.add(part);
+      }
+    }
+
+    void walk(dom.Node node) {
+      if (node is dom.Text) {
+        appendRaw(AnnouncementInlinePart(node.text));
+      } else if (node is dom.Element) {
+        if (const {'script', 'style', 'img'}.contains(node.localName)) return;
+        if (node.localName == 'a') {
+          final href = node.attributes['href'] ?? '';
+          final url =
+              href.startsWith('mailto:') ? href : _resolveUrl(baseUrl, href);
+          appendRaw(AnnouncementInlinePart(
+            node.text.trim().isEmpty ? url : node.text,
+            url: url,
+          ));
+        } else {
+          for (final child in node.nodes) {
+            walk(child);
+          }
+        }
+      }
+    }
+
+    for (final child in element.nodes) {
+      walk(child);
+    }
+    final parts = <AnnouncementInlinePart>[];
+    final autoLink = RegExp(
+      r"(?:(?:https?://|www\.)[A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=%-]+|mailto:[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})",
+      caseSensitive: false,
+    );
+    for (final part in raw) {
+      final value =
+          part.text.replaceAll('\u00a0', ' ').replaceAll(RegExp(r'\s+'), ' ');
+      if (part.url.isNotEmpty) {
+        parts.add(AnnouncementInlinePart(value, url: part.url));
+        continue;
+      }
+      var start = 0;
+      for (final match in autoLink.allMatches(value)) {
+        if (match.start > start) {
+          parts
+              .add(AnnouncementInlinePart(value.substring(start, match.start)));
+        }
+        final matched = match.group(0)!;
+        final clean = _trimDetectedLink(matched);
+        final lower = clean.toLowerCase();
+        final url = lower.startsWith('mailto:')
+            ? clean
+            : lower.startsWith('www.')
+                ? 'https://$clean'
+                : lower.startsWith('http://') || lower.startsWith('https://')
+                    ? clean
+                    : 'mailto:$clean';
+        parts.add(AnnouncementInlinePart(clean, url: url));
+        if (clean.length < matched.length) {
+          parts.add(AnnouncementInlinePart(matched.substring(clean.length)));
+        }
+        start = match.end;
+      }
+      if (start < value.length) {
+        parts.add(AnnouncementInlinePart(value.substring(start)));
+      }
+    }
+    if (parts.isEmpty) return parts;
+    final first = parts.first;
+    parts[0] = AnnouncementInlinePart(first.text.trimLeft(), url: first.url);
+    final last = parts.last;
+    parts[parts.length - 1] =
+        AnnouncementInlinePart(last.text.trimRight(), url: last.url);
+    return parts.where((part) => part.text.isNotEmpty).toList();
+  }
+
+  static String _trimDetectedLink(String candidate) {
+    var end = candidate.length;
+    while (end > 0) {
+      final last = candidate[end - 1];
+      if ('.!?;:,'.contains(last)) {
+        end--;
+        continue;
+      }
+      final opening = switch (last) {
+        ')' => '(',
+        ']' => '[',
+        '}' => '{',
+        _ => null,
+      };
+      if (opening == null) break;
+      final prefix = candidate.substring(0, end);
+      if (opening.allMatches(prefix).length >= last.allMatches(prefix).length) {
+        break;
+      }
+      end--;
+    }
+    return candidate.substring(0, end);
   }
 
   static bool _isSingleCellLayoutTable(dom.Element table) {
@@ -637,19 +798,26 @@ class AnnouncementApiClient {
         node.localName == 'style') {
       return '';
     }
-    return node.nodes.map(_visibleText).join(' ');
+    final text = node.nodes.map(_visibleText).join();
+    return _isTextBlock(node.localName) ? ' $text ' : text;
   }
 
-  static String _visibleTextWithoutAnchors(dom.Node node) {
-    if (node is dom.Text) return node.text;
-    if (node is! dom.Element ||
-        node.localName == 'script' ||
-        node.localName == 'style' ||
-        node.localName == 'a') {
-      return '';
-    }
-    return node.nodes.map(_visibleTextWithoutAnchors).join(' ');
-  }
+  static bool _isTextBlock(String? tag) => const {
+        'div',
+        'p',
+        'li',
+        'ul',
+        'ol',
+        'table',
+        'tr',
+        'td',
+        'th',
+        'h1',
+        'h2',
+        'h3',
+        'h4',
+        'br',
+      }.contains(tag);
 
   static _ParsedAnnouncementTable _parseTable(dom.Element table) {
     final occupied = <List<bool>>[];
