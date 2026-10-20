@@ -332,7 +332,7 @@ class AnnouncementApiClient {
       AnnouncementListFormat.artList => 'a.Next',
       AnnouncementListFormat.vsbTable => 'span.p_next a',
       AnnouncementListFormat.centreList => 'a.Next',
-      AnnouncementListFormat.rightList => 'div.right-list a',
+      AnnouncementListFormat.rightList => 'div.right-list a, a.Next',
       AnnouncementListFormat.rightListUl ||
       AnnouncementListFormat.listPage ||
       AnnouncementListFormat.unorderedList =>
@@ -414,10 +414,13 @@ class AnnouncementApiClient {
   }) {
     final document = html_parser.parse(html);
     final root = document.querySelector('.nry');
-    final title = _cleanText(
-      root?.querySelector('h1')?.text ??
-          document.querySelector('#activity-name')?.text,
-    );
+    // WeChat-specific title parsing is disabled so unsupported details can use
+    // the original-link fallback.
+    // final title = _cleanText(
+    //   root?.querySelector('h1')?.text ??
+    //       document.querySelector('#activity-name')?.text,
+    // );
+    final title = _cleanText(root?.querySelector('h1')?.text);
     final metadata = _parseMetadata(
       root?.querySelector('.xx'),
       document: document,
@@ -428,8 +431,9 @@ class AnnouncementApiClient {
     final contentRoot = root?.querySelector('.v_news_content') ??
         document.querySelector('.v_news_content') ??
         document.querySelector('#vsb_content') ??
-        document.querySelector('div[id^="vsb_content_"]') ??
-        document.querySelector('#js_content');
+        document.querySelector('div[id^="vsb_content_"]');
+    // WeChat-specific body parsing is disabled:
+    // document.querySelector('#js_content');
     final blocks = contentRoot == null
         ? <AnnouncementContentBlock>[]
         : _parseContentBlocks(contentRoot, baseUrl: url);
