@@ -8,6 +8,19 @@ enum AnnouncementContentType {
   table,
 }
 
+class AnnouncementInlinePart {
+  const AnnouncementInlinePart(this.text, {this.url = ''});
+
+  final String text;
+  final String url;
+
+  JsonMap toJson() => {'text': text, 'url': url};
+
+  factory AnnouncementInlinePart.fromJson(JsonMap json) =>
+      AnnouncementInlinePart(stringValue(json['text']),
+          url: stringValue(json['url']));
+}
+
 class AnnouncementTableCell {
   const AnnouncementTableCell({
     required this.row,
@@ -53,7 +66,7 @@ class AnnouncementTableCell {
 }
 
 class AnnouncementContentBlock {
-  const AnnouncementContentBlock.text(this.value)
+  const AnnouncementContentBlock.text(this.value, {this.parts = const []})
       : type = AnnouncementContentType.text,
         alt = '',
         label = '',
@@ -65,12 +78,14 @@ class AnnouncementContentBlock {
     this.alt = '',
   })  : type = AnnouncementContentType.image,
         label = '',
+        parts = const [],
         rows = const [],
         cells = const [];
 
   const AnnouncementContentBlock.link(this.value, {required this.label})
       : type = AnnouncementContentType.link,
         alt = '',
+        parts = const [],
         rows = const [],
         cells = const [];
 
@@ -79,6 +94,7 @@ class AnnouncementContentBlock {
         value = '',
         alt = '',
         label = '',
+        parts = const [],
         cells = const [];
 
   const AnnouncementContentBlock.structuredTable({
@@ -87,12 +103,14 @@ class AnnouncementContentBlock {
   })  : type = AnnouncementContentType.table,
         value = '',
         alt = '',
-        label = '';
+        label = '',
+        parts = const [];
 
   final AnnouncementContentType type;
   final String value;
   final String alt;
   final String label;
+  final List<AnnouncementInlinePart> parts;
   final List<List<String>> rows;
   final List<AnnouncementTableCell> cells;
 
@@ -107,6 +125,7 @@ class AnnouncementContentBlock {
       'value': value,
       'alt': alt,
       'label': label,
+      'parts': parts.map((part) => part.toJson()).toList(),
       'rows': rows,
       'cells': cells.map((cell) => cell.toJson()).toList(),
     };
@@ -146,7 +165,14 @@ class AnnouncementContentBlock {
       }
       return AnnouncementContentBlock.table(rows);
     }
-    return AnnouncementContentBlock.text(value);
+    return AnnouncementContentBlock.text(
+      value,
+      parts: (json['parts'] as List? ?? const [])
+          .whereType<Map>()
+          .map((part) => AnnouncementInlinePart.fromJson(
+              part.map((key, value) => MapEntry(key.toString(), value))))
+          .toList(),
+    );
   }
 }
 
