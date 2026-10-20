@@ -149,6 +149,55 @@ class AnnouncementSource {
           listFormat: AnnouncementListFormat.onlyList),
     ),
     AnnouncementSource(
+      id: 'youth',
+      name: '共青团上海大学',
+      listUrl: 'https://youth.shu.edu.cn/syxzlly/tzgg.htm',
+      adapter: AnnouncementSourceAdapter(
+          listFormat: AnnouncementListFormat.rightList),
+    ),
+    AnnouncementSource(
+      id: 'global',
+      name: '国际部',
+      listUrl: 'https://global.shu.edu.cn/cd/tzgg.htm',
+      adapter: AnnouncementSourceAdapter(
+          listFormat: AnnouncementListFormat.bareSpanList),
+    ),
+    AnnouncementSource(
+      id: 'hbb',
+      name: '后勤保障部',
+      listUrl: 'https://hbb.shu.edu.cn/tzgg.htm',
+      adapter: AnnouncementSourceAdapter(
+          listFormat: AnnouncementListFormat.bareSpanList),
+    ),
+    AnnouncementSource(
+      id: 'xyy',
+      name: '校医院',
+      listUrl: 'https://xyy.shu.edu.cn/sylm/ggl.htm',
+      adapter: AnnouncementSourceAdapter(
+          listFormat: AnnouncementListFormat.vsbTable),
+    ),
+    AnnouncementSource(
+      id: 'archive',
+      name: '档案馆',
+      listUrl: 'https://dangan.shu.edu.cn/gqgk/xxfb/fwgg.htm',
+      adapter: AnnouncementSourceAdapter(
+          listFormat: AnnouncementListFormat.bareSpanList),
+    ),
+    AnnouncementSource(
+      id: 'sbc',
+      name: '实验室与设备管理处',
+      listUrl: 'https://sbc.shu.edu.cn/tg/tzgg.htm',
+      adapter: AnnouncementSourceAdapter(
+          listFormat: AnnouncementListFormat.bareSpanList),
+    ),
+    AnnouncementSource(
+      id: 'hr',
+      name: '人事处',
+      listUrl: 'https://hr.shu.edu.cn/xwgg1/xwgg.htm',
+      adapter: AnnouncementSourceAdapter(
+          listFormat: AnnouncementListFormat.vsbTable),
+    ),
+    AnnouncementSource(
       id: 'cie',
       name: '国际教育学院',
       listUrl: 'https://cie.shu.edu.cn/tg/xytz.htm',

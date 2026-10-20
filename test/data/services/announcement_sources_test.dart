@@ -40,6 +40,23 @@ void main() {
           '<a href="../info/1095/6422.htm" target="_blank">'
           '网络故障紧急通知</a><span>2026-09-22</span>'
           '</li></ul></div>',
+      'youth': '<div class="right-list"><ul><li>'
+          '<a href="../info/1010/22105.htm">团委通知</a>'
+          '<span>2026-09-20</span></li></ul></div>'
+          '<a class="Next" href="tzgg/38.htm">下页</a>',
+      'global': '<li id="line_u8_0"><a href="../info/1003/16043.htm">'
+          '国际部通知</a><span>2026年09月22日</span></li>',
+      'hbb': '<li id="line_u5_0"><a href="info/1005/10946.htm">'
+          '后勤通知</a><span>2026-10-16</span></li>',
+      'xyy': '<table><tr id="line_u3_0"><td><a href="../info/1090/5436.htm">'
+          '校医院通知</a></td><td>2026-08-29</td></tr></table>',
+      'archive': '<li id="line_u4_0"><a href="../../info/1013/22026.htm">'
+          '档案馆通知</a><span>2026-05-11</span></li>',
+      'sbc': '<li id="line_u5_0"><a href="../info/1004/11324.htm">'
+          '实验室通知<span>2026-10-15</span></a></li>',
+      'hr': '<table class="artlist"><tr id="line_u1_0">'
+          '<td><a href="../info/1001/1.htm">人事处通知</a></td>'
+          '<td>2026-10-08</td></tr></table>',
     };
 
     for (final entry in samples.entries) {
@@ -52,15 +69,57 @@ void main() {
       expect(items, hasLength(1), reason: source.id);
       expect(items.single.url,
           startsWith('https://${Uri.parse(source.listUrl).host}/'));
-      expect(items.single.publishedAt,
-          source.id == 'its' ? DateTime(2026, 9, 22) : DateTime(2026, 10, 6));
+      expect(
+          items.single.publishedAt,
+          switch (source.id) {
+            'its' => DateTime(2026, 9, 22),
+            'youth' => DateTime(2026, 9, 20),
+            'global' => DateTime(2026, 9, 22),
+            'hbb' => DateTime(2026, 10, 16),
+            'xyy' => DateTime(2026, 8, 29),
+            'archive' => DateTime(2026, 5, 11),
+            'sbc' => DateTime(2026, 10, 15),
+            'hr' => DateTime(2026, 10, 8),
+            _ => DateTime(2026, 10, 6),
+          });
       expect(items.single.sourceId, source.id);
     }
+
+    final youth = AnnouncementSource.byId('youth');
+    expect(
+      AnnouncementApiClient.parseAnnouncementList(
+        samples['youth']!,
+        baseUrl: youth.listUrl,
+        source: youth,
+      ).single.url,
+      'https://youth.shu.edu.cn/info/1010/22105.htm',
+    );
+  });
+
+  test('youth notices parse and follow their pagination link', () async {
+    final source = AnnouncementSource.byId('youth');
+    final html = '<div class="right-list"><ul><li>'
+        '<a href="../info/1010/22125.htm">团委通知</a>'
+        '<span>2026-10-12</span></li></ul></div>'
+        '<a class="Next" href="tzgg/38.htm">下页</a>';
+    final client = AnnouncementApiClient(
+      httpClient: MockClient(
+        (request) async => http.Response.bytes(utf8.encode(html), 200),
+      ),
+    );
+
+    final page = await client.fetchPage(source: source);
+
+    expect(page.items, hasLength(1));
+    expect(page.items.single.title, '团委通知');
+    expect(
+        page.items.single.url, 'https://youth.shu.edu.cn/info/1010/22125.htm');
+    expect(page.nextPageUrls, ['https://youth.shu.edu.cn/syxzlly/tzgg/38.htm']);
   });
 
   test('college catalog and additional HTML layouts parse correctly', () {
     expect(AnnouncementSource.inGroup(AnnouncementSourceGroup.campus),
-        hasLength(10));
+        hasLength(17));
     expect(AnnouncementSource.inGroup(AnnouncementSourceGroup.college),
         hasLength(33));
     expect(
@@ -283,8 +342,7 @@ void main() {
         'https://xgb.shu.edu.cn/files/result.pdf');
   });
 
-  test('film attachments outside the body and WeChat text remain available',
-      () {
+  test('film attachments remain available and WeChat parsing is disabled', () {
     final film = AnnouncementApiClient.parseAnnouncementDetail(
       '<div class="v_news_content"><p>详见附件</p></div>'
       '<a href="/system/_content/download.jsp?'
@@ -299,14 +357,10 @@ void main() {
       '<div id="js_content"><p>正文内容</p>'
       '<p><img data-src="https://example.com/image.jpg"></p></div>',
       url: 'https://mp.weixin.qq.com/s/example',
+      fallbackTitle: '微信公众号列表标题',
     );
-    expect(wechat.title, '学院新闻');
-    expect(wechat.blocks.any((block) => block.isText && block.value == '正文内容'),
-        isTrue);
-    expect(
-        wechat.blocks.any((block) =>
-            block.isImage && block.value == 'https://example.com/image.jpg'),
-        isTrue);
+    expect(wechat.title, '微信公众号列表标题');
+    expect(wechat.blocks, isEmpty);
   });
 
   test('detail parser displays PDF pages and retains the original attachment',
