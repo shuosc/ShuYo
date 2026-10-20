@@ -1,4 +1,4 @@
-import 'dart:convert';
+ import 'dart:convert';
 import 'dart:async';
 import 'dart:collection';
 
@@ -49,22 +49,37 @@ class AnnouncementRepository {
   final Map<String, List<AnnouncementListItem>> _memoryLists = {};
   final Map<String, List<String?>> _nextPageUrls = {};
   final Map<String, Set<String>> _visitedPageUrls = {};
-  final Map<String, String?> _previews = {};
+  final LinkedHashMap<String, String?> _previews = LinkedHashMap();
   final Map<String, Future<String?>> _pendingPreviews = {};
   final Map<String, AnnouncementDetail> _recentDetails = {};
   final Map<String, Future<AnnouncementDetail>> _pendingDetails = {};
   final Queue<({AnnouncementListItem item, Completer<String?> completer})>
       _previewQueue = Queue();
   int _activePreviewRequests = 0;
+  static const _maximumQueuedPreviews = 24;
 
   /// Detail requests for list previews are limited so scrolling a long list
   /// does not open a connection for every announcement at once.
   Future<String?> loadPreview(AnnouncementListItem item) {
-    if (item.summary.isNotEmpty) return Future.value(item.summary);
+    // The Vancouver Film School list has excerpts, but its previews should
+    // use the article body like the other parsed announcements. Keep the list
+    // excerpt available to the tile if the article has no readable body.
+    if (item.summary.isNotEmpty && item.sourceId != 'shvfs') {
+      return Future.value(item.summary);
+    }
     final key = '${item.sourceId}|${item.url}';
-    if (_previews.containsKey(key)) return Future.value(_previews[key]);
+    if (_previews.containsKey(key)) {
+      final cached = _previews.remove(key);
+      _previews[key] = cached;
+      return Future.value(cached);
+    }
     final pending = _pendingPreviews[key];
     if (pending != null) return pending;
+    // A fast fling should not leave hundreds of offscreen detail requests in
+    // memory. The tile can retry if it comes back on screen.
+    if (_previewQueue.length >= _maximumQueuedPreviews) {
+      return Future.value(null);
+    }
     final completer = Completer<String?>();
     _pendingPreviews[key] = completer.future;
     _previewQueue.add((item: item, completer: completer));
@@ -87,13 +102,20 @@ class AnnouncementRepository {
     final key = '${item.sourceId}|${item.url}';
     try {
       final detail = await fetchDetail(item);
-      final text = detail.blocks
-          .where((block) => block.isText)
-          .map((block) => block.value.trim())
-          .where((value) => value.isNotEmpty && value != detail.title)
-          .join(' ')
-          .replaceAll(RegExp(r'\s+'), ' ')
-          .trim();
+      // Only the first readable paragraph is needed for a two-line preview.
+      // Joining an entire long article here needlessly allocates a large string.
+      final previewBuffer = StringBuffer();
+      for (final block in detail.blocks) {
+        if (!block.isText) continue;
+        final value = block.value.trim();
+        if (value.isEmpty || value == detail.title) continue;
+        if (previewBuffer.isNotEmpty) previewBuffer.write(' ');
+        previewBuffer
+            .write(value.length > 180 ? value.substring(0, 180) : value);
+        if (previewBuffer.length >= 180) break;
+      }
+      final text =
+          previewBuffer.toString().replaceAll(RegExp(r'\s+'), ' ').trim();
       final preview = text.isEmpty
           ? detail.blocks.any((block) =>
                   block.isLink &&
@@ -112,6 +134,7 @@ class AnnouncementRepository {
               ? '${text.substring(0, 110)}…'
               : text;
       _previews[key] = preview;
+      if (_previews.length > 160) _previews.remove(_previews.keys.first);
       request.completer.complete(preview);
     } on Object {
       // A failed detail request is retried if the item is built again later.
