@@ -105,8 +105,16 @@ class AnnouncementSource {
       id: 'gs',
       name: '研究生院',
       listUrl: 'https://gs.shu.edu.cn/xwlb/py.htm',
+      additionalListUrls: [
+        'https://gs.shu.edu.cn/xwlb/zh.htm',
+        'https://gs.shu.edu.cn/xwlb/gjjl.htm',
+        'https://gs.shu.edu.cn/xwlb/xw.htm',
+      ],
+      columnNames: ['培养', '综合', '国际交流', '学位'],
       adapter: AnnouncementSourceAdapter(
-          listFormat: AnnouncementListFormat.vsbTable),
+        listFormat: AnnouncementListFormat.vsbTable,
+        hideListColumn: true,
+      ),
     ),
     AnnouncementSource(
       id: 'cwc',
@@ -209,16 +217,28 @@ class AnnouncementSource {
       id: 'cla',
       name: '文学院',
       listUrl: 'https://cla.shu.edu.cn/tg/tzgg.htm',
-      adapter:
-          AnnouncementSourceAdapter(listFormat: AnnouncementListFormat.sjList),
+      additionalListUrls: [
+        'https://cla.shu.edu.cn/tg/zhxw.htm',
+        'https://cla.shu.edu.cn/tg/kydt.htm',
+        'https://cla.shu.edu.cn/tg/xshd.htm',
+      ],
+      columnNames: ['通知公告', '信息动态', '科研动态', '学生活动'],
+      adapter: AnnouncementSourceAdapter(
+        listFormat: AnnouncementListFormat.sjList,
+        hideListColumn: true,
+      ),
       group: AnnouncementSourceGroup.college,
     ),
     AnnouncementSource(
       id: 'ece',
       name: '环境与化学工程学院',
       listUrl: 'https://ece.shu.edu.cn/sylm/bksjx.htm',
-      additionalListUrls: ['https://ece.shu.edu.cn/sylm/yjsjx.htm'],
-      columnNames: ['本科生教学', '研究生教学'],
+      additionalListUrls: [
+        'https://ece.shu.edu.cn/sylm/yjsjx.htm',
+        'https://ece.shu.edu.cn/sylm/tzgg.htm',
+        'https://ece.shu.edu.cn/sylm/kydt1.htm',
+      ],
+      columnNames: ['本科生教学', '研究生教学', '通知公告', '科研动态'],
       adapter: AnnouncementSourceAdapter(
         listFormat: AnnouncementListFormat.rightListUl,
         hideListColumn: true,
@@ -230,8 +250,11 @@ class AnnouncementSource {
       id: 'mat',
       name: '材料科学与工程学院',
       listUrl: 'https://mat.shu.edu.cn/sycdlm/tzgg/bks.htm',
-      additionalListUrls: ['https://mat.shu.edu.cn/sycdlm/tzgg/yjs.htm'],
-      columnNames: ['通知公告(本科生)', '通知公告(研究生)'],
+      additionalListUrls: [
+        'https://mat.shu.edu.cn/sycdlm/tzgg/yjs.htm',
+        'https://mat.shu.edu.cn/sycdlm/tzgg.htm',
+      ],
+      columnNames: ['通知公告(本科生)', '通知公告(研究生)', '通知公告'],
       adapter: AnnouncementSourceAdapter(
         listFormat: AnnouncementListFormat.rightListUl,
         hideListColumn: true,
@@ -275,8 +298,11 @@ class AnnouncementSource {
       id: 'scicol',
       name: '理学院',
       listUrl: 'https://scicol.shu.edu.cn/sy/tzgg.htm',
-      additionalListUrls: ['https://scicol.shu.edu.cn/sy/yjsjw.htm'],
-      columnNames: ['通知公告', '研究生教务'],
+      additionalListUrls: [
+        'https://scicol.shu.edu.cn/sy/yjsjw.htm',
+        'https://scicol.shu.edu.cn/sy/bksjw.htm',
+      ],
+      columnNames: ['通知公告', '研究生教务', '本科生教务'],
       adapter: AnnouncementSourceAdapter(
         listFormat: AnnouncementListFormat.vsbNewList,
         hideListColumn: true,
@@ -353,9 +379,8 @@ class AnnouncementSource {
     AnnouncementSource(
       id: 'cs',
       name: '计算机工程与科学学院',
-      listUrl: 'https://cs.shu.edu.cn/index/xwdt.htm',
-      additionalListUrls: ['https://cs.shu.edu.cn/index/zytz.htm'],
-      columnNames: ['新闻动态', '重要通知'],
+      listUrl: 'https://cs.shu.edu.cn/index/zytz.htm',
+      columnNames: ['重要通知'],
       adapter: AnnouncementSourceAdapter(
         listFormat: AnnouncementListFormat.xwLt,
         authorLabelSelectors: ['p span'],
