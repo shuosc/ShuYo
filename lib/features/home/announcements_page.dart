@@ -788,7 +788,22 @@ class _AnnouncementDetailPageState extends State<AnnouncementDetailPage> {
     return Future.wait<AnnouncementDetail?>([
       widget.repository.fetchDetail(widget.item),
       _waitForRoutePushAnimation().then((_) => null),
-    ]).then((results) => results.first!);
+    ]).then((results) {
+      final detail = results.first!;
+      if (!detail.hasContent) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) unawaited(_openUnparsedAnnouncement());
+        });
+      }
+      return detail;
+    });
+  }
+
+  Future<void> _openUnparsedAnnouncement() async {
+    final opened = await _openExternal(widget.item.url);
+    if (opened && mounted && _route?.isCurrent == true) {
+      Navigator.of(context).pop();
+    }
   }
 
   /// DOM parsing, first layout and image decoding of the body keep the raster
@@ -1012,7 +1027,7 @@ class _AnnouncementDetailPageState extends State<AnnouncementDetailPage> {
     return pixels < 1 ? 1 : pixels;
   }
 
-  Future<void> _openExternal(String url) async {
+  Future<bool> _openExternal(String url) async {
     var opened = false;
     try {
       opened = await launchUrl(
@@ -1027,6 +1042,7 @@ class _AnnouncementDetailPageState extends State<AnnouncementDetailPage> {
         const SnackBar(content: Text('无法打开原网站链接')),
       );
     }
+    return opened;
   }
 
   Future<void> _confirmOpenOriginal() async {

@@ -454,6 +454,153 @@ void main() {
     expect(find.text('跳转浏览器'), findsNothing);
   });
 
+  testWidgets('non-info announcement links on the source host open in the app',
+      (tester) async {
+    const item = AnnouncementListItem(
+      title: '关于2026年下半年博士后人员高级专业技术职务申报的通知',
+      url: 'https://hr.shu.edu.cn/content.jsp?urltype=news.NewsContentUrl'
+          '&wbtreeid=1029&wbnewsid=8469',
+      sourceId: 'hr',
+    );
+    final repository = _FakeAnnouncementRepository(
+      items: const [item],
+      details: {
+        item.title: AnnouncementDetail(
+          title: item.title,
+          url: item.url,
+          blocks: const [AnnouncementContentBlock.text('申报详情')],
+        ),
+      },
+    );
+    await tester.pumpWidget(
+      MaterialApp(home: AnnouncementsPage(repository: repository)),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text(item.title));
+    await tester.pumpAndSettle();
+
+    expect(find.byType(AnnouncementDetailPage), findsOneWidget);
+    expect(find.text('申报详情'), findsOneWidget);
+    expect(repository.detailRequestCount, 1);
+  });
+
+  testWidgets('cross-host info links open outside the app', (tester) async {
+    const item = AnnouncementListItem(
+      title: '跨站公告',
+      url: 'https://other.shu.edu.cn/info/1.htm',
+      sourceId: 'hr',
+    );
+    final repository = _FakeAnnouncementRepository(
+      items: const [item],
+      details: const {},
+    );
+    const urlLauncher = MethodChannel('plugins.flutter.io/url_launcher');
+    String? openedUrl;
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      urlLauncher,
+      (call) async {
+        openedUrl = (call.arguments as Map<Object?, Object?>)['url'] as String?;
+        return true;
+      },
+    );
+    addTearDown(() => tester.binding.defaultBinaryMessenger
+        .setMockMethodCallHandler(urlLauncher, null));
+    await tester.pumpWidget(
+      MaterialApp(home: AnnouncementsPage(repository: repository)),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text(item.title));
+    await tester.pumpAndSettle();
+
+    expect(find.byType(AnnouncementDetailPage), findsNothing);
+    expect(repository.detailRequestCount, 0);
+    expect(openedUrl, item.url);
+  });
+
+  testWidgets('unparsed WeChat articles open their original link externally',
+      (tester) async {
+    const item = AnnouncementListItem(
+      title: '微信公众号公告',
+      url: 'https://mp.weixin.qq.com/s/example',
+      sourceId: 'hr',
+    );
+    final repository = _FakeAnnouncementRepository(
+      items: const [item],
+      details: {
+        item.title: AnnouncementDetail(
+          title: item.title,
+          url: item.url,
+          blocks: const [],
+        ),
+      },
+    );
+    const urlLauncher = MethodChannel('plugins.flutter.io/url_launcher');
+    String? openedUrl;
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      urlLauncher,
+      (call) async {
+        openedUrl = (call.arguments as Map<Object?, Object?>)['url'] as String?;
+        return true;
+      },
+    );
+    addTearDown(() => tester.binding.defaultBinaryMessenger
+        .setMockMethodCallHandler(urlLauncher, null));
+    await tester.pumpWidget(
+      MaterialApp(home: AnnouncementsPage(repository: repository)),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text(item.title));
+    await tester.pumpAndSettle();
+
+    expect(repository.detailRequestCount, 1);
+    expect(openedUrl, item.url);
+    expect(find.byType(AnnouncementDetailPage), findsNothing);
+  });
+
+  testWidgets('unparsed articles fall back to the original link',
+      (tester) async {
+    const item = AnnouncementListItem(
+      title: '无法解析正文的公告',
+      url: 'https://hr.shu.edu.cn/content.jsp?id=1',
+      sourceId: 'hr',
+    );
+    final repository = _FakeAnnouncementRepository(
+      items: const [item],
+      details: {
+        item.title: AnnouncementDetail(
+          title: item.title,
+          url: item.url,
+          blocks: const [],
+        ),
+      },
+    );
+    const urlLauncher = MethodChannel('plugins.flutter.io/url_launcher');
+    String? openedUrl;
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      urlLauncher,
+      (call) async {
+        openedUrl = (call.arguments as Map<Object?, Object?>)['url'] as String?;
+        return true;
+      },
+    );
+    addTearDown(() => tester.binding.defaultBinaryMessenger
+        .setMockMethodCallHandler(urlLauncher, null));
+    await tester.pumpWidget(
+      MaterialApp(home: AnnouncementsPage(repository: repository)),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text(item.title));
+    await tester.pumpAndSettle();
+
+    expect(repository.detailRequestCount, 1);
+    expect(openedUrl, item.url);
+    expect(find.byType(AnnouncementDetailPage), findsNothing);
+  });
+
   testWidgets('announcement separators remain in presets and hide in custom',
       (tester) async {
     final repository = _FakeAnnouncementRepository(
