@@ -17,7 +17,7 @@ import '../../shared/theme/custom_background.dart';
 import '../../shared/widgets/empty_state.dart';
 import '../../shared/widgets/fullscreen_image_page.dart';
 
-/// Horizontal padding of the detail body, also used to derive the image decode
+/// Horizontal padding of the detail body, also used hui derive the image decode
 /// width.
 const double _announcementDetailPadding = 20;
 
@@ -161,61 +161,83 @@ class _AnnouncementsPageState extends State<AnnouncementsPage> {
     }
     final items = loaded.items;
     if (items.isEmpty) {
-      return RefreshIndicator(
-        onRefresh: _refresh,
-        child: ListView(
-          controller: _scrollController,
-          physics: const AlwaysScrollableScrollPhysics(),
-          children: const [
-            SizedBox(height: 96),
-            EmptyState(
-              icon: Icons.campaign_outlined,
-              title: '暂无公告',
-              message: '该来源暂时没有可展示的通知公告。',
-            ),
-          ],
+      return _withAnnouncementScrollbar(
+        RefreshIndicator(
+          onRefresh: _refresh,
+          child: ListView(
+            controller: _scrollController,
+            physics: const AlwaysScrollableScrollPhysics(),
+            children: const [
+              SizedBox(height: 96),
+              EmptyState(
+                icon: Icons.campaign_outlined,
+                title: '暂无公告',
+                message: '该来源暂时没有可展示的通知公告。',
+              ),
+            ],
+          ),
         ),
       );
     }
     final rows = _announcementRows(items);
-    return RefreshIndicator(
-      onRefresh: _refresh,
-      child: ListView.separated(
-        controller: _scrollController,
-        physics: const AlwaysScrollableScrollPhysics(),
-        scrollCacheExtent: const ScrollCacheExtent.pixels(0),
-        padding: const EdgeInsets.fromLTRB(0, 8, 0, 24),
-        separatorBuilder: (context, index) {
-          if (index + 1 >= rows.length ||
-              rows[index] is _AnnouncementMonthHeader ||
-              rows[index + 1] is _AnnouncementMonthHeader ||
-              CustomBackgroundScope.maybeOf(context) != null) {
-            return const SizedBox.shrink();
-          }
-          return Divider(height: 1, color: context.shuyoColors.border);
-        },
-        itemCount: rows.length,
-        itemBuilder: (context, index) {
-          final row = rows[index];
-          if (row is _AnnouncementMonthHeader) {
-            return _AnimatedAnnouncementMonthHeader(
-              label: row.label,
-              index: row.index,
+    return _withAnnouncementScrollbar(
+      RefreshIndicator(
+        onRefresh: _refresh,
+        child: ListView.separated(
+          controller: _scrollController,
+          physics: const AlwaysScrollableScrollPhysics(),
+          scrollCacheExtent: const ScrollCacheExtent.pixels(0),
+          padding: const EdgeInsets.fromLTRB(0, 8, 0, 24),
+          separatorBuilder: (context, index) {
+            if (index + 1 >= rows.length ||
+                rows[index] is _AnnouncementMonthHeader ||
+                rows[index + 1] is _AnnouncementMonthHeader ||
+                CustomBackgroundScope.maybeOf(context) != null) {
+              return const SizedBox.shrink();
+            }
+            return Divider(height: 1, color: context.shuyoColors.border);
+          },
+          itemCount: rows.length,
+          itemBuilder: (context, index) {
+            final row = rows[index];
+            if (row is _AnnouncementMonthHeader) {
+              return _AnimatedAnnouncementMonthHeader(
+                label: row.label,
+                index: row.index,
+              );
+            }
+            final itemRow = row as _AnnouncementItemRow;
+            final item = itemRow.item;
+            return _AnnouncementTile(
+              key: ValueKey(item.url),
+              index: itemRow.index,
+              item: item,
+              repository: widget.repository,
+              external: _isExternalAnnouncement(item),
+              initialPreviewReady: loaded.initialPreviews.containsKey(item.url),
+              initialPreview: loaded.initialPreviews[item.url],
+              onTap: () => _openAnnouncement(item),
             );
-          }
-          final itemRow = row as _AnnouncementItemRow;
-          final item = itemRow.item;
-          return _AnnouncementTile(
-            key: ValueKey(item.url),
-            index: itemRow.index,
-            item: item,
-            repository: widget.repository,
-            external: _isExternalAnnouncement(item),
-            initialPreviewReady: loaded.initialPreviews.containsKey(item.url),
-            initialPreview: loaded.initialPreviews[item.url],
-            onTap: () => _openAnnouncement(item),
-          );
-        },
+          },
+        ),
+      ),
+    );
+  }
+
+  Widget _withAnnouncementScrollbar(Widget child) {
+    return ScrollbarTheme(
+      data: ScrollbarThemeData(
+        thumbColor: WidgetStatePropertyAll(
+          context.shuyoColors.textMuted.withOpacity(0.55),
+        ),
+        thickness: const WidgetStatePropertyAll(2.5),
+        radius: const Radius.circular(4),
+      ),
+      child: Scrollbar(
+        controller: _scrollController,
+        thumbVisibility: true,
+        interactive: true,
+        child: child,
       ),
     );
   }
@@ -873,7 +895,12 @@ class _AnnouncementDetailPageState extends State<AnnouncementDetailPage> {
                 ),
               ),
               const SizedBox(height: 12),
-              _AnnouncementMetadata(detail: detail),
+              _AnnouncementMetadata(
+                detail: detail,
+                showDepartment: !AnnouncementSource.byId(widget.item.sourceId)
+                    .adapter
+                    .hideDetailDepartment,
+              ),
               const SizedBox(height: 22),
               if (!detail.hasContent)
                 Text(
@@ -911,35 +938,9 @@ class _AnnouncementDetailPageState extends State<AnnouncementDetailPage> {
       );
     }
     if (block.isTable) {
-      final colors = context.shuyoColors;
-      final columnCount = block.rows.fold<int>(
-        0,
-        (count, row) => row.length > count ? row.length : count,
-      );
-      return Padding(
-        padding: const EdgeInsets.symmetric(vertical: 10),
-        child: SingleChildScrollView(
-          scrollDirection: Axis.horizontal,
-          child: Table(
-            defaultColumnWidth: const IntrinsicColumnWidth(),
-            border: TableBorder.all(color: colors.border),
-            children: [
-              for (final row in block.rows)
-                TableRow(
-                  children: [
-                    for (var index = 0; index < columnCount; index++)
-                      Padding(
-                        padding: const EdgeInsets.all(8),
-                        child: SelectableText(
-                          index < row.length ? row[index] : '',
-                          style: TextStyle(color: colors.textPrimary),
-                        ),
-                      ),
-                  ],
-                ),
-            ],
-          ),
-        ),
+      return _AnnouncementTableWidget(
+        block: block,
+        color: context.shuyoColors,
       );
     }
     if (block.isImage) {
@@ -1087,6 +1088,148 @@ class _AnnouncementImagePlaceholder extends StatelessWidget {
 
 /// The loading state carries its own repaint boundary, so during a transition
 /// only this small area is re-recorded and the page layer can be reused.
+class _AnnouncementTableWidget extends StatelessWidget {
+  const _AnnouncementTableWidget({required this.block, required this.color});
+
+  final AnnouncementContentBlock block;
+  final ShuYoColors color;
+
+  @override
+  Widget build(BuildContext context) {
+    final rowCount = block.rows.length;
+    final columnCount = block.rows.fold<int>(
+      0,
+      (count, row) => row.length > count ? row.length : count,
+    );
+    if (rowCount == 0 || columnCount == 0) return const SizedBox.shrink();
+
+    final cells = block.cells.isNotEmpty
+        ? block.cells
+        : [
+            for (var row = 0; row < block.rows.length; row++)
+              for (var column = 0; column < block.rows[row].length; column++)
+                AnnouncementTableCell(
+                  row: row,
+                  column: column,
+                  text: block.rows[row][column],
+                ),
+          ];
+    final textStyle = TextStyle(color: color.textPrimary, fontSize: 13.5);
+    final textScaler = MediaQuery.textScalerOf(context);
+    final textDirection = Directionality.of(context);
+
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final columnWidth = math.max(
+          112.0,
+          constraints.maxWidth / columnCount,
+        );
+        final rowHeights = List<double>.filled(rowCount, 40);
+        final measuredHeights = <AnnouncementTableCell, double>{};
+        for (final cell in cells) {
+          if (cell.row >= rowCount || cell.column >= columnCount) continue;
+          final span = cell.columnSpan.clamp(1, columnCount - cell.column);
+          final width = columnWidth * span;
+          final painter = TextPainter(
+            text: TextSpan(text: cell.text, style: textStyle),
+            textDirection: textDirection,
+            textScaler: textScaler,
+            textAlign: _textAlign(cell.textAlignment),
+          )..layout(maxWidth: math.max(1, width - 16));
+          final height = math.max(40.0, painter.height + 16);
+          painter.dispose();
+          measuredHeights[cell] = height;
+          if (cell.rowSpan <= 1) {
+            rowHeights[cell.row] = math.max(rowHeights[cell.row], height);
+          }
+        }
+        for (final cell in cells) {
+          if (cell.rowSpan <= 1 || cell.row >= rowCount) continue;
+          final endRow = math.min(rowCount, cell.row + cell.rowSpan);
+          final availableHeight = rowHeights
+              .getRange(cell.row, endRow)
+              .fold<double>(0, (total, height) => total + height);
+          final requiredHeight = measuredHeights[cell] ?? 40;
+          if (requiredHeight <= availableHeight) continue;
+          final extra =
+              (requiredHeight - availableHeight) / (endRow - cell.row);
+          for (var row = cell.row; row < endRow; row++) {
+            rowHeights[row] += extra;
+          }
+        }
+
+        final rowOffsets = List<double>.filled(rowCount + 1, 0);
+        for (var row = 0; row < rowCount; row++) {
+          rowOffsets[row + 1] = rowOffsets[row] + rowHeights[row];
+        }
+        final columnOffsets = List<double>.generate(
+          columnCount + 1,
+          (index) => index * columnWidth,
+        );
+        return Padding(
+          padding: const EdgeInsets.symmetric(vertical: 10),
+          child: SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            child: SizedBox(
+              width: columnOffsets.last,
+              height: rowOffsets.last,
+              child: Stack(
+                children: [
+                  for (final cell in cells)
+                    if (cell.row < rowCount && cell.column < columnCount)
+                      Positioned(
+                        left: columnOffsets[cell.column],
+                        top: rowOffsets[cell.row],
+                        width: columnOffsets[math.min(
+                                columnCount, cell.column + cell.columnSpan)] -
+                            columnOffsets[cell.column],
+                        height: rowOffsets[
+                                math.min(rowCount, cell.row + cell.rowSpan)] -
+                            rowOffsets[cell.row],
+                        child: Container(
+                          decoration: BoxDecoration(
+                            border: Border.all(color: color.border, width: 0.5),
+                          ),
+                          padding: const EdgeInsets.all(8),
+                          alignment: _cellAlignment(cell),
+                          child: SelectableText(
+                            cell.text,
+                            style: textStyle,
+                            textAlign: _textAlign(cell.textAlignment),
+                          ),
+                        ),
+                      ),
+                ],
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  TextAlign _textAlign(String value) => switch (value) {
+        'center' => TextAlign.center,
+        'right' => TextAlign.right,
+        'justify' => TextAlign.justify,
+        _ => TextAlign.left,
+      };
+
+  Alignment _cellAlignment(AnnouncementTableCell cell) {
+    final horizontal = switch (cell.textAlignment) {
+      'center' => 0.0,
+      'right' => 1.0,
+      _ => -1.0,
+    };
+    final vertical = switch (cell.verticalAlignment) {
+      'top' => -1.0,
+      'bottom' => 1.0,
+      _ => 0.0,
+    };
+    return Alignment(horizontal, vertical);
+  }
+}
+
 class _AnnouncementLoadingState extends StatelessWidget {
   const _AnnouncementLoadingState();
 
@@ -1238,8 +1381,9 @@ class _AnnouncementTileState extends State<_AnnouncementTile>
   Widget _tile(String? preview) {
     final item = widget.item;
     final colors = context.shuyoColors;
+    final adapter = AnnouncementSource.byId(item.sourceId).adapter;
     final metadata = [
-      if (item.column.isNotEmpty) item.column,
+      if (!adapter.hideListColumn && item.column.isNotEmpty) item.column,
       if (item.dateText.isNotEmpty) item.dateText,
     ].join(' · ');
     return InkWell(
@@ -1306,15 +1450,19 @@ class _AnnouncementTileState extends State<_AnnouncementTile>
 }
 
 class _AnnouncementMetadata extends StatelessWidget {
-  const _AnnouncementMetadata({required this.detail});
+  const _AnnouncementMetadata({
+    required this.detail,
+    this.showDepartment = true,
+  });
 
   final AnnouncementDetail detail;
+  final bool showDepartment;
 
   @override
   Widget build(BuildContext context) {
     final parts = [
       if (detail.dateText.isNotEmpty) detail.dateText,
-      if (detail.department.isNotEmpty) detail.department,
+      if (showDepartment && detail.department.isNotEmpty) detail.department,
       if (detail.author.isNotEmpty) detail.author,
     ];
     if (parts.isEmpty) {
