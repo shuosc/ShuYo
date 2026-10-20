@@ -8,27 +8,83 @@ enum AnnouncementContentType {
   table,
 }
 
+class AnnouncementTableCell {
+  const AnnouncementTableCell({
+    required this.row,
+    required this.column,
+    required this.text,
+    this.rowSpan = 1,
+    this.columnSpan = 1,
+    this.textAlignment = 'left',
+    this.verticalAlignment = 'middle',
+  });
+
+  final int row;
+  final int column;
+  final String text;
+  final int rowSpan;
+  final int columnSpan;
+  final String textAlignment;
+  final String verticalAlignment;
+
+  JsonMap toJson() => {
+        'row': row,
+        'column': column,
+        'text': text,
+        'rowSpan': rowSpan,
+        'columnSpan': columnSpan,
+        'textAlignment': textAlignment,
+        'verticalAlignment': verticalAlignment,
+      };
+
+  factory AnnouncementTableCell.fromJson(JsonMap json) => AnnouncementTableCell(
+        row: intValue(json['row']),
+        column: intValue(json['column']),
+        text: stringValue(json['text']),
+        rowSpan: intValue(json['rowSpan'], 1),
+        columnSpan: intValue(json['columnSpan'], 1),
+        textAlignment: stringValue(json['textAlignment']).isEmpty
+            ? 'left'
+            : stringValue(json['textAlignment']),
+        verticalAlignment: stringValue(json['verticalAlignment']).isEmpty
+            ? 'middle'
+            : stringValue(json['verticalAlignment']),
+      );
+}
+
 class AnnouncementContentBlock {
   const AnnouncementContentBlock.text(this.value)
       : type = AnnouncementContentType.text,
         alt = '',
         label = '',
-        rows = const [];
+        rows = const [],
+        cells = const [];
 
   const AnnouncementContentBlock.image(
     this.value, {
     this.alt = '',
   })  : type = AnnouncementContentType.image,
         label = '',
-        rows = const [];
+        rows = const [],
+        cells = const [];
 
   const AnnouncementContentBlock.link(this.value, {required this.label})
       : type = AnnouncementContentType.link,
         alt = '',
-        rows = const [];
+        rows = const [],
+        cells = const [];
 
   const AnnouncementContentBlock.table(this.rows)
       : type = AnnouncementContentType.table,
+        value = '',
+        alt = '',
+        label = '',
+        cells = const [];
+
+  const AnnouncementContentBlock.structuredTable({
+    required this.rows,
+    required this.cells,
+  })  : type = AnnouncementContentType.table,
         value = '',
         alt = '',
         label = '';
@@ -38,6 +94,7 @@ class AnnouncementContentBlock {
   final String alt;
   final String label;
   final List<List<String>> rows;
+  final List<AnnouncementTableCell> cells;
 
   bool get isText => type == AnnouncementContentType.text;
   bool get isImage => type == AnnouncementContentType.image;
@@ -51,6 +108,7 @@ class AnnouncementContentBlock {
       'alt': alt,
       'label': label,
       'rows': rows,
+      'cells': cells.map((cell) => cell.toJson()).toList(),
     };
   }
 
@@ -74,6 +132,18 @@ class AnnouncementContentBlock {
           .whereType<List>()
           .map((row) => row.map((cell) => cell.toString()).toList())
           .toList();
+      final cells = (json['cells'] as List? ?? const [])
+          .whereType<Map>()
+          .map((cell) => AnnouncementTableCell.fromJson(
+                cell.map((key, value) => MapEntry(key.toString(), value)),
+              ))
+          .toList();
+      if (cells.isNotEmpty) {
+        return AnnouncementContentBlock.structuredTable(
+          rows: rows,
+          cells: cells,
+        );
+      }
       return AnnouncementContentBlock.table(rows);
     }
     return AnnouncementContentBlock.text(value);
