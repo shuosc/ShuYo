@@ -19,9 +19,14 @@ enum AnnouncementListFormat {
   filmNotice,
   contentBoxList,
   unorderedList,
+  shvfsNews,
 }
 
 enum AnnouncementSourceGroup { campus, college }
+
+const _vsbAuthorValueSelectors = [
+  'tr[valign="middle"][height="20"] font[face=""] > span',
+];
 
 class AnnouncementSourceAdapter {
   const AnnouncementSourceAdapter({
@@ -91,8 +96,10 @@ class AnnouncementSource {
       id: 'xgb',
       name: '本科生工作处',
       listUrl: 'https://xgb.shu.edu.cn/xgdt/tzgg.htm',
-      adapter:
-          AnnouncementSourceAdapter(listFormat: AnnouncementListFormat.artList),
+      adapter: AnnouncementSourceAdapter(
+        listFormat: AnnouncementListFormat.artList,
+        authorValueSelectors: [r'a[id$="_hypFirst"]'],
+      ),
     ),
     AnnouncementSource(
       id: 'dwygb',
@@ -154,7 +161,9 @@ class AnnouncementSource {
       name: '信息化工作办公室',
       listUrl: 'https://newits.shu.edu.cn/index/tzgg.htm',
       adapter: AnnouncementSourceAdapter(
-          listFormat: AnnouncementListFormat.onlyList),
+        listFormat: AnnouncementListFormat.onlyList,
+        authorValueSelectors: _vsbAuthorValueSelectors,
+      ),
     ),
     AnnouncementSource(
       id: 'youth',
@@ -168,7 +177,9 @@ class AnnouncementSource {
       name: '国际部',
       listUrl: 'https://global.shu.edu.cn/cd/tzgg.htm',
       adapter: AnnouncementSourceAdapter(
-          listFormat: AnnouncementListFormat.bareSpanList),
+        listFormat: AnnouncementListFormat.bareSpanList,
+        authorValueSelectors: _vsbAuthorValueSelectors,
+      ),
     ),
     AnnouncementSource(
       id: 'hbb',
@@ -189,7 +200,9 @@ class AnnouncementSource {
       name: '档案馆',
       listUrl: 'https://dangan.shu.edu.cn/gqgk/xxfb/fwgg.htm',
       adapter: AnnouncementSourceAdapter(
-          listFormat: AnnouncementListFormat.bareSpanList),
+        listFormat: AnnouncementListFormat.bareSpanList,
+        authorValueSelectors: _vsbAuthorValueSelectors,
+      ),
     ),
     AnnouncementSource(
       id: 'sbc',
@@ -324,6 +337,16 @@ class AnnouncementSource {
       group: AnnouncementSourceGroup.college,
     ),
     AnnouncementSource(
+      id: 'xiangying',
+      name: '翔英学院',
+      listUrl: 'https://xiangying.shu.edu.cn/syxgzlpzd/tzgg.htm',
+      adapter: AnnouncementSourceAdapter(
+        listFormat: AnnouncementListFormat.vsbNewList,
+        hideDetailDepartment: true,
+      ),
+      group: AnnouncementSourceGroup.college,
+    ),
+    AnnouncementSource(
       id: 'sfs',
       name: '外国语学院',
       listUrl: 'https://sfs.shu.edu.cn/index/tzgg.htm',
@@ -444,6 +467,18 @@ class AnnouncementSource {
       listUrl: 'https://sfa.shu.edu.cn/index/tzgg.htm',
       adapter: AnnouncementSourceAdapter(
           listFormat: AnnouncementListFormat.filmNotice),
+      group: AnnouncementSourceGroup.college,
+    ),
+    AnnouncementSource(
+      id: 'shvfs',
+      name: '上海温哥华电影学院',
+      listUrl: 'https://www.shvfs.cn/site/news/4',
+      additionalListUrls: ['https://www.shvfs.cn/site/news/8'],
+      columnNames: ['学院动态', '媒体关注'],
+      adapter: AnnouncementSourceAdapter(
+        listFormat: AnnouncementListFormat.shvfsNews,
+        hideListColumn: true,
+      ),
       group: AnnouncementSourceGroup.college,
     ),
     AnnouncementSource(
