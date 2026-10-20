@@ -4,6 +4,7 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart' show ScrollCacheExtent;
 import 'package:flutter/services.dart';
+import 'package:flutter/gestures.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../../data/models/announcement.dart';
@@ -28,6 +29,39 @@ const double _announcementImagePlaceholderHeight = 180;
 /// Frame budget for waiting on the push animation, roughly 1.5 seconds, kept
 /// only as a safety net.
 const int _maximumAnimationFrames = 90;
+
+String _breakableInlineLinkText(String text, String url) {
+  final lowerText = text.toLowerCase();
+  final lowerUrl = url.toLowerCase();
+  final isAddress = lowerUrl.startsWith('mailto:') && text.contains('@');
+  final isUrl =
+      (lowerUrl.startsWith('http://') || lowerUrl.startsWith('https://')) &&
+          (lowerText.startsWith('http://') ||
+              lowerText.startsWith('https://') ||
+              lowerText.startsWith('www.'));
+  if (!isAddress && !isUrl) return text;
+
+  final runes = text.runes.toList();
+  final schemeEnd = lowerText.startsWith('http://')
+      ? 7
+      : lowerText.startsWith('https://')
+          ? 8
+          : 0;
+  final result = StringBuffer();
+  var runLength = 0;
+  for (var index = 0; index < runes.length; index++) {
+    final character = String.fromCharCode(runes[index]);
+    result.write(character);
+    if (index + 1 == runes.length) continue;
+    runLength++;
+    if (index + 1 < schemeEnd) continue;
+    if ('./@_-?&=#'.contains(character) || runLength >= 4) {
+      result.write('\u200B');
+      runLength = 0;
+    }
+  }
+  return result.toString();
+}
 
 @visibleForTesting
 const announcementImagePlaceholderKey =
@@ -59,6 +93,14 @@ class _AnnouncementsPageState extends State<AnnouncementsPage> {
   bool _loadingMore = false;
   bool _hasMore = false;
   int _requestGeneration = 0;
+  final Map<String, String?> _readyPreviews = {};
+  final Set<String> _stagedUrls = {};
+  final Set<String> _revealedUrls = {};
+  final List<AnnouncementListItem> _revealQueue = [];
+  final List<Timer> _previewDeadlines = [];
+  Timer? _revealTimer;
+  int _revealCursor = 0;
+  int _revealGeneration = 0;
 
   @override
   void initState() {
@@ -69,6 +111,10 @@ class _AnnouncementsPageState extends State<AnnouncementsPage> {
 
   @override
   void dispose() {
+    _revealTimer?.cancel();
+    for (final timer in _previewDeadlines) {
+      timer.cancel();
+    }
     _scrollController
       ..removeListener(_onScroll)
       ..dispose();
@@ -92,34 +138,89 @@ class _AnnouncementsPageState extends State<AnnouncementsPage> {
     bool forceRefresh = false,
     bool loadNextPage = false,
   }) async {
-    final media = MediaQuery.maybeOf(context);
-    final firstScreenHeight = media == null
-        ? 740.0
-        : media.size.height -
-            media.padding.top -
-            media.padding.bottom -
-            kToolbarHeight -
-            8;
     final items = await widget.repository.fetchAnnouncements(
       source: source,
       forceRefresh: forceRefresh,
       loadNextPage: loadNextPage,
     );
-    final firstScreenCount =
-        (firstScreenHeight / 120).ceil().clamp(0, items.length);
-    final firstItems = items.take(firstScreenCount).toList();
-    final previewItems =
-        firstItems.where((item) => !_isExternalAnnouncement(item)).toList();
-    final previews = await Future.wait(
-      previewItems.map(widget.repository.loadPreview),
-    );
-    final previewsByUrl = {
-      for (var index = 0; index < previewItems.length; index++)
-        previewItems[index].url: previews[index],
-    };
-    return _LoadedAnnouncementList(items, {
-      for (final item in firstItems) item.url: previewsByUrl[item.url],
+    // Some sites pin old notices above recent ones. Sort before any card enters
+    // the display queue, preserving the source order for equal/missing dates.
+    final indexed = items.asMap().entries.toList();
+    indexed.sort((a, b) {
+      final left = a.value.publishedAt;
+      final right = b.value.publishedAt;
+      if (left == null || right == null) {
+        if (left == null && right == null) return a.key.compareTo(b.key);
+        return left == null ? 1 : -1;
+      }
+      final byDate = right.compareTo(left);
+      return byDate != 0 ? byDate : a.key.compareTo(b.key);
     });
+    final sorted = [for (final entry in indexed) entry.value];
+    return _LoadedAnnouncementList(sorted, _announcementRows(sorted));
+  }
+
+  void _stagePage(List<AnnouncementListItem> items,
+      {Set<String> previousUrls = const {}}) {
+    _revealTimer?.cancel();
+    for (final timer in _previewDeadlines) {
+      timer.cancel();
+    }
+    _previewDeadlines.clear();
+    final generation = ++_revealGeneration;
+    _readyPreviews.clear();
+    _stagedUrls.clear();
+    _revealedUrls.clear();
+    _revealCursor = 0;
+    _revealQueue
+      ..clear()
+      ..addAll(items.where((item) => !previousUrls.contains(item.url)).take(8));
+    for (final item in _revealQueue) {
+      _stagedUrls.add(item.url);
+      if (_isExternalAnnouncement(item)) {
+        _readyPreviews[item.url] = null;
+        continue;
+      }
+      final deadline = Timer(const Duration(seconds: 2), () {
+        if (!mounted ||
+            generation != _revealGeneration ||
+            _readyPreviews.containsKey(item.url)) {
+          return;
+        }
+        _readyPreviews[item.url] = null;
+        _drainRevealQueue();
+      });
+      _previewDeadlines.add(deadline);
+      widget.repository.loadPreview(item).then((preview) {
+        deadline.cancel();
+        if (!mounted || generation != _revealGeneration) return;
+        final previous = _readyPreviews[item.url];
+        _readyPreviews[item.url] = preview;
+        if (_revealedUrls.contains(item.url) && previous != preview) {
+          setState(() {});
+        } else {
+          _drainRevealQueue();
+        }
+      }, onError: (Object error, StackTrace stackTrace) {
+        deadline.cancel();
+        if (!mounted || generation != _revealGeneration) return;
+        _readyPreviews[item.url] = null;
+        _drainRevealQueue();
+      });
+    }
+    _drainRevealQueue();
+  }
+
+  void _drainRevealQueue() {
+    if (_revealTimer?.isActive == true ||
+        _revealCursor >= _revealQueue.length) {
+      return;
+    }
+    final url = _revealQueue[_revealCursor].url;
+    if (!_readyPreviews.containsKey(url)) return;
+    _revealCursor++;
+    setState(() => _revealedUrls.add(url));
+    _revealTimer = Timer(const Duration(milliseconds: 55), _drainRevealQueue);
   }
 
   @override
@@ -179,7 +280,7 @@ class _AnnouncementsPageState extends State<AnnouncementsPage> {
         ),
       );
     }
-    final rows = _announcementRows(items);
+    final rows = loaded.rows;
     return _withAnnouncementScrollbar(
       RefreshIndicator(
         onRefresh: _refresh,
@@ -214,8 +315,10 @@ class _AnnouncementsPageState extends State<AnnouncementsPage> {
               item: item,
               repository: widget.repository,
               external: _isExternalAnnouncement(item),
-              initialPreviewReady: loaded.initialPreviews.containsKey(item.url),
-              initialPreview: loaded.initialPreviews[item.url],
+              awaitReveal: _stagedUrls.contains(item.url) &&
+                  !_revealedUrls.contains(item.url),
+              initialPreviewReady: _revealedUrls.contains(item.url),
+              initialPreview: _readyPreviews[item.url],
               onTap: () => _openAnnouncement(item),
             );
           },
@@ -338,6 +441,13 @@ class _AnnouncementsPageState extends State<AnnouncementsPage> {
       _hasMore = false;
       _isBusy = true;
     });
+    _revealGeneration++;
+    _revealTimer?.cancel();
+    for (final timer in _previewDeadlines) {
+      timer.cancel();
+    }
+    _previewDeadlines.clear();
+    _stagedUrls.clear();
     await _fetchPage(choice, forceRefresh: true);
   }
 
@@ -358,6 +468,8 @@ class _AnnouncementsPageState extends State<AnnouncementsPage> {
     try {
       final loaded = await _loadList(source, loadNextPage: true);
       if (!mounted || generation != _requestGeneration) return;
+      final previousUrls = _loaded?.items.map((item) => item.url).toSet() ?? {};
+      _stagePage(loaded.items, previousUrls: previousUrls);
       setState(() {
         _loaded = loaded;
         _hasMore = widget.repository.hasMoreAnnouncements(source: source);
@@ -398,6 +510,7 @@ class _AnnouncementsPageState extends State<AnnouncementsPage> {
     try {
       final loaded = await _loadList(source, forceRefresh: forceRefresh);
       if (!mounted || generation != _requestGeneration) return;
+      _stagePage(loaded.items);
       setState(() {
         _loaded = loaded;
         _hasMore = widget.repository.hasMoreAnnouncements(source: source);
@@ -414,6 +527,7 @@ class _AnnouncementsPageState extends State<AnnouncementsPage> {
     } finally {
       if (mounted && generation == _requestGeneration) {
         setState(() => _isBusy = false);
+        if (_loaded != null && _hasMore) _scheduleLoadMoreCheck();
       }
     }
   }
@@ -463,10 +577,10 @@ class _AnnouncementsPageState extends State<AnnouncementsPage> {
 }
 
 class _LoadedAnnouncementList {
-  const _LoadedAnnouncementList(this.items, this.initialPreviews);
+  const _LoadedAnnouncementList(this.items, this.rows);
 
   final List<AnnouncementListItem> items;
-  final Map<String, String?> initialPreviews;
+  final List<Object> rows;
 }
 
 class _AnnouncementMonthHeader {
@@ -575,10 +689,15 @@ bool _isExternalAnnouncement(AnnouncementListItem item) {
     return true;
   }
   final host = uri.host.toLowerCase();
-  if (host == 'mp.weixin.qq.com') return false;
-  final sourceUri =
-      Uri.tryParse(AnnouncementSource.byId(item.sourceId).listUrl);
-  return sourceUri == null || host != sourceUri.host.toLowerCase();
+  if (item.sourceId == 'shvfs' &&
+      host == 'www.shvfs.cn' &&
+      RegExp(r'^/site/newsDetail/\d+$', caseSensitive: false)
+          .hasMatch(uri.path)) {
+    return false;
+  }
+  return !(host == 'shu.edu.cn' || host.endsWith('.shu.edu.cn')) ||
+      !RegExp(r'^/info/[^/]+/[^/]+\.(?:htm|html|hmtl)$', caseSensitive: false)
+          .hasMatch(uri.path);
 }
 
 class _AnnouncementSourceMenu extends StatefulWidget {
@@ -767,6 +886,22 @@ class AnnouncementDetailPage extends StatefulWidget {
 }
 
 class _AnnouncementDetailPageState extends State<AnnouncementDetailPage> {
+  final Map<String, TapGestureRecognizer> _linkRecognizers = {};
+
+  TapGestureRecognizer _recognizerFor(String url) =>
+      _linkRecognizers.putIfAbsent(
+          url,
+          () => TapGestureRecognizer()
+            ..onTap = () => unawaited(_openExternal(url)));
+
+  @override
+  void dispose() {
+    for (final recognizer in _linkRecognizers.values) {
+      recognizer.dispose();
+    }
+    super.dispose();
+  }
+
   /// Route hosting this page, used to wait for the push animation to settle.
   ModalRoute<dynamic>? _route;
 
@@ -947,7 +1082,12 @@ class _AnnouncementDetailPageState extends State<AnnouncementDetailPage> {
         alignment: Alignment.centerLeft,
         child: TextButton.icon(
           onPressed: () => _openExternal(block.value),
-          icon: const Icon(Icons.open_in_new, size: 18),
+          icon: Icon(
+            block.value.startsWith('mailto:')
+                ? Icons.mail_outline
+                : Icons.open_in_new,
+            size: 18,
+          ),
           label: Text(block.label.isEmpty ? '查看链接' : block.label),
         ),
       );
@@ -1007,8 +1147,37 @@ class _AnnouncementDetailPageState extends State<AnnouncementDetailPage> {
     }
     return Padding(
       padding: const EdgeInsets.only(bottom: 13),
-      child: SelectableText(
-        block.value,
+      child: SelectableText.rich(
+        TextSpan(
+            children: block.parts.isEmpty
+                ? [TextSpan(text: block.value)]
+                : block.parts.map((part) {
+                    if (part.url.isEmpty) return TextSpan(text: part.text);
+                    final link = TextSpan(
+                      text: _breakableInlineLinkText(part.text, part.url),
+                      style: TextStyle(
+                        color: Theme.of(context).colorScheme.primary,
+                        decoration: TextDecoration.underline,
+                        decorationColor: Theme.of(context).colorScheme.primary,
+                      ),
+                      recognizer: _recognizerFor(part.url),
+                    );
+                    final isEmail = part.url.startsWith('mailto:');
+                    return TextSpan(children: [
+                      WidgetSpan(
+                        alignment: PlaceholderAlignment.middle,
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 3),
+                          child: Icon(
+                            isEmail ? Icons.mail_outline : Icons.open_in_new,
+                            size: 17,
+                            color: Theme.of(context).colorScheme.primary,
+                          ),
+                        ),
+                      ),
+                      link,
+                    ]);
+                  }).toList()),
         style: TextStyle(
           fontSize: 16,
           height: 1.7,
@@ -1264,6 +1433,7 @@ class _AnnouncementTile extends StatefulWidget {
     required this.item,
     required this.repository,
     required this.external,
+    required this.awaitReveal,
     required this.initialPreviewReady,
     required this.initialPreview,
     required this.onTap,
@@ -1273,6 +1443,7 @@ class _AnnouncementTile extends StatefulWidget {
   final AnnouncementListItem item;
   final AnnouncementRepository repository;
   final bool external;
+  final bool awaitReveal;
   final bool initialPreviewReady;
   final String? initialPreview;
   final VoidCallback onTap;
@@ -1302,11 +1473,31 @@ class _AnnouncementTileState extends State<_AnnouncementTile>
   @override
   void didUpdateWidget(covariant _AnnouncementTile oldWidget) {
     super.didUpdateWidget(oldWidget);
+    // Appending another page drops the parent's small staging cache. Keep an
+    // already visible card as-is instead of replaying its entrance animation.
+    if (oldWidget.item.url == widget.item.url &&
+        oldWidget.item.sourceId == widget.item.sourceId &&
+        oldWidget.item.summary == widget.item.summary &&
+        oldWidget.initialPreviewReady &&
+        !widget.initialPreviewReady &&
+        !widget.awaitReveal &&
+        _previewReady) {
+      return;
+    }
+    if (oldWidget.item.url == widget.item.url &&
+        oldWidget.initialPreviewReady &&
+        widget.initialPreviewReady &&
+        oldWidget.initialPreview != widget.initialPreview &&
+        _previewReady) {
+      _resolvedPreview = widget.initialPreview ?? widget.item.summary;
+      return;
+    }
     if (oldWidget.item.url != widget.item.url ||
         oldWidget.item.sourceId != widget.item.sourceId ||
         oldWidget.item.summary != widget.item.summary ||
         oldWidget.initialPreviewReady != widget.initialPreviewReady ||
         oldWidget.initialPreview != widget.initialPreview ||
+        oldWidget.awaitReveal != widget.awaitReveal ||
         oldWidget.external != widget.external ||
         oldWidget.repository != widget.repository) {
       _loadPreview();
@@ -1317,11 +1508,19 @@ class _AnnouncementTileState extends State<_AnnouncementTile>
     final generation = ++_previewGeneration;
     _entranceTimer?.cancel();
     _entrance.reset();
-    _previewReady =
-        widget.initialPreviewReady || widget.item.summary.isNotEmpty;
-    _resolvedPreview = widget.item.summary.isNotEmpty
-        ? widget.item.summary
-        : widget.initialPreview;
+    if (widget.awaitReveal) {
+      _previewReady = false;
+      _resolvedPreview = null;
+      return;
+    }
+    final needsArticlePreview = widget.item.sourceId == 'shvfs';
+    _previewReady = widget.initialPreviewReady ||
+        (!needsArticlePreview && widget.item.summary.isNotEmpty);
+    _resolvedPreview = needsArticlePreview
+        ? widget.initialPreview ?? widget.item.summary
+        : widget.item.summary.isNotEmpty
+            ? widget.item.summary
+            : widget.initialPreview;
     if (widget.external) {
       _previewReady = true;
       _resolvedPreview = null;
@@ -1337,7 +1536,7 @@ class _AnnouncementTileState extends State<_AnnouncementTile>
         if (!mounted || generation != _previewGeneration) return;
         setState(() {
           _previewReady = true;
-          _resolvedPreview = preview;
+          _resolvedPreview = preview ?? widget.item.summary;
         });
         _startEntrance();
       },
@@ -1433,7 +1632,7 @@ class _AnnouncementTileState extends State<_AnnouncementTile>
                         overflow: TextOverflow.ellipsis,
                         style: TextStyle(
                           color: colors.textTertiary,
-                          fontSize: 14.5,
+                          fontSize: 14,
                           height: 1.46,
                         ),
                       ),
