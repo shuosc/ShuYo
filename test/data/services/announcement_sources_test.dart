@@ -11,6 +11,225 @@ import 'package:shuyo/data/repositories/announcement_repository.dart';
 import 'package:shuyo/data/services/announcement_api_client.dart';
 
 void main() {
+  test('Xiangying list retains cross-subdomain details and pagination',
+      () async {
+    final source = AnnouncementSource.byId('xiangying');
+    expect(source.group, AnnouncementSourceGroup.college);
+    final client = AnnouncementApiClient(
+      httpClient: MockClient((request) async {
+        final secondPage = request.url.path.endsWith('/5.htm');
+        final html = '<div class="wList-lb"><ul>'
+            '<li id="line_u5_0"><a href="https://scie.shu.edu.cn/info/1070/${secondPage ? 40075 : 46185}.htm">'
+            '${secondPage ? '历史安排' : '春季安排'}</a><i>${secondPage ? '2023-09-05' : '2026-03-27'}</i></li>'
+            '</ul></div>'
+            '<a href="${secondPage ? '4.htm' : 'tzgg/5.htm'}" class="Next">下页</a>';
+        return http.Response(html, 200,
+            headers: {'content-type': 'text/html; charset=utf-8'});
+      }),
+    );
+
+    final first = await client.fetchPage(source: source);
+    expect(
+        first.items.single.url, 'https://scie.shu.edu.cn/info/1070/46185.htm');
+    expect(first.items.single.publishedAt, DateTime(2026, 3, 27));
+    expect(first.nextPageUrls,
+        ['https://xiangying.shu.edu.cn/syxgzlpzd/tzgg/5.htm']);
+
+    final second = await client.fetchPage(
+      source: source,
+      pageUrls: first.nextPageUrls,
+    );
+    expect(
+        second.items.single.url, 'https://scie.shu.edu.cn/info/1070/40075.htm');
+    expect(second.nextPageUrls,
+        ['https://xiangying.shu.edu.cn/syxgzlpzd/tzgg/4.htm']);
+  });
+
+  test('Xiangying article body parses on the linked SCIE subdomain', () async {
+    const item = AnnouncementListItem(
+      title: '春季学期自习辅导安排表',
+      url: 'https://scie.shu.edu.cn/info/1070/46185.htm',
+      sourceId: 'xiangying',
+      dateText: '2026-03-27',
+    );
+    final client = AnnouncementApiClient(
+      httpClient: MockClient((request) async {
+        expect(request.url.toString(), item.url);
+        return http.Response(
+          '<div id="vsb_content_1"><div class="v_news_content">'
+          '<p>春季学期安排正文</p></div></div>',
+          200,
+          headers: {'content-type': 'text/html; charset=utf-8'},
+        );
+      }),
+    );
+
+    final detail = await client.fetchDetail(item);
+    expect(detail.title, item.title);
+    expect(detail.dateText, item.dateText);
+    expect(detail.blocks.single.value, '春季学期安排正文');
+  });
+
+  test('Vancouver Film School news parses cards and follows Node_page',
+      () async {
+    final source = AnnouncementSource.byId('shvfs');
+    expect(source.group, AnnouncementSourceGroup.college);
+    expect(source.adapter.hideListColumn, isTrue);
+    final client = AnnouncementApiClient(
+      httpClient: MockClient((request) async {
+        final secondPage = request.url.queryParameters['Node_page'] == '2';
+        final media = request.url.path.endsWith('/8');
+        final category = media ? '媒体关注' : '学院动态';
+        final articleId = media ? 1600 : 1624;
+        final html = '<ul class="news-main-list"><li class="pr">'
+            '<div class="news-item-info">'
+            '<h2>${secondPage ? '第二页' : '首页'}$category</h2>'
+            '<span>${media ? '2026-08-20' : '2026-10-16'}</span>'
+            '<p>学院新闻摘要</p>'
+            '<div class="news-go-more"><a href="/site/newsDetail/$articleId">查看详情+</a></div>'
+            '</div></li></ul>'
+            '<ul class="yiiPager"><li class="next"><a href="/site/news/${media ? 8 : 4}?Node_page=${secondPage ? 3 : 2}">加载更多</a></li></ul>';
+        return http.Response(html, 200,
+            headers: {'content-type': 'text/html; charset=utf-8'});
+      }),
+    );
+
+    final first = await client.fetchPage(source: source);
+    expect(first.items.map((item) => item.title), ['首页学院动态', '首页媒体关注']);
+    expect(first.items.map((item) => item.column), ['学院动态', '媒体关注']);
+    expect(first.items.first.url, 'https://www.shvfs.cn/site/newsDetail/1624');
+    expect(first.items.last.url, 'https://www.shvfs.cn/site/newsDetail/1600');
+    expect(first.items.first.summary, '学院新闻摘要');
+    expect(first.items.first.publishedAt, DateTime(2026, 10, 16));
+    expect(first.nextPageUrls, [
+      'https://www.shvfs.cn/site/news/4?Node_page=2',
+      'https://www.shvfs.cn/site/news/8?Node_page=2',
+    ]);
+
+    final second = await client.fetchPage(
+      source: source,
+      pageUrls: first.nextPageUrls,
+    );
+    expect(second.items.map((item) => item.title), ['第二页学院动态', '第二页媒体关注']);
+    expect(second.nextPageUrls, [
+      'https://www.shvfs.cn/site/news/4?Node_page=3',
+      'https://www.shvfs.cn/site/news/8?Node_page=3',
+    ]);
+  });
+
+  test('Vancouver Film School detail parses its own article layout', () {
+    final detail = AnnouncementApiClient.parseAnnouncementDetail(
+      '<header class="n-detail-title"><h2>电影课堂新实践</h2>'
+      '<p>时间：2026-10-16</p></header>'
+      '<div class="news-detail-infowrap">'
+      '<p><span>第一段正文，供列表显示。</span></p>'
+      '<p>查看<a href="/site/newsDetail/1600">相关报道</a></p>'
+      '<p><span><img src="/uploads/news/photo.jpg"></span></p>'
+      '</div>',
+      url: 'https://www.shvfs.cn/site/newsDetail/1624',
+      sourceId: 'shvfs',
+      fallbackTitle: '列表标题',
+      fallbackDateText: '2026-10-15',
+    );
+
+    expect(detail.title, '电影课堂新实践');
+    expect(detail.dateText, '2026-10-16');
+    expect(detail.publishedAt, DateTime(2026, 10, 16));
+    expect(detail.author, isEmpty);
+    expect(
+        detail.blocks
+            .where((block) => block.isText)
+            .map((block) => block.value),
+        ['第一段正文，供列表显示。', '查看相关报道']);
+    expect(detail.blocks.where((block) => block.isImage).single.value,
+        'https://www.shvfs.cn/uploads/news/photo.jpg');
+    expect(
+      detail.blocks
+          .expand((block) => block.parts)
+          .where((part) => part.url.isNotEmpty)
+          .single
+          .url,
+      'https://www.shvfs.cn/site/newsDetail/1600',
+    );
+  });
+
+  test('Vancouver Film School preview uses article body over list excerpt',
+      () async {
+    const item = AnnouncementListItem(
+      title: '电影课堂新实践',
+      url: 'https://www.shvfs.cn/site/newsDetail/1624',
+      sourceId: 'shvfs',
+      summary: '列表页摘要',
+    );
+    final requests = <Uri>[];
+    final repository = AnnouncementRepository(
+      apiClient: AnnouncementApiClient(
+        httpClient: MockClient((request) async {
+          requests.add(request.url);
+          return http.Response(
+            '<header class="n-detail-title"><h2>电影课堂新实践</h2></header>'
+            '<div class="news-detail-infowrap"><p>正文首段，生成列表概览。</p></div>',
+            200,
+            headers: {'content-type': 'text/html; charset=utf-8'},
+          );
+        }),
+      ),
+    );
+
+    expect(await repository.loadPreview(item), '正文首段，生成列表概览。');
+    expect(requests, [Uri.parse(item.url)]);
+  });
+
+  test('HR notices follow the VSB Next link', () async {
+    final source = AnnouncementSource.byId('hr');
+    final client = AnnouncementApiClient(
+      httpClient: MockClient((request) async => http.Response(
+            '<table class="artlist"><tr id="line_u1_0"><td>'
+            '<a href="../info/1001/1.htm">人事通知</a></td>'
+            '<td>2026-10-08</td></tr></table>'
+            '<a href="xwgg/50.htm" class="Next">下页</a>',
+            200,
+            headers: {'content-type': 'text/html; charset=utf-8'},
+          )),
+    );
+    final page = await client.fetchPage(source: source);
+    expect(page.nextPageUrls, ['https://hr.shu.edu.cn/xwgg1/xwgg/50.htm']);
+  });
+
+  test('inline article markup does not add spaces between Chinese characters',
+      () {
+    final detail = AnnouncementApiClient.parseAnnouncementDetail(
+      '<div class="v_news_content"><p>关于<span>做好</span><strong>年度</strong>考核</p>'
+      '<p>第二段 <span>保留</span> 原有空格</p></div>',
+      url: 'https://hr.shu.edu.cn/info/1001/1.htm',
+    );
+    expect(
+        detail.blocks
+            .where((block) => block.isText)
+            .map((block) => block.value),
+        ['关于做好年度考核', '第二段 保留 原有空格']);
+  });
+
+  test('article links, plain URLs and email remain in paragraph order', () {
+    final detail = AnnouncementApiClient.parseAnnouncementDetail(
+      '<div class="v_news_content"><p>请见<a href="/guide.htm">办理指南</a>，'
+      '访问 https://example.org/help 或联系 office@example.org。</p></div>',
+      url: 'https://hr.shu.edu.cn/info/1001/1.htm',
+    );
+    final paragraph = detail.blocks.single;
+    expect(paragraph.value,
+        '请见办理指南，访问 https://example.org/help 或联系 office@example.org。');
+    expect(
+        paragraph.parts
+            .where((part) => part.url.isNotEmpty)
+            .map((part) => (part.text, part.url)),
+        [
+          ('办理指南', 'https://hr.shu.edu.cn/guide.htm'),
+          ('https://example.org/help', 'https://example.org/help'),
+          ('office@example.org', 'mailto:office@example.org'),
+        ]);
+  });
+
   test('campus and department sources extract dated article links', () {
     final samples = <String, String>{
       'shu': '<div class="ej_main"><div class="list"><ul><li><a '
@@ -121,11 +340,11 @@ void main() {
     expect(AnnouncementSource.inGroup(AnnouncementSourceGroup.campus),
         hasLength(17));
     expect(AnnouncementSource.inGroup(AnnouncementSourceGroup.college),
-        hasLength(33));
+        hasLength(35));
     expect(
         AnnouncementSource.all.any((source) => source.id == 'modart'), isFalse);
     expect(
-        AnnouncementSource.all.any((source) => source.id == 'shvfs'), isFalse);
+        AnnouncementSource.all.any((source) => source.id == 'shvfs'), isTrue);
     final library = AnnouncementSource.byId('lib');
     expect(library.listUrls, [
       'https://lib.shu.edu.cn/sho/ggxx.htm',
@@ -320,8 +539,7 @@ void main() {
       fallbackTitle: '评审公示',
     );
     expect(detail.title, '评审公示');
-    expect(
-        detail.blocks.where((block) => block.isText).single.value, '评审结果如下：');
+    expect(detail.blocks.where((block) => block.isText).first.value, '评审结果如下：');
     expect(detail.blocks.where((block) => block.isTable).single.rows, [
       ['姓名', '学院'],
       ['张同学', '理学院'],
@@ -349,6 +567,111 @@ void main() {
     );
     expect(wechat.title, '微信公众号列表标题');
     expect(wechat.blocks, isEmpty);
+  });
+
+  test('URL endings and split mail links follow their actual targets', () {
+    final detail = AnnouncementApiClient.parseAnnouncementDetail(
+      '<div class="v_news_content">'
+      '<p>网址 https://example.org/@team/help)，另见 '
+      'https://example.org/wiki/Topic_(test)。</p>'
+      '<p>邮箱：<a href="mailto:info@mathworks.cn">i</a>'
+      '<a href="mailto:info@mathworks.cn">nfo@mathworks.cn</a></p>'
+      '<p><a href="https://ww2.mathworks.cn/matlabcentral/answers/102901-how-do-i-update-the-license-file-used-by-the-network-license-manager">'
+      'https://ww2.mathworks.cn/matlabcentral/answers/102901-how-do-i-update-the-license-file-used-by-the-network-license-manager</a></p>'
+      '<p>直接写 mailto:staff@example.org，且网址跨标签 '
+      'https://example.<span>org/path</span>。</p></div>',
+      url: 'https://newits.shu.edu.cn/info/1095/6152.htm',
+    );
+    final links = detail.blocks
+        .expand((block) => block.parts)
+        .where((part) => part.url.isNotEmpty)
+        .map((part) => (part.text, part.url))
+        .toList();
+    expect(links, [
+      ('https://example.org/@team/help', 'https://example.org/@team/help'),
+      (
+        'https://example.org/wiki/Topic_(test)',
+        'https://example.org/wiki/Topic_(test)'
+      ),
+      ('info@mathworks.cn', 'mailto:info@mathworks.cn'),
+      (
+        'https://ww2.mathworks.cn/matlabcentral/answers/102901-how-do-i-update-the-license-file-used-by-the-network-license-manager',
+        'https://ww2.mathworks.cn/matlabcentral/answers/102901-how-do-i-update-the-license-file-used-by-the-network-license-manager'
+      ),
+      ('mailto:staff@example.org', 'mailto:staff@example.org'),
+      ('https://example.org/path', 'https://example.org/path'),
+    ]);
+  });
+
+  test('plain URL ends before adjacent Chinese article text', () {
+    const url = 'https://exam.shu.edu.cn/Web/BSStudent/StudentFirstPage.aspx';
+    final detail = AnnouncementApiClient.parseAnnouncementDetail(
+      '<div class="v_news_content">'
+      '<p>缴费方式（网址：$url），通过社会考生入口缴费。</p>'
+      '<p>登录网站：$url下载并打印纸质准考证。</p>'
+      '</div>',
+      url: 'https://cce.shu.edu.cn/info/1464/20944.htm',
+      sourceId: 'cce',
+    );
+
+    expect(
+        detail.blocks
+            .where((block) => block.isText)
+            .map((block) => block.value),
+        [
+          '缴费方式（网址：$url），通过社会考生入口缴费。',
+          '登录网站：$url下载并打印纸质准考证。',
+        ]);
+    final links = detail.blocks
+        .expand((block) => block.parts)
+        .where((part) => part.url.isNotEmpty)
+        .toList();
+    expect(
+        links.map((part) => (part.text, part.url)), [(url, url), (url, url)]);
+    expect(detail.blocks.last.parts.last.text, '下载并打印纸质准考证。');
+    expect(detail.blocks.last.parts.last.url, isEmpty);
+  });
+
+  test('student office author uses the page author link', () {
+    final detail = AnnouncementApiClient.parseAnnouncementDetail(
+      '<span id="dnn_ctr60125_ArtDetail_lblDatePosted">2026/10/19</span>'
+      '<a id="dnn_ctr60125_ArtDetail_hypFirst">李博</a>'
+      '<div class="v_news_content"><p>公示正文</p></div>',
+      url: 'https://xgb.shu.edu.cn/info/1003/46124.htm',
+      sourceId: 'xgb',
+    );
+    expect(detail.author, '李博');
+  });
+
+  test('VSB metadata rows show authors for IT, international and archives', () {
+    for (final (sourceId, url, name) in [
+      ('its', 'https://newits.shu.edu.cn/info/1095/6152.htm', '何梅'),
+      ('its', 'https://newits.shu.edu.cn/info/1095/6432.htm', '吕露'),
+      ('global', 'https://global.shu.edu.cn/info/1003/16043.htm', '朱珈仪'),
+      ('archive', 'https://dangan.shu.edu.cn/info/1013/22126.htm', '张文燕'),
+    ]) {
+      final detail = AnnouncementApiClient.parseAnnouncementDetail(
+        '<table><tr valign="middle" height="20"><td>'
+        '<span>创建时间：</span><span>2026/09/22</span>'
+        '<font face=""><span>$name</span>'
+        '<font face="Times New Roman"><span>浏览次数：</span></font>'
+        '</font></td></tr></table>'
+        '<div class="v_news_content"><p>正文</p></div>',
+        url: url,
+        sourceId: sourceId,
+      );
+      expect(detail.author, name);
+    }
+  });
+
+  test('attachment list entries remain standalone links', () {
+    final detail = AnnouncementApiClient.parseAnnouncementDetail(
+      '<div class="v_news_content"><ul><li>附件：'
+      '<a href="/files/form.docx">申请表</a></li></ul></div>',
+      url: 'https://hr.shu.edu.cn/info/1001/1.htm',
+    );
+    expect(detail.blocks.where((block) => block.isLink).single.label, '申请表');
+    expect(detail.blocks.where((block) => block.isText).single.value, '• 附件：');
   });
 
   test('detail parser displays PDF pages and retains the original attachment',
@@ -410,7 +733,7 @@ void main() {
       source: AnnouncementSource.byId('bksy'),
     );
     expect(requested, hasLength(1));
-    expect(firstPage.items.map((item) => item.title), ['关于教师教学设计竞赛的通知']);
+    expect(firstPage.items.map((item) => item.title), ['关于教师教学设计竞赛的通知', '旧通知']);
     expect(
         firstPage.nextPageUrls, ['https://bksy.shu.edu.cn/index/tzgg/2.htm']);
 
@@ -575,6 +898,31 @@ void main() {
     expect((await repository.fetchDetail(items.first)).blocks.single.value,
         '第一条正文摘要');
     expect(api.requested, hasLength(5));
+  });
+
+  test('a fast scroll keeps the preview request backlog bounded', () async {
+    final api = _QueuedPreviewApiClient();
+    final repository = AnnouncementRepository(apiClient: api);
+    final items = List.generate(
+      50,
+      (index) => AnnouncementListItem(
+        title: '公告 $index',
+        url: 'https://bksy.shu.edu.cn/info/1000/$index.htm',
+        sourceId: 'bksy',
+      ),
+    );
+    final requests = items.map(repository.loadPreview).toList();
+    expect(api.requested, hasLength(3));
+    expect(await requests.last, isNull);
+
+    for (final item in items.take(27)) {
+      while (!api.requested.contains(item.url)) {
+        await Future<void>.delayed(Duration.zero);
+      }
+      api.complete(item.url, item.title);
+    }
+    await Future.wait(requests);
+    expect(api.requested, hasLength(27));
   });
 
   test('image-only and PDF announcements use type labels in the list',

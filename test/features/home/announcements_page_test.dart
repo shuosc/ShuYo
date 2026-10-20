@@ -6,11 +6,12 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:shuyo/data/models/announcement.dart';
 import 'package:shuyo/data/models/announcement_source.dart';
 import 'package:shuyo/data/repositories/announcement_repository.dart';
+import 'package:shuyo/data/services/announcement_api_client.dart';
 import 'package:shuyo/features/home/announcements_page.dart';
 import 'package:shuyo/shared/theme/custom_background.dart';
 
 const _listTitle = '关于开展实验室安全检查的通知';
-const _detailBody = '各单位请于本周五前完成自查。';
+const _detailBody = '各单位请于本周五前完成自查';
 const _imageUrl = 'https://www.shu.edu.cn/__local/0/94/a.png';
 
 const _listItem = AnnouncementListItem(
@@ -95,6 +96,39 @@ class _FakeAnnouncementRepository extends AnnouncementRepository {
     }
     return null;
   }
+}
+
+class _ShortPageAnnouncementRepository extends _FakeAnnouncementRepository {
+  _ShortPageAnnouncementRepository()
+      : super(
+          items: const [],
+          details: const {},
+        );
+
+  int pagesLoaded = 0;
+
+  @override
+  Future<List<AnnouncementListItem>> fetchAnnouncements({
+    AnnouncementSource? source,
+    bool forceRefresh = false,
+    bool loadNextPage = false,
+  }) async {
+    if (loadNextPage) pagesLoaded++;
+    return [
+      const AnnouncementListItem(
+        title: '第一页公告',
+        url: 'https://example.org/first',
+      ),
+      if (pagesLoaded > 0)
+        const AnnouncementListItem(
+          title: '第二页公告',
+          url: 'https://example.org/second',
+        ),
+    ];
+  }
+
+  @override
+  bool hasMoreAnnouncements({AnnouncementSource? source}) => pagesLoaded == 0;
 }
 
 _FakeAnnouncementRepository _repositoryWith({
@@ -210,12 +244,30 @@ void main() {
           tester.view.physicalSize.height / tester.view.devicePixelRatio * 0.8),
     );
     expect(find.text('国际教育学院'), findsNothing);
-    await tester.drag(find.byType(ListView).last, const Offset(0, -380));
+    await tester.scrollUntilVisible(
+      find.text('学院与培养单位'),
+      200,
+      scrollable: find.descendant(
+        of: find.byKey(announcementSourceMenuKey),
+        matching: find.byType(Scrollable),
+      ),
+    );
+    await tester.ensureVisible(find.text('学院与培养单位'));
     await tester.pumpAndSettle();
     expect(find.text('学院与培养单位'), findsOneWidget);
     await tester.tap(find.text('学院与培养单位'));
     await tester.pumpAndSettle();
+    await tester.scrollUntilVisible(
+      find.text('国际教育学院'),
+      140,
+      scrollable: find.descendant(
+        of: find.byKey(announcementSourceMenuKey),
+        matching: find.byType(Scrollable),
+      ),
+    );
     expect(find.text('国际教育学院'), findsOneWidget);
+    await tester.ensureVisible(find.text('学院与培养单位'));
+    await tester.pumpAndSettle();
     await tester.tap(find.text('学院与培养单位'));
     await tester.pumpAndSettle();
     expect(find.text('国际教育学院'), findsNothing);
@@ -280,7 +332,19 @@ void main() {
     expect(tester.getTopLeft(menu).dx, closeTo(390 - 264 - 12, 1));
     expect(find.descendant(of: menu, matching: find.byType(Scrollbar)),
         findsOneWidget);
-    expect(tester.widget<Text>(find.text('研究生院 · 培养管理')).maxLines, 2);
+    await tester.scrollUntilVisible(
+      find.text('研究生院'),
+      140,
+      scrollable: find.descendant(of: menu, matching: find.byType(Scrollable)),
+    );
+    expect(tester.widget<Text>(find.text('研究生院')).maxLines, 2);
+    await tester.scrollUntilVisible(
+      find.byTooltip('收藏本科生院'),
+      140,
+      scrollable: find.descendant(of: menu, matching: find.byType(Scrollable)),
+    );
+    await tester.ensureVisible(find.byTooltip('收藏本科生院'));
+    await tester.pumpAndSettle();
     final starButton = find
         .ancestor(
           of: find.byTooltip('收藏本科生院'),
@@ -303,17 +367,25 @@ void main() {
     expect(menu, findsNothing);
   });
 
-  testWidgets('merged college notices show their original column',
+  testWidgets('Vancouver Film School cards hide both column labels',
       (tester) async {
     final repository = _FakeAnnouncementRepository(
       items: const [
         AnnouncementListItem(
-          title: '研究生奖学金通知',
-          url: 'https://ece.shu.edu.cn/info/1.htm',
-          sourceId: 'ece',
-          column: '研究生教学',
-          summary: '奖学金申报安排',
+          title: '电影学院新闻',
+          url: 'https://www.shvfs.cn/site/newsDetail/1',
+          sourceId: 'shvfs',
+          column: '学院动态',
+          summary: '学院新闻摘要',
           dateText: '2026-10-06',
+        ),
+        AnnouncementListItem(
+          title: '媒体报道',
+          url: 'https://www.shvfs.cn/site/newsDetail/2',
+          sourceId: 'shvfs',
+          column: '媒体关注',
+          summary: '媒体新闻摘要',
+          dateText: '2026-10-05',
         ),
       ],
       details: const {},
@@ -322,7 +394,10 @@ void main() {
       MaterialApp(home: AnnouncementsPage(repository: repository)),
     );
     await tester.pumpAndSettle();
-    expect(find.text('研究生教学 · 2026-10-06'), findsOneWidget);
+    expect(find.text('2026-10-06'), findsOneWidget);
+    expect(find.text('2026-10-05'), findsOneWidget);
+    expect(find.textContaining('学院动态'), findsNothing);
+    expect(find.textContaining('媒体关注'), findsNothing);
   });
 
   testWidgets('previews for later rows start after scrolling', (tester) async {
@@ -330,7 +405,7 @@ void main() {
       30,
       (index) => AnnouncementListItem(
         title: '公告 $index',
-        url: 'https://bksy.shu.edu.cn/info/$index.htm',
+        url: 'https://bksy.shu.edu.cn/info/1000/$index.htm',
         sourceId: 'bksy',
       ),
     );
@@ -344,18 +419,18 @@ void main() {
     expect(initiallyRequested, greaterThan(0));
     expect(initiallyRequested, lessThan(items.length));
 
-    await tester.drag(find.byType(ListView).first, const Offset(0, -550));
+    await tester.drag(find.byType(ListView).first, const Offset(0, -1150));
     await tester.pumpAndSettle();
     expect(repository.previewRequests.length, greaterThan(initiallyRequested));
     expect(repository.previewRequests.length, lessThan(items.length));
   });
 
-  testWidgets('first screen waits for previews before showing any titles',
+  testWidgets('list appears while the first preview is still loading',
       (tester) async {
     final pending = Completer<String?>();
     const item = AnnouncementListItem(
       title: '等待正文的公告',
-      url: 'https://bksy.shu.edu.cn/info/wait.htm',
+      url: 'https://bksy.shu.edu.cn/info/1000/wait.htm',
       sourceId: 'bksy',
     );
     final repository = _FakeAnnouncementRepository(
@@ -367,6 +442,8 @@ void main() {
       MaterialApp(home: AnnouncementsPage(repository: repository)),
     );
     await tester.pump();
+    expect(find.byType(ListView), findsWidgets);
+    expect(find.byType(RefreshIndicator), findsOneWidget);
     expect(find.text(item.title), findsNothing);
     expect(repository.previewRequests, [item.url]);
 
@@ -377,13 +454,104 @@ void main() {
     expect(find.byType(SlideTransition), findsWidgets);
   });
 
+  testWidgets('notices reveal in date order despite out-of-order previews',
+      (tester) async {
+    final pending = Completer<String?>();
+    final oldItem = AnnouncementListItem(
+      title: '旧通知',
+      url: 'https://bksy.shu.edu.cn/info/1000/old.htm',
+      sourceId: 'bksy',
+      publishedAt: DateTime(2025, 1, 1),
+      summary: '已有概览',
+    );
+    final newItem = AnnouncementListItem(
+      title: '新通知',
+      url: 'https://bksy.shu.edu.cn/info/1000/new.htm',
+      sourceId: 'bksy',
+      publishedAt: DateTime(2026, 1, 1),
+    );
+    final repository = _FakeAnnouncementRepository(
+      items: [oldItem, newItem],
+      details: const {},
+      previewFutures: {newItem.url: pending.future},
+    );
+    await tester.pumpWidget(
+      MaterialApp(home: AnnouncementsPage(repository: repository)),
+    );
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(find.text('旧通知'), findsNothing);
+    expect(find.text('新通知'), findsNothing);
+    pending.complete('新通知概览');
+    await tester.pumpAndSettle();
+    expect(find.text('新通知'), findsOneWidget);
+    expect(find.text('旧通知'), findsOneWidget);
+    expect(tester.getTopLeft(find.text('新通知')).dy,
+        lessThan(tester.getTopLeft(find.text('旧通知')).dy));
+  });
+
+  testWidgets('short previews keep the original compact card layout',
+      (tester) async {
+    const shortItem = AnnouncementListItem(
+      title: '短公告',
+      url: 'https://bksy.shu.edu.cn/info/1000/short.htm',
+      sourceId: 'bksy',
+      summary: '已结束。',
+    );
+    const longItem = AnnouncementListItem(
+      title: '长公告',
+      url: 'https://bksy.shu.edu.cn/info/1000/long.htm',
+      sourceId: 'bksy',
+      summary: '这是一段明显超过一行的公告概览，需要在列表卡片中显示两行内容，'
+          '用来验证短概览不会被强制撑到同样的高度。'
+          '这是一段明显超过一行的公告概览，需要在列表卡片中显示两行内容，'
+          '用来验证短概览不会被强制撑到同样的高度。',
+    );
+    final repository = _FakeAnnouncementRepository(
+      items: const [shortItem, longItem],
+      details: const {},
+    );
+    await tester.pumpWidget(
+      MaterialApp(home: AnnouncementsPage(repository: repository)),
+    );
+    await tester.pumpAndSettle();
+    expect(tester.getSize(find.byKey(ValueKey(shortItem.url))).height,
+        lessThan(tester.getSize(find.byKey(ValueKey(longItem.url))).height));
+    expect(find.byType(Scrollbar), findsOneWidget);
+  });
+
+  testWidgets('slow short previews fill the card without an empty text area',
+      (tester) async {
+    final pending = Completer<String?>();
+    const item = AnnouncementListItem(
+      title: '慢正文通知',
+      url: 'https://bksy.shu.edu.cn/info/1000/slow.htm',
+      sourceId: 'bksy',
+    );
+    final repository = _FakeAnnouncementRepository(
+      items: const [item],
+      details: const {},
+      previewFutures: {item.url: pending.future},
+    );
+    await tester.pumpWidget(
+      MaterialApp(home: AnnouncementsPage(repository: repository)),
+    );
+    await tester.pump(const Duration(seconds: 2));
+    await tester.pumpAndSettle();
+    expect(find.text(item.title), findsOneWidget);
+    pending.complete('延迟返回的概览');
+    await tester.pumpAndSettle();
+    expect(find.text('延迟返回的概览'), findsOneWidget);
+    expect(
+        tester.getSize(find.byKey(ValueKey(item.url))).height, lessThan(104));
+  });
+
   testWidgets('scrolled-to rows wait for their preview before sliding in',
       (tester) async {
     final items = List.generate(
       20,
       (index) => AnnouncementListItem(
         title: '公告 $index',
-        url: 'https://bksy.shu.edu.cn/info/$index.htm',
+        url: 'https://bksy.shu.edu.cn/info/1000/$index.htm',
         sourceId: 'bksy',
       ),
     );
@@ -454,7 +622,108 @@ void main() {
     expect(find.text('跳转浏览器'), findsNothing);
   });
 
-  testWidgets('non-info announcement links on the source host open in the app',
+  testWidgets('inline links retain their matching icons in article text',
+      (tester) async {
+    final repository = _repositoryWith(blocks: const [
+      AnnouncementContentBlock.text(
+        '联系 office@example.org 或查看说明',
+        parts: [
+          AnnouncementInlinePart('联系 '),
+          AnnouncementInlinePart('office@example.org',
+              url: 'mailto:office@example.org'),
+          AnnouncementInlinePart(' 或查看'),
+          AnnouncementInlinePart('说明', url: 'https://example.org/help'),
+        ],
+      ),
+    ]);
+    await tester.pumpWidget(MaterialApp(
+      home: AnnouncementDetailPage(repository: repository, item: _listItem),
+    ));
+    await tester.pumpAndSettle();
+    expect(find.byIcon(Icons.mail_outline), findsOneWidget);
+    expect(find.byIcon(Icons.open_in_new), findsAtLeastNWidgets(2));
+    expect(find.byType(SelectableText), findsWidgets);
+    final paragraph = tester
+        .widgetList<SelectableText>(find.byType(SelectableText))
+        .firstWhere((widget) =>
+            widget.textSpan
+                ?.toPlainText()
+                .replaceAll('\u200B', '')
+                .contains('office@example.org') ==
+            true);
+    final link = (paragraph.textSpan!.children!.last as TextSpan).children!.last
+        as TextSpan;
+    expect(
+        link.style?.decorationColor,
+        Theme.of(tester.element(find.byType(SelectableText).first))
+            .colorScheme
+            .primary);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('attachment and PDF links keep their standalone buttons',
+      (tester) async {
+    final repository = _repositoryWith(blocks: const [
+      AnnouncementContentBlock.link('https://example.org/notice.pdf',
+          label: '查看原始 PDF'),
+      AnnouncementContentBlock.link('https://example.org/attachment.docx',
+          label: '下载附件'),
+    ]);
+    await tester.pumpWidget(MaterialApp(
+      home: AnnouncementDetailPage(repository: repository, item: _listItem),
+    ));
+    await tester.pumpAndSettle();
+
+    for (final label in ['查看原始 PDF', '下载附件']) {
+      final button = find.ancestor(
+        of: find.text(label),
+        matching: find.byType(TextButton),
+      );
+      expect(button, findsOneWidget);
+      expect(tester.widget<TextButton>(button).style, isNull);
+      expect(
+        find.descendant(of: button, matching: find.byIcon(Icons.open_in_new)),
+        findsOneWidget,
+      );
+    }
+  });
+
+  testWidgets('split mail anchors render as one inline mail link',
+      (tester) async {
+    final detail = AnnouncementApiClient.parseAnnouncementDetail(
+      '<div class="v_news_content"><p>邮箱：'
+      '<a href="mailto:info@mathworks.cn">i</a>'
+      '<a href="mailto:info@mathworks.cn">nfo@mathworks.cn</a></p></div>',
+      url: _listItem.url,
+      fallbackTitle: _listTitle,
+    );
+    final repository = _FakeAnnouncementRepository(
+      items: const [_listItem],
+      details: {_listTitle: detail},
+    );
+    await tester.pumpWidget(MaterialApp(
+      home: AnnouncementDetailPage(repository: repository, item: _listItem),
+    ));
+    await tester.pumpAndSettle();
+
+    expect(find.byIcon(Icons.mail_outline), findsOneWidget);
+    final paragraph = tester
+        .widgetList<SelectableText>(find.byType(SelectableText))
+        .singleWhere((widget) =>
+            widget.textSpan
+                ?.toPlainText()
+                .replaceAll('\u200B', '')
+                .contains('info@mathworks.cn') ==
+            true);
+    expect(
+        paragraph.textSpan!
+            .toPlainText()
+            .replaceAll('\uFFFC', '')
+            .replaceAll('\u200B', ''),
+        '邮箱：info@mathworks.cn');
+  });
+
+  testWidgets('non-info announcement links skip parsing and open externally',
       (tester) async {
     const item = AnnouncementListItem(
       title: '关于2026年下半年博士后人员高级专业技术职务申报的通知',
@@ -472,6 +741,17 @@ void main() {
         ),
       },
     );
+    const urlLauncher = MethodChannel('plugins.flutter.io/url_launcher');
+    String? openedUrl;
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      urlLauncher,
+      (call) async {
+        openedUrl = (call.arguments as Map<Object?, Object?>)['url'] as String?;
+        return true;
+      },
+    );
+    addTearDown(() => tester.binding.defaultBinaryMessenger
+        .setMockMethodCallHandler(urlLauncher, null));
     await tester.pumpWidget(
       MaterialApp(home: AnnouncementsPage(repository: repository)),
     );
@@ -480,12 +760,104 @@ void main() {
     await tester.tap(find.text(item.title));
     await tester.pumpAndSettle();
 
+    expect(find.byType(AnnouncementDetailPage), findsNothing);
+    expect(repository.detailRequestCount, 0);
+    expect(repository.previewRequests, isEmpty);
+    expect(openedUrl, item.url);
+  });
+
+  testWidgets('Vancouver Film School detail opens in app with body preview',
+      (tester) async {
+    const item = AnnouncementListItem(
+      title: '电影课堂的新实践',
+      url: 'https://www.shvfs.cn/site/newsDetail/1624',
+      sourceId: 'shvfs',
+      summary: '列表页摘要',
+    );
+    final repository = _FakeAnnouncementRepository(
+      items: const [item],
+      details: {
+        item.title: AnnouncementDetail(
+          title: item.title,
+          url: item.url,
+          blocks: const [AnnouncementContentBlock.text('从正文解析出的两行概览')],
+        ),
+      },
+    )..currentDefault = AnnouncementSource.byId('shvfs');
+    await tester.pumpWidget(
+      MaterialApp(home: AnnouncementsPage(repository: repository)),
+    );
+    await tester.pumpAndSettle();
+
+    expect(repository.previewRequests, [item.url]);
+    expect(find.text('从正文解析出的两行概览'), findsOneWidget);
+    expect(find.text('列表页摘要'), findsNothing);
+    await tester.tap(find.text(item.title));
+    await tester.pumpAndSettle();
     expect(find.byType(AnnouncementDetailPage), findsOneWidget);
-    expect(find.text('申报详情'), findsOneWidget);
     expect(repository.detailRequestCount, 1);
   });
 
-  testWidgets('cross-host info links open outside the app', (tester) async {
+  testWidgets('short first announcement page loads history automatically',
+      (tester) async {
+    final repository = _ShortPageAnnouncementRepository();
+    await tester.pumpWidget(
+      MaterialApp(home: AnnouncementsPage(repository: repository)),
+    );
+    await tester.pumpAndSettle();
+
+    expect(repository.pagesLoaded, 1);
+    expect(find.text('第二页公告'), findsOneWidget);
+  });
+
+  testWidgets('cross-subdomain info articles try in-app detail parsing',
+      (tester) async {
+    const items = [
+      AnnouncementListItem(
+        title: '翔英学院通知',
+        url: 'https://scie.shu.edu.cn/info/1070/46185.htm',
+        sourceId: 'xiangying',
+      ),
+      AnnouncementListItem(
+        title: 'HTML 格式通知',
+        url: 'https://other.shu.edu.cn/info/1003/16043.html',
+        sourceId: 'hr',
+      ),
+      AnnouncementListItem(
+        title: 'HMTL 格式通知',
+        url: 'https://other.shu.edu.cn/info/1003/16043.hmtl',
+        sourceId: 'hr',
+      ),
+    ];
+    final repository = _FakeAnnouncementRepository(
+      items: items,
+      details: {
+        for (final item in items)
+          item.title: AnnouncementDetail(
+            title: item.title,
+            url: item.url,
+            blocks: const [AnnouncementContentBlock.text('跨站正文')],
+          ),
+      },
+    );
+    await tester.pumpWidget(
+      MaterialApp(home: AnnouncementsPage(repository: repository)),
+    );
+    await tester.pumpAndSettle();
+
+    expect(
+        repository.previewRequests, containsAll(items.map((item) => item.url)));
+    for (final item in items) {
+      await tester.tap(find.text(item.title));
+      await tester.pumpAndSettle();
+      expect(find.byType(AnnouncementDetailPage), findsOneWidget);
+      await tester.pageBack();
+      await tester.pumpAndSettle();
+    }
+    expect(repository.detailRequestCount, items.length);
+  });
+
+  testWidgets('incomplete info URLs open outside the app', (tester) async {
     const item = AnnouncementListItem(
       title: '跨站公告',
       url: 'https://other.shu.edu.cn/info/1.htm',
@@ -555,7 +927,7 @@ void main() {
     await tester.tap(find.text(item.title));
     await tester.pumpAndSettle();
 
-    expect(repository.detailRequestCount, 1);
+    expect(repository.detailRequestCount, 0);
     expect(openedUrl, item.url);
     expect(find.byType(AnnouncementDetailPage), findsNothing);
   });
@@ -564,7 +936,7 @@ void main() {
       (tester) async {
     const item = AnnouncementListItem(
       title: '无法解析正文的公告',
-      url: 'https://hr.shu.edu.cn/content.jsp?id=1',
+      url: 'https://hr.shu.edu.cn/info/1000/1.htm',
       sourceId: 'hr',
     );
     final repository = _FakeAnnouncementRepository(
@@ -718,7 +1090,7 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('评审结果'), findsOneWidget);
     expect(find.text('张同学'), findsOneWidget);
-    expect(find.byType(Table), findsOneWidget);
+    expect(find.text('理学院'), findsOneWidget);
   });
 
   testWidgets('detail images reserve height before they are decoded',
