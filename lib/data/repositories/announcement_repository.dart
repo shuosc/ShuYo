@@ -40,7 +40,7 @@ class AnnouncementRepository {
       ClientSettingsService.defaultAnnouncementSourceKey;
   static const _favoritesKey = 'announcements.favoriteSources';
   static const _menuExpansionKey = 'announcements.menu.expanded';
-  static const _cacheVersion = 4;
+  static const _cacheVersion = 5;
 
   final AnnouncementApiClient _apiClient;
   final Future<SharedPreferences> Function() _preferencesLoader;
@@ -171,7 +171,9 @@ class AnnouncementRepository {
   }) async {
     final selected = source ?? await defaultSource();
     if (_memoryLists.containsKey(selected.id)) {
-      return _memoryLists[selected.id]!;
+      final current = _keepActiveColumns(selected, _memoryLists[selected.id]!);
+      _memoryLists[selected.id] = current;
+      return current;
     }
     final prefs = await _preferencesLoader();
     final raw = prefs.getString('$_listCacheKey.${selected.id}') ??
@@ -189,9 +191,24 @@ class AnnouncementRepository {
         .whereType<JsonMap>()
         .map(AnnouncementListItem.fromJson)
         .toList();
-    final recent = _mergeAnnouncements(const [], items);
+    final recent = _keepActiveColumns(
+      selected,
+      _mergeAnnouncements(const [], items),
+    );
     _memoryLists[selected.id] = recent;
     return recent;
+  }
+
+  List<AnnouncementListItem> _keepActiveColumns(
+    AnnouncementSource source,
+    List<AnnouncementListItem> items,
+  ) {
+    if (source.columnNames.isEmpty) return items;
+    final activeColumns = source.columnNames.toSet();
+    return items
+        .where((item) =>
+            item.column.isEmpty || activeColumns.contains(item.column))
+        .toList(growable: false);
   }
 
   bool hasMoreAnnouncements({AnnouncementSource? source}) {

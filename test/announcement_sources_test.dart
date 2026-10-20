@@ -491,6 +491,30 @@ void main() {
         '官网旧缓存');
   });
 
+  test('cached computer news is removed with its retired source', () async {
+    SharedPreferences.setMockInitialValues({
+      'announcements.list.cache.cs': jsonEncode([
+        const AnnouncementListItem(
+          title: '学院新闻',
+          url: 'https://cs.shu.edu.cn/info/news.htm',
+          sourceId: 'cs',
+          column: '新闻动态',
+        ).toJson(),
+        const AnnouncementListItem(
+          title: '重要通知',
+          url: 'https://cs.shu.edu.cn/info/notice.htm',
+          sourceId: 'cs',
+          column: '重要通知',
+        ).toJson(),
+      ]),
+    });
+    final repository = AnnouncementRepository();
+    final cached = await repository.loadCachedAnnouncements(
+      source: AnnouncementSource.byId('cs'),
+    );
+    expect(cached.map((item) => item.title), ['重要通知']);
+  });
+
   test('favorites persist independently and allow multiple sources', () async {
     SharedPreferences.setMockInitialValues({});
     final repository = AnnouncementRepository();
