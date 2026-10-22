@@ -11,6 +11,137 @@ import 'package:shuyo/data/repositories/announcement_repository.dart';
 import 'package:shuyo/data/services/announcement_api_client.dart';
 
 void main() {
+  test('large article tables parse outside the UI isolate', () async {
+    const item = AnnouncementListItem(
+      title: '大型名单',
+      url: 'https://www.shu.edu.cn/info/1001/large.htm',
+    );
+    final rows = [
+      for (var index = 0; index < 250; index++)
+        '<tr><td>编号 $index 学生名单和材料审核结果</td>'
+            '<td>院系 $index 专业方向与报名状态</td></tr>',
+    ].join();
+    final html = '<div class="v_news_content"><table>$rows</table></div>';
+    expect(utf8.encode(html).length, greaterThan(16384));
+    final client = AnnouncementApiClient(
+      httpClient: MockClient((request) async => http.Response(
+            html,
+            200,
+            headers: {'content-type': 'text/html; charset=utf-8'},
+          )),
+    );
+
+    final detail = await client.fetchDetail(item);
+    final table = detail.blocks.singleWhere((block) => block.isTable);
+    expect(table.rows, hasLength(250));
+    expect(table.rows.first.first, contains('编号 0'));
+    expect(table.rows.last.last, contains('院系 249'));
+    client.close();
+  });
+
+  test('Film Academy article metadata completes undated list entries',
+      () async {
+    final source = AnnouncementSource.byId('sfa');
+    final client = AnnouncementApiClient(
+      httpClient: MockClient((request) async {
+        final path = request.url.path;
+        final html = path.contains('/info/')
+            ? '<span class="Head">${path.endsWith('/new.htm') ? '新公告' : '旧公告'}</span>'
+                '<table><tr valign="middle" height="20"><td>'
+                '<span>创建时间：</span><span>${path.endsWith('/new.htm') ? '2026年10月20日 08:00' : '2026年09月10日 09:00'}</span>'
+                '<font face=""><span>${path.endsWith('/new.htm') ? '王超' : '李华'}</span>'
+                '<font face="Times New Roman"><span>浏览次数：</span></font>'
+                '</font></td></tr></table>'
+                '<div class="v_news_content"><p>正文</p></div>'
+            : '<div class="right">'
+                '<li class="notice-item"><a class="notice-title" href="/info/1212/old.htm">旧公告</a></li>'
+                '<li class="notice-item"><a class="notice-title" href="/info/1212/new.htm">新公告</a></li>'
+                '<li class="notice-item"><a class="notice-title" href="https://example.org/external">外链</a></li>'
+                '</div>';
+        return http.Response(html, 200,
+            headers: {'content-type': 'text/html; charset=utf-8'});
+      }),
+    );
+
+    final page = await client.fetchPage(source: source);
+    expect(page.items.map((item) => item.title), ['新公告', '外链', '旧公告']);
+    expect(page.items.first.publishedAt, DateTime(2026, 10, 20));
+    expect(page.items.first.dateText, '2026-10-20');
+    final external = page.items.singleWhere((item) => item.title == '外链');
+    expect(external.dateText, isEmpty);
+    expect(external.publishedAt, DateTime(2026, 10, 19));
+    final detail = await client.fetchDetail(page.items.first);
+    expect(detail.dateText, '2026-10-20');
+    expect(detail.author, '王超');
+    expect(detail.title, '新公告');
+    final searchPage = await client.fetchSearchColumn(
+      source: source,
+      url: source.listUrl,
+      column: '',
+    );
+    final searchedNew =
+        searchPage.items.singleWhere((item) => item.title == '新公告');
+    expect(searchedNew.publishedAt, DateTime(2026, 10, 20));
+    expect(searchedNew.dateText, '2026-10-20');
+    client.close();
+  });
+
+  test('undated Film Academy links keep their source positions', () async {
+    final source = AnnouncementSource.byId('sfa');
+    final client = AnnouncementApiClient(
+      httpClient: MockClient((request) async {
+        final path = request.url.path;
+        if (path.contains('/info/')) {
+          final date = path.endsWith('/new.htm')
+              ? '2026年10月20日 08:00'
+              : '2026年10月10日 08:00';
+          return http.Response(
+              '<table><tr valign="middle" height="20">'
+              '<td><span>创建时间：</span><span>$date</span></td>'
+              '</tr></table><div class="v_news_content"><p>正文</p></div>',
+              200,
+              headers: {'content-type': 'text/html; charset=utf-8'});
+        }
+        return http.Response(
+            '<div class="right">'
+            '<li class="notice-item"><a class="notice-title" href="/info/new.htm">新公告</a></li>'
+            '<li class="notice-item"><a class="notice-title" href="https://example.org/a">外链甲</a></li>'
+            '<li class="notice-item"><a class="notice-title" href="https://example.org/b">外链乙</a></li>'
+            '<li class="notice-item"><a class="notice-title" href="/info/old.htm">旧公告</a></li>'
+            '<li class="notice-item"><a class="notice-title" href="https://example.org/c">外链丙</a></li>'
+            '</div>',
+            200,
+            headers: {'content-type': 'text/html; charset=utf-8'});
+      }),
+    );
+
+    final page = await client.fetchPage(source: source);
+    expect(page.items.map((item) => item.title),
+        ['新公告', '外链甲', '外链乙', '旧公告', '外链丙']);
+    expect(
+        page.items.map((item) => item.publishedAt),
+        orderedEquals([
+          DateTime(2026, 10, 20),
+          DateTime(2026, 10, 16, 16),
+          DateTime(2026, 10, 13, 8),
+          DateTime(2026, 10, 10),
+          DateTime(2026, 10, 9),
+        ]));
+    expect(
+        page.items
+            .where((item) => item.title.startsWith('外链'))
+            .every((item) => item.dateText.isEmpty),
+        isTrue);
+    final searched = await client.fetchSearchColumn(
+      source: source,
+      url: source.listUrl,
+      column: '',
+    );
+    expect(searched.items.map((item) => item.publishedAt),
+        orderedEquals(page.items.map((item) => item.publishedAt)));
+    client.close();
+  });
+
   test('Xiangying list retains cross-subdomain details and pagination',
       () async {
     final source = AnnouncementSource.byId('xiangying');
@@ -337,12 +468,26 @@ void main() {
   });
 
   test('college catalog and additional HTML layouts parse correctly', () {
-    expect(AnnouncementSource.inGroup(AnnouncementSourceGroup.campus),
-        hasLength(17));
+    expect(AnnouncementSource.inGroup(AnnouncementSourceGroup.schoolPortal),
+        hasLength(4));
+    expect(AnnouncementSource.inGroup(AnnouncementSourceGroup.schoolDepartment),
+        hasLength(19));
     expect(AnnouncementSource.inGroup(AnnouncementSourceGroup.college),
         hasLength(35));
     expect(
-        AnnouncementSource.all.any((source) => source.id == 'modart'), isFalse);
+        AnnouncementSource.inGroup(AnnouncementSourceGroup.researchInstitute),
+        hasLength(14));
+    expect(AnnouncementSource.byId('mgi').group,
+        AnnouncementSourceGroup.researchInstitute);
+    expect(AnnouncementSource.byId('museum').group,
+        AnnouncementSourceGroup.schoolDepartment);
+    expect(AnnouncementSource.byId('jgzx').group,
+        AnnouncementSourceGroup.researchInstitute);
+    expect(AnnouncementSource.byId('youth').name, '上海大学共青团委员会');
+    expect(AnnouncementSource.byId('bkzsw').name, '本科生招生网');
+    expect(AnnouncementSource.byId('yingxin').name, '迎新网');
+    expect(
+        AnnouncementSource.all.any((source) => source.id == 'modart'), isTrue);
     expect(
         AnnouncementSource.all.any((source) => source.id == 'shvfs'), isTrue);
     final library = AnnouncementSource.byId('lib');
@@ -397,6 +542,288 @@ void main() {
     }
   });
 
+  test('school portals, departments, and institutes have stable menu order',
+      () {
+    expect(
+      AnnouncementSource.inGroup(AnnouncementSourceGroup.schoolPortal)
+          .map((source) => source.id),
+      ['shu', 'bkzsw', 'yjszs', 'yingxin'],
+    );
+    expect(
+      AnnouncementSource.inGroup(AnnouncementSourceGroup.schoolDepartment)
+          .map((source) => source.id),
+      [
+        'bksy',
+        'gs',
+        'xgb',
+        'dwygb',
+        'youth',
+        'kyglb',
+        'global',
+        'alumni',
+        'shuedf',
+        'hr',
+        'cwc',
+        'sbc',
+        'lib',
+        'archive',
+        'museum',
+        'its',
+        'hbb',
+        'baoweichu',
+        'xyy',
+      ],
+    );
+    expect(
+      AnnouncementSource.inGroup(AnnouncementSourceGroup.researchInstitute)
+          .map((source) => source.id),
+      [
+        'mgi',
+        'suitm',
+        'jhai',
+        'igs',
+        'ihe',
+        'cast',
+        'icn',
+        'adri',
+        'jgzx',
+        'suns',
+        'skl4nm',
+        'sklar',
+        'sklass',
+        'fpd',
+      ],
+    );
+  });
+
+  test('display laboratory columns parse dates and paginate independently',
+      () async {
+    final source = AnnouncementSource.byId('fpd');
+    expect(source.group, AnnouncementSourceGroup.researchInstitute);
+    expect(source.columnNames, ['通知公告', '新闻中心', '学术交流']);
+    expect(source.listUrls, [
+      'https://fpd.shu.edu.cn/kfyjl/tzgg.htm',
+      'https://fpd.shu.edu.cn/kfyjl/xwzx.htm',
+      'https://fpd.shu.edu.cn/kfyjl/xsjl1.htm',
+    ]);
+    final samples = [
+      (
+        path: 'tzgg',
+        section: '1111',
+        article: '4704',
+        title: '开放课题申请通知',
+        date: '2026-09-07',
+        next: '3'
+      ),
+      (
+        path: 'xwzx',
+        section: '1113',
+        article: '4684',
+        title: '学术委员会会议',
+        date: '2026-01-16',
+        next: '11'
+      ),
+      (
+        path: 'xsjl1',
+        section: '1112',
+        article: '4524',
+        title: '生物3D打印学术交流',
+        date: '2024-03-05',
+        next: '1'
+      ),
+    ];
+    final client = AnnouncementApiClient(
+      httpClient: MockClient((request) async {
+        final sample = samples.singleWhere(
+          (sample) => request.url.path.endsWith('/${sample.path}.htm'),
+        );
+        final html = '<ul id="second_artlist"><li id="line_u4_0">'
+            '<a href="../info/${sample.section}/${sample.article}.htm">${sample.title}</a>'
+            '&nbsp;${sample.date}&nbsp;</li></ul>'
+            '<a class="Next" href="${sample.path}/${sample.next}.htm">下页</a>';
+        return http.Response.bytes(utf8.encode(html), 200,
+            headers: {'content-type': 'text/html; charset=utf-8'});
+      }),
+    );
+
+    final page = await client.fetchPage(source: source);
+    expect(page.items.map((item) => item.title), [
+      '开放课题申请通知',
+      '学术委员会会议',
+      '生物3D打印学术交流',
+    ]);
+    expect(page.items.map((item) => item.column), source.columnNames);
+    expect(page.items.map((item) => item.dateText),
+        ['2026-09-07', '2026-01-16', '2024-03-05']);
+    expect(page.items.first.url, 'https://fpd.shu.edu.cn/info/1111/4704.htm');
+    expect(page.nextPageUrls, [
+      'https://fpd.shu.edu.cn/kfyjl/tzgg/3.htm',
+      'https://fpd.shu.edu.cn/kfyjl/xwzx/11.htm',
+      'https://fpd.shu.edu.cn/kfyjl/xsjl1/1.htm',
+    ]);
+  });
+
+  test('admissions sources include each requested column once', () {
+    final undergraduate = AnnouncementSource.byId('bkzsw');
+    expect(undergraduate.listUrls, hasLength(10));
+    expect(undergraduate.listUrls.toSet(), hasLength(10));
+    expect(undergraduate.columnNames, [
+      '最新公告',
+      '秋季统考',
+      '春季招生',
+      '综合评价录取',
+      '艺术类',
+      '保送生',
+      '插班生',
+      '二学位',
+      '高校专项计划',
+      '港澳台招生',
+    ]);
+    expect(undergraduate.listUrls[6], 'https://bkzsw.shu.edu.cn/zsjz/cbs.htm');
+    final graduate = AnnouncementSource.byId('yjszs');
+    expect(graduate.listUrls, [
+      'https://yjszs.shu.edu.cn/cd/tzgg.htm',
+      'https://yjszs.shu.edu.cn/cd/zsdt.htm',
+    ]);
+    expect(graduate.columnNames, ['通知公告', '招生动态']);
+    final welcome = AnnouncementSource.byId('yingxin');
+    expect(welcome.listUrls, [
+      'https://yingxin.shu.edu.cn/tzgg.htm',
+      'https://yingxin.shu.edu.cn/rxxz.htm',
+    ]);
+    expect(welcome.columnNames, ['通知公告', '入学须知']);
+  });
+
+  test('welcome site list parses dates without adding them to titles',
+      () async {
+    final source = AnnouncementSource.byId('yingxin');
+    const noticeHtml = '<ul><li id="line_u2_0" class="lb-li">'
+        '<a href="info/1008/2695.htm">校园无线网使用指南'
+        '<span>2026-08-30</span></a></li></ul>'
+        '<a class="Next" href="tzgg/1.htm">下页</a>';
+    const instructionsHtml = '<ul><li id="line_u2_0" class="lb-li">'
+        '<a href="info/1007/2515.htm">第二学士学位报到须知'
+        '<span>2026-08-01</span></a></li></ul>';
+    final requests = <String>[];
+    final client = AnnouncementApiClient(
+      httpClient: MockClient((request) async {
+        requests.add(request.url.toString());
+        return http.Response.bytes(
+            utf8.encode(request.url.path == '/rxxz.htm'
+                ? instructionsHtml
+                : noticeHtml),
+            200);
+      }),
+    );
+    final page = await client.fetchPage(source: source);
+    expect(requests, unorderedEquals(source.listUrls));
+    expect(page.items.map((item) => item.title), ['校园无线网使用指南', '第二学士学位报到须知']);
+    expect(page.items.map((item) => item.column), ['通知公告', '入学须知']);
+    expect(page.items.first.publishedAt, DateTime(2026, 8, 30));
+    expect(
+        page.items.first.url, 'https://yingxin.shu.edu.cn/info/1008/2695.htm');
+    expect(page.nextPageUrls.first, 'https://yingxin.shu.edu.cn/tzgg/1.htm');
+    client.close();
+  });
+
+  test('translational medicine columns parse and paginate', () async {
+    final source = AnnouncementSource.byId('suitm');
+    expect(source.listUrls, [
+      'https://suitm.shu.edu.cn/syzl/xwdt.htm',
+      'https://suitm.shu.edu.cn/tzgg.htm',
+      'https://suitm.shu.edu.cn/kycg.htm',
+    ]);
+    expect(source.columnNames, ['新闻动态', '通知公告', '科研成果']);
+    final requests = <String>[];
+    final client = AnnouncementApiClient(
+      httpClient: MockClient((request) async {
+        requests.add(request.url.toString());
+        final path = request.url.path;
+        final id = path.contains('xwdt')
+            ? '1'
+            : path.contains('tzgg')
+                ? '2'
+                : '3';
+        final html = '<ul class="listUL"><li id="line_u5_0">'
+            '<div class="listItem"><a href="info/1085/$id.htm">'
+            '<div class="whitespace">栏目文章$id</div>'
+            '<div class="abstract">2026/04/10</div>'
+            '</a></div></li></ul>'
+            '<a class="Next" href="${path.split('/').last.replaceFirst('.htm', '')}/3.htm">下页</a>';
+        return http.Response.bytes(utf8.encode(html), 200);
+      }),
+    );
+    final page = await client.fetchPage(source: source);
+    expect(requests, unorderedEquals(source.listUrls));
+    expect(page.items.map((item) => item.title), ['栏目文章1', '栏目文章2', '栏目文章3']);
+    expect(page.items.map((item) => item.column), source.columnNames);
+    expect(page.items.every((item) => item.dateText == '2026-04-10'), isTrue);
+    expect(page.nextPageUrls, [
+      'https://suitm.shu.edu.cn/syzl/xwdt/3.htm',
+      'https://suitm.shu.edu.cn/tzgg/3.htm',
+      'https://suitm.shu.edu.cn/kycg/3.htm',
+    ]);
+    client.close();
+  });
+
+  test('admissions list layouts skip mobile duplicates and follow pagination',
+      () async {
+    final undergraduate = AnnouncementSource.byId('bkzsw');
+    const undergraduateHtml = '<div class="list-rContent-down">'
+        '<li id="line_u5_0"><a href="../info/7743/38680.htm">'
+        '本科招生章程</a><i>2026-05-19</i></li></div>'
+        '<div class="mobile"><li id="line_u6_0">'
+        '<a href="../info/7743/38680.htm">本科招生章程</a>'
+        '<i>2026-05-19</i></li></div>'
+        '<a class="Next" href="qjtk/3.htm">下页</a>';
+    final graduate = AnnouncementSource.byId('yjszs');
+    const graduateHtml = '<div class="dec-listPage"><div class="list-right">'
+        '<ul class="clearfix"><li class="clearfix"><a href="../info/1003/8914.htm">'
+        '<h3>上海大学报考点报名公告</h3><span>[2026/10/08]</span>'
+        '</a></li></ul></div><span class="p_next p_fun">'
+        '<a href="tzgg/4.htm">下页</a></span></div>'
+        '<div class="mob-listPage"><li class="clearfix">'
+        '<a href="../info/1003/8914.htm">上海大学报考点报名公告</a>'
+        '</li></div>';
+    final client = AnnouncementApiClient(
+      httpClient: MockClient((request) async => http.Response.bytes(
+            utf8.encode(request.url.host == 'bkzsw.shu.edu.cn'
+                ? undergraduateHtml
+                : graduateHtml),
+            200,
+          )),
+    );
+    final undergraduatePage = await client.fetchPage(
+      source: undergraduate,
+      pageUrls: [
+        null,
+        undergraduate.listUrls[1],
+        ...List<String?>.filled(8, null)
+      ],
+    );
+    expect(undergraduatePage.items, hasLength(1));
+    expect(undergraduatePage.items.single.title, '本科招生章程');
+    expect(undergraduatePage.items.single.column, '秋季统考');
+    expect(undergraduatePage.items.single.publishedAt, DateTime(2026, 5, 19));
+    expect(undergraduatePage.items.single.url,
+        'https://bkzsw.shu.edu.cn/info/7743/38680.htm');
+    expect(undergraduatePage.nextPageUrls[1],
+        'https://bkzsw.shu.edu.cn/zsjz/qjtk/3.htm');
+
+    final graduatePage = await client.fetchPage(
+      source: graduate,
+      pageUrls: [graduate.listUrl, null],
+    );
+    expect(graduatePage.items, hasLength(1));
+    expect(graduatePage.items.single.title, '上海大学报考点报名公告');
+    expect(graduatePage.items.single.dateText, '2026-10-08');
+    expect(graduatePage.items.single.url,
+        'https://yjszs.shu.edu.cn/info/1003/8914.htm');
+    expect(
+        graduatePage.nextPageUrls[0], 'https://yjszs.shu.edu.cn/cd/tzgg/4.htm');
+    client.close();
+  });
+
   test('new school list formats and computer notice source parse', () {
     const addedIds = <String>{
       'cs',
@@ -446,8 +873,65 @@ void main() {
       expect(items.single.publishedAt, DateTime(2026, 10, 6));
     }
     final computer = AnnouncementSource.byId('cs');
-    expect(computer.listUrls, ['https://cs.shu.edu.cn/index/zytz.htm']);
-    expect(computer.columnNames, ['重要通知']);
+    expect(computer.listUrls, [
+      'https://cs.shu.edu.cn/index/zytz.htm',
+      'https://cs.shu.edu.cn/index/xwdt.htm',
+    ]);
+    expect(computer.columnNames, ['重要通知', '新闻动态']);
+    final news = AnnouncementApiClient.parseAnnouncementList(
+      '<div class="xw-lt"><li><a href="/info/1061/1431.htm">'
+      '<div class="xw-tx"><h3>学院新闻</h3><p>新闻摘要</p></div>'
+      '<div class="xw-date"><b>21</b><span>2026-10</span></div>'
+      '</a></li></div>',
+      baseUrl: computer.listUrls[1],
+      source: computer,
+      column: '新闻动态',
+    );
+    expect(news.single.title, '学院新闻');
+    expect(news.single.dateText, '2026-10-21');
+    expect(news.single.column, '新闻动态');
+  });
+
+  test('alumni and foundation notices parse dates and follow pagination',
+      () async {
+    final cases = [
+      (
+        AnnouncementSource.byId('alumni'),
+        '<li id="line_u5_0"><a href="../info/1021/8756.htm">'
+            '奖学金通知</a><span>2025-11-25</span></li>'
+            '<span class="p_pages"><a href="tzgg/10.htm">下页</a></span>',
+        'https://alumni.shu.edu.cn/xwggzx/tzgg/10.htm',
+        'https://alumni.shu.edu.cn/info/1021/8756.htm',
+        '2025-11-25',
+      ),
+      (
+        AnnouncementSource.byId('shuedf'),
+        '<ul class="listUL"><li id="line_u4_0"><div class="listItem">'
+            '<a href="../info/1005/2785.htm"><div class="whitespace">'
+            '基金会声明</div><div class="abstract">2025/09/25</div>'
+            '</a></div></li></ul>'
+            '<a class="Next" href="tzgg/5.htm">下页</a>',
+        'https://shuedf.shu.edu.cn/sylm/tzgg/5.htm',
+        'https://shuedf.shu.edu.cn/info/1005/2785.htm',
+        '2025-09-25',
+      ),
+    ];
+    for (final (source, html, nextUrl, articleUrl, date) in cases) {
+      expect(source.group, AnnouncementSourceGroup.schoolDepartment);
+      final client = AnnouncementApiClient(
+        httpClient: MockClient((_) async => http.Response(
+              html,
+              200,
+              headers: {'content-type': 'text/html; charset=utf-8'},
+            )),
+      );
+      final page = await client.fetchPage(source: source);
+      expect(page.items, hasLength(1), reason: source.id);
+      expect(page.items.single.url, articleUrl);
+      expect(page.items.single.dateText, date);
+      expect(page.nextPageUrls.single, nextUrl);
+      client.close();
+    }
   });
 
   test('undated college lists keep source order without guessing from titles',
@@ -546,6 +1030,33 @@ void main() {
     ]);
     expect(detail.blocks.where((block) => block.isLink).single.value,
         'https://xgb.shu.edu.cn/files/result.pdf');
+  });
+
+  test('film notice keeps paragraphs separated by br tags', () {
+    const html = '<div id="vsb_content"><div class="v_news_content">'
+        '影视艺术技术学院2014年硕士研究生第二批次复试通知<br><br>'
+        '根据学校工作部署，相关事宜通知如下：<br><br>'
+        '1、复试通知书：上午领取。<br>'
+        '2、笔试时间：上午9时40分。<br><br>'
+        '5：应带证件：请参照研究生院要求。<br><br><br>'
+        '上海大学影视艺术技术学院<br>研究生工作办公室<br>2014年4月18日'
+        '</div></div>';
+    final detail = AnnouncementApiClient.parseAnnouncementDetail(
+      html,
+      url: 'https://sfa.shu.edu.cn/info/1212/5796.htm',
+      sourceId: 'sfa',
+    );
+    expect(
+        detail.blocks
+            .where((block) => block.isText)
+            .map((block) => block.value),
+        [
+          '影视艺术技术学院2014年硕士研究生第二批次复试通知',
+          '根据学校工作部署，相关事宜通知如下：',
+          '1、复试通知书：上午领取。\n2、笔试时间：上午9时40分。',
+          '5：应带证件：请参照研究生院要求。',
+          '上海大学影视艺术技术学院\n研究生工作办公室\n2014年4月18日',
+        ]);
   });
 
   test('film attachments remain available and WeChat parsing is disabled', () {
@@ -814,7 +1325,27 @@ void main() {
         '官网旧缓存');
   });
 
-  test('cached computer news is removed with its retired source', () async {
+  test('Film Academy refreshes caches from before date inference', () async {
+    final source = AnnouncementSource.byId('sfa');
+    SharedPreferences.setMockInitialValues({
+      'announcements.cacheVersion.sfa': 6,
+      'announcements.lastRefreshAt.sfa': DateTime.now().toIso8601String(),
+      'announcements.list.cache.sfa': jsonEncode([
+        const AnnouncementListItem(
+          title: '无日期外链',
+          url: 'https://example.org/old-link',
+          sourceId: 'sfa',
+        ).toJson(),
+      ]),
+    });
+    final api = _FakeAnnouncementApiClient();
+    await AnnouncementRepository(apiClient: api)
+        .fetchAnnouncements(source: source);
+    expect(api.requested, ['sfa']);
+  });
+
+  test('cached computer news remains available after restoring its column',
+      () async {
     SharedPreferences.setMockInitialValues({
       'announcements.list.cache.cs': jsonEncode([
         const AnnouncementListItem(
@@ -835,7 +1366,28 @@ void main() {
     final cached = await repository.loadCachedAnnouncements(
       source: AnnouncementSource.byId('cs'),
     );
-    expect(cached.map((item) => item.title), ['重要通知']);
+    expect(cached.map((item) => item.title), ['学院新闻', '重要通知']);
+  });
+
+  test('restored computer news refreshes a cache from the notice-only version',
+      () async {
+    final source = AnnouncementSource.byId('cs');
+    SharedPreferences.setMockInitialValues({
+      'announcements.cacheVersion.cs': 5,
+      'announcements.lastRefreshAt.cs': DateTime.now().toIso8601String(),
+      'announcements.list.cache.cs': jsonEncode([
+        const AnnouncementListItem(
+          title: '旧重要通知',
+          url: 'https://cs.shu.edu.cn/info/old.htm',
+          sourceId: 'cs',
+          column: '重要通知',
+        ).toJson(),
+      ]),
+    });
+    final api = _FakeAnnouncementApiClient();
+    await AnnouncementRepository(apiClient: api)
+        .fetchAnnouncements(source: source);
+    expect(api.requested, ['cs']);
   });
 
   test('favorites persist independently and allow multiple sources', () async {
@@ -854,15 +1406,39 @@ void main() {
   test('menu group expansion persists across repository instances', () async {
     SharedPreferences.setMockInitialValues({});
     final first = AnnouncementRepository();
-    expect(await first.menuExpansion(),
-        (favorites: true, campus: true, college: false));
+    expect(await first.menuExpansion(), (
+      favorites: true,
+      schoolPortal: true,
+      college: false,
+      researchInstitute: false,
+      schoolDepartment: true,
+    ));
     await first.saveMenuExpansion(AnnouncementMenuSection.favorites, false);
-    await first.saveMenuExpansion(AnnouncementMenuSection.campus, false);
+    await first.saveMenuExpansion(AnnouncementMenuSection.schoolPortal, false);
     await first.saveMenuExpansion(AnnouncementMenuSection.college, true);
+    await first.saveMenuExpansion(
+        AnnouncementMenuSection.researchInstitute, true);
+    await first.saveMenuExpansion(
+        AnnouncementMenuSection.schoolDepartment, false);
 
     final second = AnnouncementRepository();
-    expect(await second.menuExpansion(),
-        (favorites: false, campus: false, college: true));
+    expect(await second.menuExpansion(), (
+      favorites: false,
+      schoolPortal: false,
+      college: true,
+      researchInstitute: true,
+      schoolDepartment: false,
+    ));
+  });
+
+  test('new portal group respects a previously collapsed school group',
+      () async {
+    SharedPreferences.setMockInitialValues({
+      'announcements.menu.expanded.schoolDepartment': false,
+    });
+    final expansion = await AnnouncementRepository().menuExpansion();
+    expect(expansion.schoolPortal, isFalse);
+    expect(expansion.schoolDepartment, isFalse);
   });
 
   test('detail previews are queued three at a time and reused', () async {
