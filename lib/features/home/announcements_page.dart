@@ -3,7 +3,12 @@ import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart'
-    show RenderSliverList, ScrollCacheExtent, SliverMultiBoxAdaptorParentData;
+    show
+        RenderEditable,
+        RenderSliver,
+        RenderSliverList,
+        ScrollCacheExtent,
+        SliverMultiBoxAdaptorParentData;
 import 'package:flutter/services.dart';
 import 'package:flutter/gestures.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -20,6 +25,8 @@ import '../../shared/theme/shuyo_theme.dart';
 import '../../shared/theme/custom_background.dart';
 import '../../shared/widgets/empty_state.dart';
 import '../../shared/widgets/fullscreen_image_page.dart';
+import '../../shared/widgets/date_range_picker.dart';
+import 'announcement_search_matches.dart';
 
 /// Horizontal padding of the detail body, also used hui derive the image decode
 /// width.
@@ -32,6 +39,8 @@ const double _announcementImagePlaceholderHeight = 180;
 /// Frame budget for waiting on the push animation, roughly 1.5 seconds, kept
 /// only as a safety net.
 const int _maximumAnimationFrames = 90;
+
+const _announcementMatchScrollDuration = Duration(milliseconds: 450);
 
 String _breakableInlineLinkText(String text, String url) {
   final lowerText = text.toLowerCase();
@@ -569,6 +578,64 @@ class AnnouncementSearchPage extends StatefulWidget {
 
 enum _SearchTimePreset { all, week, month, year, custom }
 
+Future<T?> _showAnnouncementFilterMenu<T>({
+  required BuildContext context,
+  required String barrierLabel,
+  required WidgetBuilder builder,
+}) {
+  return showGeneralDialog<T>(
+    context: context,
+    barrierDismissible: true,
+    barrierLabel: barrierLabel,
+    barrierColor: Colors.black54,
+    transitionDuration: const Duration(milliseconds: 200),
+    transitionBuilder: (context, animation, secondaryAnimation, child) {
+      return SlideTransition(
+        position: Tween<Offset>(
+          begin: const Offset(0.18, 0),
+          end: Offset.zero,
+        ).animate(CurvedAnimation(
+          parent: animation,
+          curve: Curves.easeOutCubic,
+        )),
+        child: FadeTransition(opacity: animation, child: child),
+      );
+    },
+    pageBuilder: (context, animation, secondaryAnimation) => SafeArea(
+      child: Align(
+        alignment: Alignment.topRight,
+        child: Padding(
+          padding: const EdgeInsets.only(top: kToolbarHeight + 8, right: 12),
+          child: builder(context),
+        ),
+      ),
+    ),
+  );
+}
+
+class _AnnouncementFilterPanel extends StatelessWidget {
+  const _AnnouncementFilterPanel({super.key, required this.child});
+
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) => SizedBox(
+        width: math.min(264.0, MediaQuery.sizeOf(context).width * 0.68),
+        child: Material(
+          elevation: 12,
+          borderRadius: BorderRadius.circular(16),
+          clipBehavior: Clip.antiAlias,
+          color: Theme.of(context).colorScheme.surface,
+          child: ConstrainedBox(
+            constraints: BoxConstraints(
+              maxHeight: MediaQuery.sizeOf(context).height * 0.72,
+            ),
+            child: child,
+          ),
+        ),
+      );
+}
+
 class _AnnouncementSearchPageState extends State<AnnouncementSearchPage> {
   static final Map<String, int> _sourceOrder = {
     for (final entry in [
@@ -582,7 +649,6 @@ class _AnnouncementSearchPageState extends State<AnnouncementSearchPage> {
   };
   static const _includeBodyKey = 'announcements.search.includeBody';
   static const _includeTitleKey = 'announcements.search.includeTitle';
-  static const _retryFailuresKey = 'announcements.search.retryFailures';
   static const _selectedSourcesKey = 'announcements.search.selectedSources';
   final TextEditingController _queryController = TextEditingController();
   final FocusNode _queryFocusNode = FocusNode();
@@ -590,7 +656,6 @@ class _AnnouncementSearchPageState extends State<AnnouncementSearchPage> {
   String _activeQuery = '';
   bool _activeIncludeTitle = true;
   bool _activeIncludeBody = false;
-  bool _activeRetryFailures = true;
   Set<String> _activeSelectedSourceIds = {};
   DateTimeRange? _dateRange;
   DateTimeRange? _activeDateRange;
@@ -611,7 +676,6 @@ class _AnnouncementSearchPageState extends State<AnnouncementSearchPage> {
   bool _resultsScrolling = false;
   bool _includeBody = false;
   bool _includeTitle = true;
-  bool _retryFailures = true;
   bool _started = false;
   bool _searching = false;
   bool _failureNoticeShown = false;
@@ -679,7 +743,6 @@ class _AnnouncementSearchPageState extends State<AnnouncementSearchPage> {
       setState(() {
         _includeTitle = prefs.getBool(_includeTitleKey) ?? true;
         _includeBody = prefs.getBool(_includeBodyKey) ?? false;
-        _retryFailures = prefs.getBool(_retryFailuresKey) ?? true;
       });
     } on Object {
       // Keep the defaults if local settings are unavailable.
@@ -729,7 +792,6 @@ class _AnnouncementSearchPageState extends State<AnnouncementSearchPage> {
     _activeQuery = query;
     _activeIncludeTitle = _includeTitle;
     _activeIncludeBody = _includeBody;
-    _activeRetryFailures = _retryFailures;
     _activeSelectedSourceIds = {..._selectedSourceIds};
     _activeDateRange = _dateRange;
     final generation = ++_generation;
@@ -766,7 +828,6 @@ class _AnnouncementSearchPageState extends State<AnnouncementSearchPage> {
         query: query,
         includeTitle: _activeIncludeTitle,
         includeBody: _activeIncludeBody,
-        retryFailures: _activeRetryFailures,
         dateRange: _activeDateRange == null
             ? null
             : AnnouncementSearchDateRange(
@@ -1117,41 +1178,18 @@ class _AnnouncementSearchPageState extends State<AnnouncementSearchPage> {
       );
     }
     if (!mounted) return;
-    await showGeneralDialog<void>(
+    await _showAnnouncementFilterMenu<void>(
       context: context,
-      barrierDismissible: true,
       barrierLabel: '关闭搜索部门筛选',
-      barrierColor: Colors.black54,
-      transitionDuration: const Duration(milliseconds: 200),
-      transitionBuilder: (context, animation, secondaryAnimation, child) {
-        return SlideTransition(
-          position: Tween<Offset>(
-            begin: const Offset(0.18, 0),
-            end: Offset.zero,
-          ).animate(CurvedAnimation(
-            parent: animation,
-            curve: Curves.easeOutCubic,
-          )),
-          child: FadeTransition(opacity: animation, child: child),
-        );
-      },
-      pageBuilder: (menuContext, animation, secondaryAnimation) => SafeArea(
-        child: Align(
-          alignment: Alignment.topRight,
-          child: Padding(
-            padding: const EdgeInsets.only(top: kToolbarHeight + 8, right: 12),
-            child: _AnnouncementSourceMenu(
-              selected: AnnouncementSource.official,
-              initialFavorites: const {},
-              initialExpansion: expansion,
-              onToggleFavorite: (_) async => <String>{},
-              onExpansionChanged: widget.repository.saveMenuExpansion,
-              onSelect: (_) {},
-              selectedIds: _selectedSourceIds,
-              onSelectedIdsChanged: _changeSelectedSources,
-            ),
-          ),
-        ),
+      builder: (context) => _AnnouncementSourceMenu(
+        selected: AnnouncementSource.official,
+        initialFavorites: const {},
+        initialExpansion: expansion,
+        onToggleFavorite: (_) async => <String>{},
+        onExpansionChanged: widget.repository.saveMenuExpansion,
+        onSelect: (_) {},
+        selectedIds: _selectedSourceIds,
+        onSelectedIdsChanged: _changeSelectedSources,
       ),
     );
   }
@@ -1182,202 +1220,11 @@ class _AnnouncementSearchPageState extends State<AnnouncementSearchPage> {
     }
   }
 
-  Future<void> _openSearchSettings() async {
-    final section = await showModalBottomSheet<int>(
-      context: context,
-      backgroundColor: Colors.transparent,
-      builder: (context) {
-        final colors = context.shuyoColors;
-        final bottomPadding = MediaQuery.viewPaddingOf(context).bottom;
-        return SafeArea(
-          top: false,
-          bottom: false,
-          child: Container(
-            width: double.infinity,
-            padding: EdgeInsets.fromLTRB(12, 8, 12, 12 + bottomPadding),
-            decoration: BoxDecoration(
-              color: colors.surface,
-              borderRadius:
-                  const BorderRadius.vertical(top: Radius.circular(8)),
-            ),
-            child: Material(
-              type: MaterialType.transparency,
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  ListTile(
-                    leading: const Icon(Icons.refresh),
-                    title: const Text('失败重试'),
-                    onTap: () => Navigator.of(context).pop(0),
-                  ),
-                  ListTile(
-                    leading: const Icon(Icons.manage_search),
-                    title: const Text('搜索范围'),
-                    onTap: () => Navigator.of(context).pop(1),
-                  ),
-                ],
-              ),
-            ),
-          ),
-        );
-      },
-    );
-    if (!mounted) return;
-    if (section == 0) {
-      await _openRetrySettings();
-    } else if (section == 1) {
-      await _openScopeSettings();
-    }
-  }
-
-  Future<void> _openRetrySettings() async {
-    await showModalBottomSheet<void>(
-      context: context,
-      backgroundColor: Colors.transparent,
-      builder: (context) => StatefulBuilder(
-        builder: (context, updateSheet) {
-          final colors = context.shuyoColors;
-          final bottomPadding = MediaQuery.viewPaddingOf(context).bottom;
-          return SafeArea(
-            top: false,
-            bottom: false,
-            child: Container(
-              width: double.infinity,
-              padding: EdgeInsets.fromLTRB(12, 8, 12, 12 + bottomPadding),
-              decoration: BoxDecoration(
-                color: colors.surface,
-                borderRadius:
-                    const BorderRadius.vertical(top: Radius.circular(8)),
-              ),
-              child: Material(
-                type: MaterialType.transparency,
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    SwitchListTile(
-                      title: Transform.translate(
-                        offset: const Offset(0, 4.5),
-                        child: const Text('失败重试'),
-                      ),
-                      value: _retryFailures,
-                      onChanged: (value) {
-                        _settingsTouched = true;
-                        setState(() => _retryFailures = value);
-                        updateSheet(() {});
-                        unawaited(_saveSearchSettings());
-                      },
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          );
-        },
-      ),
-    );
-  }
-
-  Widget _searchSettingsHeading(
-    ShuYoColors colors,
-    String title,
-  ) {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(12, 10, 12, 4),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            title,
-            style: TextStyle(
-              color: colors.textPrimary,
-              fontSize: 16.5,
-              fontWeight: FontWeight.w600,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Future<void> _openScopeSettings() async {
-    await showModalBottomSheet<void>(
-      context: context,
-      backgroundColor: Colors.transparent,
-      builder: (context) => StatefulBuilder(
-        builder: (context, updateSheet) {
-          final colors = context.shuyoColors;
-          final bottomPadding = MediaQuery.viewPaddingOf(context).bottom;
-          Widget scopeButton(String label, bool selected, VoidCallback onTap) =>
-              Expanded(
-                child: OutlinedButton.icon(
-                  onPressed: onTap,
-                  icon: Icon(selected
-                      ? Icons.check_box
-                      : Icons.check_box_outline_blank),
-                  label: Text(label),
-                  style: OutlinedButton.styleFrom(
-                    minimumSize: const Size(0, 48),
-                    foregroundColor: selected
-                        ? Theme.of(context).colorScheme.primary
-                        : colors.textPrimary,
-                  ),
-                ),
-              );
-          return SafeArea(
-            top: false,
-            bottom: false,
-            child: Container(
-              width: double.infinity,
-              padding: EdgeInsets.fromLTRB(12, 8, 12, 12 + bottomPadding),
-              decoration: BoxDecoration(
-                color: colors.surface,
-                borderRadius:
-                    const BorderRadius.vertical(top: Radius.circular(8)),
-              ),
-              child: Material(
-                type: MaterialType.transparency,
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    _searchSettingsHeading(colors, '搜索范围'),
-                    Padding(
-                      padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
-                      child: Row(
-                        children: [
-                          scopeButton('标题', _includeTitle, () {
-                            _settingsTouched = true;
-                            setState(() => _includeTitle = !_includeTitle);
-                            updateSheet(() {});
-                            unawaited(_saveSearchSettings());
-                          }),
-                          const SizedBox(width: 12),
-                          scopeButton('内容', _includeBody, () {
-                            _settingsTouched = true;
-                            setState(() => _includeBody = !_includeBody);
-                            updateSheet(() {});
-                            unawaited(_saveSearchSettings());
-                          }),
-                        ],
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          );
-        },
-      ),
-    );
-  }
-
   Future<void> _saveSearchSettings() async {
     try {
       final prefs = await SharedPreferences.getInstance();
       await prefs.setBool(_includeTitleKey, _includeTitle);
       await prefs.setBool(_includeBodyKey, _includeBody);
-      await prefs.setBool(_retryFailuresKey, _retryFailures);
     } on Object {
       // Keep the current choice in memory if local storage is unavailable.
     }
@@ -1398,6 +1245,36 @@ class _AnnouncementSearchPageState extends State<AnnouncementSearchPage> {
             '${day.year}/${day.month.toString().padLeft(2, '0')}/${day.day.toString().padLeft(2, '0')}';
         return '${format(_dateRange!.start)}—${format(_dateRange!.end)}';
     }
+  }
+
+  Future<void> _openSearchTimeMenu() async {
+    final preset = await _showAnnouncementFilterMenu<_SearchTimePreset>(
+      context: context,
+      barrierLabel: '关闭搜索时间筛选',
+      builder: (menuContext) => _AnnouncementFilterPanel(
+        key: const ValueKey('announcement-search-time-menu'),
+        child: ListView(
+          shrinkWrap: true,
+          padding: const EdgeInsets.symmetric(vertical: 8),
+          children: [
+            for (final entry in const {
+              _SearchTimePreset.all: '时间不限',
+              _SearchTimePreset.week: '近一周',
+              _SearchTimePreset.month: '近一月',
+              _SearchTimePreset.year: '近一年',
+              _SearchTimePreset.custom: '自定义日期',
+            }.entries)
+              ListTile(
+                key: ValueKey('announcement-search-time-${entry.key.name}'),
+                selected: _timePreset == entry.key,
+                title: Text(entry.value),
+                onTap: () => Navigator.of(menuContext).pop(entry.key),
+              ),
+          ],
+        ),
+      ),
+    );
+    if (mounted && preset != null) await _chooseSearchTime(preset);
   }
 
   Future<void> _chooseSearchTime(_SearchTimePreset preset) async {
@@ -1422,15 +1299,12 @@ class _AnnouncementSearchPageState extends State<AnnouncementSearchPage> {
           end: today,
         );
       case _SearchTimePreset.custom:
-        range = await showDateRangePicker(
+        range = await showShuYoDateRangePicker(
           context: context,
+          title: '自定义搜索日期',
           firstDate: DateTime(1900),
           lastDate: today,
-          initialDateRange: _dateRange,
-          helpText: '自定义搜索日期',
-          cancelText: '取消',
-          confirmText: '确定',
-          saveText: '确定',
+          initialRange: _dateRange,
         );
         if (!mounted || range == null) return;
     }
@@ -1447,31 +1321,6 @@ class _AnnouncementSearchPageState extends State<AnnouncementSearchPage> {
       appBar: AppBar(
         title: const Text('搜索公告'),
         actions: [
-          PopupMenuButton<_SearchTimePreset>(
-            key: const ValueKey('announcement-search-time-filter'),
-            tooltip: '搜索时间：$_dateRangeLabel',
-            onSelected: (preset) => unawaited(_chooseSearchTime(preset)),
-            icon: Icon(
-              _dateRange == null ? Icons.date_range_outlined : Icons.date_range,
-              color: _dateRange == null
-                  ? null
-                  : Theme.of(context).colorScheme.primary,
-            ),
-            itemBuilder: (context) => [
-              for (final entry in const {
-                _SearchTimePreset.all: '时间不限',
-                _SearchTimePreset.week: '近一周',
-                _SearchTimePreset.month: '近一月',
-                _SearchTimePreset.year: '近一年',
-                _SearchTimePreset.custom: '自定义日期',
-              }.entries)
-                CheckedPopupMenuItem(
-                  value: entry.key,
-                  checked: _timePreset == entry.key,
-                  child: Text(entry.value),
-                ),
-            ],
-          ),
           IconButton(
             tooltip: '筛选部门',
             onPressed: _chooseSearchSources,
@@ -1502,9 +1351,15 @@ class _AnnouncementSearchPageState extends State<AnnouncementSearchPage> {
             ),
           ),
           IconButton(
-            tooltip: '更多',
-            onPressed: _openSearchSettings,
-            icon: const Icon(Icons.more_horiz),
+            key: const ValueKey('announcement-search-time-filter'),
+            tooltip: '搜索时间：$_dateRangeLabel',
+            onPressed: _openSearchTimeMenu,
+            icon: Icon(
+              _dateRange == null ? Icons.date_range_outlined : Icons.date_range,
+              color: _dateRange == null
+                  ? null
+                  : Theme.of(context).colorScheme.primary,
+            ),
           ),
           const SizedBox(width: 2),
         ],
@@ -1535,14 +1390,14 @@ class _AnnouncementSearchPageState extends State<AnnouncementSearchPage> {
                 child: TextField(
                   controller: _queryController,
                   focusNode: _queryFocusNode,
-                  enabled: !_searching,
+                  readOnly: _searching,
+                  onTapOutside: (_) => _queryFocusNode.unfocus(),
                   textInputAction: TextInputAction.search,
                   onSubmitted: (_) {
                     if (!_searching) _startSearch();
                   },
                   decoration: const InputDecoration(
-                    hintText: '搜索公告关键词',
-                    prefixIcon: Icon(Icons.search),
+                    labelText: '搜索公告关键词',
                   ),
                 ),
               ),
@@ -1551,7 +1406,7 @@ class _AnnouncementSearchPageState extends State<AnnouncementSearchPage> {
                 tooltip: '开始搜索',
                 onPressed: _searching ? null : _startSearch,
                 icon: Icon(
-                  Icons.play_arrow_rounded,
+                  Icons.search,
                   color: Theme.of(context).colorScheme.primary,
                 ),
               ),
@@ -1564,33 +1419,39 @@ class _AnnouncementSearchPageState extends State<AnnouncementSearchPage> {
   }
 
   Widget _searchStatus(ShuYoColors colors) {
-    final title = _searching ? _activeIncludeTitle : _includeTitle;
-    final body = _searching ? _activeIncludeBody : _includeBody;
-    final scope = title && body
-        ? '标题+正文'
-        : title
-            ? '标题'
-            : body
-                ? '正文'
-                : '未选范围';
+    Widget scopeChip(String label, String key, bool selected,
+            ValueChanged<bool> onSelected) =>
+        FilterChip(
+          key: ValueKey(key),
+          label: Text(label),
+          selected: selected,
+          showCheckmark: true,
+          onSelected: _searching
+              ? null
+              : (value) {
+                  _settingsTouched = true;
+                  onSelected(value);
+                  unawaited(_saveSearchSettings());
+                },
+          visualDensity: VisualDensity.compact,
+          materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+        );
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 2, 16, 12),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.end,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Expanded(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text('公告数',
-                    style: TextStyle(color: colors.textMuted, fontSize: 12)),
-                FittedBox(
+          Text('公告数', style: TextStyle(color: colors.textMuted, fontSize: 12)),
+          Row(
+            children: [
+              Expanded(
+                child: FittedBox(
                   fit: BoxFit.scaleDown,
                   alignment: Alignment.centerLeft,
                   child: Row(
                     mainAxisSize: MainAxisSize.min,
-                    crossAxisAlignment: CrossAxisAlignment.end,
+                    crossAxisAlignment: CrossAxisAlignment.baseline,
+                    textBaseline: TextBaseline.alphabetic,
                     children: [
                       _statusNumber(
                           'announcement-search-found-count',
@@ -1601,26 +1462,28 @@ class _AnnouncementSearchPageState extends State<AnnouncementSearchPage> {
                       Text('/',
                           style: TextStyle(
                             color: colors.textPrimary,
-                            fontSize: 26,
+                            fontSize: 18,
                             fontWeight: FontWeight.w600,
                           )),
                       _statusNumber('announcement-search-total-count',
                           _discoveredArticles, colors.textPrimary,
-                          fontSize: 26, fontWeight: FontWeight.w600),
+                          fontSize: 18, fontWeight: FontWeight.w600),
                     ],
                   ),
                 ),
-              ],
-            ),
-          ),
-          const SizedBox(width: 8),
-          Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.end,
-            children: [
-              Text('搜索范围：$scope',
-                  maxLines: 1,
-                  style: TextStyle(color: colors.textMuted, fontSize: 12)),
+              ),
+              const SizedBox(width: 8),
+              scopeChip(
+                  '标题',
+                  'announcement-search-title-scope',
+                  _searching ? _activeIncludeTitle : _includeTitle,
+                  (value) => setState(() => _includeTitle = value)),
+              const SizedBox(width: 8),
+              scopeChip(
+                  '内容',
+                  'announcement-search-body-scope',
+                  _searching ? _activeIncludeBody : _includeBody,
+                  (value) => setState(() => _includeBody = value)),
             ],
           ),
         ],
@@ -1734,6 +1597,7 @@ class _AnnouncementSearchPageState extends State<AnnouncementSearchPage> {
       builder: (context) => AnnouncementDetailPage(
         repository: widget.repository,
         item: article,
+        highlightQuery: _activeQuery,
       ),
     );
     try {
@@ -2343,27 +2207,15 @@ class _AnnouncementSourceMenuState extends State<_AnnouncementSourceMenu> {
       if (_researchInstituteExpanded)
         for (final source in researchInstituteSources) _sourceRow(source),
     ];
-    return SizedBox(
+    return _AnnouncementFilterPanel(
       key: announcementSourceMenuKey,
-      width: menuWidth,
-      child: Material(
-        elevation: 12,
-        borderRadius: BorderRadius.circular(16),
-        clipBehavior: Clip.antiAlias,
-        color: Theme.of(context).colorScheme.surface,
-        child: ConstrainedBox(
-          constraints: BoxConstraints(
-            maxHeight: MediaQuery.sizeOf(context).height * 0.72,
-          ),
-          child: Scrollbar(
-            controller: _scrollController,
-            thumbVisibility: true,
-            child: CustomScrollView(
-              controller: _scrollController,
-              shrinkWrap: true,
-              slivers: _menuSlivers(context, menuChildren, menuWidth),
-            ),
-          ),
+      child: Scrollbar(
+        controller: _scrollController,
+        thumbVisibility: true,
+        child: CustomScrollView(
+          controller: _scrollController,
+          shrinkWrap: true,
+          slivers: _menuSlivers(context, menuChildren, menuWidth),
         ),
       ),
     );
@@ -2742,10 +2594,12 @@ class AnnouncementDetailPage extends StatefulWidget {
     super.key,
     required this.repository,
     required this.item,
+    this.highlightQuery = '',
   });
 
   final AnnouncementRepository repository;
   final AnnouncementListItem item;
+  final String highlightQuery;
 
   @override
   State<AnnouncementDetailPage> createState() => _AnnouncementDetailPageState();
@@ -2754,6 +2608,310 @@ class AnnouncementDetailPage extends StatefulWidget {
 class _AnnouncementDetailPageState extends State<AnnouncementDetailPage> {
   final Map<String, TapGestureRecognizer> _linkRecognizers = {};
   final ScrollController _scrollController = ScrollController();
+  final GlobalKey _matchSliverKey = GlobalKey();
+  final GlobalKey _matchTextKey = GlobalKey();
+  GlobalKey? _tableMatchKey;
+  Rect? _tableMatchRect;
+  double? _matchBlockLocalY;
+  AnnouncementDetail? _matchedDetail;
+  int? _matchedBlockIndex;
+  ({int row, int column, int start, int end})? _matchedTableCell;
+  int _matchStart = 0;
+  int _matchEnd = 0;
+  int _displayMatchStart = 0;
+  int _displayMatchEnd = 0;
+  bool _matchScrollScheduled = false;
+  bool _matchPositioned = false;
+  Timer? _matchPauseTimer;
+  bool _matchPauseElapsed = false;
+  bool _matchNavigationCancelled = false;
+  bool _initialMatchScrollFinished = false;
+  bool _matchCorrectionScheduled = false;
+  bool _matchCorrectionUsed = false;
+  bool _prefixMetricsReady = false;
+  int _prefixMetricsGeneration = 0;
+  Object? _prefixMetricsConfiguration;
+  final Map<int, double> _prefixTextExtents = {};
+
+  /// Locate the text before creating widgets, while leaving the article at its
+  /// heading until both its first layout and the short reading pause finish.
+  void _findSearchMatch(AnnouncementDetail detail) {
+    if (identical(_matchedDetail, detail)) return;
+    _matchedDetail = detail;
+    _matchedBlockIndex = null;
+    _matchedTableCell = null;
+    _tableMatchKey = null;
+    _tableMatchRect = null;
+    _matchBlockLocalY = null;
+    _matchPositioned = false;
+    _matchPauseTimer?.cancel();
+    _matchPauseTimer = null;
+    _matchPauseElapsed = false;
+    _matchNavigationCancelled = false;
+    _initialMatchScrollFinished = false;
+    _matchCorrectionScheduled = false;
+    _matchCorrectionUsed = false;
+    _prefixMetricsConfiguration = null;
+    _prefixMetricsReady = false;
+    _prefixMetricsGeneration++;
+    _prefixTextExtents.clear();
+    final pattern = announcementSearchPattern(widget.highlightQuery);
+    if (pattern == null) return;
+    for (var index = 0; index < detail.blocks.length; index++) {
+      final block = detail.blocks[index];
+      if (block.isTable) {
+        final cells = block.cells.isNotEmpty
+            ? [...block.cells]
+            : [
+                for (var row = 0; row < block.rows.length; row++)
+                  for (var column = 0;
+                      column < block.rows[row].length;
+                      column++)
+                    AnnouncementTableCell(
+                        row: row,
+                        column: column,
+                        text: block.rows[row][column]),
+              ];
+        cells.sort((a, b) {
+          final rowOrder = a.row.compareTo(b.row);
+          return rowOrder != 0 ? rowOrder : a.column.compareTo(b.column);
+        });
+        for (final cell in cells) {
+          final match = pattern.firstMatch(cell.text);
+          if (match == null) continue;
+          _matchedBlockIndex = index;
+          _matchStart = match.start;
+          _matchEnd = match.end;
+          _displayMatchStart = match.start;
+          _displayMatchEnd = match.end;
+          _matchedTableCell = (
+            row: cell.row,
+            column: cell.column,
+            start: match.start,
+            end: match.end
+          );
+          return;
+        }
+        continue;
+      }
+      final text = block.isText
+          ? block.parts.isEmpty
+              ? block.value
+              : block.parts.map((part) => part.text).join()
+          : block.isLink
+              ? block.label
+              : '';
+      final match = pattern.firstMatch(text);
+      if (match == null) continue;
+      _matchedBlockIndex = index;
+      _matchStart = match.start;
+      _matchEnd = match.end;
+      return;
+    }
+  }
+
+  List<InlineSpan> _highlightedSpans(
+    String text, {
+    required int start,
+    required int end,
+  }) {
+    return [
+      if (start > 0) TextSpan(text: text.substring(0, start)),
+      TextSpan(
+        text: text.substring(start, end),
+        style: TextStyle(
+          color: Theme.of(context).colorScheme.primary,
+          fontWeight: FontWeight.w600,
+        ),
+      ),
+      if (end < text.length) TextSpan(text: text.substring(end)),
+    ];
+  }
+
+  void _positionFirstMatch() {
+    if (_matchedBlockIndex == null ||
+        _matchPositioned ||
+        !_matchPauseElapsed ||
+        !_prefixMetricsReady ||
+        _matchNavigationCancelled ||
+        _matchScrollScheduled) {
+      return;
+    }
+    _matchScrollScheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _matchScrollScheduled = false;
+      if (!mounted ||
+          _matchNavigationCancelled ||
+          _route?.isCurrent == false ||
+          !_scrollController.hasClients) {
+        return;
+      }
+      final tableTarget = _tableMatchKey?.currentContext?.findRenderObject();
+      final tableRect = _tableMatchRect;
+      final target = _matchTextKey.currentContext?.findRenderObject();
+      if (tableTarget is RenderBox &&
+          tableTarget.attached &&
+          tableRect != null) {
+        _matchPositioned = true;
+        _scrollToMatchY(tableTarget.localToGlobal(tableRect.topLeft).dy);
+        return;
+      }
+      if (target == null || !target.attached) return;
+      if (_matchedTableCell != null) {
+        unawaited(Scrollable.maybeOf(_matchTextKey.currentContext!,
+                axis: Axis.horizontal)
+            ?.position
+            .ensureVisible(
+              target,
+              alignment: 0.15,
+              duration: _announcementMatchScrollDuration,
+              curve: Curves.easeOutCubic,
+            ));
+      }
+      RenderEditable? editable;
+      void visit(RenderObject object) {
+        if (object is RenderEditable) {
+          editable ??= object;
+        } else {
+          object.visitChildren(visit);
+        }
+      }
+
+      visit(target);
+      final renderEditable = editable;
+      if (renderEditable == null) {
+        if (target is RenderBox) {
+          _matchPositioned = true;
+          _scrollToMatchY(target.localToGlobal(Offset.zero).dy);
+        }
+        return;
+      }
+      final boxes = renderEditable.getBoxesForSelection(TextSelection(
+        baseOffset: _displayMatchStart,
+        extentOffset: _displayMatchEnd,
+      ));
+      if (boxes.isEmpty) return;
+      _matchPositioned = true;
+      final matchY =
+          renderEditable.localToGlobal(Offset(0, boxes.first.top)).dy;
+      _scrollToMatchY(matchY);
+    });
+  }
+
+  void _scrollToMatchY(double matchY) {
+    if (_matchNavigationCancelled) return;
+    final blockTop = _matchBlockGlobalY();
+    if (blockTop != null) _matchBlockLocalY = matchY - blockTop;
+    unawaited(_animateToMatch(matchY));
+  }
+
+  Future<void> _animateToMatch(double matchY) async {
+    final generation = _prefixMetricsGeneration;
+    await _scrollController.animateTo(
+      _offsetForMatchY(matchY),
+      duration: _announcementMatchScrollDuration,
+      curve: Curves.easeOutCubic,
+    );
+    if (!mounted ||
+        _matchNavigationCancelled ||
+        generation != _prefixMetricsGeneration ||
+        _route?.isCurrent == false ||
+        !_scrollController.hasClients) {
+      return;
+    }
+    _initialMatchScrollFinished = true;
+    _scheduleMatchCorrection();
+  }
+
+  /// A late image or table may replace a placeholder even after the animation.
+  /// Allow one final correction when the scroll metrics change, then leave the
+  /// article alone. Any user interaction cancels this opportunity as well.
+  void _scheduleMatchCorrection() {
+    if (!_initialMatchScrollFinished ||
+        _matchCorrectionUsed ||
+        _matchCorrectionScheduled ||
+        _matchNavigationCancelled) {
+      return;
+    }
+    _matchCorrectionScheduled = true;
+    final generation = _prefixMetricsGeneration;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || generation != _prefixMetricsGeneration) return;
+      _matchCorrectionScheduled = false;
+      if (_matchNavigationCancelled ||
+          _route?.isCurrent == false ||
+          !_scrollController.hasClients) {
+        return;
+      }
+      final finalMatchY = _currentMatchY();
+      if (finalMatchY == null) return;
+      final correction = _offsetForMatchY(finalMatchY);
+      if ((correction - _scrollController.offset).abs() <= 1) return;
+      _matchCorrectionUsed = true;
+      unawaited(_scrollController.animateTo(
+        correction,
+        duration: _announcementMatchScrollDuration,
+        curve: Curves.easeOutCubic,
+      ));
+    });
+    WidgetsBinding.instance.scheduleFrame();
+  }
+
+  double _offsetForMatchY(double matchY) {
+    final position = _scrollController.position;
+    final viewport = position.context.notificationContext?.findRenderObject();
+    if (viewport is! RenderBox) return position.pixels;
+    final viewportY = viewport.localToGlobal(Offset.zero).dy;
+    final offset = position.pixels +
+        matchY -
+        viewportY -
+        position.viewportDimension * 0.18;
+    return offset.clamp(position.minScrollExtent, position.maxScrollExtent);
+  }
+
+  double? _currentMatchY() {
+    final tableTarget = _tableMatchKey?.currentContext?.findRenderObject();
+    final tableRect = _tableMatchRect;
+    if (tableTarget is RenderBox && tableTarget.attached && tableRect != null) {
+      return tableTarget.localToGlobal(tableRect.topLeft).dy;
+    }
+    final target = _matchTextKey.currentContext?.findRenderObject();
+    if (target == null || !target.attached) {
+      final blockTop = _matchBlockGlobalY();
+      final localY = _matchBlockLocalY;
+      return blockTop != null && localY != null ? blockTop + localY : null;
+    }
+    RenderEditable? editable;
+    void visit(RenderObject object) {
+      if (object is RenderEditable) {
+        editable ??= object;
+      } else {
+        object.visitChildren(visit);
+      }
+    }
+
+    visit(target);
+    if (editable == null) {
+      return target is RenderBox ? target.localToGlobal(Offset.zero).dy : null;
+    }
+    final boxes = editable!.getBoxesForSelection(TextSelection(
+      baseOffset: _displayMatchStart,
+      extentOffset: _displayMatchEnd,
+    ));
+    if (boxes.isEmpty) return null;
+    return editable!.localToGlobal(Offset(0, boxes.first.top)).dy;
+  }
+
+  double? _matchBlockGlobalY() {
+    final sliver = _matchSliverKey.currentContext?.findRenderObject();
+    if (sliver is! RenderSliver || !sliver.attached) return null;
+    final position = _scrollController.position;
+    final viewport = position.context.notificationContext?.findRenderObject();
+    if (viewport is! RenderBox) return null;
+    return viewport.localToGlobal(Offset.zero).dy +
+        sliver.constraints.precedingScrollExtent -
+        position.pixels;
+  }
 
   TapGestureRecognizer _recognizerFor(String url) =>
       _linkRecognizers.putIfAbsent(
@@ -2763,6 +2921,8 @@ class _AnnouncementDetailPageState extends State<AnnouncementDetailPage> {
 
   @override
   void dispose() {
+    _matchPauseTimer?.cancel();
+    _prefixMetricsGeneration++;
     _scrollController.dispose();
     for (final recognizer in _linkRecognizers.values) {
       recognizer.dispose();
@@ -2889,6 +3049,8 @@ class _AnnouncementDetailPageState extends State<AnnouncementDetailPage> {
             );
           }
           final detail = snapshot.data!;
+          _findSearchMatch(detail);
+          _positionFirstMatch();
           final colors = context.shuyoColors;
           final imageUrls = detail.blocks
               .where((block) => block.isImage)
@@ -2914,48 +3076,42 @@ class _AnnouncementDetailPageState extends State<AnnouncementDetailPage> {
               controller: _scrollController,
               thumbVisibility: true,
               interactive: true,
-              child: ListView(
-                controller: _scrollController,
-                padding: const EdgeInsets.fromLTRB(
-                  _announcementDetailPadding,
-                  10,
-                  _announcementDetailPadding,
-                  28,
-                ),
-                children: [
-                  Text(
-                    detail.title,
-                    style: ShuYoTextStyles.title(
-                      color: colors.textPrimary,
-                      size: 20,
-                      height: 1.22,
-                      weight: FontWeight.w600,
+              child: _matchedBlockIndex != null
+                  ? _matchedArticleList(detail, imageUrls, imageIndexByBlock)
+                  : ListView(
+                      controller: _scrollController,
+                      padding: const EdgeInsets.fromLTRB(
+                        _announcementDetailPadding,
+                        10,
+                        _announcementDetailPadding,
+                        28,
+                      ),
+                      children: [
+                        _detailTitle(detail),
+                        const SizedBox(height: 12),
+                        _AnnouncementMetadata(
+                          detail: detail,
+                          showDepartment:
+                              !AnnouncementSource.byId(widget.item.sourceId)
+                                  .adapter
+                                  .hideDetailDepartment,
+                        ),
+                        const SizedBox(height: 22),
+                        if (!detail.hasContent)
+                          Text(
+                            '这条公告暂时没有解析到正文。',
+                            style: TextStyle(color: colors.textTertiary),
+                          )
+                        else
+                          ...List.generate(detail.blocks.length, (index) {
+                            return _blockWidget(
+                              detail.blocks[index],
+                              imageUrls: imageUrls,
+                              imageIndex: imageIndexByBlock[index] ?? 0,
+                            );
+                          }),
+                      ],
                     ),
-                  ),
-                  const SizedBox(height: 12),
-                  _AnnouncementMetadata(
-                    detail: detail,
-                    showDepartment:
-                        !AnnouncementSource.byId(widget.item.sourceId)
-                            .adapter
-                            .hideDetailDepartment,
-                  ),
-                  const SizedBox(height: 22),
-                  if (!detail.hasContent)
-                    Text(
-                      '这条公告暂时没有解析到正文。',
-                      style: TextStyle(color: colors.textTertiary),
-                    )
-                  else
-                    ...List.generate(detail.blocks.length, (index) {
-                      return _blockWidget(
-                        detail.blocks[index],
-                        imageUrls: imageUrls,
-                        imageIndex: imageIndexByBlock[index] ?? 0,
-                      );
-                    }),
-                ],
-              ),
             ),
           );
         },
@@ -2963,10 +3119,248 @@ class _AnnouncementDetailPageState extends State<AnnouncementDetailPage> {
     );
   }
 
+  Widget _detailTitle(AnnouncementDetail detail) {
+    final style = ShuYoTextStyles.title(
+      color: context.shuyoColors.textPrimary,
+      size: 20,
+      height: 1.22,
+      weight: FontWeight.w600,
+    );
+    final matches = announcementSearchPattern(widget.highlightQuery)
+        ?.allMatches(detail.title)
+        .toList(growable: false);
+    if (matches == null || matches.isEmpty) {
+      return Text(detail.title, style: style);
+    }
+    final spans = <InlineSpan>[];
+    var offset = 0;
+    for (final match in matches) {
+      if (match.start > offset) {
+        spans.add(TextSpan(text: detail.title.substring(offset, match.start)));
+      }
+      spans.add(TextSpan(
+        text: detail.title.substring(match.start, match.end),
+        style: TextStyle(
+          color: Theme.of(context).colorScheme.primary,
+          fontWeight: FontWeight.w600,
+        ),
+      ));
+      offset = match.end;
+    }
+    if (offset < detail.title.length) {
+      spans.add(TextSpan(text: detail.title.substring(offset)));
+    }
+    return Text.rich(
+      TextSpan(children: spans),
+      style: style,
+    );
+  }
+
+  Widget _matchedArticleList(
+    AnnouncementDetail detail,
+    List<String> imageUrls,
+    Map<int, int> imageIndexByBlock,
+  ) {
+    final matchIndex = _matchedBlockIndex!;
+    Widget blockAt(int index) => _blockWidget(
+          detail.blocks[index],
+          imageUrls: imageUrls,
+          imageIndex: imageIndexByBlock[index] ?? 0,
+          highlight: index == matchIndex,
+        );
+    return LayoutBuilder(builder: (context, constraints) {
+      _preparePrefixMetrics(context, detail,
+          constraints.maxWidth - _announcementDetailPadding * 2);
+      final prefixSlivers = <Widget>[];
+      var index = 0;
+      while (index < matchIndex) {
+        final start = index;
+        final plainText = _isMeasuredPrefixText(detail.blocks[index]);
+        if (plainText) {
+          while (index < matchIndex &&
+              _isMeasuredPrefixText(detail.blocks[index])) {
+            index++;
+          }
+        } else {
+          while (index < matchIndex &&
+              !_isMeasuredPrefixText(detail.blocks[index])) {
+            index++;
+          }
+        }
+        final count = index - start;
+        prefixSlivers.add(SliverPadding(
+          padding: const EdgeInsets.symmetric(
+              horizontal: _announcementDetailPadding),
+          sliver: plainText && _prefixMetricsReady
+              ? SliverVariedExtentList.builder(
+                  itemCount: count,
+                  itemExtentBuilder: (index, dimensions) =>
+                      index < count ? _prefixTextExtents[start + index] : null,
+                  itemBuilder: (context, index) => blockAt(start + index),
+                )
+              : SliverList.builder(
+                  itemCount: count,
+                  itemBuilder: (context, index) => blockAt(start + index),
+                ),
+        ));
+      }
+      return NotificationListener<ScrollMetricsNotification>(
+        onNotification: (notification) {
+          if (notification.metrics.axis == Axis.vertical) {
+            _scheduleMatchCorrection();
+          }
+          return false;
+        },
+        child: Listener(
+          onPointerDown: (_) => _cancelMatchNavigation(),
+          onPointerSignal: (_) => _cancelMatchNavigation(),
+          child: CustomScrollView(
+            key: const ValueKey('announcement-search-matched-article'),
+            controller: _scrollController,
+            slivers: [
+              SliverPadding(
+                padding: const EdgeInsets.fromLTRB(_announcementDetailPadding,
+                    10, _announcementDetailPadding, 0),
+                sliver: SliverToBoxAdapter(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      _detailTitle(detail),
+                      const SizedBox(height: 12),
+                      _AnnouncementMetadata(
+                        detail: detail,
+                        showDepartment:
+                            !AnnouncementSource.byId(widget.item.sourceId)
+                                .adapter
+                                .hideDetailDepartment,
+                      ),
+                      const SizedBox(height: 22),
+                    ],
+                  ),
+                ),
+              ),
+              ...prefixSlivers,
+              SliverPadding(
+                key: _matchSliverKey,
+                padding: const EdgeInsets.fromLTRB(_announcementDetailPadding,
+                    0, _announcementDetailPadding, 28),
+                sliver: SliverList.builder(
+                  itemCount: detail.blocks.length - matchIndex,
+                  itemBuilder: (context, index) => blockAt(matchIndex + index),
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+    });
+  }
+
+  bool _isMeasuredPrefixText(AnnouncementContentBlock block) =>
+      block.isText && block.parts.every((part) => part.url.isEmpty);
+
+  /// Known text extents let the lazy list pass distant paragraphs without
+  /// creating every SelectableText on the way. The initial body is already
+  /// visible while these cheap measurements run in short frame slices.
+  void _preparePrefixMetrics(
+      BuildContext context, AnnouncementDetail detail, double width) {
+    final defaults = DefaultTextStyle.of(context);
+    var style = defaults.style.merge(TextStyle(
+      fontSize: 16,
+      height: 1.7,
+      color: context.shuyoColors.textPrimary,
+    ));
+    style = style.copyWith(
+      height: MediaQuery.maybeLineHeightScaleFactorOverrideOf(context) ??
+          style.height,
+      letterSpacing: MediaQuery.maybeLetterSpacingOverrideOf(context) ??
+          style.letterSpacing,
+      wordSpacing:
+          MediaQuery.maybeWordSpacingOverrideOf(context) ?? style.wordSpacing,
+    );
+    if (MediaQuery.boldTextOf(context)) {
+      style = style.merge(const TextStyle(fontWeight: FontWeight.bold));
+    }
+    final scaler = MediaQuery.textScalerOf(context);
+    final direction = Directionality.of(context);
+    final locale = Localizations.maybeLocaleOf(context);
+    final heightBehavior = defaults.textHeightBehavior ??
+        DefaultTextHeightBehavior.maybeOf(context);
+    final configuration = (
+      width,
+      style,
+      scaler,
+      direction,
+      locale,
+      defaults.textAlign,
+      defaults.textWidthBasis,
+      defaults.maxLines,
+      heightBehavior,
+    );
+    if (_prefixMetricsConfiguration == configuration) return;
+    _prefixMetricsConfiguration = configuration;
+    _prefixMetricsReady = false;
+    _prefixTextExtents.clear();
+    final generation = ++_prefixMetricsGeneration;
+    final matchIndex = _matchedBlockIndex!;
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      if (!mounted || generation != _prefixMetricsGeneration) return;
+      _matchPauseTimer ??= Timer(const Duration(milliseconds: 250), () {
+        if (!mounted || _matchNavigationCancelled) return;
+        setState(() => _matchPauseElapsed = true);
+        _positionFirstMatch();
+        WidgetsBinding.instance.scheduleFrame();
+      });
+      final stopwatch = Stopwatch()..start();
+      for (var index = 0; index < matchIndex; index++) {
+        if (!mounted || generation != _prefixMetricsGeneration) return;
+        final block = detail.blocks[index];
+        if (!_isMeasuredPrefixText(block)) continue;
+        final text = block.parts.isEmpty
+            ? block.value
+            : block.parts.map((part) => part.text).join();
+        final painter = TextPainter(
+          text: TextSpan(text: text, style: style),
+          textDirection: direction,
+          textAlign: defaults.textAlign ?? TextAlign.start,
+          textScaler: scaler,
+          textWidthBasis: defaults.textWidthBasis,
+          textHeightBehavior: heightBehavior,
+          maxLines: defaults.maxLines,
+          locale: locale,
+          strutStyle: const StrutStyle().inheritFromTextStyle(style),
+        )..layout(maxWidth: math.max(0, width - 3));
+        // SelectableText's RenderEditable reserves a 2px caret plus 1px gap.
+        _prefixTextExtents[index] = painter.height + 13;
+        painter.dispose();
+        if (stopwatch.elapsedMicroseconds >= 2200) {
+          WidgetsBinding.instance.scheduleFrame();
+          await WidgetsBinding.instance.endOfFrame;
+          stopwatch.reset();
+        }
+      }
+      if (!mounted || generation != _prefixMetricsGeneration) return;
+      setState(() => _prefixMetricsReady = true);
+      _positionFirstMatch();
+    });
+  }
+
+  void _cancelMatchNavigation() {
+    if (_matchNavigationCancelled) return;
+    _matchPauseTimer?.cancel();
+    _matchNavigationCancelled = true;
+    if (_scrollController.hasClients &&
+        _scrollController.position.isScrollingNotifier.value) {
+      _scrollController.jumpTo(_scrollController.offset);
+    }
+    setState(() {});
+  }
+
   Widget _blockWidget(
     AnnouncementContentBlock block, {
     required List<String> imageUrls,
     required int imageIndex,
+    bool highlight = false,
   }) {
     if (block.isLink) {
       return Align(
@@ -2979,7 +3373,14 @@ class _AnnouncementDetailPageState extends State<AnnouncementDetailPage> {
                 : Icons.open_in_new,
             size: 18,
           ),
-          label: Text(block.label.isEmpty ? '查看链接' : block.label),
+          label: highlight
+              ? Text.rich(
+                  key: _matchTextKey,
+                  TextSpan(
+                      children: _highlightedSpans(block.label,
+                          start: _matchStart, end: _matchEnd)),
+                )
+              : Text(block.label.isEmpty ? '查看链接' : block.label),
         ),
       );
     }
@@ -2987,6 +3388,18 @@ class _AnnouncementDetailPageState extends State<AnnouncementDetailPage> {
       return _AnnouncementTableWidget(
         block: block,
         color: context.shuyoColors,
+        match: highlight ? _matchedTableCell : null,
+        matchKey: highlight ? _matchTextKey : null,
+        positionMatch: _matchPauseElapsed &&
+            _prefixMetricsReady &&
+            !_matchNavigationCancelled,
+        onMatchReady: highlight
+            ? (key, rect) {
+                _tableMatchKey = key;
+                _tableMatchRect = rect;
+                _positionFirstMatch();
+              }
+            : null,
       );
     }
     if (block.isImage) {
@@ -3039,36 +3452,8 @@ class _AnnouncementDetailPageState extends State<AnnouncementDetailPage> {
     return Padding(
       padding: const EdgeInsets.only(bottom: 13),
       child: SelectableText.rich(
-        TextSpan(
-            children: block.parts.isEmpty
-                ? [TextSpan(text: block.value)]
-                : block.parts.map((part) {
-                    if (part.url.isEmpty) return TextSpan(text: part.text);
-                    final link = TextSpan(
-                      text: _breakableInlineLinkText(part.text, part.url),
-                      style: TextStyle(
-                        color: Theme.of(context).colorScheme.primary,
-                        decoration: TextDecoration.underline,
-                        decorationColor: Theme.of(context).colorScheme.primary,
-                      ),
-                      recognizer: _recognizerFor(part.url),
-                    );
-                    final isEmail = part.url.startsWith('mailto:');
-                    return TextSpan(children: [
-                      WidgetSpan(
-                        alignment: PlaceholderAlignment.middle,
-                        child: Padding(
-                          padding: const EdgeInsets.symmetric(horizontal: 3),
-                          child: Icon(
-                            isEmail ? Icons.mail_outline : Icons.open_in_new,
-                            size: 17,
-                            color: Theme.of(context).colorScheme.primary,
-                          ),
-                        ),
-                      ),
-                      link,
-                    ]);
-                  }).toList()),
+        key: highlight ? _matchTextKey : null,
+        TextSpan(children: _bodyTextSpans(block, highlight: highlight)),
         style: TextStyle(
           fontSize: 16,
           height: 1.7,
@@ -3076,6 +3461,100 @@ class _AnnouncementDetailPageState extends State<AnnouncementDetailPage> {
         ),
       ),
     );
+  }
+
+  List<InlineSpan> _bodyTextSpans(
+    AnnouncementContentBlock block, {
+    required bool highlight,
+  }) {
+    final parts = block.parts.isEmpty
+        ? [AnnouncementInlinePart(block.value)]
+        : block.parts;
+    final spans = <InlineSpan>[];
+    var rawOffset = 0;
+    var displayOffset = 0;
+    int displayIndex(String text, int rawIndex) {
+      var characters = 0;
+      for (var index = 0; index < text.length; index++) {
+        if (characters == rawIndex) return index;
+        if (text[index] != '\u200B') characters++;
+      }
+      return text.length;
+    }
+
+    for (final part in parts) {
+      final isLink = part.url.isNotEmpty;
+      final primary = Theme.of(context).colorScheme.primary;
+      final text =
+          isLink ? _breakableInlineLinkText(part.text, part.url) : part.text;
+      final style = isLink
+          ? TextStyle(
+              color: primary,
+              decoration: TextDecoration.underline,
+              decorationColor: primary,
+            )
+          : null;
+      final recognizer = isLink ? _recognizerFor(part.url) : null;
+      if (isLink) {
+        spans.add(WidgetSpan(
+          alignment: PlaceholderAlignment.middle,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 3),
+            child: Icon(
+              part.url.startsWith('mailto:')
+                  ? Icons.mail_outline
+                  : Icons.open_in_new,
+              size: 17,
+              color: primary,
+            ),
+          ),
+        ));
+        displayOffset++;
+      }
+      if (highlight &&
+          _matchStart >= rawOffset &&
+          _matchStart < rawOffset + part.text.length) {
+        _displayMatchStart =
+            displayOffset + displayIndex(text, _matchStart - rawOffset);
+      }
+      if (highlight &&
+          _matchEnd > rawOffset &&
+          _matchEnd <= rawOffset + part.text.length) {
+        _displayMatchEnd =
+            displayOffset + displayIndex(text, _matchEnd - rawOffset);
+      }
+      if (highlight &&
+          _matchStart < rawOffset + part.text.length &&
+          _matchEnd > rawOffset) {
+        final start = displayIndex(
+            text, (_matchStart - rawOffset).clamp(0, part.text.length));
+        final end = displayIndex(
+            text, (_matchEnd - rawOffset).clamp(0, part.text.length));
+        if (start > 0) {
+          spans.add(TextSpan(
+              text: text.substring(0, start),
+              style: style,
+              recognizer: recognizer));
+        }
+        spans.add(TextSpan(
+          text: text.substring(start, end),
+          style: (style ?? const TextStyle()).copyWith(
+            color: primary,
+            fontWeight: FontWeight.w600,
+          ),
+          recognizer: recognizer,
+        ));
+        if (end < text.length) {
+          spans.add(TextSpan(
+              text: text.substring(end), style: style, recognizer: recognizer));
+        }
+      } else {
+        spans.add(TextSpan(text: text, style: style, recognizer: recognizer));
+      }
+      rawOffset += part.text.length;
+      displayOffset += text.length;
+    }
+    return spans;
   }
 
   /// Pixel width the body actually occupies, used as the image decode width.
@@ -3165,10 +3644,21 @@ class _AnnouncementImagePlaceholder extends StatelessWidget {
 /// The loading state carries its own repaint boundary, so during a transition
 /// only this small area is re-recorded and the page layer can be reused.
 class _AnnouncementTableWidget extends StatelessWidget {
-  const _AnnouncementTableWidget({required this.block, required this.color});
+  const _AnnouncementTableWidget({
+    required this.block,
+    required this.color,
+    this.match,
+    this.matchKey,
+    this.onMatchReady,
+    this.positionMatch = true,
+  });
 
   final AnnouncementContentBlock block;
   final ShuYoColors color;
+  final ({int row, int column, int start, int end})? match;
+  final GlobalKey? matchKey;
+  final void Function(GlobalKey key, Rect rect)? onMatchReady;
+  final bool positionMatch;
 
   @override
   Widget build(BuildContext context) {
@@ -3197,6 +3687,10 @@ class _AnnouncementTableWidget extends StatelessWidget {
         rowCount: rowCount,
         columnCount: columnCount,
         color: color,
+        match: match,
+        matchColor: Theme.of(context).colorScheme.primary,
+        onMatchReady: onMatchReady,
+        positionMatch: positionMatch,
       );
     }
     final textStyle = TextStyle(color: color.textPrimary, fontSize: 13.5);
@@ -3216,7 +3710,10 @@ class _AnnouncementTableWidget extends StatelessWidget {
           final span = cell.columnSpan.clamp(1, columnCount - cell.column);
           final width = columnWidth * span;
           final painter = TextPainter(
-            text: TextSpan(text: cell.text, style: textStyle),
+            text: _tableCellTextSpan(cell,
+                style: textStyle,
+                match: match,
+                matchColor: Theme.of(context).colorScheme.primary),
             textDirection: textDirection,
             textScaler: textScaler,
             textAlign: _textAlign(cell.textAlignment),
@@ -3277,11 +3774,24 @@ class _AnnouncementTableWidget extends StatelessWidget {
                           ),
                           padding: const EdgeInsets.all(8),
                           alignment: _cellAlignment(cell),
-                          child: SelectableText(
-                            cell.text,
-                            style: textStyle,
-                            textAlign: _textAlign(cell.textAlignment),
-                          ),
+                          child: match?.row == cell.row &&
+                                  match?.column == cell.column
+                              ? SelectableText.rich(
+                                  key: matchKey,
+                                  _tableCellTextSpan(cell,
+                                      style: textStyle,
+                                      match: match,
+                                      matchColor: Theme.of(context)
+                                          .colorScheme
+                                          .primary),
+                                  style: textStyle,
+                                  textAlign: _textAlign(cell.textAlignment),
+                                )
+                              : SelectableText(
+                                  cell.text,
+                                  style: textStyle,
+                                  textAlign: _textAlign(cell.textAlignment),
+                                ),
                         ),
                       ),
                 ],
@@ -3315,6 +3825,26 @@ class _AnnouncementTableWidget extends StatelessWidget {
   }
 }
 
+TextSpan _tableCellTextSpan(
+  AnnouncementTableCell cell, {
+  required TextStyle style,
+  ({int row, int column, int start, int end})? match,
+  Color? matchColor,
+}) {
+  if (match == null || match.row != cell.row || match.column != cell.column) {
+    return TextSpan(text: cell.text, style: style);
+  }
+  return TextSpan(style: style, children: [
+    if (match.start > 0) TextSpan(text: cell.text.substring(0, match.start)),
+    TextSpan(
+      text: cell.text.substring(match.start, match.end),
+      style: TextStyle(color: matchColor, fontWeight: FontWeight.w600),
+    ),
+    if (match.end < cell.text.length)
+      TextSpan(text: cell.text.substring(match.end)),
+  ]);
+}
+
 /// Large tables cache visible text layouts and paint only visible cells.
 class _FastAnnouncementTable extends StatefulWidget {
   const _FastAnnouncementTable({
@@ -3323,6 +3853,10 @@ class _FastAnnouncementTable extends StatefulWidget {
     required this.rowCount,
     required this.columnCount,
     required this.color,
+    this.match,
+    this.matchColor,
+    this.onMatchReady,
+    this.positionMatch = true,
   });
 
   final AnnouncementContentBlock block;
@@ -3330,6 +3864,10 @@ class _FastAnnouncementTable extends StatefulWidget {
   final int rowCount;
   final int columnCount;
   final ShuYoColors color;
+  final ({int row, int column, int start, int end})? match;
+  final Color? matchColor;
+  final void Function(GlobalKey key, Rect rect)? onMatchReady;
+  final bool positionMatch;
 
   @override
   State<_FastAnnouncementTable> createState() => _FastAnnouncementTableState();
@@ -3344,11 +3882,22 @@ class _FastAnnouncementTableState extends State<_FastAnnouncementTable> {
   TextDirection? _textDirection;
   Color? _textColor;
   int _layoutGeneration = 0;
+  bool _matchPositioned = false;
 
   @override
   void didUpdateWidget(covariant _FastAnnouncementTable oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (!identical(oldWidget.block, widget.block)) _clearLayout();
+    if (oldWidget.positionMatch &&
+        !widget.positionMatch &&
+        _scrollController.hasClients &&
+        _scrollController.position.isScrollingNotifier.value) {
+      _scrollController.jumpTo(_scrollController.offset);
+    }
+    if (!identical(oldWidget.block, widget.block) ||
+        oldWidget.match != widget.match ||
+        oldWidget.matchColor != widget.matchColor) {
+      _clearLayout();
+    }
   }
 
   @override
@@ -3366,6 +3915,7 @@ class _FastAnnouncementTableState extends State<_FastAnnouncementTable> {
     _textScaler = null;
     _textDirection = null;
     _textColor = null;
+    _matchPositioned = false;
   }
 
   _AnnouncementTablePaintLayout? _layoutFor(
@@ -3389,6 +3939,8 @@ class _FastAnnouncementTableState extends State<_FastAnnouncementTable> {
       viewportWidth: viewportWidth,
       textScaler: textScaler,
       textDirection: direction,
+      match: widget.match,
+      matchColor: widget.matchColor,
     );
     if (widget.cells.length <= 256) {
       while (!work.isComplete) {
@@ -3460,6 +4012,7 @@ class _FastAnnouncementTableState extends State<_FastAnnouncementTable> {
           child: Center(child: CircularProgressIndicator(strokeWidth: 2)),
         );
       }
+      _positionTableMatch(layout, constraints.maxWidth);
       return Padding(
         padding: const EdgeInsets.symmetric(vertical: 10),
         child: RepaintBoundary(
@@ -3486,6 +4039,50 @@ class _FastAnnouncementTableState extends State<_FastAnnouncementTable> {
           ),
         ),
       );
+    });
+  }
+
+  void _positionTableMatch(_AnnouncementTablePaintLayout layout, double width) {
+    final match = widget.match;
+    if (match == null || _matchPositioned) return;
+    _AnnouncementTablePaintCell? matchedCell;
+    for (final entry in layout.cells) {
+      if (entry.cell.row == match.row && entry.cell.column == match.column) {
+        matchedCell = entry;
+        break;
+      }
+    }
+    if (matchedCell == null) return;
+    _matchPositioned = widget.positionMatch;
+    final cell = matchedCell;
+    final painter = layout.painterFor(cell);
+    final boxes = painter.getBoxesForSelection(TextSelection(
+      baseOffset: match.start,
+      extentOffset: match.end,
+    ));
+    final content = cell.rect.deflate(8);
+    final verticalFactor = switch (cell.cell.verticalAlignment) {
+      'top' => 0.0,
+      'bottom' => 1.0,
+      _ => 0.5,
+    };
+    final textTop = content.top +
+        math.max(0.0, content.height - painter.height) * verticalFactor;
+    final rect = boxes.isEmpty
+        ? content
+        : boxes.first.toRect().shift(Offset(content.left, textTop));
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !identical(_layout, layout)) return;
+      if (widget.positionMatch && _scrollController.hasClients) {
+        final position = _scrollController.position;
+        unawaited(_scrollController.animateTo(
+          (rect.left - width * 0.15)
+              .clamp(position.minScrollExtent, position.maxScrollExtent),
+          duration: _announcementMatchScrollDuration,
+          curve: Curves.easeOutCubic,
+        ));
+      }
+      widget.onMatchReady?.call(_paintKey, rect);
     });
   }
 }
@@ -3515,6 +4112,8 @@ class _AnnouncementTableLayoutWork {
     required double viewportWidth,
     required this.textScaler,
     required this.textDirection,
+    this.match,
+    this.matchColor,
   })  : columnWidth = math.max(112.0, viewportWidth / columnCount),
         style = TextStyle(color: textColor, fontSize: 13.5),
         rowHeights = List<double>.filled(rowCount, 40),
@@ -3531,6 +4130,8 @@ class _AnnouncementTableLayoutWork {
   final TextStyle style;
   final TextScaler textScaler;
   final TextDirection textDirection;
+  final ({int row, int column, int start, int end})? match;
+  final Color? matchColor;
   final List<double> rowHeights;
   final List<double> rowOffsets;
   final List<List<_AnnouncementTablePaintCell>> cellsByRow;
@@ -3559,7 +4160,8 @@ class _AnnouncementTableLayoutWork {
       }
       final span = cell.columnSpan.clamp(1, columnCount - cell.column);
       final painter = TextPainter(
-        text: TextSpan(text: cell.text, style: style),
+        text: _tableCellTextSpan(cell,
+            style: style, match: match, matchColor: matchColor),
         textDirection: textDirection,
         textScaler: textScaler,
         textAlign: _tableTextAlign(cell.textAlignment),
@@ -3634,6 +4236,8 @@ class _AnnouncementTableLayoutWork {
       style: style,
       textScaler: textScaler,
       textDirection: textDirection,
+      match: match,
+      matchColor: matchColor,
     );
   }
 }
@@ -3648,6 +4252,8 @@ class _AnnouncementTablePaintLayout {
     required this.style,
     required this.textScaler,
     required this.textDirection,
+    this.match,
+    this.matchColor,
   });
 
   final double width;
@@ -3658,6 +4264,8 @@ class _AnnouncementTablePaintLayout {
   final TextStyle style;
   final TextScaler textScaler;
   final TextDirection textDirection;
+  final ({int row, int column, int start, int end})? match;
+  final Color? matchColor;
   final Map<_AnnouncementTablePaintCell, TextPainter> _painters = {};
 
   int firstVisibleRow(double top) {
@@ -3695,7 +4303,8 @@ class _AnnouncementTablePaintLayout {
       return cached;
     }
     final painter = TextPainter(
-      text: TextSpan(text: cell.cell.text, style: style),
+      text: _tableCellTextSpan(cell.cell,
+          style: style, match: match, matchColor: matchColor),
       textDirection: textDirection,
       textScaler: textScaler,
       textAlign: _tableTextAlign(cell.cell.textAlignment),
@@ -3985,11 +4594,9 @@ class _AnnouncementTileState extends State<_AnnouncementTile>
                   if (preview != null && preview.isNotEmpty)
                     Padding(
                       padding: const EdgeInsets.only(top: 6),
-                      child: Text(
+                      child: _highlightedText(
                         preview,
-                        maxLines: 2,
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyle(
+                        TextStyle(
                           color: colors.textTertiary,
                           fontSize: 14,
                           height: 1.46,
@@ -4029,29 +4636,30 @@ class _AnnouncementTileState extends State<_AnnouncementTile>
       height: 1.26,
       weight: FontWeight.w500,
     );
-    final query = widget.highlightQuery.trim();
-    if (query.isEmpty || !title.toLowerCase().contains(query.toLowerCase())) {
-      return Text(title,
+    return _highlightedText(title, style);
+  }
+
+  Widget _highlightedText(String text, TextStyle style) {
+    final pattern = announcementSearchPattern(widget.highlightQuery);
+    final matches = pattern?.allMatches(text);
+    if (matches == null || matches.isEmpty) {
+      return Text(text,
           maxLines: 2, overflow: TextOverflow.ellipsis, style: style);
     }
-    final lowerTitle = title.toLowerCase();
-    final lowerQuery = query.toLowerCase();
     final parts = <TextSpan>[];
     var start = 0;
-    while (start < title.length) {
-      final match = lowerTitle.indexOf(lowerQuery, start);
-      if (match < 0) {
-        parts.add(TextSpan(text: title.substring(start)));
-        break;
-      }
-      if (match > start) {
-        parts.add(TextSpan(text: title.substring(start, match)));
+    for (final match in matches) {
+      if (match.start > start) {
+        parts.add(TextSpan(text: text.substring(start, match.start)));
       }
       parts.add(TextSpan(
-        text: title.substring(match, match + query.length),
+        text: text.substring(match.start, match.end),
         style: TextStyle(color: Theme.of(context).colorScheme.primary),
       ));
-      start = match + query.length;
+      start = match.end;
+    }
+    if (start < text.length) {
+      parts.add(TextSpan(text: text.substring(start)));
     }
     return Text.rich(TextSpan(children: parts),
         maxLines: 2, overflow: TextOverflow.ellipsis, style: style);

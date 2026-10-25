@@ -15,6 +15,7 @@ import 'package:shuyo/data/services/announcement_search_service.dart';
 import 'package:shuyo/features/home/announcements_page.dart';
 import 'package:shuyo/shared/theme/custom_background.dart';
 import 'package:shuyo/shared/theme/shuyo_theme.dart';
+import 'package:shuyo/shared/widgets/date_picker_dialog.dart';
 
 const _listTitle = '关于开展实验室安全检查的通知';
 const _detailBody = '各单位请于本周五前完成自查';
@@ -252,12 +253,14 @@ Future<void> _openDetail(
 }
 
 void main() {
-  testWidgets('retry settings persist and obsolete search controls are absent',
+  testWidgets(
+      'search scope is selectable inline and obsolete controls stay absent',
       (tester) async {
     SharedPreferences.setMockInitialValues({
       'announcements.search.selectedSources': ['shu'],
       'announcements.search.fast': true,
       'announcements.search.strength': 5,
+      'announcements.search.retryFailures': false,
     });
     await tester.pumpWidget(MaterialApp(
       home: AnnouncementSearchPage(repository: _repositoryWith(), isDemo: true),
@@ -266,18 +269,118 @@ void main() {
     expect(find.textContaining('搜索强度'), findsNothing);
     expect(find.textContaining('Fast模式'), findsNothing);
     expect(find.byTooltip('取消搜索'), findsNothing);
-    await tester.tap(find.byTooltip('更多'));
-    await tester.pumpAndSettle();
-    expect(find.text('搜索范围'), findsOneWidget);
+    expect(find.byTooltip('更多'), findsNothing);
+    expect(find.text('失败重试'), findsNothing);
+    expect(
+        find.byKey(const ValueKey('announcement-search-scope')), findsNothing);
+    expect(find.byTooltip('搜索范围'), findsNothing);
+    expect(find.text('搜索范围'), findsNothing);
     expect(find.text('搜索强度'), findsNothing);
-    await tester.tap(find.text('失败重试'));
+    expect(find.text('失败重试'), findsNothing);
+    final title = find.byKey(const ValueKey('announcement-search-title-scope'));
+    final body = find.byKey(const ValueKey('announcement-search-body-scope'));
+    expect(tester.widget<FilterChip>(title).selected, isTrue);
+    expect(tester.widget<FilterChip>(body).selected, isFalse);
+    expect(find.widgetWithText(FilterChip, '标题'), findsOneWidget);
+    expect(find.widgetWithText(FilterChip, '内容'), findsOneWidget);
+    await tester.tap(body);
     await tester.pumpAndSettle();
-    final retry = find.widgetWithText(SwitchListTile, '失败重试');
-    expect(tester.widget<SwitchListTile>(retry).value, isTrue);
-    await tester.tap(retry);
+    expect(tester.widget<FilterChip>(body).selected, isTrue);
+  });
+
+  testWidgets('obsolete retry preference does not disable transient recovery',
+      (tester) async {
+    SharedPreferences.setMockInitialValues({
+      'announcements.search.selectedSources': ['shu'],
+      'announcements.search.retryFailures': false,
+    });
+    var requests = 0;
+    final service = AnnouncementSearchService(
+      retryBaseDelay: Duration.zero,
+      clientFactory: () => MockClient((request) async {
+        requests++;
+        if (requests == 1) return http.Response('unavailable', 503);
+        return _searchResponse([
+          _searchRecord(title: '目标词 恢复后的公告'),
+        ]);
+      }),
+    );
+    addTearDown(service.dispose);
+    await tester.pumpWidget(MaterialApp(
+      home: AnnouncementSearchPage(
+        repository: _repositoryWith(),
+        searchService: service,
+      ),
+    ));
+    await _startAnnouncementSearch(tester);
     await tester.pumpAndSettle();
-    final prefs = await SharedPreferences.getInstance();
-    expect(prefs.getBool('announcements.search.retryFailures'), isFalse);
+    expect(requests, 2);
+    expect(find.text('目标词 恢复后的公告'), findsOneWidget);
+    expect(find.byType(SnackBar), findsNothing);
+    expect(find.text('失败重试'), findsNothing);
+  });
+
+  testWidgets('tapping blank search page space dismisses the query keyboard',
+      (tester) async {
+    SharedPreferences.setMockInitialValues({});
+    await tester.pumpWidget(MaterialApp(
+      home: AnnouncementSearchPage(repository: _repositoryWith(), isDemo: true),
+    ));
+    await tester.pumpAndSettle();
+    final field = find.byType(TextField);
+    await tester.tap(field);
+    await tester.enterText(field, '保留搜索关键词');
+    await tester.pump();
+    final input = tester.widget<TextField>(field);
+    expect(input.focusNode!.hasFocus, isTrue);
+    expect(tester.testTextInput.isVisible, isTrue);
+
+    final bottom = tester.getBottomLeft(find.byType(Scaffold)).dy;
+    await tester.tapAt(Offset(8, bottom - 24));
+    await tester.pump();
+
+    expect(input.focusNode!.hasFocus, isFalse);
+    expect(tester.testTextInput.isVisible, isFalse);
+    expect(input.controller!.text, '保留搜索关键词');
+  });
+
+  testWidgets('search field and inline scope match the app input style',
+      (tester) async {
+    tester.view.physicalSize = const Size(320, 640);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    SharedPreferences.setMockInitialValues({});
+    final theme = ShuYoThemes.byId(ShuYoThemes.defaultId).themeData();
+    await tester.pumpWidget(MaterialApp(
+      theme: theme,
+      home: AnnouncementSearchPage(repository: _repositoryWith(), isDemo: true),
+    ));
+    await tester.pumpAndSettle();
+    final field = tester.widget<TextField>(find.byType(TextField));
+    expect(field.decoration!.labelText, '搜索公告关键词');
+    expect(field.decoration!.hintText, isNull);
+    expect(field.decoration!.prefixIcon, isNull);
+    final decoration = tester
+        .widget<InputDecorator>(find.descendant(
+          of: find.byType(TextField),
+          matching: find.byType(InputDecorator),
+        ))
+        .decoration;
+    expect(decoration.filled, isFalse);
+    expect(decoration.enabledBorder, theme.inputDecorationTheme.enabledBorder);
+    expect(decoration.focusedBorder, theme.inputDecorationTheme.focusedBorder);
+    final count = find.byKey(const ValueKey('announcement-search-found-count'));
+    final title = find.byKey(const ValueKey('announcement-search-title-scope'));
+    final body = find.byKey(const ValueKey('announcement-search-body-scope'));
+    expect(tester.getCenter(title).dy, closeTo(tester.getCenter(count).dy, 1));
+    expect(tester.getCenter(body).dy, closeTo(tester.getCenter(count).dy, 1));
+    expect(
+        tester.getTopLeft(title).dx, greaterThan(tester.getTopRight(count).dx));
+    expect(
+        tester.getTopLeft(body).dx, greaterThan(tester.getTopRight(title).dx));
+    expect(tester.getBottomRight(body).dx, lessThanOrEqualTo(304));
+    expect(tester.takeException(), isNull);
   });
 
   testWidgets(
@@ -302,12 +405,17 @@ void main() {
     ));
     await _startAnnouncementSearch(tester);
     expect(find.text('1 项解析失败'), findsOneWidget);
+    expect(
+        find.descendant(
+            of: find.byType(SnackBar), matching: find.text('1 项解析失败')),
+        findsOneWidget);
     expect(find.text('没有找到公告'), findsOneWidget);
     expect(find.text('继续失败项'), findsNothing);
     expect(requests, 1);
   });
 
-  testWidgets('API snippets display without another article preview request',
+  testWidgets(
+      'API snippets highlight every literal term without another article preview request',
       (tester) async {
     SharedPreferences.setMockInitialValues({
       'announcements.search.selectedSources': ['shu'],
@@ -319,7 +427,10 @@ void main() {
       clientFactory: () => MockClient((request) async {
         requests.add(request);
         return _searchResponse([
-          _searchRecord(title: '普通公告', summary: '<em>目标</em>内容'),
+          _searchRecord(
+            title: '普通公告',
+            summary: '<em>目标</em>内容，与 C++ 及 c++ 相关的目标',
+          ),
         ]);
       }),
     );
@@ -330,15 +441,50 @@ void main() {
         searchService: service,
       ),
     ));
-    await _startAnnouncementSearch(tester, query: '目标');
+    await _startAnnouncementSearch(tester, query: '目标 C++');
     expect(find.text('普通公告'), findsOneWidget);
-    expect(find.text('目标内容'), findsOneWidget);
+    final snippet = find.text('目标内容，与 C++ 及 c++ 相关的目标');
+    expect(snippet, findsOneWidget);
+    final preview = tester.widget<Text>(snippet);
+    final primary = Theme.of(tester.element(snippet)).colorScheme.primary;
+    final highlighted = (preview.textSpan! as TextSpan)
+        .children!
+        .whereType<TextSpan>()
+        .where((span) => span.style?.color == primary)
+        .map((span) => span.text);
+    expect(highlighted, ['目标', 'C++', 'c++', '目标']);
+    expect(preview.maxLines, 2);
+    expect(preview.overflow, TextOverflow.ellipsis);
     expect(repository.previewRequests, isEmpty);
     expect(requests, hasLength(1));
     final requestBody =
         jsonDecode(requests.single.body) as Map<String, dynamic>;
     expect(requestBody['owner'], AnnouncementSource.official.searchOwner);
     expect(requestBody['searchScope'], 3);
+  });
+
+  testWidgets(
+      'search detail receives the active query rather than edited input',
+      (tester) async {
+    SharedPreferences.setMockInitialValues({
+      'announcements.search.selectedSources': ['shu'],
+    });
+    await tester.pumpWidget(MaterialApp(
+      home: AnnouncementSearchPage(
+        repository: _repositoryWith(),
+        isDemo: true,
+      ),
+    ));
+    await _startAnnouncementSearch(tester, query: '实验室');
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextField), '下次查询');
+    await tester.tap(find.text(_listTitle));
+    await tester.pumpAndSettle();
+    final detail = tester.widget<AnnouncementDetailPage>(
+      find.byType(AnnouncementDetailPage),
+    );
+    expect(detail.highlightQuery, '实验室');
+    expect(find.text(_detailBody), findsOneWidget);
   });
 
   testWidgets('title result stays visible while a missing preview loads',
@@ -408,7 +554,7 @@ void main() {
     );
   });
 
-  testWidgets('API pages append seamlessly and input unlocks when complete',
+  testWidgets('API pages append seamlessly without changing the input style',
       (tester) async {
     SharedPreferences.setMockInitialValues({
       'announcements.search.selectedSources': ['shu'],
@@ -435,9 +581,33 @@ void main() {
         searchService: service,
       ),
     ));
+    await tester.pumpAndSettle();
+    final inputFinder = find.byType(TextField);
+    final inputElement = tester.element(inputFinder);
+    final initialInput = tester.widget<TextField>(inputFinder);
+    expect(initialInput.readOnly, isFalse);
+    final decoratorFinder = find.descendant(
+      of: inputFinder,
+      matching: find.byType(InputDecorator),
+    );
+    final initialDecoration =
+        tester.widget<InputDecorator>(decoratorFinder).decoration;
     await _startAnnouncementSearch(tester);
     expect(find.text('目标词 公告 0'), findsOneWidget);
-    expect(tester.widget<TextField>(find.byType(TextField)).enabled, isFalse);
+    final searchingInput = tester.widget<TextField>(inputFinder);
+    expect(tester.element(inputFinder), same(inputElement));
+    expect(searchingInput.readOnly, isTrue);
+    expect(searchingInput.enabled, isNot(false));
+    expect(searchingInput.decoration, initialInput.decoration);
+    final searchingDecoration =
+        tester.widget<InputDecorator>(decoratorFinder).decoration;
+    expect(searchingDecoration.enabled, isTrue);
+    expect(searchingDecoration.enabledBorder, initialDecoration.enabledBorder);
+    expect(searchingDecoration.focusedBorder, initialDecoration.focusedBorder);
+    expect(searchingDecoration.fillColor, initialDecoration.fillColor);
+    expect(searchingInput.controller!.text, '目标词');
+    expect(tester.widget<EditableText>(find.byType(EditableText)).readOnly,
+        isTrue);
     expect(find.byTooltip('取消搜索'), findsNothing);
     expect(
       tester
@@ -483,7 +653,12 @@ void main() {
             ))
             .data,
         '51');
-    expect(tester.widget<TextField>(find.byType(TextField)).enabled, isTrue);
+    final completedInput = tester.widget<TextField>(inputFinder);
+    expect(tester.element(inputFinder), same(inputElement));
+    expect(completedInput.readOnly, isFalse);
+    expect(completedInput.enabled, isNot(false));
+    expect(completedInput.decoration, initialInput.decoration);
+    expect(completedInput.controller!.text, '目标词');
     expect(find.text(retainedText), findsOneWidget);
   });
 
@@ -555,7 +730,7 @@ void main() {
     Navigator.of(tester.element(find.byType(AnnouncementDetailPage))).pop();
     await tester.pumpAndSettle();
     expect(foundCount().data, '51');
-    expect(tester.widget<TextField>(find.byType(TextField)).enabled, isTrue);
+    expect(tester.widget<TextField>(find.byType(TextField)).readOnly, isFalse);
   });
 
   testWidgets('updating one department preserves the other department sliver',
@@ -608,7 +783,8 @@ void main() {
         isTrue);
   });
 
-  testWidgets('settings changed during a search apply to the next request',
+  testWidgets(
+      'search locks scope while source changes apply to the next request',
       (tester) async {
     SharedPreferences.setMockInitialValues({
       'announcements.search.selectedSources': ['shu', 'bksy'],
@@ -641,14 +817,19 @@ void main() {
     await pumpOverlay();
     await tester.tapAt(const Offset(8, 8));
     await pumpOverlay();
-    await tester.tap(find.byTooltip('更多'));
+    final bodyScope = find.byKey(
+      const ValueKey('announcement-search-body-scope'),
+    );
+    final titleScope = find.byKey(
+      const ValueKey('announcement-search-title-scope'),
+    );
+    expect(tester.widget<FilterChip>(titleScope).onSelected, isNull);
+    expect(tester.widget<FilterChip>(bodyScope).onSelected, isNull);
+    await tester.tap(titleScope);
+    await tester.tap(bodyScope);
     await pumpOverlay();
-    await tester.tap(find.text('搜索范围'));
-    await pumpOverlay();
-    await tester.tap(find.widgetWithText(OutlinedButton, '内容'));
-    await tester.tapAt(const Offset(8, 8));
-    await pumpOverlay();
-    expect(find.text('搜索范围：标题'), findsOneWidget);
+    expect(tester.widget<FilterChip>(titleScope).selected, isTrue);
+    expect(tester.widget<FilterChip>(bodyScope).selected, isFalse);
     expect((requests.single['owner'] as String).split(',').toSet(), {
       AnnouncementSource.official.searchOwner,
       AnnouncementSource.byId('bksy').searchOwner,
@@ -659,7 +840,12 @@ void main() {
     ]));
     await tester.pumpAndSettle();
     expect(find.text('目标词 本科生院公告'), findsOneWidget);
-    expect(find.text('搜索范围：标题+正文'), findsOneWidget);
+    expect(tester.widget<FilterChip>(titleScope).onSelected, isNotNull);
+    expect(tester.widget<FilterChip>(bodyScope).onSelected, isNotNull);
+    expect(tester.widget<FilterChip>(bodyScope).selected, isFalse);
+    await tester.tap(bodyScope);
+    await tester.pumpAndSettle();
+    expect(tester.widget<FilterChip>(bodyScope).selected, isTrue);
     await tester.tap(find.byTooltip('开始搜索'));
     await tester.pumpAndSettle();
     expect(requests, hasLength(2));
@@ -679,6 +865,65 @@ void main() {
     await tester.pump();
     expect(find.text('请至少选择一个部门'), findsOneWidget);
     expect(find.byType(LinearProgressIndicator), findsNothing);
+  });
+
+  testWidgets('time presets reuse the department filter panel style',
+      (tester) async {
+    SharedPreferences.setMockInitialValues({});
+    await tester.pumpWidget(MaterialApp(
+      home: AnnouncementSearchPage(repository: _repositoryWith(), isDemo: true),
+    ));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(
+      const ValueKey('announcement-search-time-filter'),
+    ));
+    await tester.pumpAndSettle();
+    final timeMenu = find.byKey(
+      const ValueKey('announcement-search-time-menu'),
+    );
+    final timeMaterial = tester.widget<Material>(find
+        .descendant(
+          of: timeMenu,
+          matching: find.byType(Material),
+        )
+        .first);
+    final timePosition = tester.getTopRight(timeMenu);
+    final timeWidth = tester.getSize(timeMenu).width;
+    expect(timeMaterial.elevation, 12);
+    expect(timeMaterial.borderRadius, BorderRadius.circular(16));
+    expect(timeMaterial.clipBehavior, Clip.antiAlias);
+    expect(find.byType(PopupMenuButton), findsNothing);
+    for (final preset in ['all', 'week', 'month', 'year', 'custom']) {
+      expect(find.byKey(ValueKey('announcement-search-time-$preset')),
+          findsOneWidget);
+    }
+    expect(
+      tester
+          .widget<ListTile>(find.byKey(
+            const ValueKey('announcement-search-time-all'),
+          ))
+          .selected,
+      isTrue,
+    );
+    await tester.tapAt(const Offset(8, 8));
+    await tester.pumpAndSettle();
+    expect(timeMenu, findsNothing);
+    await tester.tap(find.byTooltip('筛选部门'));
+    await tester.pumpAndSettle();
+    final sourceMenu = find.byKey(announcementSourceMenuKey);
+    final sourceMaterial = tester.widget<Material>(find
+        .descendant(
+          of: sourceMenu,
+          matching: find.byType(Material),
+        )
+        .first);
+    expect(tester.getTopRight(sourceMenu), timePosition);
+    expect(tester.getSize(sourceMenu).width, timeWidth);
+    expect(sourceMaterial.elevation, timeMaterial.elevation);
+    expect(sourceMaterial.borderRadius, timeMaterial.borderRadius);
+    expect(sourceMaterial.clipBehavior, timeMaterial.clipBehavior);
+    expect(sourceMaterial.color, timeMaterial.color);
+    expect(tester.takeException(), isNull);
   });
 
   testWidgets('AppBar time choices snapshot dates for the next search',
@@ -710,10 +955,10 @@ void main() {
       ));
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 300));
-      await tester.tap(find.byWidgetPredicate((widget) =>
-          widget is CheckedPopupMenuItem &&
-          widget.child is Text &&
-          (widget.child! as Text).data == label));
+      expect(find.byKey(const ValueKey('announcement-search-time-menu')),
+          findsOneWidget);
+      expect(find.byType(CheckedPopupMenuItem), findsNothing);
+      await tester.tap(find.widgetWithText(ListTile, label));
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 300));
     }
@@ -765,24 +1010,47 @@ void main() {
       const ValueKey('announcement-search-time-filter'),
     ));
     await tester.pumpAndSettle();
-    await tester.tap(find.byWidgetPredicate((widget) =>
-        widget is CheckedPopupMenuItem &&
-        widget.child is Text &&
-        (widget.child! as Text).data == '自定义日期'));
+    await tester.tap(find.byKey(
+      const ValueKey('announcement-search-time-custom'),
+    ));
     await tester.pumpAndSettle();
-    expect(find.byType(DateRangePickerDialog), findsOneWidget);
-    await tester.tap(find.byIcon(Icons.edit_outlined));
-    await tester.pumpAndSettle();
+    expect(find.byType(ShuYoDatePickerDialog), findsOneWidget);
     final year = DateTime.now().year - 1;
-    final dateFields = find.descendant(
-      of: find.byType(DateRangePickerDialog),
-      matching: find.byType(TextField),
+    final localizations = MaterialLocalizations.of(
+      tester.element(find.byType(ShuYoDatePickerDialog)),
     );
-    await tester.enterText(dateFields.at(0), '1/2/$year');
-    await tester.enterText(dateFields.at(1), '1/5/$year');
+    await tester.tap(find.text(localizations.formatMonthYear(DateTime.now())));
+    await tester.pumpAndSettle();
+    final chosenYear = find.descendant(
+      of: find.byType(YearPicker),
+      matching: find.text('$year'),
+    );
+    await tester.ensureVisible(chosenYear);
+    await tester.tap(chosenYear);
+    await tester.pumpAndSettle();
+    for (var month = DateTime.now().month; month > 1; month--) {
+      await tester.tap(find.byTooltip(localizations.previousMonthTooltip));
+      await tester.pumpAndSettle();
+    }
+    for (final day in [2, 5]) {
+      final cell = find.byKey(ValueKey<DateTime>(DateTime(year, 1, day)));
+      if (cell.hitTestable().evaluate().isEmpty) {
+        final scroll = find
+            .descendant(
+              of: find.byType(ShuYoDatePickerDialog),
+              matching: find.byType(SingleChildScrollView),
+            )
+            .first;
+        await tester.drag(scroll, const Offset(0, -100));
+        await tester.pumpAndSettle();
+      }
+      await tester.tap(cell);
+      await tester.pumpAndSettle();
+    }
+    await tester.ensureVisible(find.text('确定'));
     await tester.tap(find.text('确定'));
     await tester.pumpAndSettle();
-    expect(find.byType(DateRangePickerDialog), findsNothing);
+    expect(find.byType(ShuYoDatePickerDialog), findsNothing);
     expect(find.byTooltip('搜索时间：$year/01/02—$year/01/05'), findsOneWidget);
     await _startAnnouncementSearch(tester);
     expect(requests.single['beginDate'], '$year-01-02 00:00:00');
@@ -847,7 +1115,7 @@ void main() {
       lessThan(20),
     );
     expect(find.byType(SliverMainAxisGroup), findsOneWidget);
-    expect(tester.widget<TextField>(find.byType(TextField)).enabled, isTrue);
+    expect(tester.widget<TextField>(find.byType(TextField)).readOnly, isFalse);
     final scrollView = find.byType(CustomScrollView).last;
     await tester.drag(scrollView, const Offset(0, -600));
     await tester.pumpAndSettle();
@@ -902,7 +1170,7 @@ void main() {
     await gesture.up();
     await tester.pumpAndSettle();
     expect(count().data, '51');
-    expect(tester.widget<TextField>(find.byType(TextField)).enabled, isTrue);
+    expect(tester.widget<TextField>(find.byType(TextField)).readOnly, isFalse);
   });
 
   testWidgets('a fast new search completes after resetting a scrolled list',
@@ -946,7 +1214,7 @@ void main() {
     await tester.pump(const Duration(milliseconds: 600));
     // A ScrollEnd caused by resetting the previous list must not leave the
     // next run's fast response waiting behind an obsolete frame callback.
-    expect(tester.widget<TextField>(find.byType(TextField)).enabled, isTrue);
+    expect(tester.widget<TextField>(find.byType(TextField)).readOnly, isFalse);
     expect(find.text('第二轮 公告 0'), findsOneWidget);
     expect(
       tester
@@ -997,12 +1265,27 @@ void main() {
     expect(number('announcement-search-total-count').data, '1');
     expect(number('announcement-search-total-count').style!.color,
         colors.textPrimary);
-    expect(number('announcement-search-total-count').style!.fontSize, 26);
+    expect(number('announcement-search-total-count').style!.fontSize, 18);
     expect(number('announcement-search-found-count').style!.fontSize, 26);
     expect(find.text('公告数'), findsOneWidget);
     expect(
         tester.widget<Text>(find.text('/')).style!.color, colors.textPrimary);
-    expect(find.text('搜索范围：标题'), findsOneWidget);
+    expect(
+      tester
+          .widget<FilterChip>(find.byKey(
+            const ValueKey('announcement-search-title-scope'),
+          ))
+          .selected,
+      isTrue,
+    );
+    expect(
+      tester
+          .widget<FilterChip>(find.byKey(
+            const ValueKey('announcement-search-body-scope'),
+          ))
+          .selected,
+      isFalse,
+    );
     expect(find.text('搜到'), findsNothing);
     expect(find.text('搜寻'), findsNothing);
     expect(
@@ -1045,7 +1328,13 @@ void main() {
         find.byType(CustomScrollView).last, const Offset(0, -500));
     await tester.pumpAndSettle();
     expect(find.byType(TextField), findsOneWidget);
-    expect(find.byIcon(Icons.play_arrow_rounded), findsOneWidget);
+    expect(find.byIcon(Icons.play_arrow_rounded), findsNothing);
+    expect(
+        find.descendant(
+          of: find.byTooltip('开始搜索'),
+          matching: find.byIcon(Icons.search),
+        ),
+        findsOneWidget);
   });
 
   testWidgets('interleaved dates still produce one header per department',
@@ -1243,7 +1532,8 @@ void main() {
     expect(find.text('2026年8月'), findsOneWidget);
   });
 
-  testWidgets('search scope settings preserve body matching and typography',
+  testWidgets(
+      'inline search scope chips preserve body matching and saved selection',
       (tester) async {
     SharedPreferences.setMockInitialValues({
       'announcements.search.selectedSources': ['shu'],
@@ -1255,15 +1545,10 @@ void main() {
       ),
     ));
     await tester.pumpAndSettle();
-    await tester.tap(find.byTooltip('更多'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('搜索范围'));
-    await tester.pumpAndSettle();
-    final scopeHeading = tester.widget<Text>(find.text('搜索范围'));
-    expect(scopeHeading.style?.fontSize, 16.5);
-    expect(scopeHeading.style?.fontWeight, FontWeight.w600);
-    await tester.tap(find.widgetWithText(OutlinedButton, '内容'));
-    await tester.tapAt(const Offset(8, 8));
+    final bodyScope = find.byKey(
+      const ValueKey('announcement-search-body-scope'),
+    );
+    await tester.tap(bodyScope);
     await tester.pumpAndSettle();
     await tester.enterText(find.byType(TextField), _detailBody);
     await tester.tap(find.byTooltip('开始搜索'));
@@ -1278,7 +1563,8 @@ void main() {
         findsOneWidget);
     final prefs = await SharedPreferences.getInstance();
     expect(prefs.getBool('announcements.search.includeBody'), isTrue);
-    expect(find.text('搜索范围：标题+正文'), findsOneWidget);
+    expect(tester.widget<FilterChip>(bodyScope).selected, isTrue);
+    expect(find.byTooltip('搜索范围'), findsNothing);
   });
 
   testWidgets('search scope allows content only and requires one selection',
@@ -1295,7 +1581,14 @@ void main() {
       ),
     ));
     await tester.pumpAndSettle();
-    expect(find.text('搜索范围：正文'), findsOneWidget);
+    final titleScope = find.byKey(
+      const ValueKey('announcement-search-title-scope'),
+    );
+    final bodyScope = find.byKey(
+      const ValueKey('announcement-search-body-scope'),
+    );
+    expect(tester.widget<FilterChip>(titleScope).selected, isFalse);
+    expect(tester.widget<FilterChip>(bodyScope).selected, isTrue);
 
     await tester.enterText(find.byType(TextField), '实验室');
     await tester.tap(find.byTooltip('开始搜索'));
@@ -1307,12 +1600,7 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text(_listTitle), findsOneWidget);
 
-    await tester.tap(find.byTooltip('更多'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('搜索范围'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.widgetWithText(OutlinedButton, '内容'));
-    await tester.tapAt(const Offset(8, 8));
+    await tester.tap(bodyScope);
     await tester.pumpAndSettle();
     final prefs = await SharedPreferences.getInstance();
     expect(prefs.getBool('announcements.search.includeTitle'), isFalse);
@@ -2469,8 +2757,9 @@ void main() {
                 .replaceAll('\u200B', '')
                 .contains('office@example.org') ==
             true);
-    final link = (paragraph.textSpan!.children!.last as TextSpan).children!.last
-        as TextSpan;
+    final link = paragraph.textSpan!.getSpanForPosition(TextPosition(
+      offset: paragraph.textSpan!.toPlainText().indexOf('说明'),
+    )) as TextSpan;
     expect(
         link.style?.decorationColor,
         Theme.of(tester.element(find.byType(SelectableText).first))
