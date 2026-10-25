@@ -191,7 +191,8 @@ class _AnnouncementsPageState extends State<AnnouncementsPage> {
         _drainRevealQueue();
       });
       _previewDeadlines.add(deadline);
-      widget.repository.loadPreview(item).then((preview) {
+      final article = _announcementForUrlOwner(item);
+      widget.repository.loadPreview(article).then((preview) {
         deadline.cancel();
         if (!mounted || generation != _revealGeneration) return;
         final previous = _readyPreviews[item.url];
@@ -284,54 +285,81 @@ class _AnnouncementsPageState extends State<AnnouncementsPage> {
     return _withAnnouncementScrollbar(
       RefreshIndicator(
         onRefresh: _refresh,
-        child: ListView.separated(
+        child: CustomScrollView(
           controller: _scrollController,
           physics: const AlwaysScrollableScrollPhysics(),
           scrollCacheExtent: const ScrollCacheExtent.pixels(0),
-          padding: const EdgeInsets.fromLTRB(0, 8, 0, 24),
-          separatorBuilder: (context, index) {
-            if (index + 1 >= rows.length ||
-                rows[index] is _AnnouncementMonthHeader ||
-                rows[index + 1] is _AnnouncementMonthHeader ||
-                CustomBackgroundScope.maybeOf(context) != null) {
-              return const SizedBox.shrink();
-            }
-            return Divider(height: 1, color: context.shuyoColors.border);
-          },
-          itemCount: rows.length,
-          itemBuilder: (context, index) {
-            final row = rows[index];
-            if (row is _AnnouncementMonthHeader) {
-              return _AnimatedAnnouncementMonthHeader(
-                label: row.label,
-                index: row.index,
-              );
-            }
-            final itemRow = row as _AnnouncementItemRow;
-            final item = itemRow.item;
-            return _AnnouncementTile(
-              key: ValueKey(item.url),
-              index: itemRow.index,
-              item: item,
-              repository: widget.repository,
-              external: _isExternalAnnouncement(item),
-              awaitReveal: _stagedUrls.contains(item.url) &&
-                  !_revealedUrls.contains(item.url),
-              initialPreviewReady: _revealedUrls.contains(item.url),
-              initialPreview: _readyPreviews[item.url],
-              onTap: () => _openAnnouncement(item),
-            );
-          },
+          slivers: _homeSlivers(rows),
         ),
       ),
     );
+  }
+
+  List<Widget> _homeSlivers(List<Object> rows) {
+    final slivers = <Widget>[
+      const SliverToBoxAdapter(child: SizedBox(height: 8)),
+    ];
+    var position = 0;
+    while (position < rows.length) {
+      _AnnouncementMonthHeader? header;
+      if (rows[position] is _AnnouncementMonthHeader) {
+        header = rows[position] as _AnnouncementMonthHeader;
+        position++;
+      }
+      final start = position;
+      while (position < rows.length && rows[position] is _AnnouncementItemRow) {
+        position++;
+      }
+      final end = position;
+      if (start == end) continue;
+      final itemList = SliverList.builder(
+        itemCount: end - start,
+        itemBuilder: (context, index) {
+          final itemRow = rows[start + index] as _AnnouncementItemRow;
+          final item = itemRow.item;
+          return Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              _AnnouncementTile(
+                key: ValueKey(item.url),
+                index: itemRow.index,
+                item: item,
+                repository: widget.repository,
+                external: _isExternalAnnouncement(item),
+                awaitReveal: _stagedUrls.contains(item.url) &&
+                    !_revealedUrls.contains(item.url),
+                initialPreviewReady: _revealedUrls.contains(item.url),
+                initialPreview: _readyPreviews[item.url],
+                onTap: () => _openAnnouncement(item),
+              ),
+              if (index + 1 < end - start &&
+                  CustomBackgroundScope.maybeOf(context) == null)
+                Divider(height: 1, color: context.shuyoColors.border),
+            ],
+          );
+        },
+      );
+      if (header == null) {
+        slivers.add(itemList);
+      } else {
+        slivers.add(SliverMainAxisGroup(slivers: [
+          SliverPersistentHeader(
+            pinned: true,
+            delegate: _AnnouncementStickyHeaderDelegate(month: header.label),
+          ),
+          itemList,
+        ]));
+      }
+    }
+    slivers.add(const SliverToBoxAdapter(child: SizedBox(height: 24)));
+    return slivers;
   }
 
   Widget _withAnnouncementScrollbar(Widget child) {
     return ScrollbarTheme(
       data: ScrollbarThemeData(
         thumbColor: WidgetStatePropertyAll(
-          context.shuyoColors.textMuted.withOpacity(0.55),
+          context.shuyoColors.textMuted.withValues(alpha: 0.55),
         ),
         thickness: const WidgetStatePropertyAll(2.5),
         radius: const Radius.circular(4),
@@ -393,8 +421,10 @@ class _AnnouncementsPageState extends State<AnnouncementsPage> {
       favorites = <String>{};
       expansion = (
         favorites: true,
-        campus: true,
+        schoolPortal: true,
         college: false,
+        researchInstitute: false,
+        schoolDepartment: true,
       );
     }
     if (!mounted || _source == null) return;
@@ -532,40 +562,8 @@ class _AnnouncementsPageState extends State<AnnouncementsPage> {
     }
   }
 
-  void _openDetail(AnnouncementListItem item) {
-    Navigator.of(context).push<void>(
-      shuyoRoute(
-        builder: (context) => AnnouncementDetailPage(
-          repository: widget.repository,
-          item: item,
-        ),
-      ),
-    );
-  }
-
   void _openAnnouncement(AnnouncementListItem item) {
-    if (_isExternalAnnouncement(item)) {
-      unawaited(_openExternalAnnouncement(item.url));
-      return;
-    }
-    _openDetail(item);
-  }
-
-  Future<void> _openExternalAnnouncement(String url) async {
-    var opened = false;
-    try {
-      opened = await launchUrl(
-        Uri.parse(url),
-        mode: LaunchMode.externalApplication,
-      );
-    } on Object {
-      // Keep the list available when the system cannot open the URL.
-    }
-    if (!opened && mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('无法打开公告链接')),
-      );
-    }
+    _openAnnouncementItem(context, widget.repository, item);
   }
 
   String _friendlyError(Object error) {
@@ -590,88 +588,43 @@ class _AnnouncementMonthHeader {
   final int index;
 }
 
-class _AnimatedAnnouncementMonthHeader extends StatefulWidget {
-  const _AnimatedAnnouncementMonthHeader({
-    required this.label,
-    required this.index,
-  });
+const _stickyHeaderExtent = 38.0;
 
-  final String label;
-  final int index;
+class _AnnouncementStickyHeaderDelegate extends SliverPersistentHeaderDelegate {
+  const _AnnouncementStickyHeaderDelegate({required this.month});
+
+  final String month;
 
   @override
-  State<_AnimatedAnnouncementMonthHeader> createState() =>
-      _AnimatedAnnouncementMonthHeaderState();
-}
-
-class _AnimatedAnnouncementMonthHeaderState
-    extends State<_AnimatedAnnouncementMonthHeader>
-    with SingleTickerProviderStateMixin {
-  late final AnimationController _entrance;
-  Timer? _entranceTimer;
+  double get minExtent => maxExtent;
 
   @override
-  void initState() {
-    super.initState();
-    _entrance = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 280),
-    );
-    _startEntrance();
-  }
+  double get maxExtent => _stickyHeaderExtent;
 
   @override
-  void didUpdateWidget(covariant _AnimatedAnnouncementMonthHeader oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    if (oldWidget.label != widget.label || oldWidget.index != widget.index) {
-      _startEntrance();
-    }
-  }
-
-  void _startEntrance() {
-    _entranceTimer?.cancel();
-    _entrance.reset();
-    _entranceTimer = Timer(
-      Duration(milliseconds: (widget.index % 6) * 55),
-      () {
-        if (mounted) _entrance.forward();
-      },
-    );
-  }
-
-  @override
-  void dispose() {
-    _entranceTimer?.cancel();
-    _entrance.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return SlideTransition(
-      position: Tween<Offset>(
-        begin: const Offset(0.12, 0),
-        end: Offset.zero,
-      ).animate(CurvedAnimation(
-        parent: _entrance,
-        curve: Curves.easeOutCubic,
-      )),
-      child: FadeTransition(
-        opacity: _entrance,
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(16, 18, 16, 4),
-          child: Text(
-            widget.label,
-            style: ShuYoTextStyles.meta(
-              color: context.shuyoColors.textSecondary,
-              size: 12.5,
-              weight: FontWeight.w600,
-            ),
+  Widget build(
+      BuildContext context, double shrinkOffset, bool overlapsContent) {
+    final colors = context.shuyoColors;
+    return Material(
+      key: ValueKey('announcement-sticky-home-$month'),
+      color: Theme.of(context).scaffoldBackgroundColor,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(16, 18, 16, 4),
+        child: Text(
+          month,
+          style: ShuYoTextStyles.meta(
+            color: colors.textSecondary,
+            size: 12.5,
+            weight: FontWeight.w600,
           ),
         ),
       ),
     );
   }
+
+  @override
+  bool shouldRebuild(_AnnouncementStickyHeaderDelegate oldDelegate) =>
+      month != oldDelegate.month;
 }
 
 class _AnnouncementItemRow {
@@ -689,7 +642,8 @@ bool _isExternalAnnouncement(AnnouncementListItem item) {
     return true;
   }
   final host = uri.host.toLowerCase();
-  if (item.sourceId == 'shvfs' &&
+  final sourceId = _announcementSourceForUrl(item)?.id ?? item.sourceId;
+  if (sourceId == 'shvfs' &&
       host == 'www.shvfs.cn' &&
       RegExp(r'^/site/newsDetail/\d+$', caseSensitive: false)
           .hasMatch(uri.path)) {
@@ -698,6 +652,101 @@ bool _isExternalAnnouncement(AnnouncementListItem item) {
   return !(host == 'shu.edu.cn' || host.endsWith('.shu.edu.cn')) ||
       !RegExp(r'^/info/[^/]+/[^/]+\.(?:htm|html|hmtl)$', caseSensitive: false)
           .hasMatch(uri.path);
+}
+
+String _normalizedAnnouncementHost(String host) {
+  final normalized = host.toLowerCase();
+  return normalized.startsWith('www.') ? normalized.substring(4) : normalized;
+}
+
+final Map<String, AnnouncementSource> _announcementSourcesByHost = () {
+  final sourcesByHost = <String, AnnouncementSource>{};
+  for (final source in AnnouncementSource.all) {
+    for (final listUrl in source.listUrls) {
+      final uri = Uri.tryParse(listUrl);
+      if (uri == null || uri.host.isEmpty) continue;
+      sourcesByHost.putIfAbsent(
+        _normalizedAnnouncementHost(uri.host),
+        () => source,
+      );
+    }
+  }
+  return sourcesByHost;
+}();
+
+AnnouncementSource? _announcementSourceForUrl(AnnouncementListItem item) {
+  final uri = Uri.tryParse(item.url);
+  if (uri == null || uri.host.isEmpty) return null;
+  final host = _normalizedAnnouncementHost(uri.host);
+
+  // Prefer the source already attached to the item when it shares the link's
+  // host. This keeps different columns on a shared site using their own parser.
+  for (final source in AnnouncementSource.all) {
+    if (source.id != item.sourceId) continue;
+    if (source.listUrls.any((listUrl) {
+      final sourceUri = Uri.tryParse(listUrl);
+      return sourceUri != null &&
+          _normalizedAnnouncementHost(sourceUri.host) == host;
+    })) {
+      return source;
+    }
+    break;
+  }
+  return _announcementSourcesByHost[host];
+}
+
+AnnouncementListItem _announcementForUrlOwner(AnnouncementListItem item) {
+  final source = _announcementSourceForUrl(item);
+  if (source == null || source.id == item.sourceId) return item;
+  return AnnouncementListItem(
+    title: item.title,
+    url: item.url,
+    summary: item.summary,
+    dateText: item.dateText,
+    publishedAt: item.publishedAt,
+    sourceId: source.id,
+    column: item.column,
+  );
+}
+
+void _openAnnouncementItem(
+  BuildContext context,
+  AnnouncementRepository repository,
+  AnnouncementListItem item,
+) {
+  final article = _announcementForUrlOwner(item);
+  if (_isExternalAnnouncement(article)) {
+    unawaited(_openExternalAnnouncementUrl(context, article.url));
+    return;
+  }
+  Navigator.of(context).push<void>(
+    shuyoRoute(
+      builder: (context) => AnnouncementDetailPage(
+        repository: repository,
+        item: article,
+      ),
+    ),
+  );
+}
+
+Future<void> _openExternalAnnouncementUrl(
+  BuildContext context,
+  String url,
+) async {
+  var opened = false;
+  try {
+    opened = await launchUrl(
+      Uri.parse(url),
+      mode: LaunchMode.externalApplication,
+    );
+  } on Object {
+    // Keep the list available when the system cannot open the URL.
+  }
+  if (!opened && context.mounted) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('无法打开公告链接')),
+    );
+  }
 }
 
 class _AnnouncementSourceMenu extends StatefulWidget {
@@ -726,8 +775,12 @@ class _AnnouncementSourceMenuState extends State<_AnnouncementSourceMenu> {
   late Set<String> _favorites = {...widget.initialFavorites};
   final ScrollController _scrollController = ScrollController();
   late bool _favoritesExpanded = widget.initialExpansion.favorites;
-  late bool _campusExpanded = widget.initialExpansion.campus;
+  late bool _schoolPortalExpanded = widget.initialExpansion.schoolPortal;
   late bool _collegeExpanded = widget.initialExpansion.college;
+  late bool _researchInstituteExpanded =
+      widget.initialExpansion.researchInstitute;
+  late bool _schoolDepartmentExpanded =
+      widget.initialExpansion.schoolDepartment;
   bool _saving = false;
 
   @override
@@ -741,11 +794,57 @@ class _AnnouncementSourceMenuState extends State<_AnnouncementSourceMenu> {
     final favoriteSources = AnnouncementSource.all
         .where((source) => _favorites.contains(source.id))
         .toList();
-    final campusSources =
-        AnnouncementSource.inGroup(AnnouncementSourceGroup.campus);
-    final collegeSources =
-        AnnouncementSource.inGroup(AnnouncementSourceGroup.college);
+    final researchInstituteSources =
+        AnnouncementSource.inGroup(AnnouncementSourceGroup.researchInstitute);
+    final schoolPortalSources =
+        AnnouncementSource.inGroup(AnnouncementSourceGroup.schoolPortal);
+    final schoolDepartmentSources =
+        AnnouncementSource.inGroup(AnnouncementSourceGroup.schoolDepartment);
     final menuWidth = math.min(264.0, MediaQuery.sizeOf(context).width * 0.68);
+    final menuChildren = <Widget>[
+      _sectionHeader('收藏', _favoritesExpanded,
+          () => _toggleSection(AnnouncementMenuSection.favorites)),
+      if (_favoritesExpanded)
+        if (favoriteSources.isEmpty)
+          const ListTile(
+            contentPadding: EdgeInsets.only(left: 16, right: 12),
+            title: Text('暂无收藏'),
+          )
+        else
+          for (final source in favoriteSources) _sourceRow(source),
+      _sectionHeader(
+        AnnouncementSourceGroup.schoolPortal.label,
+        _schoolPortalExpanded,
+        () => _toggleSection(AnnouncementMenuSection.schoolPortal),
+      ),
+      if (_schoolPortalExpanded)
+        for (final source in schoolPortalSources) _sourceRow(source),
+      _sectionHeader(
+        AnnouncementSourceGroup.schoolDepartment.label,
+        _schoolDepartmentExpanded,
+        () => _toggleSection(AnnouncementMenuSection.schoolDepartment),
+      ),
+      if (_schoolDepartmentExpanded)
+        for (final source in schoolDepartmentSources) _sourceRow(source),
+      _sectionHeader(
+        AnnouncementSourceGroup.college.label,
+        _collegeExpanded,
+        () => _toggleSection(AnnouncementMenuSection.college),
+      ),
+      if (_collegeExpanded)
+        for (final category in AnnouncementCollegeCategory.values) ...[
+          _collegeCategoryHeader(category.label),
+          for (final source in AnnouncementSource.inCollegeCategory(category))
+            _sourceRow(source),
+        ],
+      _sectionHeader(
+        AnnouncementSourceGroup.researchInstitute.label,
+        _researchInstituteExpanded,
+        () => _toggleSection(AnnouncementMenuSection.researchInstitute),
+      ),
+      if (_researchInstituteExpanded)
+        for (final source in researchInstituteSources) _sourceRow(source),
+    ];
     return SizedBox(
       key: announcementSourceMenuKey,
       width: menuWidth,
@@ -761,30 +860,10 @@ class _AnnouncementSourceMenuState extends State<_AnnouncementSourceMenu> {
           child: Scrollbar(
             controller: _scrollController,
             thumbVisibility: true,
-            child: ListView(
+            child: CustomScrollView(
               controller: _scrollController,
               shrinkWrap: true,
-              padding: const EdgeInsets.symmetric(vertical: 8),
-              children: [
-                _sectionHeader('收藏', _favoritesExpanded,
-                    () => _toggleSection(AnnouncementMenuSection.favorites)),
-                if (_favoritesExpanded)
-                  if (favoriteSources.isEmpty)
-                    const ListTile(
-                      contentPadding: EdgeInsets.only(left: 16, right: 12),
-                      title: Text('暂无收藏'),
-                    )
-                  else
-                    for (final source in favoriteSources) _sourceRow(source),
-                _sectionHeader('校级与公共服务', _campusExpanded,
-                    () => _toggleSection(AnnouncementMenuSection.campus)),
-                if (_campusExpanded)
-                  for (final source in campusSources) _sourceRow(source),
-                _sectionHeader('学院与培养单位', _collegeExpanded,
-                    () => _toggleSection(AnnouncementMenuSection.college)),
-                if (_collegeExpanded)
-                  for (final source in collegeSources) _sourceRow(source),
-              ],
+              slivers: _menuSlivers(context, menuChildren, menuWidth),
             ),
           ),
         ),
@@ -792,13 +871,115 @@ class _AnnouncementSourceMenuState extends State<_AnnouncementSourceMenu> {
     );
   }
 
+  List<Widget> _menuSlivers(
+    BuildContext context,
+    List<Widget> children,
+    double menuWidth,
+  ) {
+    final slivers = <Widget>[
+      const SliverToBoxAdapter(child: SizedBox(height: 8)),
+    ];
+    final regularChildren = <Widget>[];
+
+    void flushRegularChildren() {
+      if (regularChildren.isEmpty) return;
+      slivers.add(SliverList(
+        delegate: SliverChildListDelegate([...regularChildren]),
+      ));
+      regularChildren.clear();
+    }
+
+    for (var index = 0; index < children.length; index++) {
+      final child = children[index];
+      if (child is! _AnnouncementMenuSectionHeader) {
+        regularChildren.add(child);
+        continue;
+      }
+
+      flushRegularChildren();
+      final sectionChildren = <Widget>[];
+      while (index + 1 < children.length &&
+          children[index + 1] is! _AnnouncementMenuSectionHeader) {
+        sectionChildren.add(children[++index]);
+      }
+      final sectionSlivers =
+          _menuSectionSlivers(context, sectionChildren, menuWidth);
+      slivers.add(SliverMainAxisGroup(slivers: [
+        SliverPersistentHeader(
+          pinned: true,
+          delegate: _AnnouncementMenuSectionStickyHeaderDelegate(
+            header: child,
+            extent: _announcementMenuSectionHeaderExtent,
+          ),
+        ),
+        ...sectionSlivers,
+      ]));
+    }
+    flushRegularChildren();
+    slivers.add(const SliverToBoxAdapter(child: SizedBox(height: 8)));
+    return slivers;
+  }
+
+  List<Widget> _menuSectionSlivers(
+    BuildContext context,
+    List<Widget> children,
+    double menuWidth,
+  ) {
+    final slivers = <Widget>[];
+    final regularChildren = <Widget>[];
+
+    void flushRegularChildren() {
+      if (regularChildren.isEmpty) return;
+      slivers.add(SliverList(
+        delegate: SliverChildListDelegate([...regularChildren]),
+      ));
+      regularChildren.clear();
+    }
+
+    for (var index = 0; index < children.length; index++) {
+      final child = children[index];
+      if (child is! _AnnouncementCollegeCategoryHeader) {
+        regularChildren.add(child);
+        continue;
+      }
+
+      flushRegularChildren();
+      final categoryChildren = <Widget>[];
+      while (index + 1 < children.length &&
+          children[index + 1] is! _AnnouncementCollegeCategoryHeader) {
+        categoryChildren.add(children[++index]);
+      }
+      final maxWidth = menuWidth > 28 ? menuWidth - 28 : 0.0;
+      final extent = child.extent(context, maxWidth);
+      slivers.add(SliverMainAxisGroup(slivers: [
+        SliverPersistentHeader(
+          pinned: true,
+          delegate: _AnnouncementCollegeCategoryStickyHeaderDelegate(
+            header: child,
+            extent: extent,
+          ),
+        ),
+        SliverList(
+          delegate: SliverChildListDelegate(categoryChildren),
+        ),
+      ]));
+    }
+    flushRegularChildren();
+    return slivers;
+  }
+
   Widget _sectionHeader(String title, bool expanded, VoidCallback onTap) {
-    return ListTile(
+    final tile = ListTile(
       contentPadding: const EdgeInsets.only(left: 16, right: 12),
       title: Text(title, style: const TextStyle(fontWeight: FontWeight.w600)),
       trailing: Icon(expanded ? Icons.expand_less : Icons.expand_more),
       onTap: onTap,
     );
+    return _AnnouncementMenuSectionHeader(title: title, tile: tile);
+  }
+
+  Widget _collegeCategoryHeader(String title) {
+    return _AnnouncementCollegeCategoryHeader(title);
   }
 
   void _toggleSection(AnnouncementMenuSection section) {
@@ -807,10 +988,14 @@ class _AnnouncementSourceMenuState extends State<_AnnouncementSourceMenu> {
       switch (section) {
         case AnnouncementMenuSection.favorites:
           expanded = _favoritesExpanded = !_favoritesExpanded;
-        case AnnouncementMenuSection.campus:
-          expanded = _campusExpanded = !_campusExpanded;
+        case AnnouncementMenuSection.schoolPortal:
+          expanded = _schoolPortalExpanded = !_schoolPortalExpanded;
         case AnnouncementMenuSection.college:
           expanded = _collegeExpanded = !_collegeExpanded;
+        case AnnouncementMenuSection.researchInstitute:
+          expanded = _researchInstituteExpanded = !_researchInstituteExpanded;
+        case AnnouncementMenuSection.schoolDepartment:
+          expanded = _schoolDepartmentExpanded = !_schoolDepartmentExpanded;
       }
     });
     unawaited(widget.onExpansionChanged(section, expanded).catchError(
@@ -871,6 +1056,130 @@ class _AnnouncementSourceMenuState extends State<_AnnouncementSourceMenu> {
   }
 }
 
+const _announcementMenuSectionHeaderExtent = 56.0;
+
+class _AnnouncementMenuSectionHeader extends StatelessWidget {
+  const _AnnouncementMenuSectionHeader({
+    required this.title,
+    required this.tile,
+  });
+
+  final String title;
+  final ListTile tile;
+
+  @override
+  Widget build(BuildContext context) => tile;
+}
+
+class _AnnouncementMenuSectionStickyHeaderDelegate
+    extends SliverPersistentHeaderDelegate {
+  const _AnnouncementMenuSectionStickyHeaderDelegate({
+    required this.header,
+    required this.extent,
+  });
+
+  final _AnnouncementMenuSectionHeader header;
+  final double extent;
+
+  @override
+  double get minExtent => extent;
+
+  @override
+  double get maxExtent => extent;
+
+  @override
+  Widget build(
+      BuildContext context, double shrinkOffset, bool overlapsContent) {
+    return Material(
+      key: ValueKey('announcement-sticky-menu-section-${header.title}'),
+      color: Theme.of(context).colorScheme.surface,
+      child: header,
+    );
+  }
+
+  @override
+  bool shouldRebuild(
+          _AnnouncementMenuSectionStickyHeaderDelegate oldDelegate) =>
+      header != oldDelegate.header || extent != oldDelegate.extent;
+}
+
+class _AnnouncementCollegeCategoryHeader extends StatelessWidget {
+  const _AnnouncementCollegeCategoryHeader(this.title);
+
+  final String title;
+
+  double extent(BuildContext context, double maxWidth) {
+    final style = DefaultTextStyle.of(context).style.merge(TextStyle(
+          color: context.shuyoColors.textMuted,
+          fontSize: 12.5,
+          fontWeight: FontWeight.w600,
+        ));
+    final painter = TextPainter(
+      text: TextSpan(text: title, style: style),
+      textDirection: Directionality.of(context),
+      textScaler: MediaQuery.textScalerOf(context),
+      locale: Localizations.maybeLocaleOf(context),
+    );
+    try {
+      painter.layout(maxWidth: maxWidth);
+      return painter.height + 14;
+    } finally {
+      painter.dispose();
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(left: 16, right: 12, top: 10, bottom: 4),
+      child: Align(
+        alignment: Alignment.centerLeft,
+        child: Text(
+          title,
+          textAlign: TextAlign.left,
+          style: TextStyle(
+            color: context.shuyoColors.textMuted,
+            fontSize: 12.5,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _AnnouncementCollegeCategoryStickyHeaderDelegate
+    extends SliverPersistentHeaderDelegate {
+  const _AnnouncementCollegeCategoryStickyHeaderDelegate({
+    required this.header,
+    required this.extent,
+  });
+
+  final _AnnouncementCollegeCategoryHeader header;
+  final double extent;
+
+  @override
+  double get minExtent => extent;
+
+  @override
+  double get maxExtent => extent;
+
+  @override
+  Widget build(
+      BuildContext context, double shrinkOffset, bool overlapsContent) {
+    return Material(
+      key: ValueKey('announcement-sticky-college-category-${header.title}'),
+      color: Theme.of(context).colorScheme.surface,
+      child: header,
+    );
+  }
+
+  @override
+  bool shouldRebuild(
+          _AnnouncementCollegeCategoryStickyHeaderDelegate oldDelegate) =>
+      header.title != oldDelegate.header.title || extent != oldDelegate.extent;
+}
+
 class AnnouncementDetailPage extends StatefulWidget {
   const AnnouncementDetailPage({
     super.key,
@@ -887,6 +1196,7 @@ class AnnouncementDetailPage extends StatefulWidget {
 
 class _AnnouncementDetailPageState extends State<AnnouncementDetailPage> {
   final Map<String, TapGestureRecognizer> _linkRecognizers = {};
+  final ScrollController _scrollController = ScrollController();
 
   TapGestureRecognizer _recognizerFor(String url) =>
       _linkRecognizers.putIfAbsent(
@@ -896,6 +1206,7 @@ class _AnnouncementDetailPageState extends State<AnnouncementDetailPage> {
 
   @override
   void dispose() {
+    _scrollController.dispose();
     for (final recognizer in _linkRecognizers.values) {
       recognizer.dispose();
     }
@@ -1004,6 +1315,13 @@ class _AnnouncementDetailPageState extends State<AnnouncementDetailPage> {
             return const _AnnouncementLoadingState();
           }
           if (snapshot.hasError) {
+            if (snapshot.error is AnnouncementUnavailableException) {
+              return const EmptyState(
+                icon: Icons.link_off_outlined,
+                title: '公告失效',
+                message: '系统提示：您访问的页面未找到，可能已被删除。',
+              );
+            }
             return _AnnouncementErrorState(
               message: '公告详情加载失败，请稍后重试',
               onRetry: () async {
@@ -1027,45 +1345,61 @@ class _AnnouncementDetailPageState extends State<AnnouncementDetailPage> {
               imageIndexByBlock[index] = imageIndexByBlock.length;
             }
           }
-          return ListView(
-            padding: const EdgeInsets.fromLTRB(
-              _announcementDetailPadding,
-              10,
-              _announcementDetailPadding,
-              28,
+          return ScrollbarTheme(
+            data: ScrollbarThemeData(
+              thumbColor: WidgetStatePropertyAll(
+                colors.textMuted.withValues(alpha: 0.55),
+              ),
+              thickness: const WidgetStatePropertyAll(2.5),
+              radius: const Radius.circular(4),
             ),
-            children: [
-              Text(
-                detail.title,
-                style: ShuYoTextStyles.title(
-                  color: colors.textPrimary,
-                  size: 20,
-                  height: 1.22,
-                  weight: FontWeight.w600,
+            child: Scrollbar(
+              controller: _scrollController,
+              thumbVisibility: true,
+              interactive: true,
+              child: ListView(
+                controller: _scrollController,
+                padding: const EdgeInsets.fromLTRB(
+                  _announcementDetailPadding,
+                  10,
+                  _announcementDetailPadding,
+                  28,
                 ),
+                children: [
+                  Text(
+                    detail.title,
+                    style: ShuYoTextStyles.title(
+                      color: colors.textPrimary,
+                      size: 20,
+                      height: 1.22,
+                      weight: FontWeight.w600,
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  _AnnouncementMetadata(
+                    detail: detail,
+                    showDepartment:
+                        !AnnouncementSource.byId(widget.item.sourceId)
+                            .adapter
+                            .hideDetailDepartment,
+                  ),
+                  const SizedBox(height: 22),
+                  if (!detail.hasContent)
+                    Text(
+                      '这条公告暂时没有解析到正文。',
+                      style: TextStyle(color: colors.textTertiary),
+                    )
+                  else
+                    ...List.generate(detail.blocks.length, (index) {
+                      return _blockWidget(
+                        detail.blocks[index],
+                        imageUrls: imageUrls,
+                        imageIndex: imageIndexByBlock[index] ?? 0,
+                      );
+                    }),
+                ],
               ),
-              const SizedBox(height: 12),
-              _AnnouncementMetadata(
-                detail: detail,
-                showDepartment: !AnnouncementSource.byId(widget.item.sourceId)
-                    .adapter
-                    .hideDetailDepartment,
-              ),
-              const SizedBox(height: 22),
-              if (!detail.hasContent)
-                Text(
-                  '这条公告暂时没有解析到正文。',
-                  style: TextStyle(color: colors.textTertiary),
-                )
-              else
-                ...List.generate(detail.blocks.length, (index) {
-                  return _blockWidget(
-                    detail.blocks[index],
-                    imageUrls: imageUrls,
-                    imageIndex: imageIndexByBlock[index] ?? 0,
-                  );
-                }),
-            ],
+            ),
           );
         },
       ),
@@ -1299,6 +1633,15 @@ class _AnnouncementTableWidget extends StatelessWidget {
                   text: block.rows[row][column],
                 ),
           ];
+    if (cells.length > 24) {
+      return _FastAnnouncementTable(
+        block: block,
+        cells: cells,
+        rowCount: rowCount,
+        columnCount: columnCount,
+        color: color,
+      );
+    }
     final textStyle = TextStyle(color: color.textPrimary, fontSize: 13.5);
     final textScaler = MediaQuery.textScalerOf(context);
     final textDirection = Directionality.of(context);
@@ -1415,6 +1758,485 @@ class _AnnouncementTableWidget extends StatelessWidget {
   }
 }
 
+/// Large tables cache visible text layouts and paint only visible cells.
+class _FastAnnouncementTable extends StatefulWidget {
+  const _FastAnnouncementTable({
+    required this.block,
+    required this.cells,
+    required this.rowCount,
+    required this.columnCount,
+    required this.color,
+  });
+
+  final AnnouncementContentBlock block;
+  final List<AnnouncementTableCell> cells;
+  final int rowCount;
+  final int columnCount;
+  final ShuYoColors color;
+
+  @override
+  State<_FastAnnouncementTable> createState() => _FastAnnouncementTableState();
+}
+
+class _FastAnnouncementTableState extends State<_FastAnnouncementTable> {
+  final ScrollController _scrollController = ScrollController();
+  final GlobalKey _paintKey = GlobalKey();
+  _AnnouncementTablePaintLayout? _layout;
+  double? _viewportWidth;
+  TextScaler? _textScaler;
+  TextDirection? _textDirection;
+  Color? _textColor;
+  int _layoutGeneration = 0;
+
+  @override
+  void didUpdateWidget(covariant _FastAnnouncementTable oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (!identical(oldWidget.block, widget.block)) _clearLayout();
+  }
+
+  @override
+  void dispose() {
+    _clearLayout();
+    _scrollController.dispose();
+    super.dispose();
+  }
+
+  void _clearLayout() {
+    _layoutGeneration++;
+    _layout?.dispose();
+    _layout = null;
+    _viewportWidth = null;
+    _textScaler = null;
+    _textDirection = null;
+    _textColor = null;
+  }
+
+  _AnnouncementTablePaintLayout? _layoutFor(
+      double viewportWidth, TextScaler textScaler, TextDirection direction) {
+    if (_viewportWidth == viewportWidth &&
+        _textScaler == textScaler &&
+        _textDirection == direction &&
+        _textColor == widget.color.textPrimary) {
+      return _layout;
+    }
+    _clearLayout();
+    _viewportWidth = viewportWidth;
+    _textScaler = textScaler;
+    _textDirection = direction;
+    _textColor = widget.color.textPrimary;
+    final work = _AnnouncementTableLayoutWork(
+      cells: widget.cells,
+      rowCount: widget.rowCount,
+      columnCount: widget.columnCount,
+      textColor: widget.color.textPrimary,
+      viewportWidth: viewportWidth,
+      textScaler: textScaler,
+      textDirection: direction,
+    );
+    if (widget.cells.length <= 256) {
+      while (!work.isComplete) {
+        work.advance();
+      }
+      return _layout = work.finish();
+    }
+    final generation = _layoutGeneration;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && generation == _layoutGeneration) {
+        unawaited(_finishLargeLayout(work, generation));
+      }
+    });
+    return null;
+  }
+
+  Future<void> _finishLargeLayout(
+      _AnnouncementTableLayoutWork work, int generation) async {
+    while (mounted && generation == _layoutGeneration && !work.isComplete) {
+      final stopwatch = Stopwatch()..start();
+      do {
+        work.advance();
+      } while (!work.isComplete && stopwatch.elapsedMicroseconds < 2200);
+      if (!work.isComplete) {
+        WidgetsBinding.instance.scheduleFrame();
+        await WidgetsBinding.instance.endOfFrame;
+      }
+    }
+    if (!mounted || generation != _layoutGeneration) return;
+    setState(() => _layout = work.finish());
+  }
+
+  void _selectCell(LongPressStartDetails details) {
+    final renderObject = _paintKey.currentContext?.findRenderObject();
+    final layout = _layout;
+    if (renderObject is! RenderBox || layout == null) return;
+    final position = renderObject.globalToLocal(details.globalPosition);
+    final row = layout.firstVisibleRow(position.dy);
+    if (row >= layout.cellsByRow.length) return;
+    for (final entry in layout.cellsByRow[row]) {
+      if (!entry.rect.contains(position) || entry.cell.text.isEmpty) continue;
+      showDialog<void>(
+        context: context,
+        builder: (context) => AlertDialog(
+          content: SelectableText(entry.cell.text),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: const Text('关闭'),
+            ),
+          ],
+        ),
+      );
+      return;
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final textScaler = MediaQuery.textScalerOf(context);
+    final direction = Directionality.of(context);
+    final verticalPosition = Scrollable.maybeOf(context)?.position;
+    final screenHeight = MediaQuery.sizeOf(context).height;
+    return LayoutBuilder(builder: (context, constraints) {
+      final layout = _layoutFor(constraints.maxWidth, textScaler, direction);
+      if (layout == null) {
+        return const SizedBox(
+          height: 72,
+          child: Center(child: CircularProgressIndicator(strokeWidth: 2)),
+        );
+      }
+      return Padding(
+        padding: const EdgeInsets.symmetric(vertical: 10),
+        child: RepaintBoundary(
+          key: const ValueKey<String>('announcement-fast-table'),
+          child: GestureDetector(
+            onLongPressStart: _selectCell,
+            child: SingleChildScrollView(
+              controller: _scrollController,
+              scrollDirection: Axis.horizontal,
+              child: CustomPaint(
+                key: _paintKey,
+                size: Size(layout.width, layout.height),
+                painter: _AnnouncementTablePainter(
+                  layout: layout,
+                  borderColor: widget.color.border,
+                  scrollController: _scrollController,
+                  verticalPosition: verticalPosition,
+                  tableKey: _paintKey,
+                  viewportWidth: constraints.maxWidth,
+                  viewportHeight: screenHeight,
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+    });
+  }
+}
+
+TextAlign _tableTextAlign(String value) => switch (value) {
+      'center' => TextAlign.center,
+      'right' => TextAlign.right,
+      'justify' => TextAlign.justify,
+      _ => TextAlign.left,
+    };
+
+class _AnnouncementTablePaintCell {
+  _AnnouncementTablePaintCell(this.cell, this.textHeight);
+
+  final AnnouncementTableCell cell;
+  final double textHeight;
+  late final Rect rect;
+}
+
+/// Measures large tables in short frame slices, then builds the paint index.
+class _AnnouncementTableLayoutWork {
+  _AnnouncementTableLayoutWork({
+    required this.cells,
+    required this.rowCount,
+    required this.columnCount,
+    required Color textColor,
+    required double viewportWidth,
+    required this.textScaler,
+    required this.textDirection,
+  })  : columnWidth = math.max(112.0, viewportWidth / columnCount),
+        style = TextStyle(color: textColor, fontSize: 13.5),
+        rowHeights = List<double>.filled(rowCount, 40),
+        rowOffsets = List<double>.filled(rowCount + 1, 0),
+        cellsByRow = List.generate(
+          rowCount,
+          (_) => <_AnnouncementTablePaintCell>[],
+        );
+
+  final List<AnnouncementTableCell> cells;
+  final int rowCount;
+  final int columnCount;
+  final double columnWidth;
+  final TextStyle style;
+  final TextScaler textScaler;
+  final TextDirection textDirection;
+  final List<double> rowHeights;
+  final List<double> rowOffsets;
+  final List<List<_AnnouncementTablePaintCell>> cellsByRow;
+  final List<_AnnouncementTablePaintCell> entries = [];
+  int _phase = 0;
+  int _index = 0;
+
+  bool get isComplete => _phase == 4;
+
+  int _lastRow(AnnouncementTableCell cell) =>
+      math.min(rowCount, cell.row + math.max(1, cell.rowSpan));
+
+  void advance() {
+    if (_phase == 0) {
+      if (_index == cells.length) {
+        _phase = 1;
+        _index = 0;
+        return;
+      }
+      final cell = cells[_index++];
+      if (cell.row < 0 ||
+          cell.column < 0 ||
+          cell.row >= rowCount ||
+          cell.column >= columnCount) {
+        return;
+      }
+      final span = cell.columnSpan.clamp(1, columnCount - cell.column);
+      final painter = TextPainter(
+        text: TextSpan(text: cell.text, style: style),
+        textDirection: textDirection,
+        textScaler: textScaler,
+        textAlign: _tableTextAlign(cell.textAlignment),
+      )..layout(maxWidth: math.max(1, columnWidth * span - 16));
+      final height = math.max(40.0, painter.height + 16);
+      painter.dispose();
+      entries.add(_AnnouncementTablePaintCell(cell, height));
+      if (cell.rowSpan <= 1) {
+        rowHeights[cell.row] = math.max(rowHeights[cell.row], height);
+      }
+      return;
+    }
+    if (_phase == 1) {
+      if (_index == entries.length) {
+        _phase = 2;
+        _index = 0;
+        return;
+      }
+      final entry = entries[_index++];
+      final cell = entry.cell;
+      if (cell.rowSpan <= 1) return;
+      final endRow = _lastRow(cell);
+      final currentHeight = rowHeights
+          .getRange(cell.row, endRow)
+          .fold<double>(0, (sum, height) => sum + height);
+      if (entry.textHeight <= currentHeight) return;
+      final extra = (entry.textHeight - currentHeight) / (endRow - cell.row);
+      for (var row = cell.row; row < endRow; row++) {
+        rowHeights[row] += extra;
+      }
+      return;
+    }
+    if (_phase == 2) {
+      if (_index == rowCount) {
+        _phase = 3;
+        _index = 0;
+        return;
+      }
+      rowOffsets[_index + 1] = rowOffsets[_index] + rowHeights[_index];
+      _index++;
+      return;
+    }
+    if (_phase == 3) {
+      if (_index == entries.length) {
+        _phase = 4;
+        return;
+      }
+      final entry = entries[_index++];
+      final cell = entry.cell;
+      final endRow = _lastRow(cell);
+      entry.rect = Rect.fromLTRB(
+        cell.column * columnWidth,
+        rowOffsets[cell.row],
+        math.min(columnCount, cell.column + math.max(1, cell.columnSpan)) *
+            columnWidth,
+        rowOffsets[endRow],
+      );
+      for (var row = cell.row; row < endRow; row++) {
+        cellsByRow[row].add(entry);
+      }
+    }
+  }
+
+  _AnnouncementTablePaintLayout finish() {
+    assert(isComplete);
+    return _AnnouncementTablePaintLayout(
+      width: columnCount * columnWidth,
+      height: rowOffsets.last,
+      cells: entries,
+      rowOffsets: rowOffsets,
+      cellsByRow: cellsByRow,
+      style: style,
+      textScaler: textScaler,
+      textDirection: textDirection,
+    );
+  }
+}
+
+class _AnnouncementTablePaintLayout {
+  _AnnouncementTablePaintLayout({
+    required this.width,
+    required this.height,
+    required this.cells,
+    required this.rowOffsets,
+    required this.cellsByRow,
+    required this.style,
+    required this.textScaler,
+    required this.textDirection,
+  });
+
+  final double width;
+  final double height;
+  final List<_AnnouncementTablePaintCell> cells;
+  final List<double> rowOffsets;
+  final List<List<_AnnouncementTablePaintCell>> cellsByRow;
+  final TextStyle style;
+  final TextScaler textScaler;
+  final TextDirection textDirection;
+  final Map<_AnnouncementTablePaintCell, TextPainter> _painters = {};
+
+  int firstVisibleRow(double top) {
+    var low = 0;
+    var high = rowOffsets.length;
+    while (low < high) {
+      final middle = low + (high - low) ~/ 2;
+      if (rowOffsets[middle] <= top) {
+        low = middle + 1;
+      } else {
+        high = middle;
+      }
+    }
+    return (low - 1).clamp(0, cellsByRow.length);
+  }
+
+  int firstRowAfter(double bottom) {
+    var low = 0;
+    var high = rowOffsets.length;
+    while (low < high) {
+      final middle = low + (high - low) ~/ 2;
+      if (rowOffsets[middle] < bottom) {
+        low = middle + 1;
+      } else {
+        high = middle;
+      }
+    }
+    return low.clamp(0, cellsByRow.length);
+  }
+
+  TextPainter painterFor(_AnnouncementTablePaintCell cell) {
+    final cached = _painters.remove(cell);
+    if (cached != null) {
+      _painters[cell] = cached;
+      return cached;
+    }
+    final painter = TextPainter(
+      text: TextSpan(text: cell.cell.text, style: style),
+      textDirection: textDirection,
+      textScaler: textScaler,
+      textAlign: _tableTextAlign(cell.cell.textAlignment),
+    )..layout(maxWidth: math.max(1, cell.rect.width - 16));
+    if (_painters.length >= 256) {
+      _painters.remove(_painters.keys.first)?.dispose();
+    }
+    _painters[cell] = painter;
+    return painter;
+  }
+
+  void dispose() {
+    for (final painter in _painters.values) {
+      painter.dispose();
+    }
+    _painters.clear();
+  }
+}
+
+class _AnnouncementTablePainter extends CustomPainter {
+  _AnnouncementTablePainter({
+    required this.layout,
+    required this.borderColor,
+    required this.scrollController,
+    required this.verticalPosition,
+    required this.tableKey,
+    required this.viewportWidth,
+    required this.viewportHeight,
+  }) : super(
+            repaint: Listenable.merge([
+          scrollController,
+          if (verticalPosition != null) verticalPosition,
+        ]));
+
+  final _AnnouncementTablePaintLayout layout;
+  final Color borderColor;
+  final ScrollController scrollController;
+  final ScrollPosition? verticalPosition;
+  final GlobalKey tableKey;
+  final double viewportWidth;
+  final double viewportHeight;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final left = scrollController.hasClients ? scrollController.offset : 0.0;
+    final right = left + viewportWidth;
+    final renderObject = tableKey.currentContext?.findRenderObject();
+    final top = renderObject is RenderBox
+        ? renderObject.globalToLocal(Offset.zero).dy
+        : 0.0;
+    final bottom = renderObject is RenderBox
+        ? renderObject.globalToLocal(Offset(0, viewportHeight)).dy
+        : size.height;
+    final border = Paint()
+      ..color = borderColor
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 0.5;
+    final paintedSpans = <_AnnouncementTablePaintCell>{};
+    final firstRow = layout.firstVisibleRow(top);
+    final lastRow = layout.firstRowAfter(bottom);
+    for (var row = firstRow; row < lastRow; row++) {
+      for (final entry in layout.cellsByRow[row]) {
+        if (entry.cell.rowSpan > 1 && !paintedSpans.add(entry)) continue;
+        final rect = entry.rect;
+        if (rect.right <= left ||
+            rect.left >= right ||
+            rect.bottom <= top ||
+            rect.top >= bottom) {
+          continue;
+        }
+        canvas.drawRect(rect, border);
+        final content = rect.deflate(8);
+        if (content.isEmpty) continue;
+        final painter = layout.painterFor(entry);
+        final verticalFactor = switch (entry.cell.verticalAlignment) {
+          'top' => 0.0,
+          'bottom' => 1.0,
+          _ => 0.5,
+        };
+        final textTop = content.top +
+            math.max(0.0, content.height - painter.height) * verticalFactor;
+        canvas.save();
+        canvas.clipRect(content);
+        painter.paint(canvas, Offset(content.left, textTop));
+        canvas.restore();
+      }
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _AnnouncementTablePainter oldDelegate) =>
+      oldDelegate.layout != layout ||
+      oldDelegate.borderColor != borderColor ||
+      oldDelegate.viewportWidth != viewportWidth ||
+      oldDelegate.viewportHeight != viewportHeight ||
+      oldDelegate.verticalPosition != verticalPosition;
+}
+
 class _AnnouncementLoadingState extends StatelessWidget {
   const _AnnouncementLoadingState();
 
@@ -1513,7 +2335,8 @@ class _AnnouncementTileState extends State<_AnnouncementTile>
       _resolvedPreview = null;
       return;
     }
-    final needsArticlePreview = widget.item.sourceId == 'shvfs';
+    final article = _announcementForUrlOwner(widget.item);
+    final needsArticlePreview = article.sourceId == 'shvfs';
     _previewReady = widget.initialPreviewReady ||
         (!needsArticlePreview && widget.item.summary.isNotEmpty);
     _resolvedPreview = needsArticlePreview
@@ -1531,7 +2354,7 @@ class _AnnouncementTileState extends State<_AnnouncementTile>
       _startEntrance();
       return;
     }
-    widget.repository.loadPreview(widget.item).then(
+    widget.repository.loadPreview(article).then(
       (preview) {
         if (!mounted || generation != _previewGeneration) return;
         setState(() {
@@ -1549,6 +2372,7 @@ class _AnnouncementTileState extends State<_AnnouncementTile>
   }
 
   void _startEntrance() {
+    if (_announcementForUrlOwner(widget.item).sourceId == 'sfa') return;
     _entranceTimer = Timer(
       Duration(milliseconds: (widget.index % 6) * 55),
       () {
@@ -1566,6 +2390,11 @@ class _AnnouncementTileState extends State<_AnnouncementTile>
 
   @override
   Widget build(BuildContext context) {
+    // Film Academy dates are fetched with the list. Do not hold the whole card
+    // behind an optional article preview after the dated list is ready.
+    if (_announcementForUrlOwner(widget.item).sourceId == 'sfa') {
+      return _tile(_resolvedPreview ?? widget.item.summary);
+    }
     if (!_previewReady) {
       return const SizedBox(
         height: 104,
@@ -1596,9 +2425,7 @@ class _AnnouncementTileState extends State<_AnnouncementTile>
   Widget _tile(String? preview) {
     final item = widget.item;
     final colors = context.shuyoColors;
-    final adapter = AnnouncementSource.byId(item.sourceId).adapter;
     final metadata = [
-      if (!adapter.hideListColumn && item.column.isNotEmpty) item.column,
       if (item.dateText.isNotEmpty) item.dateText,
     ].join(' · ');
     return InkWell(
@@ -1612,17 +2439,7 @@ class _AnnouncementTileState extends State<_AnnouncementTile>
                 crossAxisAlignment: CrossAxisAlignment.start,
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
-                  Text(
-                    item.title,
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                    style: ShuYoTextStyles.title(
-                      color: colors.textPrimary,
-                      size: 16,
-                      height: 1.26,
-                      weight: FontWeight.w500,
-                    ),
-                  ),
+                  _title(item.title, colors),
                   if (preview != null && preview.isNotEmpty)
                     Padding(
                       padding: const EdgeInsets.only(top: 6),
@@ -1659,6 +2476,20 @@ class _AnnouncementTileState extends State<_AnnouncementTile>
             ),
           ],
         ),
+      ),
+    );
+  }
+
+  Widget _title(String title, ShuYoColors colors) {
+    return Text(
+      title,
+      maxLines: 2,
+      overflow: TextOverflow.ellipsis,
+      style: ShuYoTextStyles.title(
+        color: colors.textPrimary,
+        size: 16,
+        height: 1.26,
+        weight: FontWeight.w500,
       ),
     );
   }

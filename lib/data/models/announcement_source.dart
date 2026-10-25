@@ -20,9 +20,60 @@ enum AnnouncementListFormat {
   contentBoxList,
   unorderedList,
   shvfsNews,
+  whitespaceList,
+  newsBodyList,
+  undergraduateAdmissions,
+  graduateAdmissions,
 }
 
-enum AnnouncementSourceGroup { campus, college }
+enum AnnouncementCollegeCategory {
+  humanitiesSocial('人文社科类', [
+    'mkszyxy',
+    'sfs',
+    'sociology',
+    'schim',
+    'cla',
+    'law',
+    'sjc',
+  ]),
+  engineeringScience('理工类', [
+    'qwc',
+    'scie',
+    'xiangying',
+    'auto',
+    'ece',
+    'utseus',
+    'smes',
+    'ai',
+    'scicol',
+    'cs',
+    'mat',
+    'bio',
+    'sme',
+    'ulisboas',
+    'zhgy',
+  ]),
+  economicsManagement('经济管理类', ['soe', 'silc', 'ms']),
+  medicine('医学类', ['medicine']),
+  arts('艺术类', ['safa', 'music', 'sfa', 'shvfs']),
+  other('其他类', ['tiyu', 'cce', 'cie', 'mba', 'modart']);
+
+  const AnnouncementCollegeCategory(this.label, this.sourceIds);
+
+  final String label;
+  final List<String> sourceIds;
+}
+
+enum AnnouncementSourceGroup {
+  schoolPortal('学校门户'),
+  schoolDepartment('学校下属部门'),
+  college('学院'),
+  researchInstitute('研究院所');
+
+  const AnnouncementSourceGroup(this.label);
+
+  final String label;
+}
 
 const _vsbAuthorValueSelectors = [
   'tr[valign="middle"][height="20"] font[face=""] > span',
@@ -56,7 +107,7 @@ class AnnouncementSource {
     required this.adapter,
     this.additionalListUrls = const [],
     this.columnNames = const [],
-    this.group = AnnouncementSourceGroup.campus,
+    this.group = AnnouncementSourceGroup.schoolDepartment,
   });
 
   final String id;
@@ -81,6 +132,7 @@ class AnnouncementSource {
       authorLabelSelectors: ['.xx span'],
       authorValueSelectors: [],
     ),
+    group: AnnouncementSourceGroup.schoolPortal,
   );
 
   static const all = <AnnouncementSource>[
@@ -91,6 +143,60 @@ class AnnouncementSource {
       listUrl: 'https://bksy.shu.edu.cn/index/tzgg.htm',
       adapter: AnnouncementSourceAdapter(
           listFormat: AnnouncementListFormat.onlyList),
+    ),
+    AnnouncementSource(
+      id: 'bkzsw',
+      name: '本科生招生网',
+      listUrl: 'https://bkzsw.shu.edu.cn/zxgg.htm',
+      additionalListUrls: [
+        'https://bkzsw.shu.edu.cn/zsjz/qjtk.htm',
+        'https://bkzsw.shu.edu.cn/zsjz/cjzs.htm',
+        'https://bkzsw.shu.edu.cn/zsjz/zhpjlq.htm',
+        'https://bkzsw.shu.edu.cn/zsjz/ysl.htm',
+        'https://bkzsw.shu.edu.cn/zsjz/bss.htm',
+        'https://bkzsw.shu.edu.cn/zsjz/cbs.htm',
+        'https://bkzsw.shu.edu.cn/zsjz/exw.htm',
+        'https://bkzsw.shu.edu.cn/zsjz/gxzxjh.htm',
+        'https://bkzsw.shu.edu.cn/zsjz/gatzha.htm',
+      ],
+      columnNames: [
+        '最新公告',
+        '秋季统考',
+        '春季招生',
+        '综合评价录取',
+        '艺术类',
+        '保送生',
+        '插班生',
+        '二学位',
+        '高校专项计划',
+        '港澳台招生',
+      ],
+      adapter: AnnouncementSourceAdapter(
+        listFormat: AnnouncementListFormat.undergraduateAdmissions,
+      ),
+      group: AnnouncementSourceGroup.schoolPortal,
+    ),
+    AnnouncementSource(
+      id: 'yjszs',
+      name: '研究生招生网',
+      listUrl: 'https://yjszs.shu.edu.cn/cd/tzgg.htm',
+      additionalListUrls: ['https://yjszs.shu.edu.cn/cd/zsdt.htm'],
+      columnNames: ['通知公告', '招生动态'],
+      adapter: AnnouncementSourceAdapter(
+        listFormat: AnnouncementListFormat.graduateAdmissions,
+      ),
+      group: AnnouncementSourceGroup.schoolPortal,
+    ),
+    AnnouncementSource(
+      id: 'yingxin',
+      name: '迎新网',
+      listUrl: 'https://yingxin.shu.edu.cn/tzgg.htm',
+      additionalListUrls: ['https://yingxin.shu.edu.cn/rxxz.htm'],
+      columnNames: ['通知公告', '入学须知'],
+      adapter: AnnouncementSourceAdapter(
+        listFormat: AnnouncementListFormat.vsbNewList,
+      ),
+      group: AnnouncementSourceGroup.schoolPortal,
     ),
     AnnouncementSource(
       id: 'xgb',
@@ -143,6 +249,20 @@ class AnnouncementSource {
       ),
     ),
     AnnouncementSource(
+      id: 'alumni',
+      name: '对外联络处',
+      listUrl: 'https://alumni.shu.edu.cn/xwggzx/tzgg.htm',
+      adapter: AnnouncementSourceAdapter(
+          listFormat: AnnouncementListFormat.bareSpanList),
+    ),
+    AnnouncementSource(
+      id: 'shuedf',
+      name: '上海大学教育发展基金会',
+      listUrl: 'https://shuedf.shu.edu.cn/sylm/tzgg.htm',
+      adapter: AnnouncementSourceAdapter(
+          listFormat: AnnouncementListFormat.whitespaceList),
+    ),
+    AnnouncementSource(
       id: 'kyglb',
       name: '科研管理部',
       listUrl: 'https://kyglb.shu.edu.cn/dhl/tzgg.htm',
@@ -167,7 +287,7 @@ class AnnouncementSource {
     ),
     AnnouncementSource(
       id: 'youth',
-      name: '共青团上海大学',
+      name: '上海大学共青团委员会',
       listUrl: 'https://youth.shu.edu.cn/syxzlly/tzgg.htm',
       adapter: AnnouncementSourceAdapter(
           listFormat: AnnouncementListFormat.rightList),
@@ -289,7 +409,162 @@ class AnnouncementSource {
       listUrl: 'https://mgi.shu.edu.cn/index/lmzl/tzgg.htm',
       adapter:
           AnnouncementSourceAdapter(listFormat: AnnouncementListFormat.artList),
-      group: AnnouncementSourceGroup.college,
+      group: AnnouncementSourceGroup.researchInstitute,
+    ),
+    AnnouncementSource(
+      id: 'suitm',
+      name: '转化医学研究院',
+      listUrl: 'https://suitm.shu.edu.cn/syzl/xwdt.htm',
+      additionalListUrls: [
+        'https://suitm.shu.edu.cn/tzgg.htm',
+        'https://suitm.shu.edu.cn/kycg.htm',
+      ],
+      columnNames: ['新闻动态', '通知公告', '科研成果'],
+      adapter: AnnouncementSourceAdapter(
+        listFormat: AnnouncementListFormat.whitespaceList,
+      ),
+      group: AnnouncementSourceGroup.researchInstitute,
+    ),
+    AnnouncementSource(
+      id: 'adri',
+      name: '亚洲人口研究中心',
+      listUrl: 'https://adrichn.shu.edu.cn/sylmnr/ggl.htm',
+      adapter: AnnouncementSourceAdapter(
+          listFormat: AnnouncementListFormat.vsbTable),
+      group: AnnouncementSourceGroup.researchInstitute,
+    ),
+    AnnouncementSource(
+      id: 'cast',
+      name: '先进凝固技术中心',
+      listUrl: 'https://cast.shu.edu.cn/sylm/xwkd.htm',
+      additionalListUrls: [
+        'https://cast.shu.edu.cn/sylm/yjcg.htm',
+        'https://cast.shu.edu.cn/sylm/xsdt.htm',
+      ],
+      columnNames: ['新闻快递', '研究成果', '学术动态'],
+      adapter: AnnouncementSourceAdapter(
+        listFormat: AnnouncementListFormat.rightList,
+        hideListColumn: true,
+      ),
+      group: AnnouncementSourceGroup.researchInstitute,
+    ),
+    AnnouncementSource(
+      id: 'icn',
+      name: '碳中和创新研究中心',
+      listUrl: 'https://icn.shu.edu.cn/index/kydt.htm',
+      additionalListUrls: ['https://icn.shu.edu.cn/index/xwdt.htm'],
+      columnNames: ['科研动态', '新闻动态'],
+      adapter: AnnouncementSourceAdapter(
+        listFormat: AnnouncementListFormat.whitespaceList,
+        hideListColumn: true,
+      ),
+      group: AnnouncementSourceGroup.researchInstitute,
+    ),
+    AnnouncementSource(
+      id: 'igs',
+      name: '全球问题研究院',
+      listUrl: 'https://igs.shu.edu.cn/cd/tzgg.htm',
+      additionalListUrls: ['https://igs.shu.edu.cn/cd/xwzx.htm'],
+      columnNames: ['通知公告', '新闻中心'],
+      adapter: AnnouncementSourceAdapter(
+        listFormat: AnnouncementListFormat.newsBodyList,
+        hideListColumn: true,
+      ),
+      group: AnnouncementSourceGroup.researchInstitute,
+    ),
+    AnnouncementSource(
+      id: 'ihe',
+      name: '高等教育研究所',
+      listUrl: 'https://ihe.shu.edu.cn/sybk/gjdt.htm',
+      adapter: AnnouncementSourceAdapter(
+          listFormat: AnnouncementListFormat.whitespaceList),
+      group: AnnouncementSourceGroup.researchInstitute,
+    ),
+    AnnouncementSource(
+      id: 'jgzx',
+      name: '上海经济管理中心',
+      listUrl: 'https://jgzx.shu.edu.cn/synr/ywsd.htm',
+      additionalListUrls: ['https://jgzx.shu.edu.cn/synr/zsjz.htm'],
+      columnNames: ['要闻速递', '招生简章'],
+      adapter: AnnouncementSourceAdapter(
+        listFormat: AnnouncementListFormat.vsbNewList,
+        hideListColumn: true,
+      ),
+      group: AnnouncementSourceGroup.researchInstitute,
+    ),
+    AnnouncementSource(
+      id: 'jhai',
+      name: '无人艇工程研究院',
+      listUrl: 'https://jhai.shu.edu.cn/sylm/xwdt.htm',
+      adapter: AnnouncementSourceAdapter(
+          listFormat: AnnouncementListFormat.vsbTable),
+      group: AnnouncementSourceGroup.researchInstitute,
+    ),
+    AnnouncementSource(
+      id: 'museum',
+      name: '博物馆',
+      listUrl: 'https://museum.shu.edu.cn/bggk/xwkd.htm',
+      adapter: AnnouncementSourceAdapter(
+          listFormat: AnnouncementListFormat.bareSpanList),
+      group: AnnouncementSourceGroup.schoolDepartment,
+    ),
+    AnnouncementSource(
+      id: 'suns',
+      name: '数据科学与都市研究中心',
+      listUrl: 'https://suns.shu.edu.cn/sy/gg.htm',
+      additionalListUrls: ['https://suns.shu.edu.cn/sy/xw.htm'],
+      columnNames: ['公告', '新闻'],
+      adapter: AnnouncementSourceAdapter(
+        listFormat: AnnouncementListFormat.rightList,
+        hideListColumn: true,
+      ),
+      group: AnnouncementSourceGroup.researchInstitute,
+    ),
+    AnnouncementSource(
+      id: 'skl4nm',
+      name: '核电关键材料全国重点实验室',
+      listUrl: 'https://skl4nm.shu.edu.cn/sybk/tzgg.htm',
+      additionalListUrls: [
+        'https://skl4nm.shu.edu.cn/sybk/yjcg.htm',
+        'https://skl4nm.shu.edu.cn/sybk/zszp.htm',
+        'https://skl4nm.shu.edu.cn/sybk/kfkt.htm',
+      ],
+      columnNames: ['通知公告', '研究成果', '招生招聘', '开放课题'],
+      adapter: AnnouncementSourceAdapter(
+        listFormat: AnnouncementListFormat.rightList,
+        hideListColumn: true,
+      ),
+      group: AnnouncementSourceGroup.researchInstitute,
+    ),
+    AnnouncementSource(
+      id: 'sklar',
+      name: '先进耐火材料全国实验室',
+      listUrl: 'https://sklar.shu.edu.cn/sybk/tzgg.htm',
+      adapter: AnnouncementSourceAdapter(
+          listFormat: AnnouncementListFormat.whitespaceList),
+      group: AnnouncementSourceGroup.researchInstitute,
+    ),
+    AnnouncementSource(
+      id: 'sklass',
+      name: '先进特殊钢全国重点实验室',
+      listUrl: 'https://sklass.shu.edu.cn/index/gsgg.htm',
+      adapter: AnnouncementSourceAdapter(
+          listFormat: AnnouncementListFormat.whitespaceList),
+      group: AnnouncementSourceGroup.researchInstitute,
+    ),
+    AnnouncementSource(
+      id: 'fpd',
+      name: '新型显示技术及应用集成教育部重点实验室',
+      listUrl: 'https://fpd.shu.edu.cn/kfyjl/tzgg.htm',
+      additionalListUrls: [
+        'https://fpd.shu.edu.cn/kfyjl/xwzx.htm',
+        'https://fpd.shu.edu.cn/kfyjl/xsjl1.htm',
+      ],
+      columnNames: ['通知公告', '新闻中心', '学术交流'],
+      adapter: AnnouncementSourceAdapter(
+        listFormat: AnnouncementListFormat.vsbNewList,
+      ),
+      group: AnnouncementSourceGroup.researchInstitute,
     ),
     AnnouncementSource(
       id: 'ms',
@@ -403,12 +678,12 @@ class AnnouncementSource {
       id: 'cs',
       name: '计算机工程与科学学院',
       listUrl: 'https://cs.shu.edu.cn/index/zytz.htm',
-      columnNames: ['重要通知'],
+      additionalListUrls: ['https://cs.shu.edu.cn/index/xwdt.htm'],
+      columnNames: ['重要通知', '新闻动态'],
       adapter: AnnouncementSourceAdapter(
         listFormat: AnnouncementListFormat.xwLt,
         authorLabelSelectors: ['p span'],
         authorValueSelectors: [],
-        hideListColumn: true,
         hideDetailDepartment: true,
       ),
       group: AnnouncementSourceGroup.college,
@@ -435,6 +710,19 @@ class AnnouncementSource {
       listUrl: 'https://music.shu.edu.cn/xwzx/tzgg.htm',
       adapter:
           AnnouncementSourceAdapter(listFormat: AnnouncementListFormat.artList),
+      group: AnnouncementSourceGroup.college,
+    ),
+    AnnouncementSource(
+      id: 'modart',
+      name: '巴黎国际时装艺术学院',
+      listUrl: 'https://modart.shu.edu.cn/tzgg.htm',
+      additionalListUrls: [
+        'https://modart.shu.edu.cn/xyzx/xyxw.htm',
+        'https://modart.shu.edu.cn/xyzx/sszx1.htm',
+      ],
+      columnNames: ['通知公告', '学院新闻', '时尚资讯'],
+      adapter: AnnouncementSourceAdapter(
+          listFormat: AnnouncementListFormat.rightListUl),
       group: AnnouncementSourceGroup.college,
     ),
     AnnouncementSource(
@@ -558,8 +846,91 @@ class AnnouncementSource {
     ),
   ];
 
-  static List<AnnouncementSource> inGroup(AnnouncementSourceGroup group) =>
-      all.where((source) => source.group == group).toList(growable: false);
+  static const _schoolDepartmentOrder = <String>[
+    'bksy',
+    'gs',
+    'xgb',
+    'dwygb',
+    'youth',
+    'kyglb',
+    'global',
+    'alumni',
+    'shuedf',
+    'hr',
+    'cwc',
+    'sbc',
+    'lib',
+    'archive',
+    'museum',
+    'its',
+    'hbb',
+    'baoweichu',
+    'xyy',
+  ];
+
+  static const _researchInstituteOrder = <String>[
+    'mgi',
+    'suitm',
+    'jhai',
+    'igs',
+    'ihe',
+    'cast',
+    'icn',
+    'adri',
+    'jgzx',
+    'suns',
+    'skl4nm',
+    'sklar',
+    'sklass',
+    'fpd',
+  ];
+
+  static List<AnnouncementSource> inGroup(AnnouncementSourceGroup group) {
+    if (group == AnnouncementSourceGroup.college) {
+      return [
+        for (final category in AnnouncementCollegeCategory.values)
+          ...inCollegeCategory(category),
+      ];
+    }
+    if (group == AnnouncementSourceGroup.schoolDepartment ||
+        group == AnnouncementSourceGroup.researchInstitute) {
+      final order = group == AnnouncementSourceGroup.schoolDepartment
+          ? _schoolDepartmentOrder
+          : _researchInstituteOrder;
+      final sourcesById = {
+        for (final source in all)
+          if (source.group == group) source.id: source,
+      };
+      return [
+        for (final id in order)
+          if (sourcesById.containsKey(id)) sourcesById[id]!,
+        for (final source in sourcesById.values)
+          if (!order.contains(source.id)) source,
+      ];
+    }
+    return all.where((source) => source.group == group).toList(growable: false);
+  }
+
+  static List<AnnouncementSource> inCollegeCategory(
+      AnnouncementCollegeCategory category) {
+    final sourcesById = {
+      for (final source in all)
+        if (source.group == AnnouncementSourceGroup.college) source.id: source,
+    };
+    final sources = <AnnouncementSource>[];
+    for (final id in category.sourceIds) {
+      final source = sourcesById[id];
+      if (source != null) sources.add(source);
+    }
+    if (category == AnnouncementCollegeCategory.other) {
+      final categorizedIds = AnnouncementCollegeCategory.values
+          .expand((value) => value.sourceIds)
+          .toSet();
+      sources.addAll(sourcesById.values
+          .where((source) => !categorizedIds.contains(source.id)));
+    }
+    return sources;
+  }
 
   static AnnouncementSource byId(String? id) {
     for (final source in all) {

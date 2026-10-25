@@ -232,32 +232,60 @@ class _DefaultAnnouncementPageState extends State<_DefaultAnnouncementPage> {
                 Padding(
                   padding: const EdgeInsets.fromLTRB(16, 20, 16, 8),
                   child: Text(
-                    group == AnnouncementSourceGroup.campus
-                        ? '校级与公共服务'
-                        : '学院与培养单位',
+                    group.label,
                     style: TextStyle(
                       color: Theme.of(context).colorScheme.primary,
                       fontWeight: FontWeight.w600,
                     ),
                   ),
                 ),
-                for (final source in AnnouncementSource.inGroup(group))
-                  ListTile(
-                    title: Text(source.name),
-                    onTap: _saving ? null : () => _save(source),
-                    trailing: Icon(
-                      source == selected
-                          ? Icons.radio_button_checked
-                          : Icons.radio_button_unchecked,
-                      color: source == selected
-                          ? Theme.of(context).colorScheme.primary
-                          : null,
-                    ),
-                  ),
+                if (group == AnnouncementSourceGroup.college)
+                  for (final category
+                      in AnnouncementCollegeCategory.values) ...[
+                    _collegeCategoryHeader(category.label),
+                    for (final source
+                        in AnnouncementSource.inCollegeCategory(category))
+                      _sourceTile(source, selected),
+                  ]
+                else
+                  for (final source in AnnouncementSource.inGroup(group))
+                    _sourceTile(source, selected),
               ],
             ],
           );
         },
+      ),
+    );
+  }
+
+  Widget _collegeCategoryHeader(String title) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 10, 16, 4),
+      child: Align(
+        alignment: Alignment.centerLeft,
+        child: Text(
+          title,
+          textAlign: TextAlign.left,
+          style: TextStyle(
+            color: context.shuyoColors.textMuted,
+            fontSize: 12.5,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _sourceTile(AnnouncementSource source, AnnouncementSource selected) {
+    return ListTile(
+      title: Text(source.name),
+      onTap: _saving ? null : () => _save(source),
+      trailing: Icon(
+        source == selected
+            ? Icons.radio_button_checked
+            : Icons.radio_button_unchecked,
+        color:
+            source == selected ? Theme.of(context).colorScheme.primary : null,
       ),
     );
   }

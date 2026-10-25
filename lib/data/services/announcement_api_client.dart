@@ -1,6 +1,9 @@
+import 'dart:async';
+import 'dart:collection';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:flutter/foundation.dart';
 import 'package:html/dom.dart' as dom;
 import 'package:html/parser.dart' as html_parser;
 import 'package:http/http.dart' as http;
@@ -9,13 +12,16 @@ import 'package:http/io_client.dart';
 import '../../core/client_user_agent.dart';
 import '../models/announcement.dart';
 import '../models/announcement_source.dart';
+import 'announcement_film_date_order.dart';
 import 'http_timeout.dart';
 
 class AnnouncementApiException implements Exception {
-  const AnnouncementApiException(this.message, {this.statusCode});
+  const AnnouncementApiException(this.message,
+      {this.statusCode, this.retryAfter});
 
   final String message;
   final int? statusCode;
+  final Duration? retryAfter;
 
   @override
   String toString() {
@@ -27,6 +33,11 @@ class AnnouncementApiException implements Exception {
   }
 }
 
+/// The server confirms that this announcement no longer exists.
+class AnnouncementUnavailableException extends AnnouncementApiException {
+  const AnnouncementUnavailableException({super.statusCode}) : super('公告失效');
+}
+
 class AnnouncementPageBatch {
   const AnnouncementPageBatch(
       {required this.items, required this.nextPageUrls});
@@ -35,11 +46,55 @@ class AnnouncementPageBatch {
   final List<String?> nextPageUrls;
 }
 
-class AnnouncementApiClient {
-  AnnouncementApiClient({http.Client? httpClient})
-      : _httpClient = httpClient ?? IOClient(HttpClient());
+class AnnouncementColumnPage {
+  const AnnouncementColumnPage(this.items, this.nextPageUrl);
 
+  final List<AnnouncementListItem> items;
+  final String? nextPageUrl;
+}
+
+class AnnouncementApiClient {
+  AnnouncementApiClient({http.Client? httpClient, bool ownsHttpClient = true})
+      : _httpClient = httpClient ?? IOClient(HttpClient()),
+        _ownsHttpClient = httpClient == null || ownsHttpClient;
+
+  static const _maxConcurrentParses = 4;
   final http.Client _httpClient;
+  final bool _ownsHttpClient;
+  final Queue<Completer<void>> _parseWaiters = Queue();
+  int _activeParses = 0;
+  bool _closed = false;
+
+  void close() {
+    if (_closed) return;
+    _closed = true;
+    if (_ownsHttpClient) _httpClient.close();
+    while (_parseWaiters.isNotEmpty) {
+      _parseWaiters.removeFirst().complete();
+    }
+  }
+
+  /// Limits isolate creation after HTTP requests have already been sent.
+  Future<T> _withParse<T>(Future<T> Function() parse) async {
+    if (_closed) throw StateError('AnnouncementApiClient is closed');
+    if (_activeParses >= _maxConcurrentParses) {
+      final waiter = Completer<void>();
+      _parseWaiters.add(waiter);
+      await waiter.future;
+      if (_closed) throw StateError('AnnouncementApiClient is closed');
+    } else {
+      _activeParses++;
+    }
+    try {
+      return await parse();
+    } finally {
+      if (_parseWaiters.isNotEmpty) {
+        _parseWaiters.removeFirst().complete();
+      } else {
+        _activeParses--;
+      }
+    }
+  }
 
   Future<List<AnnouncementListItem>> fetchAnnouncements({
     AnnouncementSource source = AnnouncementSource.official,
@@ -66,17 +121,31 @@ class AnnouncementApiClient {
             index < source.columnNames.length ? source.columnNames[index] : '';
         try {
           final response = await _getHtml(pageUrl);
-          final html = _decodeHtml(response);
-          final items = parseAnnouncementList(html,
-              baseUrl: pageUrl, source: source, column: column);
+          // A source can have many columns, all of which may finish loading in
+          // one frame. Keep HTML decoding and DOM traversal off the UI isolate.
+          final parsed = await _withParse(
+            () => compute(
+              _parseColumn,
+              (
+                bytes: response.bodyBytes,
+                url: pageUrl,
+                source: source,
+                column: column
+              ),
+            ),
+          );
+          var items = parsed.items;
           if (items.isEmpty) {
             throw const AnnouncementApiException(
               '公告页面结构已变化，请稍后再试',
             );
           }
+          if (source.adapter.listFormat == AnnouncementListFormat.filmNotice) {
+            items = await _enrichFilmNotices(items, source: source);
+          }
           return (
             items: items,
-            nextPageUrl: _nextPageUrl(html, baseUrl: pageUrl, source: source),
+            nextPageUrl: parsed.nextPageUrl,
             error: null as Object?,
           );
         } on Object catch (error) {
@@ -134,15 +203,36 @@ class AnnouncementApiClient {
   }
 
   Future<AnnouncementDetail> fetchDetail(AnnouncementListItem item) async {
-    final response = await _getHtml(item.url);
-    return parseAnnouncementDetail(
-      _decodeHtml(response),
+    late final http.Response response;
+    try {
+      response = await _getHtml(item.url);
+    } on AnnouncementApiException catch (error) {
+      if (error.statusCode == 404 || error.statusCode == 410) {
+        throw AnnouncementUnavailableException(statusCode: error.statusCode);
+      }
+      rethrow;
+    }
+    final htmlPreview = utf8.decode(
+      response.bodyBytes.length > 32768
+          ? response.bodyBytes.sublist(0, 32768)
+          : response.bodyBytes,
+      allowMalformed: true,
+    );
+    if (_isUnavailableAnnouncementPage(htmlPreview)) {
+      throw const AnnouncementUnavailableException();
+    }
+    final request = (
+      bytes: response.bodyBytes,
       url: item.url,
-      fallbackTitle: item.title,
-      fallbackDateText: item.dateText,
-      fallbackPublishedAt: item.publishedAt,
+      title: item.title,
+      dateText: item.dateText,
+      publishedAt: item.publishedAt,
       sourceId: item.sourceId,
     );
+    if (response.bodyBytes.length >= 16384) {
+      return compute(_parseDetailResponse, request);
+    }
+    return _parseDetailResponse(request);
   }
 
   static List<AnnouncementListItem> parseAnnouncementList(
@@ -150,8 +240,9 @@ class AnnouncementApiClient {
     required String baseUrl,
     AnnouncementSource source = AnnouncementSource.official,
     String column = '',
+    dom.Document? parsedDocument,
   }) {
-    final document = html_parser.parse(html);
+    final document = parsedDocument ?? html_parser.parse(html);
     final rows = switch (source.adapter.listFormat) {
       AnnouncementListFormat.shuHome => document
               .querySelector('.ej_main .list')
@@ -169,9 +260,10 @@ class AnnouncementApiClient {
               .querySelector('div.list-centre-right-down')
               ?.querySelectorAll('li.clearfix') ??
           const <dom.Element>[],
-      AnnouncementListFormat.rightList =>
-        document.querySelector('div.right-list')?.querySelectorAll('li') ??
-            const <dom.Element>[],
+      AnnouncementListFormat.rightList => document
+              .querySelector('div.right-list, div.list-right')
+              ?.querySelectorAll('li') ??
+          const <dom.Element>[],
       AnnouncementListFormat.rightListUl =>
         document.querySelector('ul.rightList')?.querySelectorAll('li') ??
             const <dom.Element>[],
@@ -217,6 +309,18 @@ class AnnouncementApiClient {
             const <dom.Element>[],
       AnnouncementListFormat.shvfsNews =>
         document.querySelectorAll('ul.news-main-list > li.pr'),
+      AnnouncementListFormat.whitespaceList =>
+        document.querySelector('ul.listUL')?.querySelectorAll('li') ??
+            const <dom.Element>[],
+      AnnouncementListFormat.newsBodyList =>
+        document.querySelector('.news-body')?.querySelectorAll('li') ??
+            const <dom.Element>[],
+      AnnouncementListFormat.undergraduateAdmissions => document
+              .querySelector('.list-rContent-down')
+              ?.querySelectorAll('li[id^="line_u"]') ??
+          const <dom.Element>[],
+      AnnouncementListFormat.graduateAdmissions => document.querySelectorAll(
+          '.dec-listPage .list-right ul.clearfix > li.clearfix'),
     };
     final items = <AnnouncementListItem>[];
     for (final row in rows) {
@@ -237,10 +341,13 @@ class AnnouncementApiClient {
         AnnouncementListFormat.artList => row.querySelector('a.linkfont1'),
         AnnouncementListFormat.mbaList => row.querySelector('div.news-title'),
         AnnouncementListFormat.nestedListUl => row.querySelector('.whitespace'),
+        AnnouncementListFormat.whitespaceList =>
+          row.querySelector('.whitespace'),
         AnnouncementListFormat.xwLt => row.querySelector('h3'),
         AnnouncementListFormat.listPageList => anchor?.querySelector('p'),
         AnnouncementListFormat.shvfsNews =>
           row.querySelector('div.news-item-info h2'),
+        AnnouncementListFormat.graduateAdmissions => row.querySelector('h3'),
         _ => anchor,
       };
       final dateNode = switch (source.adapter.listFormat) {
@@ -254,7 +361,7 @@ class AnnouncementApiClient {
         AnnouncementListFormat.listPage ||
         AnnouncementListFormat.bareSpanList =>
           row.querySelector('span'),
-        AnnouncementListFormat.vsbNewList => row.querySelector('i'),
+        AnnouncementListFormat.vsbNewList => row.querySelector('i, span'),
         AnnouncementListFormat.sjList => row.querySelector('p'),
         AnnouncementListFormat.mbaList => row.querySelector('div.date-box'),
         AnnouncementListFormat.sjcList => row.querySelector('span.fr'),
@@ -268,6 +375,11 @@ class AnnouncementApiClient {
         AnnouncementListFormat.unorderedList => row.querySelector('span'),
         AnnouncementListFormat.shvfsNews =>
           row.querySelector('div.news-item-info > span'),
+        AnnouncementListFormat.whitespaceList => row.querySelector('.abstract'),
+        AnnouncementListFormat.newsBodyList => row.querySelector('.news-data'),
+        AnnouncementListFormat.undergraduateAdmissions =>
+          row.querySelector('i'),
+        AnnouncementListFormat.graduateAdmissions => row.querySelector('span'),
         AnnouncementListFormat.onlyList => null,
       };
       final rawDate = switch (source.adapter.listFormat) {
@@ -334,33 +446,40 @@ class AnnouncementApiClient {
     String html, {
     required String baseUrl,
     required AnnouncementSource source,
+    dom.Document? parsedDocument,
   }) {
-    final document = html_parser.parse(html);
+    final document = parsedDocument ?? html_parser.parse(html);
     final selector = switch (source.adapter.listFormat) {
       AnnouncementListFormat.shuHome => 'span.p_pages a',
       AnnouncementListFormat.onlyList => 'div.fanye a',
       AnnouncementListFormat.artList => 'a.Next',
       AnnouncementListFormat.vsbTable => 'a.Next, span.p_next a',
       AnnouncementListFormat.centreList => 'a.Next',
-      AnnouncementListFormat.rightList => 'div.right-list a, a.Next',
-      AnnouncementListFormat.rightListUl ||
+      AnnouncementListFormat.rightList =>
+        'div.right-list a, div.list-right a, a.Next',
+      AnnouncementListFormat.rightListUl => 'span.p_pages a, a.Next',
       AnnouncementListFormat.listPage ||
       AnnouncementListFormat.unorderedList =>
         'span.p_pages a',
+      AnnouncementListFormat.bareSpanList => 'a.Next, span.p_pages a',
       AnnouncementListFormat.vsbNewList ||
       AnnouncementListFormat.sjList ||
-      AnnouncementListFormat.bareSpanList ||
       AnnouncementListFormat.mbaList ||
       AnnouncementListFormat.sjcList =>
         'a.Next',
       AnnouncementListFormat.nestedListUl ||
       AnnouncementListFormat.listPageList ||
       AnnouncementListFormat.listRLb ||
-      AnnouncementListFormat.contentBoxList =>
+      AnnouncementListFormat.contentBoxList ||
+      AnnouncementListFormat.whitespaceList ||
+      AnnouncementListFormat.newsBodyList =>
         'a.Next',
       AnnouncementListFormat.xwLt => 'span.p_pages a',
       AnnouncementListFormat.filmNotice => 'span.p_next a',
       AnnouncementListFormat.shvfsNews => 'ul.yiiPager li.next a',
+      AnnouncementListFormat.undergraduateAdmissions => 'a.Next',
+      AnnouncementListFormat.graduateAdmissions =>
+        '.dec-listPage span.p_next a',
     };
     final links = document.querySelectorAll(selector);
     for (final link in links) {
@@ -418,6 +537,48 @@ class AnnouncementApiClient {
     return response;
   }
 
+  Future<List<AnnouncementListItem>> _enrichFilmNotices(
+    List<AnnouncementListItem> items, {
+    required AnnouncementSource source,
+  }) async {
+    final result = List<AnnouncementListItem>.of(items);
+    final host = Uri.parse(source.listUrl).host;
+    for (var start = 0; start < items.length; start += 3) {
+      await Future.wait([
+        for (var index = start;
+            index < items.length && index < start + 3;
+            index++)
+          () async {
+            final item = items[index];
+            final uri = Uri.tryParse(item.url);
+            if (uri == null || uri.host != host || !uri.path.endsWith('.htm')) {
+              return;
+            }
+            try {
+              final response = await _getHtml(item.url);
+              final metadata = _parseFilmNoticeMetadata(
+                html_parser.parse(_decodeHtml(response)),
+              );
+              final date = _parseDate(metadata.dateText);
+              if (date == null) return;
+              result[index] = AnnouncementListItem(
+                title: item.title,
+                url: item.url,
+                summary: item.summary,
+                dateText: metadata.dateText,
+                publishedAt: date,
+                sourceId: item.sourceId,
+                column: item.column,
+              );
+            } on Object {
+              // Keep the list entry when one article is unavailable.
+            }
+          }(),
+      ]);
+    }
+    return inferFilmNoticeDates(result);
+  }
+
   static AnnouncementDetail parseAnnouncementDetail(
     String html, {
     required String url,
@@ -428,6 +589,9 @@ class AnnouncementApiClient {
   }) {
     final document = html_parser.parse(html);
     final isShvfsNews = sourceId == 'shvfs';
+    final isVsbLegacyDetail =
+        sourceId == 'sfa' || sourceId == 'alumni' || sourceId == 'shuedf';
+    final isComputerDetail = sourceId == 'cs';
     final root = document.querySelector('.nry');
     // WeChat-specific title parsing is disabled so unsupported details can use
     // the original-link fallback.
@@ -437,7 +601,11 @@ class AnnouncementApiClient {
     // );
     final title = _cleanText(isShvfsNews
         ? document.querySelector('header.n-detail-title > h2')?.text
-        : root?.querySelector('h1')?.text);
+        : isVsbLegacyDetail
+            ? document.querySelector('.Head')?.text
+            : isComputerDetail
+                ? document.querySelector('.art-tit h3')?.text
+                : root?.querySelector('h1')?.text);
     final metadata = isShvfsNews
         ? _AnnouncementMetadata(
             dateText: _cleanText(
@@ -446,11 +614,15 @@ class AnnouncementApiClient {
             author: '',
             department: '',
           )
-        : _parseMetadata(
-            root?.querySelector('.xx'),
-            document: document,
-            adapter: AnnouncementSource.byId(sourceId).adapter,
-          );
+        : isVsbLegacyDetail
+            ? _parseFilmNoticeMetadata(document)
+            : _parseMetadata(
+                isComputerDetail
+                    ? document.querySelector('.art-tit p')
+                    : root?.querySelector('.xx'),
+                document: document,
+                adapter: AnnouncementSource.byId(sourceId).adapter,
+              );
     final dateText =
         metadata.dateText.isNotEmpty ? metadata.dateText : fallbackDateText;
     final contentRoot = isShvfsNews
@@ -488,6 +660,14 @@ class AnnouncementApiClient {
       department: metadata.department,
       blocks: blocks,
     );
+  }
+
+  static bool _isUnavailableAnnouncementPage(String html) {
+    final document = html_parser.parse(html);
+    final title = _cleanText(document.querySelector('title')?.text);
+    final message = _cleanText(document.body?.text);
+    return title.contains('404错误提示') ||
+        (message.contains('系统提示') && message.contains('您访问的页面未找到'));
   }
 
   static List<AnnouncementContentBlock> _parseContentBlocks(
@@ -590,6 +770,11 @@ class AnnouncementApiClient {
                 'h2',
                 'h3'
               }.contains(child.localName))) {
+        final separated = _parseBreakSeparatedText(element);
+        if (separated != null) {
+          blocks.addAll(separated);
+          return;
+        }
         final parts = _inlineParts(element, baseUrl);
         final text = parts.map((part) => part.text).join();
         if (text.isNotEmpty) {
@@ -652,10 +837,72 @@ class AnnouncementApiClient {
       visit(child);
     }
     if (blocks.isEmpty) {
-      final text = _cleanText(_visibleText(root));
-      if (text.isNotEmpty) blocks.add(AnnouncementContentBlock.text(text));
+      final separated = _parseBreakSeparatedText(root);
+      if (separated != null) {
+        blocks.addAll(separated);
+      } else {
+        final text = _cleanText(_visibleText(root));
+        if (text.isNotEmpty) blocks.add(AnnouncementContentBlock.text(text));
+      }
     }
     return blocks;
+  }
+
+  static List<AnnouncementContentBlock>? _parseBreakSeparatedText(
+      dom.Element element) {
+    if (element.querySelector('br') == null) return null;
+    const inlineTags = {
+      'span',
+      'font',
+      'strong',
+      'b',
+      'em',
+      'i',
+      'u',
+      'sup',
+      'sub'
+    };
+
+    bool isPlainInline(dom.Node node) {
+      if (node is dom.Text) return true;
+      if (node is! dom.Element) return false;
+      if (node.localName == 'br') return true;
+      return inlineTags.contains(node.localName) &&
+          node.nodes.every(isPlainInline);
+    }
+
+    if (!element.nodes.every(isPlainInline)) return null;
+
+    final source = StringBuffer();
+    void append(dom.Node node) {
+      if (node is dom.Text) {
+        source.write(node.text
+            .replaceAll('\u00a0', ' ')
+            .replaceAll(RegExp(r'\s+'), ' '));
+      } else if (node is dom.Element) {
+        if (node.localName == 'br') {
+          source.write('\n');
+        } else {
+          for (final child in node.nodes) {
+            append(child);
+          }
+        }
+      }
+    }
+
+    for (final node in element.nodes) {
+      append(node);
+    }
+    final blocks = <AnnouncementContentBlock>[];
+    for (final paragraph in source.toString().split(RegExp(r'\n{2,}'))) {
+      final lines = paragraph
+          .split('\n')
+          .map((line) => line.replaceAll(RegExp(r'\s+'), ' ').trim())
+          .where((line) => line.isNotEmpty);
+      final text = lines.join('\n');
+      if (text.isNotEmpty) blocks.add(AnnouncementContentBlock.text(text));
+    }
+    return blocks.isEmpty ? null : blocks;
   }
 
   static bool _isAttachmentAnchor(dom.Element anchor) {
@@ -965,6 +1212,14 @@ class AnnouncementApiClient {
       final text = _cleanText(span.text);
       if (text.startsWith('发布时间：')) {
         dateText = text.substring('发布时间：'.length).trim();
+      } else if (text.startsWith('时间：')) {
+        final value = text.substring('时间：'.length).trim();
+        final date = _parseDate(value);
+        dateText = date == null
+            ? value
+            : '${date.year.toString().padLeft(4, '0')}-'
+                '${date.month.toString().padLeft(2, '0')}-'
+                '${date.day.toString().padLeft(2, '0')}';
       } else if (text.startsWith('部门：')) {
         department = text.substring('部门：'.length).trim();
       } else if (text.startsWith('部门:')) {
@@ -1016,6 +1271,25 @@ class AnnouncementApiClient {
       value.startsWith('发布者：') ||
       value.startsWith('发布者:');
 
+  static _AnnouncementMetadata _parseFilmNoticeMetadata(dom.Document document) {
+    for (final row in document.querySelectorAll('tr[valign="middle"]')) {
+      final label = row.querySelector('span');
+      if (!_cleanText(label?.text).startsWith('创建时间')) continue;
+      final date = _parseDate(_cleanText(label?.nextElementSibling?.text));
+      return _AnnouncementMetadata(
+        dateText: date == null
+            ? ''
+            : '${date.year.toString().padLeft(4, '0')}-'
+                '${date.month.toString().padLeft(2, '0')}-'
+                '${date.day.toString().padLeft(2, '0')}',
+        author: _cleanText(row.querySelector('font[face=""] > span')?.text),
+        department: '',
+      );
+    }
+    return const _AnnouncementMetadata(
+        dateText: '', author: '', department: '');
+  }
+
   static String _authorValue(String value) {
     final separator = value.indexOf(RegExp('[:：]'));
     return separator < 0 ? '' : value.substring(separator + 1).trim();
@@ -1060,9 +1334,28 @@ class AnnouncementApiClient {
 
   void _ensureSuccess(http.Response response) {
     if (response.statusCode < 200 || response.statusCode >= 300) {
+      Duration? retryAfter;
+      final header = response.headers['retry-after'];
+      if (header != null) {
+        final seconds = int.tryParse(header.trim());
+        if (seconds != null) {
+          retryAfter = Duration(seconds: seconds.clamp(0, 3600));
+        } else {
+          try {
+            final date = HttpDate.parse(header);
+            retryAfter = date.difference(DateTime.now());
+            if (retryAfter.isNegative) retryAfter = Duration.zero;
+          } on FormatException {
+            // Ignore malformed server hints.
+          } on HttpException {
+            // Ignore malformed server hints.
+          }
+        }
+      }
       throw AnnouncementApiException(
         '通知公告请求失败',
         statusCode: response.statusCode,
+        retryAfter: retryAfter,
       );
     }
   }
@@ -1070,6 +1363,25 @@ class AnnouncementApiClient {
   static String _decodeHtml(http.Response response) {
     return utf8.decode(response.bodyBytes, allowMalformed: true);
   }
+}
+
+AnnouncementDetail _parseDetailResponse(
+    ({
+      List<int> bytes,
+      String url,
+      String title,
+      String dateText,
+      DateTime? publishedAt,
+      String sourceId,
+    }) request) {
+  return AnnouncementApiClient.parseAnnouncementDetail(
+    utf8.decode(request.bytes, allowMalformed: true),
+    url: request.url,
+    fallbackTitle: request.title,
+    fallbackDateText: request.dateText,
+    fallbackPublishedAt: request.publishedAt,
+    sourceId: request.sourceId,
+  );
 }
 
 class _ParsedAnnouncementTable {
@@ -1089,6 +1401,33 @@ class _AnnouncementMetadata {
   final String dateText;
   final String author;
   final String department;
+}
+
+AnnouncementColumnPage _parseColumn(
+  ({
+    List<int> bytes,
+    String url,
+    AnnouncementSource source,
+    String column,
+  }) request,
+) {
+  final html = utf8.decode(request.bytes, allowMalformed: true);
+  final document = html_parser.parse(html);
+  return AnnouncementColumnPage(
+    AnnouncementApiClient.parseAnnouncementList(
+      html,
+      baseUrl: request.url,
+      source: request.source,
+      column: request.column,
+      parsedDocument: document,
+    ),
+    AnnouncementApiClient._nextPageUrl(
+      html,
+      baseUrl: request.url,
+      source: request.source,
+      parsedDocument: document,
+    ),
+  );
 }
 
 String _announcementUrlKey(String url) {

@@ -1,4 +1,4 @@
- import 'dart:convert';
+import 'dart:convert';
 import 'dart:async';
 import 'dart:collection';
 
@@ -16,12 +16,20 @@ class AnnouncementHomeSummary {
   final String text;
 }
 
-enum AnnouncementMenuSection { favorites, campus, college }
+enum AnnouncementMenuSection {
+  favorites,
+  schoolPortal,
+  schoolDepartment,
+  college,
+  researchInstitute,
+}
 
 typedef AnnouncementMenuExpansion = ({
   bool favorites,
-  bool campus,
+  bool schoolPortal,
+  bool schoolDepartment,
   bool college,
+  bool researchInstitute,
 });
 
 class AnnouncementRepository {
@@ -41,6 +49,11 @@ class AnnouncementRepository {
   static const _favoritesKey = 'announcements.favoriteSources';
   static const _menuExpansionKey = 'announcements.menu.expanded';
   static const _cacheVersion = 5;
+  static int _cacheVersionFor(AnnouncementSource source) => switch (source.id) {
+        'sfa' => 7,
+        'cs' => 6,
+        _ => _cacheVersion,
+      };
 
   final AnnouncementApiClient _apiClient;
   final Future<SharedPreferences> Function() _preferencesLoader;
@@ -174,10 +187,22 @@ class AnnouncementRepository {
 
   Future<AnnouncementMenuExpansion> menuExpansion() async {
     final prefs = await _preferencesLoader();
+    final schoolDepartmentExpanded =
+        prefs.getBool('$_menuExpansionKey.schoolDepartment') ??
+            ((prefs.getBool('$_menuExpansionKey.campusAcademic') ??
+                    prefs.getBool('$_menuExpansionKey.campus') ??
+                    true) ||
+                (prefs.getBool('$_menuExpansionKey.campusAdministration') ??
+                    prefs.getBool('$_menuExpansionKey.campus') ??
+                    true));
     return (
       favorites: prefs.getBool('$_menuExpansionKey.favorites') ?? true,
-      campus: prefs.getBool('$_menuExpansionKey.campus') ?? true,
+      schoolPortal: prefs.getBool('$_menuExpansionKey.schoolPortal') ??
+          schoolDepartmentExpanded,
+      schoolDepartment: schoolDepartmentExpanded,
       college: prefs.getBool('$_menuExpansionKey.college') ?? false,
+      researchInstitute:
+          prefs.getBool('$_menuExpansionKey.researchInstitute') ?? false,
     );
   }
 
@@ -332,7 +357,8 @@ class AnnouncementRepository {
 
   Future<bool> _shouldAutoRefresh(AnnouncementSource source) async {
     final prefs = await _preferencesLoader();
-    if (prefs.getInt('$_cacheVersionKey.${source.id}') != _cacheVersion) {
+    if (prefs.getInt('$_cacheVersionKey.${source.id}') !=
+        _cacheVersionFor(source)) {
       return true;
     }
     final raw = prefs.getString('$_lastRefreshKey.${source.id}');
@@ -358,7 +384,8 @@ class AnnouncementRepository {
       '$_lastRefreshKey.${source.id}',
       DateTime.now().toIso8601String(),
     );
-    await prefs.setInt('$_cacheVersionKey.${source.id}', _cacheVersion);
+    await prefs.setInt(
+        '$_cacheVersionKey.${source.id}', _cacheVersionFor(source));
   }
 
   List<AnnouncementListItem> _mergeAnnouncements(
