@@ -280,8 +280,9 @@ void main() {
     expect(aborted, isTrue);
   });
 
-  test('close aborts active work and settles queued work without owning client',
-      () async {
+  testWidgets(
+      'close aborts active work and clears timers without owning client',
+      (tester) async {
     var aborted = false;
     final network = _HandlerClient((request, _) {
       (request as http.AbortableRequest).abortTrigger!.then((_) {

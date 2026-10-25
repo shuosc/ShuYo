@@ -320,6 +320,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
     WidgetsBinding.instance.removeObserver(this);
     _scheduleSummaryTimer?.cancel();
     _announcementSummaryTimer?.cancel();
+    _announcementRepository.dispose();
     _widgetClickSubscription?.cancel();
     _directBookingClient?.dispose();
     _webVpnBookingClient?.dispose();

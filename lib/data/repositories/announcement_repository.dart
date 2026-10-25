@@ -43,6 +43,8 @@ class AnnouncementRepository {
         _preferencesLoader = preferencesLoader ?? SharedPreferences.getInstance,
         _now = now ?? DateTime.now;
 
+  void dispose() => _apiClient.close();
+
   static const defaultAutoRefreshInterval = Duration(hours: 12);
   static const _listCacheKey = 'announcements.list.cache';
   static const _lastRefreshKey = 'announcements.lastRefreshAt';

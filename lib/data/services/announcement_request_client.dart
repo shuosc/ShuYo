@@ -298,12 +298,12 @@ class AnnouncementRequestClient {
 
     try {
       return await Future.any([
-        send().timeout(requestTimeout, onTimeout: () {
-          if (!abort.isCompleted) abort.complete();
-          throw TimeoutException('通知公告请求超时，请稍后再试', requestTimeout);
-        }),
+        send(),
         request.stopped.future.then<http.Response>((_) => throw request.error!),
-      ]);
+      ]).timeout(requestTimeout, onTimeout: () {
+        if (!abort.isCompleted) abort.complete();
+        throw TimeoutException('通知公告请求超时，请稍后再试', requestTimeout);
+      });
     } on Object {
       if (!abort.isCompleted) abort.complete();
       rethrow;
