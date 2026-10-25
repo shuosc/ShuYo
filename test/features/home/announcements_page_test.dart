@@ -24,11 +24,13 @@ class _FakeAnnouncementRepository extends AnnouncementRepository {
     required this.items,
     required this.details,
     this.previewFutures = const {},
+    this.detailErrors = const {},
   });
 
   final List<AnnouncementListItem> items;
   final Map<String, AnnouncementDetail> details;
   final Map<String, Future<String?>> previewFutures;
+  final Map<String, Object> detailErrors;
   int detailRequestCount = 0;
   final previewRequests = <String>[];
   AnnouncementSource currentDefault = AnnouncementSource.official;
@@ -87,6 +89,8 @@ class _FakeAnnouncementRepository extends AnnouncementRepository {
   @override
   Future<AnnouncementDetail> fetchDetail(AnnouncementListItem item) async {
     detailRequestCount++;
+    final error = detailErrors[item.title];
+    if (error != null) throw error;
     return details[item.title]!;
   }
 
@@ -1408,7 +1412,7 @@ void main() {
     expect(find.byType(AnnouncementDetailPage), findsNothing);
   });
 
-  testWidgets('unparsed articles fall back to the original link',
+  testWidgets('unparsed articles retain the inline error and can retry',
       (tester) async {
     const item = AnnouncementListItem(
       title: '无法解析正文的公告',
@@ -1445,8 +1449,76 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(repository.detailRequestCount, 1);
-    expect(openedUrl, item.url);
-    expect(find.byType(AnnouncementDetailPage), findsNothing);
+    expect(openedUrl, isNull);
+    expect(find.byType(AnnouncementDetailPage), findsOneWidget);
+    expect(find.text('加载失败'), findsOneWidget);
+    expect(find.text('公告详情加载失败，请稍后重试'), findsOneWidget);
+
+    repository.details[item.title] = AnnouncementDetail(
+      title: item.title,
+      url: item.url,
+      blocks: const [AnnouncementContentBlock.text('重试后加载的公告正文')],
+    );
+    await tester.tap(find.text('重试'));
+    await tester.pumpAndSettle();
+
+    expect(repository.detailRequestCount, 2);
+    expect(find.text('加载失败'), findsNothing);
+    expect(find.text('重试后加载的公告正文'), findsOneWidget);
+    expect(openedUrl, isNull);
+    expect(find.byType(AnnouncementDetailPage), findsOneWidget);
+  });
+
+  testWidgets('unavailable youth article retains its preset error page',
+      (tester) async {
+    const item = AnnouncementListItem(
+      title: '失效的团委公告',
+      url: 'https://youth.shu.edu.cn/info/1010/22195.htm',
+      sourceId: 'youth',
+    );
+    final repository = _FakeAnnouncementRepository(
+      items: const [item],
+      details: const {},
+      detailErrors: const {
+        '失效的团委公告': AnnouncementUnavailableException(),
+      },
+    );
+    const urlLauncher = MethodChannel('plugins.flutter.io/url_launcher');
+    final openedUrls = <String>[];
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      urlLauncher,
+      (call) async {
+        final url = (call.arguments as Map<Object?, Object?>)['url'] as String?;
+        if (url != null) openedUrls.add(url);
+        return true;
+      },
+    );
+    addTearDown(() => tester.binding.defaultBinaryMessenger
+        .setMockMethodCallHandler(urlLauncher, null));
+    await tester.pumpWidget(
+      MaterialApp(home: AnnouncementsPage(repository: repository)),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text(item.title));
+    await tester.pumpAndSettle();
+
+    expect(repository.detailRequestCount, 1);
+    expect(find.byType(AnnouncementDetailPage), findsOneWidget);
+    expect(find.text('公告失效'), findsOneWidget);
+    expect(find.text('系统提示：您访问的页面未找到，可能已被删除。'), findsOneWidget);
+    expect(find.text('重试'), findsNothing);
+    expect(openedUrls, isEmpty);
+
+    await tester.tap(find.byTooltip('查看原文'));
+    await tester.pumpAndSettle();
+    expect(find.text('跳转浏览器'), findsOneWidget);
+    expect(openedUrls, isEmpty);
+    await tester.tap(find.text('确认'));
+    await tester.pumpAndSettle();
+
+    expect(openedUrls, [item.url]);
+    expect(find.byType(AnnouncementDetailPage), findsOneWidget);
   });
 
   testWidgets('announcement separators remain in presets and hide in custom',

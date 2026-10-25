@@ -1188,19 +1188,10 @@ class _AnnouncementDetailPageState extends State<AnnouncementDetailPage> {
     ]).then((results) {
       final detail = results.first!;
       if (!detail.hasContent) {
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (mounted) unawaited(_openUnparsedAnnouncement());
-        });
+        throw const AnnouncementApiException('公告正文无法解析');
       }
       return detail;
     });
-  }
-
-  Future<void> _openUnparsedAnnouncement() async {
-    final opened = await _openExternal(widget.item.url);
-    if (opened && mounted && _route?.isCurrent == true) {
-      Navigator.of(context).pop();
-    }
   }
 
   /// DOM parsing, first layout and image decoding of the body keep the raster
