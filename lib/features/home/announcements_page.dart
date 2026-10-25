@@ -5,12 +5,15 @@ import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart' show ScrollCacheExtent;
 import 'package:flutter/services.dart';
 import 'package:flutter/gestures.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../../data/models/announcement.dart';
 import '../../data/models/announcement_source.dart';
 import '../../data/repositories/announcement_repository.dart';
 import '../../data/services/announcement_api_client.dart';
+import '../../data/services/announcement_search_service.dart';
+import '../../data/services/announcement_search_worker.dart';
 import '../../shared/shuyo_text_styles.dart';
 import '../../shared/navigation/shuyo_route.dart';
 import '../../shared/theme/shuyo_theme.dart';
@@ -162,6 +165,11 @@ class _AnnouncementsPageState extends State<AnnouncementsPage> {
             ? '通知公告'
             : _source!.name),
         actions: [
+          IconButton(
+            tooltip: '搜索公告',
+            onPressed: _openSearch,
+            icon: const Icon(Icons.search),
+          ),
           if (!widget.isDemo)
             IconButton(
               tooltip: '选择公告来源',
@@ -487,6 +495,17 @@ class _AnnouncementsPageState extends State<AnnouncementsPage> {
     }
   }
 
+  void _openSearch() {
+    Navigator.of(context).push<void>(
+      shuyoRoute(
+        builder: (context) => AnnouncementSearchPage(
+          repository: widget.repository,
+          isDemo: widget.isDemo,
+        ),
+      ),
+    );
+  }
+
   Future<bool> _waitForListVisibility(int generation) async {
     final gate = _listVisibilityGate;
     if (gate != null) await gate.future;
@@ -532,6 +551,1255 @@ class _AnnouncementsPageState extends State<AnnouncementsPage> {
   }
 }
 
+class AnnouncementSearchPage extends StatefulWidget {
+  const AnnouncementSearchPage({
+    super.key,
+    required this.repository,
+    this.isDemo = false,
+    this.searchService,
+  });
+
+  final AnnouncementRepository repository;
+  final bool isDemo;
+  final AnnouncementSearchService? searchService;
+
+  @override
+  State<AnnouncementSearchPage> createState() => _AnnouncementSearchPageState();
+}
+
+class _AnnouncementSearchPageState extends State<AnnouncementSearchPage> {
+  static final Map<String, int> _sourceOrder = {
+    for (final entry in [
+      ...AnnouncementSource.inGroup(AnnouncementSourceGroup.schoolPortal),
+      ...AnnouncementSource.inGroup(AnnouncementSourceGroup.schoolDepartment),
+      for (final category in AnnouncementCollegeCategory.values)
+        ...AnnouncementSource.inCollegeCategory(category),
+      ...AnnouncementSource.inGroup(AnnouncementSourceGroup.researchInstitute),
+    ].asMap().entries)
+      entry.value.id: entry.key,
+  };
+  static const _includeBodyKey = 'announcements.search.includeBody';
+  static const _includeTitleKey = 'announcements.search.includeTitle';
+  static const _strengthKey = 'announcements.search.strength';
+  static const _strengthVersionKey = 'announcements.search.strengthVersion';
+  static const _fastKey = 'announcements.search.fast';
+  static const _retryFailuresKey = 'announcements.search.retryFailures';
+  static const _selectedSourcesKey = 'announcements.search.selectedSources';
+  static const _searchStrengthLabels = [
+    'Low',
+    'Medium',
+    'High',
+    'Xhigh',
+    'Max',
+    'Ultra',
+  ];
+  final TextEditingController _queryController = TextEditingController();
+  final FocusNode _queryFocusNode = FocusNode();
+  final ScrollController _resultsScrollController = ScrollController();
+  String _activeQuery = '';
+  bool _activeIncludeTitle = true;
+  bool _activeIncludeBody = false;
+  bool _activeFast = false;
+  bool _activeRetryFailures = true;
+  int _activeStrength = 0;
+  Set<String> _activeSelectedSourceIds = {};
+  final Map<String, int> _resultIndexByKey = {};
+  final List<AnnouncementListItem> _results = [];
+  final Map<String, List<AnnouncementListItem>> _resultsBySource = {};
+  List<Object> _resultRows = const [];
+  List<Widget> _resultSlivers = const [];
+  final Map<String, Widget> _sourceSlivers = {};
+  final Map<String, AnnouncementListItem> _pendingMatches = {};
+  AnnouncementSearchWorkerService? _searchService;
+  AnnouncementSearchWorkerRun? _session;
+  StreamSubscription<AnnouncementSearchProgress>? _subscription;
+  AnnouncementSearchProgress? _pendingProgress;
+  Timer? _progressTimer;
+  bool _includeBody = false;
+  bool _includeTitle = true;
+  bool _fast = false;
+  bool _retryFailures = true;
+  int _searchStrength = 0;
+  bool _started = false;
+  bool _searching = false;
+  bool _cancelled = false;
+  bool _failureNoticeShown = false;
+  final ValueNotifier<bool> _updatesPaused = ValueNotifier(false);
+  bool get _detailRouteOpen => _updatesPaused.value;
+  bool _searchStreamDone = false;
+  String? _pendingSearchError;
+  int _generation = 0;
+  int _discoveredArticles = 0;
+  bool _settingsTouched = false;
+  bool _selectionTouched = false;
+  Set<String> _selectedSourceIds = {};
+  String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    if (!widget.isDemo) {
+      _searchService = AnnouncementSearchWorkerService(
+        fallback: widget.searchService,
+      );
+    }
+    unawaited(_loadSearchSettings());
+    unawaited(_loadSelectedSources());
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _resultSlivers = const [];
+    _sourceSlivers.clear();
+  }
+
+  @override
+  void didUpdateWidget(covariant AnnouncementSearchPage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.repository != widget.repository) {
+      _resultSlivers = const [];
+      _sourceSlivers.clear();
+    }
+  }
+
+  Future<void> _loadSelectedSources() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final saved = prefs.getStringList(_selectedSourcesKey);
+      if (!mounted || _selectionTouched || saved == null) return;
+      final validIds =
+          AnnouncementSource.all.map((source) => source.id).toSet();
+      setState(() => _selectedSourceIds = saved.toSet().intersection(validIds));
+    } on Object {
+      // Keep no sources selected when local settings are unavailable.
+    }
+  }
+
+  Future<void> _loadSearchSettings() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      if (!mounted || _settingsTouched) return;
+      setState(() {
+        _includeTitle = prefs.getBool(_includeTitleKey) ?? true;
+        _includeBody = prefs.getBool(_includeBodyKey) ?? false;
+        _fast = prefs.getBool(_fastKey) ?? false;
+        _retryFailures = prefs.getBool(_retryFailuresKey) ?? true;
+        final savedStrength = prefs.getInt(_strengthKey) ?? 0;
+        final migratedStrength =
+            (prefs.getInt(_strengthVersionKey) ?? 1) < 2 && savedStrength >= 3
+                ? savedStrength + 1
+                : savedStrength;
+        _searchStrength = migratedStrength.clamp(0, 5);
+      });
+    } on Object {
+      // Keep the defaults if local settings are unavailable.
+    }
+  }
+
+  @override
+  void dispose() {
+    _generation++;
+    _progressTimer?.cancel();
+    final subscription = _subscription;
+    if (subscription != null) unawaited(subscription.cancel());
+    _session?.cancel();
+    _searchService?.dispose();
+    _pendingMatches.clear();
+    _updatesPaused.dispose();
+    _queryFocusNode.dispose();
+    _queryController.dispose();
+    _resultsScrollController.dispose();
+    super.dispose();
+  }
+
+  void _startSearch() {
+    final query = _queryController.text.trim();
+    if (query.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('请输入搜索关键词')),
+      );
+      return;
+    }
+    if (!_includeTitle && !_includeBody) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('请至少选择一个搜索范围')),
+      );
+      return;
+    }
+    if (_selectedSourceIds.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('请至少选择一个部门')),
+      );
+      return;
+    }
+    _queryFocusNode.unfocus();
+    if (_resultsScrollController.hasClients) {
+      _resultsScrollController.jumpTo(0);
+    }
+    _activeQuery = query;
+    _activeIncludeTitle = _includeTitle;
+    _activeIncludeBody = _includeBody;
+    _activeFast = _fast;
+    _activeRetryFailures = _retryFailures;
+    _activeStrength = _searchStrength;
+    _activeSelectedSourceIds = {..._selectedSourceIds};
+    final generation = ++_generation;
+    final oldSubscription = _subscription;
+    if (oldSubscription != null) unawaited(oldSubscription.cancel());
+    _subscription = null;
+    _session?.cancel();
+    _session = null;
+    _progressTimer?.cancel();
+    _progressTimer = null;
+    _pendingProgress = null;
+    _pendingMatches.clear();
+    setState(() {
+      _resultIndexByKey.clear();
+      _results.clear();
+      _resultsBySource.clear();
+      _resultRows = const [];
+      _resultSlivers = const [];
+      _sourceSlivers.clear();
+      _started = true;
+      _searching = true;
+      _cancelled = false;
+      _failureNoticeShown = false;
+      _discoveredArticles = 0;
+      _error = null;
+      _searchStreamDone = false;
+      _pendingSearchError = null;
+    });
+    if (widget.isDemo) {
+      unawaited(_searchDemo(query, generation));
+      return;
+    }
+    try {
+      final session = _searchService!.startSearch(
+        query: query,
+        includeTitle: _activeIncludeTitle,
+        includeBody: _activeIncludeBody,
+        strength: _activeStrength,
+        fast: _activeFast,
+        retryFailures: _activeRetryFailures,
+        sources: AnnouncementSource.all
+            .where((source) => _activeSelectedSourceIds.contains(source.id))
+            .toList(),
+      );
+      _session = session;
+      _subscription = session.updates.listen(
+        (progress) => _queueProgress(progress, generation),
+        onError: (Object error, StackTrace stackTrace) {
+          if (!mounted || generation != _generation) return;
+          _progressTimer?.cancel();
+          _pendingSearchError = '搜索失败，请重试';
+          _searchStreamDone = true;
+          _flushProgress(generation);
+        },
+        onDone: () {
+          if (!mounted || generation != _generation) return;
+          _progressTimer?.cancel();
+          _searchStreamDone = true;
+          _flushProgress(generation);
+        },
+      );
+    } on Object {
+      if (!mounted || generation != _generation) return;
+      setState(() {
+        _error = '搜索失败，请重试';
+        _searching = false;
+      });
+    }
+  }
+
+  void _cancelSearch() {
+    if (!_searching) return;
+    _progressTimer?.cancel();
+    _flushProgress(_generation);
+    _generation++;
+    final subscription = _subscription;
+    _subscription = null;
+    if (subscription != null) unawaited(subscription.cancel());
+    _session?.cancel();
+    _session = null;
+    _pendingProgress = null;
+    _pendingMatches.clear();
+    _searchStreamDone = false;
+    _pendingSearchError = null;
+    setState(() {
+      _searching = false;
+      _cancelled = true;
+    });
+  }
+
+  void _queueProgress(AnnouncementSearchProgress progress, int generation) {
+    if (!mounted || generation != _generation) return;
+    _pendingProgress = progress;
+    for (final item in progress.newMatches) {
+      _pendingMatches[_searchResultKey(item)] = item;
+    }
+    if (_detailRouteOpen) return;
+    if (progress.isFinished) {
+      _progressTimer?.cancel();
+      _flushProgress(generation);
+      return;
+    }
+    _progressTimer ??= Timer(
+      const Duration(milliseconds: 250),
+      () => _flushProgress(generation),
+    );
+  }
+
+  String _searchResultKey(AnnouncementListItem item) =>
+      '${item.sourceId}\u0000${item.url}\u0000${item.title.trim().toLowerCase()}';
+
+  int _compareSearchDate(AnnouncementListItem a, AnnouncementListItem b) {
+    final left = a.publishedAt;
+    final right = b.publishedAt;
+    if (left == null) return right == null ? 0 : 1;
+    if (right == null) return -1;
+    return right.compareTo(left);
+  }
+
+  void _insertSortedResult(AnnouncementListItem item) {
+    final items = _resultsBySource.putIfAbsent(item.sourceId, () => []);
+    var low = 0;
+    var high = items.length;
+    while (low < high) {
+      final middle = (low + high) >> 1;
+      if (_compareSearchDate(items[middle], item) <= 0) {
+        low = middle + 1;
+      } else {
+        high = middle;
+      }
+    }
+    items.insert(low, item);
+  }
+
+  bool _upsertSearchResult(AnnouncementListItem item) {
+    final key = _searchResultKey(item);
+    final index = _resultIndexByKey[key];
+    if (index == null) {
+      _resultIndexByKey[key] = _results.length;
+      _results.add(item);
+    } else {
+      final old = _results[index];
+      if (identical(old, item)) return false;
+      _resultsBySource[old.sourceId]?.remove(old);
+      _results[index] = item;
+    }
+    _insertSortedResult(item);
+    return true;
+  }
+
+  Set<String> _mergePendingMatches() {
+    if (_pendingMatches.isEmpty) return const <String>{};
+    final changedSources = <String>{};
+    for (final entry in _pendingMatches.entries) {
+      final item = entry.value;
+      final index = _resultIndexByKey[entry.key];
+      if (index == null) {
+        _resultIndexByKey[entry.key] = _results.length;
+        _results.add(item);
+      } else {
+        final previous = _results[index];
+        if (identical(previous, item)) continue;
+        _results[index] = item;
+      }
+      changedSources.add(item.sourceId);
+    }
+    _pendingMatches.clear();
+    if (changedSources.isEmpty) return changedSources;
+
+    // One grouping and one sort per changed source replace a sorted-list
+    // insertion for every match in a large worker update.
+    final indexedBySource =
+        <String, List<({int index, AnnouncementListItem item})>>{
+      for (final sourceId in changedSources) sourceId: [],
+    };
+    for (var index = 0; index < _results.length; index++) {
+      final item = _results[index];
+      indexedBySource[item.sourceId]?.add((index: index, item: item));
+    }
+    for (final entry in indexedBySource.entries) {
+      entry.value.sort((a, b) {
+        final byDate = _compareSearchDate(a.item, b.item);
+        return byDate != 0 ? byDate : a.index.compareTo(b.index);
+      });
+      _resultsBySource[entry.key] = [
+        for (final indexed in entry.value) indexed.item,
+      ];
+    }
+    return changedSources;
+  }
+
+  void _rebuildResultRows({Set<String>? changedSources}) {
+    if (changedSources == null) _sourceSlivers.clear();
+    final sourceIds = _resultsBySource.keys.toList()
+      ..sort((a, b) {
+        final byOrder = (_sourceOrder[a] ?? _sourceOrder.length)
+            .compareTo(_sourceOrder[b] ?? _sourceOrder.length);
+        return byOrder != 0 ? byOrder : a.compareTo(b);
+      });
+    final rows = <Object>[];
+    var index = 0;
+    for (final sourceId in sourceIds) {
+      rows.add(_AnnouncementDepartmentHeader(
+          sourceId, AnnouncementSource.byId(sourceId).name));
+      String? previousMonth;
+      for (final item in _resultsBySource[sourceId]!) {
+        final date = item.publishedAt;
+        final month = date == null ? null : '${date.year}年${date.month}月';
+        if (month != null && month != previousMonth) {
+          rows.add(_AnnouncementMonthHeader(month, index));
+        }
+        previousMonth = month;
+        rows.add(_AnnouncementItemRow(index, item));
+        index++;
+      }
+    }
+    _resultRows = rows;
+    _resultSlivers = _searchSlivers(rows, changedSources: changedSources);
+  }
+
+  void _flushProgress(int generation) {
+    _progressTimer = null;
+    if (!mounted || generation != _generation || _detailRouteOpen) return;
+    final progress = _pendingProgress;
+    if (progress == null && !_searchStreamDone) return;
+    _pendingProgress = null;
+    final searching = !_searchStreamDone && !(progress?.isFinished ?? false);
+    if (progress?.isFinished == true && !_failureNoticeShown) {
+      _failureNoticeShown = true;
+      final otherFailureCount = progress!.unfinishedCount -
+          progress.parseFailureCount -
+          progress.timeoutFailureCount;
+      final notices = <String>[
+        if (progress.parseFailureCount > 0)
+          '${progress.parseFailureCount} 项解析失败',
+        if (progress.timeoutFailureCount > 0)
+          '${progress.timeoutFailureCount} 项请求超时',
+        if (otherFailureCount > 0) '$otherFailureCount 项请求失败',
+      ];
+      if (notices.isNotEmpty) {
+        ScaffoldMessenger.of(context)
+          ..hideCurrentSnackBar()
+          ..showSnackBar(SnackBar(content: Text(notices.join('；'))));
+      }
+    }
+    if (_pendingMatches.isEmpty &&
+        _discoveredArticles ==
+            (progress?.discoveredArticles ?? _discoveredArticles) &&
+        _searching == searching &&
+        (_pendingSearchError == null || _error == _pendingSearchError)) {
+      return;
+    }
+    final changedSources = _mergePendingMatches();
+    if (changedSources.isNotEmpty) {
+      _rebuildResultRows(changedSources: changedSources);
+    }
+    setState(() {
+      _discoveredArticles = progress?.discoveredArticles ?? _discoveredArticles;
+      _searching = searching;
+      _error = _pendingSearchError ?? _error;
+    });
+  }
+
+  Future<void> _searchDemo(String query, int generation) async {
+    final normalized = query.toLowerCase();
+    try {
+      final items = (await widget.repository.fetchAnnouncements())
+          .where((item) => _activeSelectedSourceIds.contains(item.sourceId))
+          .toList();
+      if (!mounted || generation != _generation) return;
+      setState(() {
+        _discoveredArticles = items.length;
+      });
+      for (final item in items) {
+        if (!mounted || generation != _generation) return;
+        var matched = _activeIncludeTitle &&
+            item.title.toLowerCase().contains(normalized);
+        if (!matched && _activeIncludeBody) {
+          try {
+            final detail = await widget.repository.fetchDetail(item);
+            matched = detail.blocks.any((block) =>
+                (block.isText &&
+                    (block.value.toLowerCase().contains(normalized) ||
+                        block.parts.any((part) =>
+                            part.text.toLowerCase().contains(normalized)))) ||
+                (block.isTable &&
+                    (block.cells.any((cell) =>
+                            cell.text.toLowerCase().contains(normalized)) ||
+                        block.rows.any((row) => row.any((cell) =>
+                            cell.toLowerCase().contains(normalized))))) ||
+                (block.isLink && block.label.toLowerCase().contains(normalized)) ||
+                (block.isImage && block.alt.toLowerCase().contains(normalized)));
+          } on Object {
+            // A demo detail can fail independently of the other results.
+          }
+        }
+        if (!mounted || generation != _generation) return;
+        setState(() {
+          if (matched && _upsertSearchResult(item)) {
+            _rebuildResultRows();
+          }
+        });
+        await Future<void>.delayed(Duration.zero);
+      }
+      if (mounted && generation == _generation) {
+        setState(() => _searching = false);
+      }
+    } on Object {
+      if (mounted && generation == _generation) {
+        setState(() {
+          _error = '搜索失败，请重试';
+          _searching = false;
+        });
+      }
+    }
+  }
+
+  Future<void> _chooseSearchSources() async {
+    AnnouncementMenuExpansion expansion;
+    try {
+      expansion = await widget.repository.menuExpansion();
+    } on Object {
+      expansion = (
+        favorites: true,
+        schoolPortal: true,
+        college: false,
+        researchInstitute: false,
+        schoolDepartment: true,
+      );
+    }
+    if (!mounted) return;
+    await showGeneralDialog<void>(
+      context: context,
+      barrierDismissible: true,
+      barrierLabel: '关闭搜索部门筛选',
+      barrierColor: Colors.black54,
+      transitionDuration: const Duration(milliseconds: 200),
+      transitionBuilder: (context, animation, secondaryAnimation, child) {
+        return SlideTransition(
+          position: Tween<Offset>(
+            begin: const Offset(0.18, 0),
+            end: Offset.zero,
+          ).animate(CurvedAnimation(
+            parent: animation,
+            curve: Curves.easeOutCubic,
+          )),
+          child: FadeTransition(opacity: animation, child: child),
+        );
+      },
+      pageBuilder: (menuContext, animation, secondaryAnimation) => SafeArea(
+        child: Align(
+          alignment: Alignment.topRight,
+          child: Padding(
+            padding: const EdgeInsets.only(top: kToolbarHeight + 8, right: 12),
+            child: _AnnouncementSourceMenu(
+              selected: AnnouncementSource.official,
+              initialFavorites: const {},
+              initialExpansion: expansion,
+              onToggleFavorite: (_) async => <String>{},
+              onExpansionChanged: widget.repository.saveMenuExpansion,
+              onSelect: (_) {},
+              selectedIds: _selectedSourceIds,
+              onSelectedIdsChanged: _changeSelectedSources,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _changeSelectedSources(Set<String> selectedIds) {
+    _selectionTouched = true;
+    setState(() => _selectedSourceIds = selectedIds);
+    unawaited(_saveSelectedSources());
+  }
+
+  Future<void> _saveSelectedSources() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setStringList(
+        _selectedSourcesKey,
+        AnnouncementSource.all
+            .where((source) => _selectedSourceIds.contains(source.id))
+            .map((source) => source.id)
+            .toList(),
+      );
+    } on Object {
+      // Keep the current choice in memory if local storage is unavailable.
+    }
+  }
+
+  Future<void> _openSearchSettings() async {
+    final section = await showModalBottomSheet<int>(
+      context: context,
+      backgroundColor: Colors.transparent,
+      builder: (context) {
+        final colors = context.shuyoColors;
+        final bottomPadding = MediaQuery.viewPaddingOf(context).bottom;
+        return SafeArea(
+          top: false,
+          bottom: false,
+          child: Container(
+            width: double.infinity,
+            padding: EdgeInsets.fromLTRB(12, 8, 12, 12 + bottomPadding),
+            decoration: BoxDecoration(
+              color: colors.surface,
+              borderRadius:
+                  const BorderRadius.vertical(top: Radius.circular(8)),
+            ),
+            child: Material(
+              type: MaterialType.transparency,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  ListTile(
+                    leading: const Icon(Icons.tune),
+                    title: const Text('搜索强度'),
+                    onTap: () => Navigator.of(context).pop(0),
+                  ),
+                  ListTile(
+                    leading: const Icon(Icons.manage_search),
+                    title: const Text('搜索范围'),
+                    onTap: () => Navigator.of(context).pop(1),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        );
+      },
+    );
+    if (!mounted) return;
+    if (section == 0) {
+      await _openStrengthSettings();
+    } else if (section == 1) {
+      await _openScopeSettings();
+    }
+  }
+
+  Future<void> _openStrengthSettings() async {
+    await showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: Colors.transparent,
+      builder: (context) => StatefulBuilder(
+        builder: (context, updateSheet) {
+          final colors = context.shuyoColors;
+          final bottomPadding = MediaQuery.viewPaddingOf(context).bottom;
+          return SafeArea(
+            top: false,
+            bottom: false,
+            child: Container(
+              width: double.infinity,
+              padding: EdgeInsets.fromLTRB(12, 8, 12, 12 + bottomPadding),
+              decoration: BoxDecoration(
+                color: colors.surface,
+                borderRadius:
+                    const BorderRadius.vertical(top: Radius.circular(8)),
+              ),
+              child: Material(
+                type: MaterialType.transparency,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    ListTile(
+                      title: _searchSettingTitleWithHelp(
+                        '搜索强度',
+                        tooltip: '搜索强度说明',
+                        onHelp: _showStrengthInfo,
+                      ),
+                      trailing: Text(
+                        _searchStrengthLabels[_searchStrength],
+                        style: TextStyle(
+                          color: colors.textPrimary,
+                          fontSize: 17,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                    Slider(
+                      min: 0,
+                      max: 5,
+                      divisions: 5,
+                      value: _searchStrength.toDouble(),
+                      onChanged: (value) {
+                        _settingsTouched = true;
+                        setState(() => _searchStrength = value.round());
+                        updateSheet(() {});
+                      },
+                      onChangeEnd: (_) => unawaited(_saveSearchSettings()),
+                    ),
+                    SwitchListTile(
+                      title: _searchSettingTitleWithHelp(
+                        'Fast模式',
+                        tooltip: 'Fast模式说明',
+                        onHelp: _showFastInfo,
+                      ),
+                      value: _fast,
+                      onChanged: (value) {
+                        _settingsTouched = true;
+                        setState(() => _fast = value);
+                        updateSheet(() {});
+                        unawaited(_saveSearchSettings());
+                      },
+                    ),
+                    SwitchListTile(
+                      title: Transform.translate(
+                        offset: const Offset(0, 4.5),
+                        child: const Text('失败重试'),
+                      ),
+                      value: _retryFailures,
+                      onChanged: (value) {
+                        _settingsTouched = true;
+                        setState(() => _retryFailures = value);
+                        updateSheet(() {});
+                        unawaited(_saveSearchSettings());
+                      },
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _searchSettingsHeading(
+    ShuYoColors colors,
+    String title,
+  ) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(12, 10, 12, 4),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            title,
+            style: TextStyle(
+              color: colors.textPrimary,
+              fontSize: 16.5,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _searchSettingTitleWithHelp(
+    String title, {
+    required String tooltip,
+    required VoidCallback onHelp,
+  }) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Transform.translate(
+          offset: const Offset(0, 4.5),
+          child: Text(title),
+        ),
+        Transform.translate(
+          offset: const Offset(-3, 4),
+          child: Opacity(
+            opacity: 0.65,
+            child: IconButton(
+              tooltip: tooltip,
+              visualDensity: VisualDensity.compact,
+              padding: EdgeInsets.zero,
+              constraints: const BoxConstraints(
+                minWidth: 28,
+                minHeight: 28,
+              ),
+              icon: const Icon(Icons.info_outline, size: 18),
+              onPressed: onHelp,
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Future<void> _showStrengthInfo() => showDialog<void>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('搜索强度说明'),
+          content: const Text(
+              '从 Low 到 Ultra，搜索强度越高，同时处理的请求越多，翻页等待越短，通常能更快完成搜索，也会占用更多网络资源。'),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: const Text('知道了'),
+            ),
+          ],
+        ),
+      );
+
+  Future<void> _showFastInfo() => showDialog<void>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('Fast模式说明'),
+          content: const Text(
+              'Fast模式会缩短翻页等待，并在处理当前列表时提前请求同一栏目最多三页后续列表。搜索范围、文章内容和结果不会因此减少。'),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: const Text('知道了'),
+            ),
+          ],
+        ),
+      );
+
+  Future<void> _openScopeSettings() async {
+    await showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: Colors.transparent,
+      builder: (context) => StatefulBuilder(
+        builder: (context, updateSheet) {
+          final colors = context.shuyoColors;
+          final bottomPadding = MediaQuery.viewPaddingOf(context).bottom;
+          Widget scopeButton(String label, bool selected, VoidCallback onTap) =>
+              Expanded(
+                child: OutlinedButton.icon(
+                  onPressed: onTap,
+                  icon: Icon(selected
+                      ? Icons.check_box
+                      : Icons.check_box_outline_blank),
+                  label: Text(label),
+                  style: OutlinedButton.styleFrom(
+                    minimumSize: const Size(0, 48),
+                    foregroundColor: selected
+                        ? Theme.of(context).colorScheme.primary
+                        : colors.textPrimary,
+                  ),
+                ),
+              );
+          return SafeArea(
+            top: false,
+            bottom: false,
+            child: Container(
+              width: double.infinity,
+              padding: EdgeInsets.fromLTRB(12, 8, 12, 12 + bottomPadding),
+              decoration: BoxDecoration(
+                color: colors.surface,
+                borderRadius:
+                    const BorderRadius.vertical(top: Radius.circular(8)),
+              ),
+              child: Material(
+                type: MaterialType.transparency,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    _searchSettingsHeading(colors, '搜索范围'),
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
+                      child: Row(
+                        children: [
+                          scopeButton('标题', _includeTitle, () {
+                            _settingsTouched = true;
+                            setState(() => _includeTitle = !_includeTitle);
+                            updateSheet(() {});
+                            unawaited(_saveSearchSettings());
+                          }),
+                          const SizedBox(width: 12),
+                          scopeButton('内容', _includeBody, () {
+                            _settingsTouched = true;
+                            setState(() => _includeBody = !_includeBody);
+                            updateSheet(() {});
+                            unawaited(_saveSearchSettings());
+                          }),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  Future<void> _saveSearchSettings() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool(_includeTitleKey, _includeTitle);
+      await prefs.setBool(_includeBodyKey, _includeBody);
+      await prefs.setBool(_fastKey, _fast);
+      await prefs.setBool(_retryFailuresKey, _retryFailures);
+      await prefs.setInt(_strengthKey, _searchStrength);
+      await prefs.setInt(_strengthVersionKey, 2);
+    } on Object {
+      // Keep the current choice in memory if local storage is unavailable.
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = context.shuyoColors;
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('搜索公告'),
+        actions: [
+          IconButton(
+            tooltip: '筛选部门',
+            onPressed: _chooseSearchSources,
+            icon: Stack(
+              clipBehavior: Clip.none,
+              children: [
+                const Icon(Icons.filter_list),
+                Positioned(
+                  right: -6,
+                  bottom: -4,
+                  child: Text(
+                    _selectedSourceIds.length == AnnouncementSource.all.length
+                        ? 'ALL'
+                        : '${_selectedSourceIds.length}',
+                    style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                      color: Theme.of(context).colorScheme.primary,
+                      fontSize: 10,
+                      fontWeight: FontWeight.w600,
+                      height: 1,
+                      fontFeatures: const [FontFeature.tabularFigures()],
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          IconButton(
+            tooltip: '更多',
+            onPressed: _openSearchSettings,
+            icon: const Icon(Icons.more_horiz),
+          ),
+          const SizedBox(width: 2),
+        ],
+        bottom: PreferredSize(
+          preferredSize: const Size.fromHeight(3),
+          child: _searching
+              ? const LinearProgressIndicator(minHeight: 3)
+              : const SizedBox(height: 3),
+        ),
+      ),
+      body: Column(
+        children: [
+          _buildSearchHeader(colors),
+          Expanded(child: _buildResults()),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSearchHeader(ShuYoColors colors) {
+    return Column(
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
+          child: Row(
+            children: [
+              Expanded(
+                child: TextField(
+                  controller: _queryController,
+                  focusNode: _queryFocusNode,
+                  enabled: !_searching,
+                  textInputAction: TextInputAction.search,
+                  onSubmitted: (_) {
+                    if (!_searching) _startSearch();
+                  },
+                  decoration: const InputDecoration(
+                    hintText: '搜索公告关键词',
+                    prefixIcon: Icon(Icons.search),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 6),
+              IconButton(
+                tooltip: _searching ? '取消搜索' : '开始搜索',
+                onPressed: _searching ? _cancelSearch : _startSearch,
+                icon: Icon(
+                  _searching ? Icons.close_rounded : Icons.play_arrow_rounded,
+                  color: Theme.of(context).colorScheme.primary,
+                ),
+              ),
+            ],
+          ),
+        ),
+        _searchStatus(colors),
+      ],
+    );
+  }
+
+  Widget _searchStatus(ShuYoColors colors) {
+    final title = _searching ? _activeIncludeTitle : _includeTitle;
+    final body = _searching ? _activeIncludeBody : _includeBody;
+    final scope = title && body
+        ? '标题+正文'
+        : title
+            ? '标题'
+            : body
+                ? '正文'
+                : '未选范围';
+    final strength =
+        _searchStrengthLabels[_searching ? _activeStrength : _searchStrength];
+    final fast = _searching ? _activeFast : _fast;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 2, 16, 12),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.end,
+        children: [
+          Expanded(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('公告数',
+                    style: TextStyle(color: colors.textMuted, fontSize: 12)),
+                FittedBox(
+                  fit: BoxFit.scaleDown,
+                  alignment: Alignment.centerLeft,
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.end,
+                    children: [
+                      _statusNumber(
+                          'announcement-search-found-count',
+                          _results.length,
+                          Theme.of(context).colorScheme.primary,
+                          fontSize: 26,
+                          fontWeight: FontWeight.w600),
+                      Text('/',
+                          style: TextStyle(
+                            color: colors.textPrimary,
+                            fontSize: 26,
+                            fontWeight: FontWeight.w600,
+                          )),
+                      _statusNumber('announcement-search-total-count',
+                          _discoveredArticles, colors.textPrimary,
+                          fontSize: 26, fontWeight: FontWeight.w600),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 8),
+          Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.end,
+            children: [
+              Text('搜索范围：$scope',
+                  maxLines: 1,
+                  style: TextStyle(color: colors.textMuted, fontSize: 12)),
+              Text('搜索强度：$strength${fast ? ' · Fast模式' : ''}',
+                  maxLines: 1,
+                  style: TextStyle(color: colors.textMuted, fontSize: 12)),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _statusNumber(String key, int value, Color color,
+      {double fontSize = 12.5, FontWeight? fontWeight}) {
+    return Text(
+      '$value',
+      key: ValueKey<String>(key),
+      maxLines: 1,
+      style: TextStyle(
+        color: color,
+        fontSize: fontSize,
+        fontWeight: fontWeight,
+        fontFeatures: const [FontFeature.tabularFigures()],
+      ),
+    );
+  }
+
+  Widget _buildResults() {
+    if (_results.isEmpty) {
+      if (_error != null) {
+        return EmptyState(
+          icon: Icons.error_outline,
+          title: '搜索失败',
+          message: _error!,
+        );
+      }
+      if (_searching) {
+        return const Center(child: Text('正在查询各来源公告…'));
+      }
+      return EmptyState(
+        icon: _started ? Icons.search_off : Icons.search,
+        title: _started
+            ? _cancelled
+                ? '搜索公告'
+                : '没有找到公告'
+            : '搜索公告',
+        message: _started
+            ? _cancelled
+                ? '可重新开始搜索。'
+                : '试试其他关键词。'
+            : '输入关键词后点击搜索。',
+      );
+    }
+    final slivers = _resultSlivers.isEmpty
+        ? _resultSlivers = _searchSlivers(_resultRows)
+        : _resultSlivers;
+    return ScrollbarTheme(
+      data: ScrollbarThemeData(
+        thumbColor: WidgetStatePropertyAll(
+          context.shuyoColors.textMuted.withValues(alpha: 0.55),
+        ),
+        thickness: const WidgetStatePropertyAll(2.5),
+        radius: const Radius.circular(4),
+      ),
+      child: Scrollbar(
+        controller: _resultsScrollController,
+        thumbVisibility: true,
+        interactive: true,
+        child: CustomScrollView(
+          controller: _resultsScrollController,
+          scrollCacheExtent: const ScrollCacheExtent.pixels(0),
+          slivers: slivers,
+        ),
+      ),
+    );
+  }
+
+  List<Widget> _searchSlivers(List<Object> rows,
+      {Set<String>? changedSources}) {
+    final slivers = <Widget>[
+      const SliverToBoxAdapter(child: SizedBox(height: 8)),
+    ];
+    var position = 0;
+    while (position < rows.length) {
+      final header = rows[position] as _AnnouncementDepartmentHeader;
+      final department = header.label;
+      position++;
+      final cached = _sourceSlivers[header.sourceId];
+      if (cached != null &&
+          changedSources != null &&
+          !changedSources.contains(header.sourceId)) {
+        while (position < rows.length &&
+            rows[position] is! _AnnouncementDepartmentHeader) {
+          position++;
+        }
+        slivers.add(cached);
+        continue;
+      }
+      final departmentSlivers = <Widget>[
+        SliverPersistentHeader(
+          pinned: true,
+          delegate: _AnnouncementDepartmentStickyHeaderDelegate(department),
+        ),
+      ];
+      while (position < rows.length &&
+          rows[position] is! _AnnouncementDepartmentHeader) {
+        String? month;
+        if (rows[position] is _AnnouncementMonthHeader) {
+          month = (rows[position] as _AnnouncementMonthHeader).label;
+          position++;
+        }
+        final itemRows = <_AnnouncementItemRow>[];
+        while (
+            position < rows.length && rows[position] is _AnnouncementItemRow) {
+          itemRows.add(rows[position++] as _AnnouncementItemRow);
+        }
+        if (itemRows.isEmpty) continue;
+        final itemList = _searchItemList(itemRows);
+        departmentSlivers.add(month == null
+            ? itemList
+            : SliverMainAxisGroup(slivers: [
+                SliverPersistentHeader(
+                  pinned: true,
+                  delegate: _AnnouncementStickyHeaderDelegate(
+                    month: month,
+                    department: department,
+                  ),
+                ),
+                itemList,
+              ]));
+      }
+      final sourceSliver = SliverMainAxisGroup(slivers: departmentSlivers);
+      _sourceSlivers[header.sourceId] = sourceSliver;
+      slivers.add(sourceSliver);
+    }
+    slivers.add(const SliverToBoxAdapter(child: SizedBox(height: 24)));
+    return slivers;
+  }
+
+  Widget _searchItemList(List<_AnnouncementItemRow> rows) {
+    return SliverList.builder(
+      itemCount: rows.length,
+      itemBuilder: (context, index) {
+        final itemRow = rows[index];
+        final item = itemRow.item;
+        return Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            _AnnouncementTile(
+              key: ValueKey(_searchResultKey(item)),
+              index: itemRow.index,
+              item: item,
+              repository: widget.repository,
+              external: _isExternalAnnouncement(item),
+              updatesPaused: _updatesPaused,
+              previewVersion: _generation,
+              highlightQuery: _activeQuery,
+              onTap: () => unawaited(_openSearchResult(item)),
+            ),
+            if (index + 1 < rows.length &&
+                CustomBackgroundScope.maybeOf(context) == null)
+              Divider(height: 1, color: context.shuyoColors.border),
+          ],
+        );
+      },
+    );
+  }
+
+  Future<void> _openSearchResult(AnnouncementListItem item) async {
+    final article = _announcementForUrlOwner(item);
+    if (_isExternalAnnouncement(article)) {
+      await _openExternalAnnouncementUrl(context, article.url);
+      return;
+    }
+    if (_detailRouteOpen) return;
+    _updatesPaused.value = true;
+    _progressTimer?.cancel();
+    _progressTimer = null;
+    final route = shuyoRoute<void>(
+      builder: (context) => AnnouncementDetailPage(
+        repository: widget.repository,
+        item: article,
+      ),
+    );
+    try {
+      await Navigator.of(context).push<void>(route);
+      // The push Future completes at pop time; wait until the reverse animation
+      // finishes before applying the accumulated worker update.
+      if (route is TransitionRoute<void>) await route.completed;
+    } finally {
+      if (mounted) {
+        _updatesPaused.value = false;
+        _flushProgress(_generation);
+      }
+    }
+  }
+}
+
+class _AnnouncementDepartmentHeader {
+  const _AnnouncementDepartmentHeader(this.sourceId, this.label);
+
+  final String sourceId;
+  final String label;
+}
+
 class _LoadedAnnouncementList {
   const _LoadedAnnouncementList(this.items, this.rows);
 
@@ -549,8 +1817,10 @@ class _AnnouncementMonthHeader {
 const _stickyHeaderExtent = 38.0;
 
 class _AnnouncementStickyHeaderDelegate extends SliverPersistentHeaderDelegate {
-  const _AnnouncementStickyHeaderDelegate({required this.month});
+  const _AnnouncementStickyHeaderDelegate(
+      {this.department, required this.month});
 
+  final String? department;
   final String month;
 
   @override
@@ -564,7 +1834,9 @@ class _AnnouncementStickyHeaderDelegate extends SliverPersistentHeaderDelegate {
       BuildContext context, double shrinkOffset, bool overlapsContent) {
     final colors = context.shuyoColors;
     return Material(
-      key: ValueKey('announcement-sticky-home-$month'),
+      key: ValueKey(department == null
+          ? 'announcement-sticky-home-$month'
+          : 'announcement-sticky-month-$department-$month'),
       color: Theme.of(context).scaffoldBackgroundColor,
       child: Padding(
         padding: const EdgeInsets.fromLTRB(16, 18, 16, 4),
@@ -582,7 +1854,49 @@ class _AnnouncementStickyHeaderDelegate extends SliverPersistentHeaderDelegate {
 
   @override
   bool shouldRebuild(_AnnouncementStickyHeaderDelegate oldDelegate) =>
-      month != oldDelegate.month;
+      department != oldDelegate.department || month != oldDelegate.month;
+}
+
+class _AnnouncementDepartmentStickyHeaderDelegate
+    extends SliverPersistentHeaderDelegate {
+  const _AnnouncementDepartmentStickyHeaderDelegate(this.department);
+
+  final String department;
+
+  @override
+  double get minExtent => maxExtent;
+
+  @override
+  double get maxExtent => _stickyHeaderExtent;
+
+  @override
+  Widget build(
+      BuildContext context, double shrinkOffset, bool overlapsContent) {
+    return Material(
+      key: ValueKey('announcement-sticky-department-$department'),
+      color: Theme.of(context).scaffoldBackgroundColor,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(16, 10, 16, 5),
+        child: Align(
+          alignment: Alignment.centerLeft,
+          child: Text(
+            department,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: ShuYoTextStyles.meta(
+              color: Theme.of(context).colorScheme.primary,
+              size: 15,
+              weight: FontWeight.w600,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  @override
+  bool shouldRebuild(_AnnouncementDepartmentStickyHeaderDelegate oldDelegate) =>
+      department != oldDelegate.department;
 }
 
 class _AnnouncementItemRow {
@@ -708,6 +2022,8 @@ class _AnnouncementSourceMenu extends StatefulWidget {
     required this.onToggleFavorite,
     required this.onExpansionChanged,
     required this.onSelect,
+    this.selectedIds,
+    this.onSelectedIdsChanged,
   });
 
   final AnnouncementSource selected;
@@ -716,6 +2032,8 @@ class _AnnouncementSourceMenu extends StatefulWidget {
   final Future<Set<String>> Function(AnnouncementSource) onToggleFavorite;
   final Future<void> Function(AnnouncementMenuSection, bool) onExpansionChanged;
   final ValueChanged<AnnouncementSource> onSelect;
+  final Set<String>? selectedIds;
+  final ValueChanged<Set<String>>? onSelectedIdsChanged;
 
   @override
   State<_AnnouncementSourceMenu> createState() =>
@@ -724,6 +2042,7 @@ class _AnnouncementSourceMenu extends StatefulWidget {
 
 class _AnnouncementSourceMenuState extends State<_AnnouncementSourceMenu> {
   late Set<String> _favorites = {...widget.initialFavorites};
+  late final Set<String> _selectedIds = {...?widget.selectedIds};
   final ScrollController _scrollController = ScrollController();
   late bool _favoritesExpanded = widget.initialExpansion.favorites;
   late bool _schoolPortalExpanded = widget.initialExpansion.schoolPortal;
@@ -751,22 +2070,28 @@ class _AnnouncementSourceMenuState extends State<_AnnouncementSourceMenu> {
         AnnouncementSource.inGroup(AnnouncementSourceGroup.schoolPortal);
     final schoolDepartmentSources =
         AnnouncementSource.inGroup(AnnouncementSourceGroup.schoolDepartment);
+    final collegeSources =
+        AnnouncementSource.inGroup(AnnouncementSourceGroup.college);
     final menuWidth = math.min(264.0, MediaQuery.sizeOf(context).width * 0.68);
     final menuChildren = <Widget>[
-      _sectionHeader('收藏', _favoritesExpanded,
-          () => _toggleSection(AnnouncementMenuSection.favorites)),
-      if (_favoritesExpanded)
-        if (favoriteSources.isEmpty)
-          const ListTile(
-            contentPadding: EdgeInsets.only(left: 16, right: 12),
-            title: Text('暂无收藏'),
-          )
-        else
-          for (final source in favoriteSources) _sourceRow(source),
+      if (widget.selectedIds == null) ...[
+        _sectionHeader('收藏', _favoritesExpanded,
+            () => _toggleSection(AnnouncementMenuSection.favorites)),
+        if (_favoritesExpanded)
+          if (favoriteSources.isEmpty)
+            const ListTile(
+              contentPadding: EdgeInsets.only(left: 16, right: 12),
+              title: Text('暂无收藏'),
+            )
+          else
+            for (final source in favoriteSources) _sourceRow(source),
+      ],
       _sectionHeader(
         AnnouncementSourceGroup.schoolPortal.label,
         _schoolPortalExpanded,
         () => _toggleSection(AnnouncementMenuSection.schoolPortal),
+        sources: schoolPortalSources,
+        group: AnnouncementSourceGroup.schoolPortal,
       ),
       if (_schoolPortalExpanded)
         for (final source in schoolPortalSources) _sourceRow(source),
@@ -774,6 +2099,8 @@ class _AnnouncementSourceMenuState extends State<_AnnouncementSourceMenu> {
         AnnouncementSourceGroup.schoolDepartment.label,
         _schoolDepartmentExpanded,
         () => _toggleSection(AnnouncementMenuSection.schoolDepartment),
+        sources: schoolDepartmentSources,
+        group: AnnouncementSourceGroup.schoolDepartment,
       ),
       if (_schoolDepartmentExpanded)
         for (final source in schoolDepartmentSources) _sourceRow(source),
@@ -781,6 +2108,8 @@ class _AnnouncementSourceMenuState extends State<_AnnouncementSourceMenu> {
         AnnouncementSourceGroup.college.label,
         _collegeExpanded,
         () => _toggleSection(AnnouncementMenuSection.college),
+        sources: collegeSources,
+        group: AnnouncementSourceGroup.college,
       ),
       if (_collegeExpanded)
         for (final category in AnnouncementCollegeCategory.values) ...[
@@ -792,6 +2121,8 @@ class _AnnouncementSourceMenuState extends State<_AnnouncementSourceMenu> {
         AnnouncementSourceGroup.researchInstitute.label,
         _researchInstituteExpanded,
         () => _toggleSection(AnnouncementMenuSection.researchInstitute),
+        sources: researchInstituteSources,
+        group: AnnouncementSourceGroup.researchInstitute,
       ),
       if (_researchInstituteExpanded)
         for (final source in researchInstituteSources) _sourceRow(source),
@@ -919,14 +2250,52 @@ class _AnnouncementSourceMenuState extends State<_AnnouncementSourceMenu> {
     return slivers;
   }
 
-  Widget _sectionHeader(String title, bool expanded, VoidCallback onTap) {
+  Widget _sectionHeader(String title, bool expanded, VoidCallback onTap,
+      {List<AnnouncementSource>? sources, AnnouncementSourceGroup? group}) {
     final tile = ListTile(
       contentPadding: const EdgeInsets.only(left: 16, right: 12),
       title: Text(title, style: const TextStyle(fontWeight: FontWeight.w600)),
-      trailing: Icon(expanded ? Icons.expand_less : Icons.expand_more),
+      trailing: widget.selectedIds == null || sources == null || group == null
+          ? Icon(expanded ? Icons.expand_less : Icons.expand_more)
+          : Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Checkbox(
+                  key: ValueKey<String>(
+                      'announcement-search-group-${group.name}'),
+                  tristate: true,
+                  value: _groupSelection(sources),
+                  onChanged: (_) => _toggleGroupSelection(sources),
+                ),
+                Icon(expanded ? Icons.expand_less : Icons.expand_more),
+              ],
+            ),
       onTap: onTap,
     );
     return _AnnouncementMenuSectionHeader(title: title, tile: tile);
+  }
+
+  bool? _groupSelection(List<AnnouncementSource> sources) {
+    final selected =
+        sources.where((source) => _selectedIds.contains(source.id)).length;
+    if (selected == 0) return false;
+    if (selected == sources.length) return true;
+    return null;
+  }
+
+  void _toggleGroupSelection(List<AnnouncementSource> sources) {
+    final allSelected =
+        sources.every((source) => _selectedIds.contains(source.id));
+    setState(() {
+      for (final source in sources) {
+        if (allSelected) {
+          _selectedIds.remove(source.id);
+        } else {
+          _selectedIds.add(source.id);
+        }
+      }
+    });
+    widget.onSelectedIdsChanged?.call({..._selectedIds});
   }
 
   Widget _collegeCategoryHeader(String title) {
@@ -961,6 +2330,14 @@ class _AnnouncementSourceMenuState extends State<_AnnouncementSourceMenu> {
 
   Widget _sourceRow(AnnouncementSource source) {
     final favorite = _favorites.contains(source.id);
+    final selecting = widget.selectedIds != null;
+    void toggleSelection() {
+      setState(() {
+        if (!_selectedIds.add(source.id)) _selectedIds.remove(source.id);
+      });
+      widget.onSelectedIdsChanged?.call({..._selectedIds});
+    }
+
     return ListTile(
       contentPadding: const EdgeInsets.only(left: 16, right: 12),
       title: Text(
@@ -968,25 +2345,30 @@ class _AnnouncementSourceMenuState extends State<_AnnouncementSourceMenu> {
         maxLines: 2,
         overflow: TextOverflow.ellipsis,
       ),
-      selected: widget.selected == source,
-      onTap: () => widget.onSelect(source),
-      trailing: IconButton(
-        iconSize: 22,
-        padding: EdgeInsets.zero,
-        constraints: const BoxConstraints.tightFor(width: 40, height: 40),
-        splashRadius: 20,
-        style: IconButton.styleFrom(
-          fixedSize: const Size.square(40),
-          shape: const CircleBorder(),
-          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-        ),
-        tooltip: favorite ? '取消收藏${source.name}' : '收藏${source.name}',
-        icon: Icon(
-          favorite ? Icons.star : Icons.star_border,
-          color: favorite ? Theme.of(context).colorScheme.primary : null,
-        ),
-        onPressed: _saving ? null : () => _toggleFavorite(source),
-      ),
+      selected: !selecting && widget.selected == source,
+      onTap: selecting ? toggleSelection : () => widget.onSelect(source),
+      trailing: selecting
+          ? Checkbox(
+              value: _selectedIds.contains(source.id),
+              onChanged: (_) => toggleSelection(),
+            )
+          : IconButton(
+              iconSize: 22,
+              padding: EdgeInsets.zero,
+              constraints: const BoxConstraints.tightFor(width: 40, height: 40),
+              splashRadius: 20,
+              style: IconButton.styleFrom(
+                fixedSize: const Size.square(40),
+                shape: const CircleBorder(),
+                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              ),
+              tooltip: favorite ? '取消收藏${source.name}' : '收藏${source.name}',
+              icon: Icon(
+                favorite ? Icons.star : Icons.star_border,
+                color: favorite ? Theme.of(context).colorScheme.primary : null,
+              ),
+              onPressed: _saving ? null : () => _toggleFavorite(source),
+            ),
     );
   }
 
@@ -2208,6 +3590,7 @@ class _AnnouncementTile extends StatefulWidget {
     required this.external,
     this.updatesPaused,
     this.previewVersion = 0,
+    this.highlightQuery = '',
     required this.onTap,
   });
 
@@ -2217,6 +3600,7 @@ class _AnnouncementTile extends StatefulWidget {
   final bool external;
   final ValueNotifier<bool>? updatesPaused;
   final int previewVersion;
+  final String highlightQuery;
   final VoidCallback onTap;
 
   @override
@@ -2415,17 +3799,38 @@ class _AnnouncementTileState extends State<_AnnouncementTile>
   }
 
   Widget _title(String title, ShuYoColors colors) {
-    return Text(
-      title,
-      maxLines: 2,
-      overflow: TextOverflow.ellipsis,
-      style: ShuYoTextStyles.title(
-        color: colors.textPrimary,
-        size: 16,
-        height: 1.26,
-        weight: FontWeight.w500,
-      ),
+    final style = ShuYoTextStyles.title(
+      color: colors.textPrimary,
+      size: 16,
+      height: 1.26,
+      weight: FontWeight.w500,
     );
+    final query = widget.highlightQuery.trim();
+    if (query.isEmpty || !title.toLowerCase().contains(query.toLowerCase())) {
+      return Text(title,
+          maxLines: 2, overflow: TextOverflow.ellipsis, style: style);
+    }
+    final lowerTitle = title.toLowerCase();
+    final lowerQuery = query.toLowerCase();
+    final parts = <TextSpan>[];
+    var start = 0;
+    while (start < title.length) {
+      final match = lowerTitle.indexOf(lowerQuery, start);
+      if (match < 0) {
+        parts.add(TextSpan(text: title.substring(start)));
+        break;
+      }
+      if (match > start) {
+        parts.add(TextSpan(text: title.substring(start, match)));
+      }
+      parts.add(TextSpan(
+        text: title.substring(match, match + query.length),
+        style: TextStyle(color: Theme.of(context).colorScheme.primary),
+      ));
+      start = match + query.length;
+    }
+    return Text.rich(TextSpan(children: parts),
+        maxLines: 2, overflow: TextOverflow.ellipsis, style: style);
   }
 }
 

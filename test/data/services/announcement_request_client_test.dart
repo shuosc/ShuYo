@@ -75,6 +75,18 @@ void main() {
     expect(network.requests, hasLength(2));
   });
 
+  test('externally scheduled requests make one attempt without host cooldown',
+      () async {
+    final network = _HandlerClient(
+        (request, _) async => _response(request, 'unavailable', status: 503));
+    final client = AnnouncementRequestClient(httpClient: network);
+    addTearDown(client.close);
+    expect((await client.getOnce('https://a.test/search')).statusCode, 503);
+    expect(network.requests, hasLength(1));
+    expect((await client.getOnce('https://a.test/search')).statusCode, 503);
+    expect(network.requests, hasLength(2));
+  });
+
   test('parse failures evict downloaded HTML before a later retry', () async {
     final network = _HandlerClient(
         (request, count) async => _response(request, 'version $count'));
@@ -282,10 +294,10 @@ void main() {
 
   test('close aborts active work and settles queued work without owning client',
       () async {
-    var aborted = false;
+    var aborted = 0;
     final network = _HandlerClient((request, _) {
       (request as http.AbortableRequest).abortTrigger!.then((_) {
-        aborted = true;
+        aborted++;
       });
       return Completer<http.StreamedResponse>().future;
     });
@@ -298,10 +310,12 @@ void main() {
         expectLater(client.get('https://a.test/one'), throwsStateError);
     final second =
         expectLater(client.get('https://b.test/two'), throwsStateError);
-    expect(network.requests, hasLength(1));
+    final externallyScheduled =
+        expectLater(client.getOnce('https://c.test/search'), throwsStateError);
+    expect(network.requests, hasLength(2));
     client.close();
-    await Future.wait([first, second]);
-    expect(aborted, isTrue);
+    await Future.wait([first, second, externallyScheduled]);
+    expect(aborted, 2);
     expect(network.closeCount, 0);
     await expectLater(client.get('https://c.test/three'), throwsStateError);
   });

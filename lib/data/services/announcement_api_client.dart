@@ -37,6 +37,12 @@ class AnnouncementUnavailableException extends AnnouncementApiException {
   const AnnouncementUnavailableException({super.statusCode}) : super('公告失效');
 }
 
+/// A received HTML page cannot be read with the supported announcement layout.
+/// Retrying the same HTML cannot fix its structure.
+class AnnouncementSearchParseException extends AnnouncementApiException {
+  const AnnouncementSearchParseException(super.message);
+}
+
 class AnnouncementPageBatch {
   const AnnouncementPageBatch(
       {required this.items, required this.nextPageUrls});
@@ -130,6 +136,120 @@ class AnnouncementApiClient {
         }
       }
     }
+  }
+
+  /// Fetches one source column without starting requests for its other columns.
+  /// Parsing runs away from the UI isolate during cross-source searches.
+  Future<AnnouncementColumnPage> fetchSearchColumn({
+    required AnnouncementSource source,
+    required String url,
+    required String column,
+  }) async {
+    final response = await _getSearchHtml(url);
+    final items = await _withParse(
+      () => compute(
+        _parseColumn,
+        (bytes: response.bodyBytes, url: url, source: source, column: column),
+      ),
+      prioritizeList: true,
+    );
+    if (items.items.isEmpty) {
+      throw const AnnouncementSearchParseException('公告列表结构无法解析');
+    }
+    if (source.adapter.listFormat != AnnouncementListFormat.filmNotice) {
+      return items;
+    }
+    return AnnouncementColumnPage(
+      await _enrichFilmNotices(items.items, source: source),
+      items.nextPageUrl,
+    );
+  }
+
+  /// The search scheduler owns network concurrency. These methods leave parsing
+  /// to its separate, globally limited queue.
+  Future<http.Response> fetchSearchResponse(String url) => _getSearchHtml(url);
+
+  Future<AnnouncementColumnPage> parseSearchColumnResponse({
+    required http.Response response,
+    required AnnouncementSource source,
+    required String url,
+    required String column,
+  }) async {
+    final page = await compute(
+      _parseColumn,
+      (bytes: response.bodyBytes, url: url, source: source, column: column),
+    );
+    if (page.items.isEmpty) {
+      throw const AnnouncementSearchParseException('公告列表结构无法解析');
+    }
+    return page;
+  }
+
+  Future<String> parseSearchDetailText({
+    required http.Response response,
+    required AnnouncementListItem item,
+  }) async {
+    final path = Uri.tryParse(item.url)?.path.toLowerCase() ?? '';
+    if (RegExp(r'\.(pdf|docx?|xlsx?|pptx?|zip)$').hasMatch(path) ||
+        (response.bodyBytes.length >= 4 &&
+            response.bodyBytes[0] == 0x25 &&
+            response.bodyBytes[1] == 0x50 &&
+            response.bodyBytes[2] == 0x44 &&
+            response.bodyBytes[3] == 0x46)) {
+      return '';
+    }
+    final contentType = response.headers['content-type']?.toLowerCase() ?? '';
+    if (contentType.contains('text/plain')) {
+      return utf8.decode(response.bodyBytes, allowMalformed: true);
+    }
+    if (contentType.isNotEmpty && !contentType.contains('html')) return '';
+    final text = await compute(
+        _searchDetailText, (bytes: response.bodyBytes, item: item));
+    if (text == null) {
+      throw const AnnouncementSearchParseException('公告正文结构无法解析');
+    }
+    return text;
+  }
+
+  Future<DateTime?> parseFilmSearchDate(http.Response response) =>
+      compute(_filmSearchDate, response.bodyBytes);
+
+  /// Returns whether readable article body content contains [query].
+  /// Non-HTML documents cannot be parsed by the existing detail parser.
+  Future<bool> searchDetailBody(
+    AnnouncementListItem item,
+    String query,
+  ) async {
+    final path = Uri.tryParse(item.url)?.path.toLowerCase() ?? '';
+    if (RegExp(r'\.(pdf|docx?|xlsx?|pptx?|zip)$').hasMatch(path)) {
+      return false;
+    }
+    final response = await _getSearchHtml(item.url);
+    final contentType = response.headers['content-type']?.toLowerCase() ?? '';
+    if (response.bodyBytes.length >= 4 &&
+        response.bodyBytes[0] == 0x25 &&
+        response.bodyBytes[1] == 0x50 &&
+        response.bodyBytes[2] == 0x44 &&
+        response.bodyBytes[3] == 0x46) {
+      return false;
+    }
+    if (contentType.contains('text/plain')) {
+      return _withParse(
+        () => compute(
+          _searchPlainText,
+          (bytes: response.bodyBytes, query: query),
+        ),
+      );
+    }
+    if (contentType.isNotEmpty && !contentType.contains('html')) {
+      return false;
+    }
+    return _withParse(
+      () => compute(
+        _searchDetailBody,
+        (bytes: response.bodyBytes, item: item, query: query),
+      ),
+    );
   }
 
   Future<List<AnnouncementListItem>> fetchAnnouncements({
@@ -613,6 +733,14 @@ class AnnouncementApiClient {
       ]);
     }
     return inferFilmNoticeDates(result);
+  }
+
+  /// Search owns its network limits, retries and response cache. Keep this a
+  /// single attempt while sharing ordinary requests' abort/header handling.
+  Future<http.Response> _getSearchHtml(String url) async {
+    final response = await _requests.getOnce(url);
+    _ensureSuccess(response);
+    return response;
   }
 
   static AnnouncementDetail parseAnnouncementDetail(
@@ -1485,6 +1613,237 @@ AnnouncementColumnPage _parseColumn(
     ),
   );
 }
+
+bool _searchDetailBody(
+    ({
+      List<int> bytes,
+      AnnouncementListItem item,
+      String query,
+    }) request) {
+  final item = request.item;
+  final query = request.query.toLowerCase();
+  final html = utf8.decode(request.bytes, allowMalformed: true);
+  final detail = AnnouncementApiClient.parseAnnouncementDetail(
+    html,
+    url: item.url,
+    sourceId: item.sourceId,
+    fallbackTitle: item.title,
+    fallbackDateText: item.dateText,
+    fallbackPublishedAt: item.publishedAt,
+  );
+  if (_searchContentBlocks(detail.blocks, query)) return true;
+  if (detail.blocks.any((block) => block.isText || block.isTable)) {
+    return false;
+  }
+
+  // Some article templates use a different content wrapper. Keep this
+  // fallback restricted to article containers to avoid matching site menus.
+  final document = html_parser.parse(html);
+  const articleSelectors = [
+    '.nry .article-content',
+    '.nry .article-body',
+    '.nry .news-content',
+    '.nry .detail-content',
+    '.article-content',
+    '.article-body',
+    '.article_content',
+    '.article_body',
+    '.news-detail-content',
+    '.news-detail-infowrap',
+    '.news-content',
+    '.news_content',
+    '.detail-content',
+    '.detail_content',
+    '#articleContent',
+    '#article-content',
+    '#article_content',
+    '.articleContent',
+  ];
+  for (final selector in articleSelectors) {
+    final root = document.querySelector(selector);
+    if (root == null) continue;
+    _removeArticleChrome(root);
+    if (_searchContentBlocks(
+      AnnouncementApiClient._parseContentBlocks(root, baseUrl: item.url),
+      query,
+    )) {
+      return true;
+    }
+  }
+  final root = document.querySelector('.nry');
+  if (root != null && root.querySelector('p, table') != null) {
+    _removeArticleChrome(root);
+    return _searchContentBlocks(
+      AnnouncementApiClient._parseContentBlocks(root, baseUrl: item.url),
+      query,
+    );
+  }
+  return false;
+}
+
+String? _searchDetailText(
+    ({List<int> bytes, AnnouncementListItem item}) request) {
+  final item = request.item;
+  final html = utf8.decode(request.bytes, allowMalformed: true);
+  final document = html_parser.parse(html);
+  final notice = document.querySelector('.nry');
+  final content = item.sourceId == 'shvfs'
+      ? document.querySelector('div.news-detail-infowrap')
+      : notice?.querySelector('.v_news_content') ??
+          document.querySelector('.v_news_content') ??
+          document.querySelector('#vsb_content') ??
+          document.querySelector('div[id^="vsb_content_"]');
+  final textParts = <String>[];
+  if (content != null) {
+    final text = _searchArticleNodeText(content);
+    if (text.isNotEmpty) textParts.add(text);
+  }
+  if (content != null) {
+    for (final anchor in document.querySelectorAll('a[href]')) {
+      if ((anchor.attributes['href'] ?? '').contains('DownloadAttachUrl')) {
+        textParts.add(anchor.text);
+      }
+    }
+    return textParts.join(' ');
+  }
+  const selectors = [
+    '.nry .article-content',
+    '.nry .article-body',
+    '.nry .news-content',
+    '.nry .detail-content',
+    '.article-content',
+    '.article-body',
+    '.article_content',
+    '.article_body',
+    '.news-detail-content',
+    '.news-detail-infowrap',
+    '.news-content',
+    '.news_content',
+    '.detail-content',
+    '.detail_content',
+    '#articleContent',
+    '#article-content',
+    '#article_content',
+    '.articleContent',
+  ];
+  var foundArticleContainer = false;
+  for (final selector in selectors) {
+    final root = document.querySelector(selector);
+    if (root == null) continue;
+    foundArticleContainer = true;
+    textParts.add(_searchArticleNodeText(root));
+  }
+  if (notice != null && notice.querySelector('p, table') != null) {
+    foundArticleContainer = true;
+    textParts.add(_searchArticleNodeText(notice));
+  }
+  return foundArticleContainer ? textParts.join(' ') : null;
+}
+
+String _searchArticleNodeText(dom.Element root) {
+  const ignoredTags = {'script', 'style', 'nav', 'aside', 'header', 'footer'};
+  const ignoredClasses = {
+    'breadcrumb',
+    'location',
+    'position',
+    'sidebar',
+    'menu',
+    'related',
+    'xgyd',
+    'pagination',
+    'xx',
+  };
+  const blockTags = {
+    'div',
+    'p',
+    'br',
+    'li',
+    'tr',
+    'td',
+    'th',
+    'table',
+    'section',
+    'article',
+    'h1',
+    'h2',
+    'h3',
+    'h4',
+    'h5',
+    'h6',
+  };
+  final buffer = StringBuffer();
+
+  void visit(dom.Node node) {
+    if (node is dom.Text) {
+      buffer.write(node.text);
+      return;
+    }
+    if (node is! dom.Element) return;
+    final tag = node.localName;
+    if (ignoredTags.contains(tag) ||
+        node.classes.any(ignoredClasses.contains)) {
+      return;
+    }
+    if (blockTags.contains(tag)) buffer.write(' ');
+    if (tag == 'img') {
+      buffer.write(' ');
+      buffer.write(node.attributes['alt'] ?? node.attributes['title'] ?? '');
+      buffer.write(' ');
+    }
+    for (final child in node.nodes) {
+      visit(child);
+    }
+    if (blockTags.contains(tag)) buffer.write(' ');
+  }
+
+  visit(root);
+  return buffer.toString().replaceAll(RegExp(r'\s+'), ' ').trim();
+}
+
+DateTime? _filmSearchDate(List<int> bytes) {
+  final document = html_parser.parse(utf8.decode(bytes, allowMalformed: true));
+  final metadata = AnnouncementApiClient._parseFilmNoticeMetadata(document);
+  return AnnouncementApiClient._parseDate(metadata.dateText);
+}
+
+void _removeArticleChrome(dom.Element root) {
+  for (final element in root.querySelectorAll(
+    'nav, aside, header, footer, .breadcrumb, .location, .position, '
+    '.sidebar, .menu, .related, .xgyd, .pagination, .xx',
+  )) {
+    element.remove();
+  }
+}
+
+bool _searchContentBlocks(List<AnnouncementContentBlock> blocks, String query) {
+  for (final block in blocks) {
+    if (block.isText && block.value.toLowerCase().contains(query)) return true;
+    if (block.isText &&
+        block.parts.any((part) => part.text.toLowerCase().contains(query))) {
+      return true;
+    }
+    if (block.isTable &&
+        (block.rows.any((row) =>
+                row.any((cell) => cell.toLowerCase().contains(query))) ||
+            block.cells
+                .any((cell) => cell.text.toLowerCase().contains(query)))) {
+      return true;
+    }
+    if (block.isLink && block.label.toLowerCase().contains(query)) return true;
+    if (block.isImage && block.alt.toLowerCase().contains(query)) return true;
+  }
+  return false;
+}
+
+bool _searchPlainText(
+        ({
+          List<int> bytes,
+          String query,
+        }) request) =>
+    utf8
+        .decode(request.bytes, allowMalformed: true)
+        .toLowerCase()
+        .contains(request.query.toLowerCase());
 
 String _announcementUrlKey(String url) {
   final uri = Uri.tryParse(url.trim());

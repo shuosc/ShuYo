@@ -74,6 +74,15 @@ void main() {
     expect(detail.dateText, '2026-10-20');
     expect(detail.author, '王超');
     expect(detail.title, '新公告');
+    final searchPage = await client.fetchSearchColumn(
+      source: source,
+      url: source.listUrl,
+      column: '',
+    );
+    final searchedNew =
+        searchPage.items.singleWhere((item) => item.title == '新公告');
+    expect(searchedNew.publishedAt, DateTime(2026, 10, 20));
+    expect(searchedNew.dateText, '2026-10-20');
     client.close();
   });
 
@@ -123,6 +132,13 @@ void main() {
             .where((item) => item.title.startsWith('外链'))
             .every((item) => item.dateText.isEmpty),
         isTrue);
+    final searched = await client.fetchSearchColumn(
+      source: source,
+      url: source.listUrl,
+      column: '',
+    );
+    expect(searched.items.map((item) => item.publishedAt),
+        orderedEquals(page.items.map((item) => item.publishedAt)));
     client.close();
   });
 

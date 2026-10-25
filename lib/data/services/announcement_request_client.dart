@@ -116,6 +116,32 @@ class AnnouncementRequestClient {
     return request.completer.future;
   }
 
+  /// One attempt for callers that already own scheduling, caching and retries.
+  /// Reuses this transport's headers, request timeout and close/abort handling.
+  Future<http.Response> getOnce(String url) {
+    if (_closed) {
+      return Future.error(StateError('Announcement client is closed'));
+    }
+    final request = _Request(
+      _urlKey(url),
+      AnnouncementRequestPriority.list,
+      false,
+      _cacheEpoch,
+    );
+    _requests.add(request);
+    unawaited(_executeOnce(request));
+    return request.completer.future;
+  }
+
+  Future<void> _executeOnce(_Request request) async {
+    try {
+      final response = await _send(request);
+      if (!request.done) _finishResponse(request, response);
+    } on Object catch (error) {
+      if (!request.done) _finishError(request, error);
+    }
+  }
+
   Future<T> withResponse<T>(
     String url,
     Future<T> Function(http.Response response) action, {
