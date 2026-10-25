@@ -1,6 +1,8 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../../data/models/campus_card.dart';
 import '../../data/services/academic_account_store.dart';
@@ -8,6 +10,14 @@ import '../../data/services/campus_card_service.dart';
 import '../../shared/shuyo_text_styles.dart';
 import '../../shared/theme/shuyo_theme.dart';
 import 'campus_card_date_range_sheet.dart';
+
+// 来自企微工作台点击日志；businessid 是客户端内部应用 ID，与 OAuth agentid 不同。
+// 通过已有校园一卡通应用进入，避免 sso/jump 对任意网页的域名限制。
+const _rechargeAppUrl =
+    'wxwork://jump?target=jump_to_third_app&businessid=5629500339709576';
+
+// 启动失败时可复制的固定网页入口；金额、订单和支付仍由学校页面处理。
+const _rechargeEntryUrl = 'https://pay.shu.edu.cn/epay/home/IndexLoginWXCorp';
 
 class CampusCardPage extends StatefulWidget {
   const CampusCardPage({
@@ -49,6 +59,7 @@ class _CampusCardPageState extends State<CampusCardPage> {
   bool _loggingIn = false;
   bool _refreshing = false;
   int _cardRevision = 0;
+  bool _openingRecharge = false;
   int _billsRevision = 0;
   DateTimeRange? _billsRange;
 
@@ -207,6 +218,45 @@ class _CampusCardPageState extends State<CampusCardPage> {
       await _refresh(interactive: true, allowLogin: false);
     }
     return loggedIn;
+  }
+
+  Future<void> _openRecharge() async {
+    if (_openingRecharge) return;
+    setState(() => _openingRecharge = true);
+    try {
+      final opened = await launchUrl(
+        Uri.parse(_rechargeAppUrl),
+        mode: LaunchMode.externalApplication,
+      );
+      if (!opened) _showRechargeLaunchError();
+    } on Object {
+      _showRechargeLaunchError();
+    } finally {
+      if (mounted) setState(() => _openingRecharge = false);
+    }
+  }
+
+  void _showRechargeLaunchError() {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: const Text('无法打开企业微信，请确认已安装企业微信'),
+        action: SnackBarAction(label: '复制入口', onPressed: _copyRechargeEntry),
+      ),
+    );
+  }
+
+  Future<void> _copyRechargeEntry() async {
+    var message = '已复制充值入口，请在企业微信中打开';
+    try {
+      await Clipboard.setData(const ClipboardData(text: _rechargeEntryUrl));
+    } on Object {
+      message = '复制失败，请重试';
+    }
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(message)),
+    );
   }
 
   void _selectRecentDays(int days) {
@@ -563,6 +613,20 @@ class _CampusCardPageState extends State<CampusCardPage> {
               ),
             ],
           ],
+          const SizedBox(height: 20),
+          SizedBox(
+            width: double.infinity,
+            child: FilledButton.tonalIcon(
+              onPressed: _openingRecharge ? null : _openRecharge,
+              icon: const Icon(Icons.open_in_new),
+              label: const Text('前往企业微信充值'),
+            ),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            '打开校园一卡通后，点击「账户充值」。',
+            style: ShuYoTextStyles.meta(color: colors.textSecondary),
+          ),
         ],
       ),
     );
