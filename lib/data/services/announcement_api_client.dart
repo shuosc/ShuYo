@@ -624,25 +624,22 @@ class AnnouncementApiClient {
     DateTime? fallbackPublishedAt,
     dom.Document? parsedDocument,
   }) {
-    final document = parsedDocument ?? html_parser.parse(html);
+    final document = parsedDocument ?? _parseDetailDocument(html);
+    if (_isUnavailableAnnouncementPage(html, parsedDocument: document)) {
+      throw const AnnouncementUnavailableException();
+    }
     final isShvfsNews = sourceId == 'shvfs';
-    final isVsbLegacyDetail =
-        sourceId == 'sfa' || sourceId == 'alumni' || sourceId == 'shuedf';
+    final legacyMetadata = _parseVsbLegacyMetadata(document);
     final isComputerDetail = sourceId == 'cs';
     final root = document.querySelector('.nry');
-    // WeChat-specific title parsing is disabled so unsupported details can use
-    // the original-link fallback.
-    // final title = _cleanText(
-    //   root?.querySelector('h1')?.text ??
-    //       document.querySelector('#activity-name')?.text,
-    // );
     final title = _cleanText(isShvfsNews
         ? document.querySelector('header.n-detail-title > h2')?.text
-        : isVsbLegacyDetail
-            ? document.querySelector('.Head')?.text
-            : isComputerDetail
-                ? document.querySelector('.art-tit h3')?.text
-                : root?.querySelector('h1')?.text);
+        : isComputerDetail
+            ? document.querySelector('.art-tit h3')?.text
+            : root?.querySelector('h1')?.text ??
+                (legacyMetadata == null
+                    ? null
+                    : document.querySelector('.Head')?.text));
     final metadata = isShvfsNews
         ? _AnnouncementMetadata(
             dateText: _cleanText(
@@ -651,15 +648,14 @@ class AnnouncementApiClient {
             author: '',
             department: '',
           )
-        : isVsbLegacyDetail
-            ? _parseFilmNoticeMetadata(document)
-            : _parseMetadata(
-                isComputerDetail
-                    ? document.querySelector('.art-tit p')
-                    : root?.querySelector('.xx'),
-                document: document,
-                adapter: AnnouncementSource.byId(sourceId).adapter,
-              );
+        : legacyMetadata ??
+            _parseMetadata(
+              isComputerDetail
+                  ? document.querySelector('.art-tit p')
+                  : root?.querySelector('.xx'),
+              document: document,
+              adapter: AnnouncementSource.byId(sourceId).adapter,
+            );
     final dateText =
         metadata.dateText.isNotEmpty ? metadata.dateText : fallbackDateText;
     final contentRoot = isShvfsNews
@@ -668,8 +664,6 @@ class AnnouncementApiClient {
             document.querySelector('.v_news_content') ??
             document.querySelector('#vsb_content') ??
             document.querySelector('div[id^="vsb_content_"]');
-    // WeChat-specific body parsing is disabled:
-    // document.querySelector('#js_content');
     final blocks = contentRoot == null
         ? <AnnouncementContentBlock>[]
         : _parseContentBlocks(contentRoot, baseUrl: url);
@@ -699,6 +693,20 @@ class AnnouncementApiClient {
     );
   }
 
+  static dom.Document _parseDetailDocument(String html) {
+    // Some VSB templates put the content div directly inside a layout table.
+    // Supply its missing cell before HTML parsing can move a nested data table
+    // and subsequent paragraphs outside the article body.
+    final normalized = html.replaceAllMapped(
+      RegExp(
+        r'''(<table\b[^>]*\sclass\s*=\s*["'](?:[^"']*\s)?shuArticle(?:\s[^"']*)?["'][^>]*>)(\s*)(?=<div\b)''',
+        caseSensitive: false,
+      ),
+      (match) => '${match[1]}<tbody><tr><td>${match[2]}',
+    );
+    return html_parser.parse(normalized);
+  }
+
   static bool _isUnavailableAnnouncementPage(
     String html, {
     dom.Document? parsedDocument,
@@ -706,8 +714,13 @@ class AnnouncementApiClient {
     final document = parsedDocument ?? html_parser.parse(html);
     final title = _cleanText(document.querySelector('title')?.text);
     final message = _cleanText(document.body?.text);
+    final missingArticle = RegExp(r'^没有找到文章\s*ID[。！!]?$');
     return title.contains('404错误提示') ||
-        (message.contains('系统提示') && message.contains('您访问的页面未找到'));
+        (message.contains('系统提示') && message.contains('您访问的页面未找到')) ||
+        document
+            .querySelectorAll('.content, .v_news_content, #vsb_content')
+            .any(
+                (element) => missingArticle.hasMatch(_cleanText(element.text)));
   }
 
   static List<AnnouncementContentBlock> _parseContentBlocks(
@@ -1311,8 +1324,17 @@ class AnnouncementApiClient {
       value.startsWith('发布者：') ||
       value.startsWith('发布者:');
 
-  static _AnnouncementMetadata _parseFilmNoticeMetadata(dom.Document document) {
+  static _AnnouncementMetadata? _parseVsbLegacyMetadata(dom.Document document) {
     for (final row in document.querySelectorAll('tr[valign="middle"]')) {
+      var inArticleBody = false;
+      for (var parent = row.parent; parent != null; parent = parent.parent) {
+        if (parent.classes.contains('v_news_content') ||
+            parent.id.startsWith('vsb_content')) {
+          inArticleBody = true;
+          break;
+        }
+      }
+      if (inArticleBody) continue;
       final label = row.querySelector('span');
       if (!_cleanText(label?.text).startsWith('创建时间')) continue;
       final date = _parseDate(_cleanText(label?.nextElementSibling?.text));
@@ -1326,8 +1348,7 @@ class AnnouncementApiClient {
         department: '',
       );
     }
-    return const _AnnouncementMetadata(
-        dateText: '', author: '', department: '');
+    return null;
   }
 
   static String _authorValue(String value) {
@@ -1411,14 +1432,8 @@ AnnouncementDetail _parseDetailResponse(
       String sourceId,
     }) request) {
   final html = utf8.decode(request.bytes, allowMalformed: true);
-  final document = html_parser.parse(html);
-  if (AnnouncementApiClient._isUnavailableAnnouncementPage(
-    html,
-    parsedDocument: document,
-  )) {
-    throw const AnnouncementUnavailableException();
-  }
-  return AnnouncementApiClient.parseAnnouncementDetail(
+  final document = AnnouncementApiClient._parseDetailDocument(html);
+  final detail = AnnouncementApiClient.parseAnnouncementDetail(
     html,
     url: request.url,
     fallbackTitle: request.title,
@@ -1427,16 +1442,21 @@ AnnouncementDetail _parseDetailResponse(
     sourceId: request.sourceId,
     parsedDocument: document,
   );
+  if (!detail.hasContent) {
+    throw const AnnouncementApiException('公告正文无法解析');
+  }
+  return detail;
 }
 
 ({String dateText, DateTime? publishedAt}) _parseFilmNoticeDateResponse(
     List<int> bytes) {
-  final metadata = AnnouncementApiClient._parseFilmNoticeMetadata(
+  final metadata = AnnouncementApiClient._parseVsbLegacyMetadata(
     html_parser.parse(utf8.decode(bytes, allowMalformed: true)),
   );
+  final dateText = metadata?.dateText ?? '';
   return (
-    dateText: metadata.dateText,
-    publishedAt: AnnouncementApiClient._parseDate(metadata.dateText),
+    dateText: dateText,
+    publishedAt: AnnouncementApiClient._parseDate(dateText),
   );
 }
 
