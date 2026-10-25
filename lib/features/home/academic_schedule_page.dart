@@ -18,6 +18,7 @@ import '../../data/services/schedule_comparison.dart';
 import '../../shared/shuyo_text_styles.dart';
 import '../../shared/navigation/shuyo_route.dart';
 import '../../shared/theme/shuyo_theme.dart';
+import '../../shared/widgets/date_picker.dart';
 import '../../shared/widgets/empty_state.dart';
 import 'academic_schedule_editor_page.dart';
 import 'schedule_share_page.dart';
@@ -413,11 +414,13 @@ class _AcademicSchedulePageState extends State<AcademicSchedulePage> {
     final schedule = _schedule;
     final currentState = _weekState;
     if (schedule == null || currentState == null) return;
-    final picked = await showDialog<DateTime>(
+    final picked = await showShuYoDatePicker(
       context: context,
-      builder: (context) => _FirstWeekDatePickerDialog(
-        initialDate: currentState.firstWeekStart,
-      ),
+      initialDate: currentState.firstWeekStart,
+      firstDate: DateTime(2000),
+      lastDate: DateTime(2100, 12, 31),
+      title: '选择开学日期',
+      selectableDayPredicate: (date) => date.weekday == DateTime.monday,
     );
     if (picked == null || !mounted) return;
     await widget.repository.setFirstWeekStart(picked);
@@ -635,15 +638,12 @@ class _AcademicSchedulePageState extends State<AcademicSchedulePage> {
     final initialDate = targetDate.isBefore(firstWeekStart)
         ? firstWeekStart
         : (targetDate.isAfter(lastDate) ? lastDate : targetDate);
-    final picked = await showDialog<DateTime>(
+    final picked = await showShuYoDatePicker(
       context: context,
-      builder: (context) => _FirstWeekDatePickerDialog(
-        initialDate: initialDate,
-        title: '选择要复制的日期',
-        mondayOnly: false,
-        firstDate: firstWeekStart,
-        lastDate: lastDate,
-      ),
+      initialDate: initialDate,
+      title: '选择要复制的日期',
+      firstDate: firstWeekStart,
+      lastDate: lastDate,
     );
     if (picked == null || !mounted) {
       return;
@@ -1637,94 +1637,6 @@ class _DisplaySettingTitle extends StatelessWidget {
     return Transform.translate(
       offset: const Offset(0, 4.5),
       child: Text(text),
-    );
-  }
-}
-
-class _FirstWeekDatePickerDialog extends StatefulWidget {
-  const _FirstWeekDatePickerDialog({
-    required this.initialDate,
-    this.title = '选择开学日期',
-    this.mondayOnly = true,
-    this.firstDate,
-    this.lastDate,
-  });
-
-  final DateTime initialDate;
-  final String title;
-  final bool mondayOnly;
-  final DateTime? firstDate;
-  final DateTime? lastDate;
-
-  @override
-  State<_FirstWeekDatePickerDialog> createState() =>
-      _FirstWeekDatePickerDialogState();
-}
-
-class _FirstWeekDatePickerDialogState
-    extends State<_FirstWeekDatePickerDialog> {
-  late DateTime _selectedDate = widget.initialDate;
-
-  @override
-  Widget build(BuildContext context) {
-    final colors = context.shuyoColors;
-    return Dialog(
-      backgroundColor: Colors.transparent,
-      surfaceTintColor: Colors.transparent,
-      elevation: 0,
-      insetPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 24),
-      child: Container(
-        width: double.infinity,
-        constraints: const BoxConstraints(maxWidth: 400),
-        decoration: BoxDecoration(
-          color: colors.surface,
-          borderRadius: BorderRadius.circular(8),
-        ),
-        clipBehavior: Clip.antiAlias,
-        child: SingleChildScrollView(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Padding(
-                padding: const EdgeInsets.fromLTRB(20, 20, 20, 4),
-                child: Text(
-                  widget.title,
-                  style: ShuYoTextStyles.sectionTitle(
-                    color: colors.textPrimary,
-                  ),
-                ),
-              ),
-              CalendarDatePicker(
-                initialDate: widget.initialDate,
-                firstDate: widget.firstDate ?? DateTime(2000),
-                lastDate: widget.lastDate ?? DateTime(2100, 12, 31),
-                selectableDayPredicate: widget.mondayOnly
-                    ? (date) => date.weekday == DateTime.monday
-                    : null,
-                onDateChanged: (date) => setState(() => _selectedDate = date),
-              ),
-              Padding(
-                padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.end,
-                  children: [
-                    TextButton(
-                      onPressed: () => Navigator.of(context).pop(),
-                      child: const Text('取消'),
-                    ),
-                    const SizedBox(width: 8),
-                    FilledButton(
-                      onPressed: () => Navigator.of(context).pop(_selectedDate),
-                      child: const Text('确定'),
-                    ),
-                  ],
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
     );
   }
 }
