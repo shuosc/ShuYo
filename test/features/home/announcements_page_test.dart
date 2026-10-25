@@ -1,9 +1,11 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter/services.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:shuyo/data/models/announcement.dart';
 import 'package:shuyo/data/models/announcement_source.dart';
@@ -173,222 +175,54 @@ class _DeferredPageAnnouncementRepository extends _FakeAnnouncementRepository {
       !nextPage.isCompleted;
 }
 
-class _PendingSearchRepository extends _FakeAnnouncementRepository {
-  _PendingSearchRepository() : super(items: const [], details: const {});
+http.Response _searchResponse(
+  List<Map<String, Object?>> records, {
+  int? total,
+  int current = 0,
+}) =>
+    http.Response(
+      jsonEncode({
+        'code': '0000',
+        'data': {
+          'page': {
+            'total': total ?? records.length,
+            'size': 50,
+            'current': current,
+            'records': records,
+          },
+        },
+      }),
+      200,
+      headers: {'content-type': 'application/json;charset=utf-8'},
+    );
 
-  final pending = Completer<List<AnnouncementListItem>>();
+Map<String, Object?> _searchRecord({
+  String sourceId = 'shu',
+  required String title,
+  String url = 'https://www.shu.edu.cn/info/1051/1.htm',
+  String? summary = '公告概览',
+  String date = '2026-10-25 12:00:00',
+}) =>
+    {
+      'index': 'article_data',
+      'owner': AnnouncementSource.byId(sourceId).searchOwner,
+      'title': title,
+      'url': url,
+      'column': sourceId == 'bksy' ? '1015' : '1051',
+      'columnName': '通知公告',
+      'createDate': date,
+      if (summary != null) 'intro': summary,
+    };
 
-  @override
-  Future<List<AnnouncementListItem>> fetchAnnouncements({
-    AnnouncementSource? source,
-    bool forceRefresh = false,
-    bool loadNextPage = false,
-  }) =>
-      pending.future;
-}
-
-class _PageSearchClient extends AnnouncementApiClient {
-  _PageSearchClient(this.requests, this.shouldFailParsing);
-
-  final List<String> requests;
-  final bool Function() shouldFailParsing;
-
-  @override
-  Future<http.Response> fetchSearchResponse(String url) async {
-    requests.add(url);
-    return http.Response('ok', 200);
-  }
-
-  @override
-  Future<AnnouncementColumnPage> parseSearchColumnResponse({
-    required http.Response response,
-    required AnnouncementSource source,
-    required String url,
-    required String column,
-  }) async =>
-      const AnnouncementColumnPage([
-        AnnouncementListItem(
-          title: '普通公告',
-          url: 'https://example.org/body',
-          sourceId: 'shu',
-        ),
-      ], null);
-
-  @override
-  Future<String> parseSearchDetailText({
-    required http.Response response,
-    required AnnouncementListItem item,
-  }) async {
-    if (shouldFailParsing()) throw const FormatException('无法解析正文');
-    return '目标内容';
-  }
-}
-
-class _TimeoutPageSearchClient extends _PageSearchClient {
-  _TimeoutPageSearchClient(List<String> requests)
-      : super(requests, () => false);
-
-  @override
-  Future<http.Response> fetchSearchResponse(String url) async {
-    requests.add(url);
-    if (url.endsWith('/body')) throw TimeoutException('正文请求超时');
-    return http.Response('ok', 200);
-  }
-}
-
-class _SharedUrlSearchClient extends AnnouncementApiClient {
-  @override
-  Future<http.Response> fetchSearchResponse(String url) async =>
-      http.Response('ok', 200);
-
-  @override
-  Future<AnnouncementColumnPage> parseSearchColumnResponse({
-    required http.Response response,
-    required AnnouncementSource source,
-    required String url,
-    required String column,
-  }) async =>
-      AnnouncementColumnPage([
-        AnnouncementListItem(
-          title: '目标词 ${source.name}',
-          url: 'https://shared.test/article.htm',
-          sourceId: source.id,
-        ),
-      ], null);
-}
-
-class _SameSourceDifferentTitleClient extends _SharedUrlSearchClient {
-  @override
-  Future<AnnouncementColumnPage> parseSearchColumnResponse({
-    required http.Response response,
-    required AnnouncementSource source,
-    required String url,
-    required String column,
-  }) async =>
-      AnnouncementColumnPage([
-        AnnouncementListItem(
-          title: '目标词 原标题',
-          url: 'https://shared.test/article.htm',
-          sourceId: source.id,
-        ),
-        AnnouncementListItem(
-          title: '目标词 新标题',
-          url: 'https://shared.test/article.htm',
-          sourceId: source.id,
-        ),
-      ], null);
-}
-
-class _BusyBodySearchClient extends AnnouncementApiClient {
-  _BusyBodySearchClient(this.bodyGate);
-
-  final Completer<http.Response> bodyGate;
-
-  @override
-  Future<http.Response> fetchSearchResponse(String url) =>
-      url.contains('/body/')
-          ? bodyGate.future
-          : Future.value(http.Response('ok', 200));
-
-  @override
-  Future<AnnouncementColumnPage> parseSearchColumnResponse({
-    required http.Response response,
-    required AnnouncementSource source,
-    required String url,
-    required String column,
-  }) async =>
-      AnnouncementColumnPage([
-        for (var index = 0; index < 5; index++)
-          AnnouncementListItem(
-            title: '目标词 ${source.name} $index',
-            url: 'https://example.org/${source.id}/${url.hashCode}/$index.htm',
-            sourceId: source.id,
-          ),
-        AnnouncementListItem(
-          title: '等待读取的正文',
-          url: 'https://example.org/body/${source.id}/${url.hashCode}.htm',
-          sourceId: source.id,
-        ),
-      ], null);
-
-  @override
-  Future<String> parseSearchDetailText({
-    required http.Response response,
-    required AnnouncementListItem item,
-  }) async =>
-      '正文无匹配';
-}
-
-class _MatchingBodySearchClient extends _BusyBodySearchClient {
-  _MatchingBodySearchClient(super.bodyGate);
-
-  @override
-  Future<AnnouncementColumnPage> parseSearchColumnResponse({
-    required http.Response response,
-    required AnnouncementSource source,
-    required String url,
-    required String column,
-  }) async =>
-      AnnouncementColumnPage([
-        for (var index = 0; index < 5; index++)
-          AnnouncementListItem(
-            title: '目标词 ${source.name} $index',
-            url: 'https://www.shu.edu.cn/info/1051/$index.htm',
-            sourceId: source.id,
-          ),
-        AnnouncementListItem(
-          title: '等待读取的正文',
-          url: 'https://www.shu.edu.cn/info/body/6.htm',
-          sourceId: source.id,
-        ),
-      ], null);
-
-  @override
-  Future<String> parseSearchDetailText({
-    required http.Response response,
-    required AnnouncementListItem item,
-  }) async =>
-      '目标词 正文内容';
-}
-
-class _TwoSourceStagedSearchClient extends AnnouncementApiClient {
-  _TwoSourceStagedSearchClient(this.bodyGate);
-
-  final Completer<http.Response> bodyGate;
-
-  @override
-  Future<http.Response> fetchSearchResponse(String url) =>
-      url.contains('/deferred/')
-          ? bodyGate.future
-          : Future.value(http.Response('ok', 200));
-
-  @override
-  Future<AnnouncementColumnPage> parseSearchColumnResponse({
-    required http.Response response,
-    required AnnouncementSource source,
-    required String url,
-    required String column,
-  }) async =>
-      AnnouncementColumnPage([
-        AnnouncementListItem(
-          title: '目标词 ${source.name}',
-          url: 'https://${Uri.parse(source.listUrl).host}/info/1051/1.htm',
-          sourceId: source.id,
-        ),
-        if (source.id == 'bksy')
-          const AnnouncementListItem(
-            title: '稍后发现的正文匹配',
-            url: 'https://bksy.shu.edu.cn/info/deferred/2.htm',
-            sourceId: 'bksy',
-          ),
-      ], null);
-
-  @override
-  Future<String> parseSearchDetailText({
-    required http.Response response,
-    required AnnouncementListItem item,
-  }) async =>
-      item.url.contains('/deferred/') ? '目标词' : '正文无匹配';
+Future<void> _startAnnouncementSearch(
+  WidgetTester tester, {
+  String query = '目标词',
+}) async {
+  await tester.pumpAndSettle();
+  await tester.enterText(find.byType(TextField), query);
+  await tester.tap(find.byTooltip('开始搜索'));
+  await tester.pump();
+  await tester.pump(const Duration(milliseconds: 600));
 }
 
 _FakeAnnouncementRepository _repositoryWith({
@@ -418,92 +252,46 @@ Future<void> _openDetail(
 }
 
 void main() {
-  testWidgets(
-      'Fast and retry settings persist and active search keeps its snapshot',
-      (tester) async {
-    SharedPreferences.setMockInitialValues({});
-    final repository = _PendingSearchRepository();
-    await tester.pumpWidget(MaterialApp(
-      home: AnnouncementSearchPage(repository: repository, isDemo: true),
-    ));
-    await tester.pumpAndSettle();
-    await tester.tap(find.byTooltip('更多'));
-    await tester.pumpAndSettle();
-    expect(find.text('搜索强度'), findsOneWidget);
-    expect(find.text('搜索范围'), findsOneWidget);
-    await tester.tap(find.text('搜索强度'));
-    await tester.pumpAndSettle();
-    expect(tester.widget<Text>(find.text('High')).style?.fontSize, 17);
-    final strengthLabel = find.text('搜索强度');
-    final fastLabel = find.text('Fast模式');
-    final retryLabel = find.text('失败重试');
-    expect(tester.getTopLeft(strengthLabel).dx,
-        closeTo(tester.getTopLeft(fastLabel).dx, 1));
-    expect(tester.getTopLeft(strengthLabel).dx,
-        closeTo(tester.getTopLeft(retryLabel).dx, 1));
-    expect(
-      (tester.getCenter(find.byTooltip('搜索强度说明')).dy -
-              tester.getCenter(strengthLabel).dy)
-          .abs(),
-      lessThan(2),
-    );
-    final fast = find.widgetWithText(SwitchListTile, 'Fast模式');
-    final retry = find.widgetWithText(SwitchListTile, '失败重试');
-    expect(tester.widget<SwitchListTile>(fast).value, isFalse);
-    expect(tester.widget<SwitchListTile>(retry).value, isTrue);
-    await tester.tap(find.byTooltip('搜索强度说明'));
-    await tester.pumpAndSettle();
-    expect(find.textContaining('同时处理的请求越多'), findsOneWidget);
-    await tester.tap(find.text('知道了'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.byTooltip('Fast模式说明'));
-    await tester.pumpAndSettle();
-    expect(find.textContaining('提前请求同一栏目'), findsOneWidget);
-    await tester.tap(find.text('知道了'));
-    await tester.pumpAndSettle();
-    await tester.tap(fast);
-    await tester.tap(retry);
-    await tester.pumpAndSettle();
-    final prefs = await SharedPreferences.getInstance();
-    expect(prefs.getBool('announcements.search.fast'), isTrue);
-    expect(prefs.getBool('announcements.search.retryFailures'), isFalse);
-    await tester.tapAt(const Offset(8, 8));
-    await tester.pumpAndSettle();
-    expect(find.text('搜索强度：High · Fast模式'), findsOneWidget);
-
-    await tester.enterText(find.byType(TextField), '目标');
-    await tester.tap(find.byTooltip('开始搜索'));
-    await tester.pump();
-    await tester.tap(find.byTooltip('更多'));
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 300));
-    await tester.tap(find.text('搜索强度'));
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 300));
-    await tester.tap(find.widgetWithText(SwitchListTile, 'Fast模式'));
-    await tester.tapAt(const Offset(8, 8));
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 300));
-    expect(find.text('搜索强度：High · Fast模式'), findsOneWidget);
-    await tester.tap(find.byTooltip('取消搜索'));
-    await tester.pump();
-    expect(find.text('搜索强度：High'), findsOneWidget);
-    expect(find.text('搜索已取消'), findsNothing);
-    repository.pending.complete(const []);
-    await tester.pumpAndSettle();
-  });
-
-  testWidgets(
-      'parse failure is reported once without an incomplete status or retry action',
+  testWidgets('retry settings persist and obsolete search controls are absent',
       (tester) async {
     SharedPreferences.setMockInitialValues({
       'announcements.search.selectedSources': ['shu'],
-      'announcements.search.includeBody': true,
-      'announcements.search.retryFailures': true,
+      'announcements.search.fast': true,
+      'announcements.search.strength': 5,
     });
-    final requests = <String>[];
+    await tester.pumpWidget(MaterialApp(
+      home: AnnouncementSearchPage(repository: _repositoryWith(), isDemo: true),
+    ));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('搜索强度'), findsNothing);
+    expect(find.textContaining('Fast模式'), findsNothing);
+    expect(find.byTooltip('取消搜索'), findsNothing);
+    await tester.tap(find.byTooltip('更多'));
+    await tester.pumpAndSettle();
+    expect(find.text('搜索范围'), findsOneWidget);
+    expect(find.text('搜索强度'), findsNothing);
+    await tester.tap(find.text('失败重试'));
+    await tester.pumpAndSettle();
+    final retry = find.widgetWithText(SwitchListTile, '失败重试');
+    expect(tester.widget<SwitchListTile>(retry).value, isTrue);
+    await tester.tap(retry);
+    await tester.pumpAndSettle();
+    final prefs = await SharedPreferences.getInstance();
+    expect(prefs.getBool('announcements.search.retryFailures'), isFalse);
+  });
+
+  testWidgets(
+      'malformed API response reports one failure without a retry action',
+      (tester) async {
+    SharedPreferences.setMockInitialValues({
+      'announcements.search.selectedSources': ['shu'],
+    });
+    var requests = 0;
     final service = AnnouncementSearchService(
-      clientFactory: () => _PageSearchClient(requests, () => true),
+      clientFactory: () => MockClient((request) async {
+        requests++;
+        return http.Response('invalid JSON', 200);
+      }),
     );
     addTearDown(service.dispose);
     await tester.pumpWidget(MaterialApp(
@@ -512,33 +300,28 @@ void main() {
         searchService: service,
       ),
     ));
-    await tester.pumpAndSettle();
-    await tester.enterText(find.byType(TextField), '目标');
-    await tester.tap(find.byTooltip('开始搜索'));
-    for (var attempt = 0;
-        attempt < 100 && find.text('1 项解析失败').evaluate().isEmpty;
-        attempt++) {
-      await tester.pump(const Duration(milliseconds: 50));
-    }
+    await _startAnnouncementSearch(tester);
     expect(find.text('1 项解析失败'), findsOneWidget);
     expect(find.text('没有找到公告'), findsOneWidget);
-    expect(find.text('未完成 1 项'), findsNothing);
-    expect(find.text('搜索结果不完整'), findsNothing);
     expect(find.text('继续失败项'), findsNothing);
-    expect(requests.where((url) => url.endsWith('/body')), hasLength(1));
+    expect(requests, 1);
   });
 
-  testWidgets(
-      'body match shows its parsed text without another preview request',
+  testWidgets('API snippets display without another article preview request',
       (tester) async {
     SharedPreferences.setMockInitialValues({
       'announcements.search.selectedSources': ['shu'],
       'announcements.search.includeBody': true,
     });
-    final requests = <String>[];
+    final requests = <http.Request>[];
     final repository = _repositoryWith();
     final service = AnnouncementSearchService(
-      clientFactory: () => _PageSearchClient(requests, () => false),
+      clientFactory: () => MockClient((request) async {
+        requests.add(request);
+        return _searchResponse([
+          _searchRecord(title: '普通公告', summary: '<em>目标</em>内容'),
+        ]);
+      }),
     );
     addTearDown(service.dispose);
     await tester.pumpWidget(MaterialApp(
@@ -547,39 +330,34 @@ void main() {
         searchService: service,
       ),
     ));
-    await tester.pumpAndSettle();
-    await tester.enterText(find.byType(TextField), '目标');
-    await tester.tap(find.byTooltip('开始搜索'));
-    await tester.pumpAndSettle();
+    await _startAnnouncementSearch(tester, query: '目标');
     expect(find.text('普通公告'), findsOneWidget);
     expect(find.text('目标内容'), findsOneWidget);
     expect(repository.previewRequests, isEmpty);
-    expect(requests.where((url) => url.endsWith('/body')), hasLength(1));
+    expect(requests, hasLength(1));
+    final requestBody =
+        jsonDecode(requests.single.body) as Map<String, dynamic>;
+    expect(requestBody['owner'], AnnouncementSource.official.searchOwner);
+    expect(requestBody['searchScope'], 3);
   });
 
-  testWidgets(
-      'title match loads a missing article overview without hiding result',
+  testWidgets('title result stays visible while a missing preview loads',
       (tester) async {
     SharedPreferences.setMockInitialValues({
       'announcements.search.selectedSources': ['shu'],
     });
-    final title = '目标词 ${AnnouncementSource.byId('shu').name}';
+    const title = '目标词 上海大学官网';
+    const url = 'https://www.shu.edu.cn/info/1051/1.htm';
     final pendingPreview = Completer<String?>();
     final repository = _FakeAnnouncementRepository(
       items: const [],
-      previewFutures: {
-        'https://shared.test/article.htm': pendingPreview.future,
-      },
-      details: {
-        title: AnnouncementDetail(
-          title: title,
-          url: 'https://shared.test/article.htm',
-          blocks: const [AnnouncementContentBlock.text('正文概览一段')],
-        ),
-      },
+      previewFutures: {url: pendingPreview.future},
+      details: const {},
     );
     final service = AnnouncementSearchService(
-      clientFactory: _SharedUrlSearchClient.new,
+      clientFactory: () => MockClient((request) async => _searchResponse([
+            _searchRecord(title: title, url: url, summary: null),
+          ])),
     );
     addTearDown(service.dispose);
     await tester.pumpWidget(MaterialApp(
@@ -588,62 +366,26 @@ void main() {
         searchService: service,
       ),
     ));
-    await tester.pumpAndSettle();
-    await tester.enterText(find.byType(TextField), '目标词');
-    await tester.tap(find.byTooltip('开始搜索'));
-    for (var attempt = 0;
-        attempt < 100 && find.text(title).evaluate().isEmpty;
-        attempt++) {
-      await tester.pump(const Duration(milliseconds: 50));
-    }
+    await _startAnnouncementSearch(tester);
     expect(find.text(title), findsOneWidget);
     expect(find.text('正文概览一段'), findsNothing);
     pendingPreview.complete('正文概览一段');
     await tester.pumpAndSettle();
     expect(find.text('正文概览一段'), findsOneWidget);
-    expect(repository.previewRequests, ['https://shared.test/article.htm']);
+    expect(repository.previewRequests, [url]);
   });
 
-  testWidgets('exhausted timeout is labeled separately from parse failure',
-      (tester) async {
-    SharedPreferences.setMockInitialValues({
-      'announcements.search.selectedSources': ['shu'],
-      'announcements.search.includeBody': true,
-      'announcements.search.retryFailures': false,
-    });
-    final requests = <String>[];
-    final service = AnnouncementSearchService(
-      clientFactory: () => _TimeoutPageSearchClient(requests),
-    );
-    addTearDown(service.dispose);
-    await tester.pumpWidget(MaterialApp(
-      home: AnnouncementSearchPage(
-        repository: _repositoryWith(),
-        searchService: service,
-      ),
-    ));
-    await tester.pumpAndSettle();
-    await tester.enterText(find.byType(TextField), '目标');
-    await tester.tap(find.byTooltip('开始搜索'));
-    for (var attempt = 0;
-        attempt < 100 && find.text('1 项请求超时').evaluate().isEmpty;
-        attempt++) {
-      await tester.pump(const Duration(milliseconds: 50));
-    }
-    expect(find.text('1 项请求超时'), findsOneWidget);
-    expect(find.textContaining('解析失败'), findsNothing);
-    expect(find.text('继续失败项'), findsNothing);
-    expect(requests.where((url) => url.endsWith('/body')), hasLength(1));
-  });
-
-  testWidgets('ALL displays the same article URL under both departments',
+  testWidgets('search retains shared URLs under their respective departments',
       (tester) async {
     SharedPreferences.setMockInitialValues({
       'announcements.search.selectedSources': ['shu', 'bksy'],
-      'announcements.search.strength': 5,
     });
     final service = AnnouncementSearchService(
-      clientFactory: _SharedUrlSearchClient.new,
+      clientFactory: () => MockClient((request) async => _searchResponse([
+            _searchRecord(title: '目标词 上海大学官网'),
+            _searchRecord(sourceId: 'bksy', title: '目标词 本科生院'),
+            _searchRecord(title: '目标词 新标题'),
+          ])),
     );
     addTearDown(service.dispose);
     await tester.pumpWidget(MaterialApp(
@@ -652,97 +394,106 @@ void main() {
         searchService: service,
       ),
     ));
-    await tester.pumpAndSettle();
-    await tester.enterText(find.byType(TextField), '目标词');
-    await tester.tap(find.byTooltip('开始搜索'));
-    await tester.pumpAndSettle();
+    await _startAnnouncementSearch(tester);
     expect(find.text('目标词 上海大学官网'), findsOneWidget);
     expect(find.text('目标词 本科生院'), findsOneWidget);
+    expect(find.text('目标词 新标题'), findsOneWidget);
+    expect(
+      tester
+          .widget<Text>(find.byKey(
+            const ValueKey<String>('announcement-search-found-count'),
+          ))
+          .data,
+      '3',
+    );
+  });
+
+  testWidgets('API pages append seamlessly and input unlocks when complete',
+      (tester) async {
+    SharedPreferences.setMockInitialValues({
+      'announcements.search.selectedSources': ['shu'],
+    });
+    final secondPage = Completer<http.Response>();
+    final service = AnnouncementSearchService(
+      clientFactory: () => MockClient((request) async {
+        final body = jsonDecode(request.body) as Map<String, dynamic>;
+        final page = body['page'] as Map<String, dynamic>;
+        if (page['current'] == 1) return secondPage.future;
+        return _searchResponse([
+          for (var index = 0; index < 50; index++)
+            _searchRecord(
+              title: '目标词 公告 $index',
+              url: 'https://www.shu.edu.cn/info/1051/$index.htm',
+            ),
+        ], total: 51);
+      }),
+    );
+    addTearDown(service.dispose);
+    await tester.pumpWidget(MaterialApp(
+      home: AnnouncementSearchPage(
+        repository: _repositoryWith(),
+        searchService: service,
+      ),
+    ));
+    await _startAnnouncementSearch(tester);
+    expect(find.text('目标词 公告 0'), findsOneWidget);
+    expect(tester.widget<TextField>(find.byType(TextField)).enabled, isFalse);
+    expect(find.byTooltip('取消搜索'), findsNothing);
+    expect(
+      tester
+          .widget<IconButton>(find.ancestor(
+            of: find.byTooltip('开始搜索'),
+            matching: find.byType(IconButton),
+          ))
+          .onPressed,
+      isNull,
+    );
     expect(
         tester
             .widget<Text>(find.byKey(
-                const ValueKey<String>('announcement-search-found-count')))
+              const ValueKey<String>('announcement-search-found-count'),
+            ))
             .data,
-        '2');
-  });
-
-  testWidgets('search displays different matching titles for one article URL',
-      (tester) async {
-    SharedPreferences.setMockInitialValues({
-      'announcements.search.selectedSources': ['shu'],
-    });
-    final service = AnnouncementSearchService(
-      clientFactory: _SameSourceDifferentTitleClient.new,
-    );
-    addTearDown(service.dispose);
-    await tester.pumpWidget(MaterialApp(
-      home: AnnouncementSearchPage(
-        repository: _repositoryWith(),
-        searchService: service,
-      ),
-    ));
-    await tester.pumpAndSettle();
-    await tester.enterText(find.byType(TextField), '目标词');
-    await tester.tap(find.byTooltip('开始搜索'));
-    await tester.pumpAndSettle();
-    expect(find.text('目标词 原标题'), findsOneWidget);
-    expect(find.text('目标词 新标题'), findsOneWidget);
-  });
-
-  testWidgets('ALL body search locks input while loading visible previews',
-      (tester) async {
-    SharedPreferences.setMockInitialValues({
-      'announcements.search.includeBody': true,
-      'announcements.search.fast': true,
-      'announcements.search.strength': 5,
-    });
-    final bodyGate = Completer<http.Response>();
-    final repository = _repositoryWith();
-    final service = AnnouncementSearchService(
-      clientFactory: () => _BusyBodySearchClient(bodyGate),
-    );
-    addTearDown(service.dispose);
-    await tester.pumpWidget(MaterialApp(
-      home: AnnouncementSearchPage(
-        repository: repository,
-        searchService: service,
-      ),
-    ));
-    await tester.pumpAndSettle();
-    await tester.enterText(find.byType(TextField), '目标词');
-    await tester.tap(find.byTooltip('开始搜索'));
+        '50');
+    final scrollView = find.byType(CustomScrollView).last;
+    await tester.drag(scrollView, const Offset(0, -260));
     await tester.pump();
-    await tester.pump(const Duration(milliseconds: 600));
-    expect(find.byTooltip('取消搜索'), findsOneWidget);
-    final found = tester.widget<Text>(
-        find.byKey(const ValueKey<String>('announcement-search-found-count')));
-    expect(int.parse(found.data!), greaterThan(100));
-    expect(repository.previewRequests, isNotEmpty);
-    expect(repository.previewRequests.length, lessThan(100));
-
-    final activeField = tester.widget<TextField>(find.byType(TextField));
-    expect(activeField.enabled, isFalse);
-    expect(activeField.controller!.text, '目标词');
-    expect(activeField.focusNode!.hasFocus, isFalse);
-    expect(find.byTooltip('取消搜索'), findsOneWidget);
-    expect(repository.previewRequests.length, lessThan(100));
-
-    bodyGate.complete(http.Response('ok', 200));
+    final scrollable = tester.state<ScrollableState>(
+      find.descendant(of: scrollView, matching: find.byType(Scrollable)),
+    );
+    final offset = scrollable.position.pixels;
+    final retainedTitle = tester.widget<Text>(
+      find.textContaining('目标词 公告 ').hitTestable().first,
+    );
+    final retainedText =
+        retainedTitle.data ?? retainedTitle.textSpan!.toPlainText();
+    secondPage.complete(_searchResponse([
+      _searchRecord(
+        title: '目标词 最后一条公告',
+        url: 'https://www.shu.edu.cn/info/1051/50.htm',
+        date: '2026-10-24 12:00:00',
+      ),
+    ], total: 51, current: 1));
     await tester.pumpAndSettle();
+    expect(scrollable.position.pixels, offset);
+    expect(
+        tester
+            .widget<Text>(find.byKey(
+              const ValueKey<String>('announcement-search-found-count'),
+            ))
+            .data,
+        '51');
     expect(tester.widget<TextField>(find.byType(TextField)).enabled, isTrue);
-    await tester.enterText(find.byType(TextField), '新的搜索词');
-    expect(find.text('新的搜索词'), findsOneWidget);
+    expect(find.text(retainedText), findsOneWidget);
   });
 
-  testWidgets('search updates wait while a detail route covers the results',
+  testWidgets('search updates wait while a detail route covers results',
       (tester) async {
     SharedPreferences.setMockInitialValues({
       'announcements.search.selectedSources': ['shu'],
-      'announcements.search.includeBody': true,
-      'announcements.search.strength': 5,
     });
-    final bodyGate = Completer<http.Response>();
-    const firstTitle = '目标词 上海大学官网 0';
+    final secondPage = Completer<http.Response>();
+    const firstTitle = '目标词 公告 0';
     final repository = _FakeAnnouncementRepository(
       items: const [],
       details: {
@@ -754,7 +505,19 @@ void main() {
       },
     );
     final service = AnnouncementSearchService(
-      clientFactory: () => _MatchingBodySearchClient(bodyGate),
+      clientFactory: () => MockClient((request) async {
+        final body = jsonDecode(request.body) as Map<String, dynamic>;
+        if ((body['page'] as Map<String, dynamic>)['current'] == 1) {
+          return secondPage.future;
+        }
+        return _searchResponse([
+          for (var index = 0; index < 50; index++)
+            _searchRecord(
+              title: '目标词 公告 $index',
+              url: 'https://www.shu.edu.cn/info/1051/$index.htm',
+            ),
+        ], total: 51);
+      }),
     );
     addTearDown(service.dispose);
     await tester.pumpWidget(MaterialApp(
@@ -763,160 +526,110 @@ void main() {
         searchService: service,
       ),
     ));
-    await tester.pumpAndSettle();
-    await tester.enterText(find.byType(TextField), '目标词');
-    await tester.tap(find.byTooltip('开始搜索'));
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 600));
-    expect(find.text(firstTitle), findsOneWidget);
+    await _startAnnouncementSearch(tester);
     Text foundCount() => tester.widget<Text>(find.byKey(
           const ValueKey<String>('announcement-search-found-count'),
           skipOffstage: false,
         ));
-    expect(foundCount().data, '5');
-
+    expect(foundCount().data, '50');
     await tester.tap(find.text(firstTitle));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 300));
     expect(find.byType(AnnouncementDetailPage), findsOneWidget);
     final coveredList = tester.widget<CustomScrollView>(
-        find.byType(CustomScrollView, skipOffstage: false));
-    bodyGate.complete(http.Response('ok', 200));
-    await tester.pump(const Duration(milliseconds: 700));
-    expect(foundCount().data, '5');
-    expect(
-      identical(
-        coveredList,
-        tester.widget<CustomScrollView>(
-            find.byType(CustomScrollView, skipOffstage: false)),
-      ),
-      isTrue,
+      find.byType(CustomScrollView, skipOffstage: false),
     );
-
+    secondPage.complete(_searchResponse([
+      _searchRecord(
+          title: '目标词 稍后到达的公告', url: 'https://www.shu.edu.cn/info/1051/50.htm'),
+    ], total: 51, current: 1));
+    await tester.pump(const Duration(milliseconds: 700));
+    expect(foundCount().data, '50');
+    expect(
+        identical(
+            coveredList,
+            tester.widget<CustomScrollView>(
+              find.byType(CustomScrollView, skipOffstage: false),
+            )),
+        isTrue);
     Navigator.of(tester.element(find.byType(AnnouncementDetailPage))).pop();
     await tester.pumpAndSettle();
-    expect(foundCount().data, '6');
-    expect(find.byTooltip('开始搜索'), findsOneWidget);
+    expect(foundCount().data, '51');
+    expect(tester.widget<TextField>(find.byType(TextField)).enabled, isTrue);
   });
 
-  testWidgets('updating one source keeps other source slivers in place',
+  testWidgets('updating one department preserves the other department sliver',
       (tester) async {
     SharedPreferences.setMockInitialValues({
       'announcements.search.selectedSources': ['shu', 'bksy'],
-      'announcements.search.includeBody': true,
     });
-    final bodyGate = Completer<http.Response>();
+    final secondPage = Completer<http.Response>();
     final service = AnnouncementSearchService(
-      clientFactory: () => _TwoSourceStagedSearchClient(bodyGate),
+      clientFactory: () => MockClient((request) async {
+        final body = jsonDecode(request.body) as Map<String, dynamic>;
+        if ((body['page'] as Map<String, dynamic>)['current'] == 1) {
+          return secondPage.future;
+        }
+        return _searchResponse([
+          _searchRecord(title: '目标词 上海大学官网'),
+          for (var index = 0; index < 49; index++)
+            _searchRecord(
+              sourceId: 'bksy',
+              title: '目标词 本科生院 $index',
+              url: 'https://bksy.shu.edu.cn/info/1015/$index.htm',
+            ),
+        ], total: 51);
+      }),
     );
     addTearDown(service.dispose);
     await tester.pumpWidget(MaterialApp(
       home: AnnouncementSearchPage(
-        repository:
-            _FakeAnnouncementRepository(items: const [], details: const {}),
+        repository: _repositoryWith(),
         searchService: service,
       ),
     ));
-    await tester.pumpAndSettle();
-    await tester.enterText(find.byType(TextField), '目标词');
-    await tester.tap(find.byTooltip('开始搜索'));
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 600));
-    expect(find.text('目标词 上海大学官网'), findsOneWidget);
-    expect(find.text('目标词 本科生院'), findsOneWidget);
-    final officialSliver = tester
-        .widget<SliverMainAxisGroup>(find.byType(SliverMainAxisGroup).first);
-    expect(tester.getTopLeft(find.text('目标词 上海大学官网')).dy,
-        lessThan(tester.getTopLeft(find.text('目标词 本科生院')).dy));
-
-    bodyGate.complete(http.Response('ok', 200));
+    await _startAnnouncementSearch(tester);
+    final officialSliver = tester.widget<SliverMainAxisGroup>(
+      find.byType(SliverMainAxisGroup).first,
+    );
+    secondPage.complete(_searchResponse([
+      _searchRecord(
+          sourceId: 'bksy',
+          title: '目标词 本科生院 新公告',
+          url: 'https://bksy.shu.edu.cn/info/1015/50.htm'),
+    ], total: 51, current: 1));
     await tester.pumpAndSettle();
     expect(
         identical(
-          officialSliver,
-          tester.widget<SliverMainAxisGroup>(
-              find.byType(SliverMainAxisGroup).first),
-        ),
+            officialSliver,
+            tester.widget<SliverMainAxisGroup>(
+              find.byType(SliverMainAxisGroup).first,
+            )),
         isTrue);
-    expect(
-        tester
-            .widget<Text>(find.byKey(
-                const ValueKey<String>('announcement-search-found-count')))
-            .data,
-        '3');
-    expect(tester.getTopLeft(find.text('目标词 上海大学官网')).dy,
-        lessThan(tester.getTopLeft(find.text('目标词 本科生院')).dy));
-  });
-  testWidgets('search can be cancelled before results arrive', (tester) async {
-    SharedPreferences.setMockInitialValues({});
-    final repository = _PendingSearchRepository();
-    await tester.pumpWidget(MaterialApp(
-      home: AnnouncementSearchPage(repository: repository, isDemo: true),
-    ));
-    await tester.enterText(find.byType(TextField), '实验室');
-    expect(tester.widget<TextField>(find.byType(TextField)).focusNode!.hasFocus,
-        isTrue);
-    await tester.tap(find.byTooltip('开始搜索'));
-    await tester.pump();
-    expect(find.byTooltip('取消搜索'), findsOneWidget);
-    final searchingField = tester.widget<TextField>(find.byType(TextField));
-    expect(searchingField.enabled, isFalse);
-    expect(searchingField.controller!.text, '实验室');
-    expect(searchingField.focusNode!.hasFocus, isFalse);
-    expect(find.text('搜索强度：High'), findsOneWidget);
-    expect(find.byIcon(Icons.close_rounded), findsOneWidget);
-    expect(find.text('0'), findsNWidgets(2));
-    await tester.tap(find.byTooltip('取消搜索').last);
-    await tester.pump();
-    expect(find.byTooltip('开始搜索'), findsOneWidget);
-    final restoredField = tester.widget<TextField>(find.byType(TextField));
-    expect(restoredField.enabled, isTrue);
-    expect(restoredField.controller!.text, '实验室');
-    expect(find.text('搜索已取消'), findsNothing);
-    repository.pending.complete(const [_listItem]);
-    await tester.pumpAndSettle();
-    expect(find.text(_listTitle), findsNothing);
   });
 
-  testWidgets('search input unlocks after results finish', (tester) async {
-    SharedPreferences.setMockInitialValues({});
-    final repository = _PendingSearchRepository();
-    await tester.pumpWidget(MaterialApp(
-      home: AnnouncementSearchPage(repository: repository, isDemo: true),
-    ));
-    await tester.enterText(find.byType(TextField), '公告');
-    await tester.tap(find.byTooltip('开始搜索'));
-    await tester.pump();
-    expect(tester.widget<TextField>(find.byType(TextField)).enabled, isFalse);
-    repository.pending.complete(const [
-      AnnouncementListItem(
-        title: '测试公告',
-        url: 'https://www.shu.edu.cn/info/1001/1.htm',
-      ),
-    ]);
-    await tester.pumpAndSettle();
-    final field = tester.widget<TextField>(find.byType(TextField));
-    expect(field.enabled, isTrue);
-    expect(field.controller!.text, '公告');
-    await tester.tap(find.byType(TextField));
-    await tester.pump();
-    expect(field.focusNode!.hasFocus, isTrue);
-  });
-
-  testWidgets('settings and sources changed mid-search apply next time',
+  testWidgets('settings changed during a search apply to the next request',
       (tester) async {
     SharedPreferences.setMockInitialValues({
       'announcements.search.selectedSources': ['shu', 'bksy'],
     });
-    final repository = _PendingSearchRepository();
+    final firstPage = Completer<http.Response>();
+    final requests = <Map<String, dynamic>>[];
+    final service = AnnouncementSearchService(
+      clientFactory: () => MockClient((request) async {
+        requests.add(jsonDecode(request.body) as Map<String, dynamic>);
+        if (requests.length == 1) return firstPage.future;
+        return _searchResponse([]);
+      }),
+    );
+    addTearDown(service.dispose);
     await tester.pumpWidget(MaterialApp(
-      home: AnnouncementSearchPage(repository: repository, isDemo: true),
+      home: AnnouncementSearchPage(
+        repository: _repositoryWith(),
+        searchService: service,
+      ),
     ));
-    await tester.pumpAndSettle();
-    await tester.enterText(find.byType(TextField), '公告');
-    await tester.tap(find.byTooltip('开始搜索'));
-    await tester.pump();
-    expect(find.text('已选2部门'), findsNothing);
+    await _startAnnouncementSearch(tester);
     Future<void> pumpOverlay() async {
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 300));
@@ -928,9 +641,6 @@ void main() {
     await pumpOverlay();
     await tester.tapAt(const Offset(8, 8));
     await pumpOverlay();
-    expect(find.byTooltip('取消搜索'), findsOneWidget);
-    expect(find.text('已选2部门'), findsNothing);
-
     await tester.tap(find.byTooltip('更多'));
     await pumpOverlay();
     await tester.tap(find.text('搜索范围'));
@@ -938,50 +648,314 @@ void main() {
     await tester.tap(find.widgetWithText(OutlinedButton, '内容'));
     await tester.tapAt(const Offset(8, 8));
     await pumpOverlay();
-    await tester.tap(find.byTooltip('更多'));
-    await pumpOverlay();
-    await tester.tap(find.text('搜索强度'));
-    await pumpOverlay();
-    await tester.drag(find.byType(Slider), const Offset(500, 0));
-    await pumpOverlay();
-    await tester.tapAt(const Offset(8, 8));
-    await pumpOverlay();
-    expect(find.text('搜索强度：High'), findsOneWidget);
-
-    repository.pending.complete(const [
-      AnnouncementListItem(
-        title: '本科生院公告',
-        url: 'https://example.org/bksy',
-        sourceId: 'bksy',
-      ),
-    ]);
+    expect(find.text('搜索范围：标题'), findsOneWidget);
+    expect((requests.single['owner'] as String).split(',').toSet(), {
+      AnnouncementSource.official.searchOwner,
+      AnnouncementSource.byId('bksy').searchOwner,
+    });
+    expect(requests.single['searchScope'], 1);
+    firstPage.complete(_searchResponse([
+      _searchRecord(sourceId: 'bksy', title: '目标词 本科生院公告'),
+    ]));
     await tester.pumpAndSettle();
-    expect(find.text('本科生院公告'), findsOneWidget);
-    expect(find.text('已选1部门'), findsNothing);
-    expect(find.text('搜索强度：Ultra'), findsOneWidget);
-
+    expect(find.text('目标词 本科生院公告'), findsOneWidget);
+    expect(find.text('搜索范围：标题+正文'), findsOneWidget);
     await tester.tap(find.byTooltip('开始搜索'));
     await tester.pumpAndSettle();
-    expect(find.text('本科生院公告'), findsNothing);
-    expect(find.text('已选1部门'), findsNothing);
-    expect(find.text('搜索强度：Ultra'), findsOneWidget);
+    expect(requests, hasLength(2));
+    expect(requests.last['owner'], AnnouncementSource.official.searchOwner);
+    expect(requests.last['searchScope'], 3);
+    expect(find.text('目标词 本科生院公告'), findsNothing);
+  });
 
-    await tester.tap(find.byTooltip('更多'));
-    await pumpOverlay();
-    await tester.tap(find.text('搜索范围'));
-    await pumpOverlay();
-    await tester.tap(find.widgetWithText(OutlinedButton, '内容'));
-    await tester.tapAt(const Offset(8, 8));
-    await pumpOverlay();
-    await tester.tap(find.byTooltip('更多'));
-    await pumpOverlay();
-    await tester.tap(find.text('搜索强度'));
-    await pumpOverlay();
-    await tester.drag(find.byType(Slider), const Offset(-500, 0));
-    await pumpOverlay();
-    await tester.tapAt(const Offset(8, 8));
-    await pumpOverlay();
-    expect(find.text('搜索强度：Low'), findsOneWidget);
+  testWidgets('search begins with no departments selected', (tester) async {
+    SharedPreferences.setMockInitialValues({});
+    await tester.pumpWidget(MaterialApp(
+      home: AnnouncementSearchPage(repository: _repositoryWith(), isDemo: true),
+    ));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextField), '公告');
+    await tester.tap(find.byTooltip('开始搜索'));
+    await tester.pump();
+    expect(find.text('请至少选择一个部门'), findsOneWidget);
+    expect(find.byType(LinearProgressIndicator), findsNothing);
+  });
+
+  testWidgets('AppBar time choices snapshot dates for the next search',
+      (tester) async {
+    SharedPreferences.setMockInitialValues({
+      'announcements.search.selectedSources': ['shu'],
+    });
+    final firstPage = Completer<http.Response>();
+    final requests = <Map<String, dynamic>>[];
+    final service = AnnouncementSearchService(
+      clientFactory: () => MockClient((request) async {
+        requests.add(jsonDecode(request.body) as Map<String, dynamic>);
+        if (requests.length == 1) return firstPage.future;
+        return _searchResponse([]);
+      }),
+    );
+    addTearDown(service.dispose);
+    await tester.pumpWidget(MaterialApp(
+      home: AnnouncementSearchPage(
+        repository: _repositoryWith(),
+        searchService: service,
+      ),
+    ));
+    await tester.pumpAndSettle();
+    expect(find.byTooltip('搜索时间：时间不限'), findsOneWidget);
+    Future<void> choose(String label) async {
+      await tester.tap(find.byKey(
+        const ValueKey('announcement-search-time-filter'),
+      ));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+      await tester.tap(find.byWidgetPredicate((widget) =>
+          widget is CheckedPopupMenuItem &&
+          widget.child is Text &&
+          (widget.child! as Text).data == label));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+    }
+
+    await choose('近一周');
+    await _startAnnouncementSearch(tester);
+    final today = DateUtils.dateOnly(DateTime.now());
+    String apiDay(DateTime day) =>
+        '${day.year}-${day.month.toString().padLeft(2, '0')}-${day.day.toString().padLeft(2, '0')}';
+    final weekBegin = DateTime(today.year, today.month, today.day - 6);
+    expect(requests.single['searchDateType'], 'custom');
+    expect(requests.single['beginDate'], '${apiDay(weekBegin)} 00:00:00');
+    expect(requests.single['endDate'], '${apiDay(today)} 23:59:59');
+
+    await choose('时间不限');
+    expect(requests, hasLength(1));
+    expect(requests.single['beginDate'], '${apiDay(weekBegin)} 00:00:00');
+    firstPage.complete(_searchResponse([]));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('开始搜索'));
+    await tester.pumpAndSettle();
+    expect(requests, hasLength(2));
+    expect(requests.last.containsKey('beginDate'), isFalse);
+    expect(requests.last['searchDateType'], 'custom');
+    expect(find.text('公告数'), findsOneWidget);
+  });
+
+  testWidgets('custom time picker sends both inclusive calendar dates',
+      (tester) async {
+    SharedPreferences.setMockInitialValues({
+      'announcements.search.selectedSources': ['shu'],
+    });
+    final requests = <Map<String, dynamic>>[];
+    final service = AnnouncementSearchService(
+      clientFactory: () => MockClient((request) async {
+        requests.add(jsonDecode(request.body) as Map<String, dynamic>);
+        return _searchResponse([]);
+      }),
+    );
+    addTearDown(service.dispose);
+    await tester.pumpWidget(MaterialApp(
+      home: AnnouncementSearchPage(
+        repository: _repositoryWith(),
+        searchService: service,
+      ),
+    ));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(
+      const ValueKey('announcement-search-time-filter'),
+    ));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byWidgetPredicate((widget) =>
+        widget is CheckedPopupMenuItem &&
+        widget.child is Text &&
+        (widget.child! as Text).data == '自定义日期'));
+    await tester.pumpAndSettle();
+    expect(find.byType(DateRangePickerDialog), findsOneWidget);
+    await tester.tap(find.byIcon(Icons.edit_outlined));
+    await tester.pumpAndSettle();
+    final year = DateTime.now().year - 1;
+    final dateFields = find.descendant(
+      of: find.byType(DateRangePickerDialog),
+      matching: find.byType(TextField),
+    );
+    await tester.enterText(dateFields.at(0), '1/2/$year');
+    await tester.enterText(dateFields.at(1), '1/5/$year');
+    await tester.tap(find.text('确定'));
+    await tester.pumpAndSettle();
+    expect(find.byType(DateRangePickerDialog), findsNothing);
+    expect(find.byTooltip('搜索时间：$year/01/02—$year/01/05'), findsOneWidget);
+    await _startAnnouncementSearch(tester);
+    expect(requests.single['beginDate'], '$year-01-02 00:00:00');
+    expect(requests.single['endDate'], '$year-01-05 23:59:59');
+  });
+
+  testWidgets('rapid historical pages keep offscreen search articles lazy',
+      (tester) async {
+    SharedPreferences.setMockInitialValues({
+      'announcements.search.selectedSources': ['shu'],
+    });
+    const count = 1440;
+    final service = AnnouncementSearchService(
+      clientFactory: () => MockClient((request) async {
+        final body = jsonDecode(request.body) as Map<String, dynamic>;
+        final current =
+            (body['page'] as Map<String, dynamic>)['current'] as int;
+        final start = current * 50;
+        return _searchResponse([
+          for (var index = start; index < start + 50 && index < count; index++)
+            _searchRecord(
+              title: '目标词 历史公告 $index',
+              url: 'https://www.shu.edu.cn/info/1051/$index.htm',
+              date:
+                  '${DateTime(2026, 10 - index ~/ 12).toIso8601String().substring(0, 10)} 12:00:00',
+            ),
+        ], total: count, current: current);
+      }),
+    );
+    addTearDown(service.dispose);
+    await tester.pumpWidget(MaterialApp(
+      home: AnnouncementSearchPage(
+        repository: _repositoryWith(),
+        searchService: service,
+      ),
+    ));
+    await _startAnnouncementSearch(tester);
+    final firstApplied = int.parse(tester
+        .widget<Text>(find.byKey(
+          const ValueKey<String>('announcement-search-found-count'),
+        ))
+        .data!);
+    expect(firstApplied, greaterThan(0));
+    expect(firstApplied, lessThan(count));
+    await tester.pumpAndSettle();
+    expect(
+      tester
+          .widget<Text>(find.byKey(
+            const ValueKey<String>('announcement-search-found-count'),
+          ))
+          .data,
+      '$count',
+    );
+    expect(
+      find.textContaining('目标词 历史公告 ', skipOffstage: false),
+      findsAtLeastNWidgets(1),
+    );
+    // This used to mount one animated article per historical month even
+    // with cacheExtent zero; the list now builds only its visible children.
+    expect(
+      find.textContaining('目标词 历史公告 ', skipOffstage: false).evaluate().length,
+      lessThan(20),
+    );
+    expect(find.byType(SliverMainAxisGroup), findsOneWidget);
+    expect(tester.widget<TextField>(find.byType(TextField)).enabled, isTrue);
+    final scrollView = find.byType(CustomScrollView).last;
+    await tester.drag(scrollView, const Offset(0, -600));
+    await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('arriving search pages wait until an active drag ends',
+      (tester) async {
+    SharedPreferences.setMockInitialValues({
+      'announcements.search.selectedSources': ['shu'],
+    });
+    final nextPage = Completer<http.Response>();
+    final service = AnnouncementSearchService(
+      clientFactory: () => MockClient((request) async {
+        final body = jsonDecode(request.body) as Map<String, dynamic>;
+        if ((body['page'] as Map<String, dynamic>)['current'] == 1) {
+          return nextPage.future;
+        }
+        return _searchResponse([
+          for (var index = 0; index < 50; index++)
+            _searchRecord(
+              title: '目标词 滚动公告 $index',
+              url: 'https://www.shu.edu.cn/info/1051/$index.htm',
+            ),
+        ], total: 51);
+      }),
+    );
+    addTearDown(service.dispose);
+    await tester.pumpWidget(MaterialApp(
+      home: AnnouncementSearchPage(
+        repository: _repositoryWith(),
+        searchService: service,
+      ),
+    ));
+    await _startAnnouncementSearch(tester);
+    Text count() => tester.widget<Text>(find.byKey(
+          const ValueKey<String>('announcement-search-found-count'),
+        ));
+    expect(count().data, '50');
+    final scrollView = find.byType(CustomScrollView).last;
+    final gesture = await tester.startGesture(tester.getCenter(scrollView));
+    await gesture.moveBy(const Offset(0, -200));
+    await tester.pump();
+    nextPage.complete(_searchResponse([
+      _searchRecord(
+        title: '目标词 拖动后追加公告',
+        url: 'https://www.shu.edu.cn/info/1051/50.htm',
+      ),
+    ], total: 51, current: 1));
+    await tester.pump(const Duration(milliseconds: 500));
+    expect(count().data, '50');
+    await gesture.up();
+    await tester.pumpAndSettle();
+    expect(count().data, '51');
+    expect(tester.widget<TextField>(find.byType(TextField)).enabled, isTrue);
+  });
+
+  testWidgets('a fast new search completes after resetting a scrolled list',
+      (tester) async {
+    SharedPreferences.setMockInitialValues({
+      'announcements.search.selectedSources': ['shu'],
+    });
+    final service = AnnouncementSearchService(
+      clientFactory: () => MockClient((request) async {
+        final body = jsonDecode(request.body) as Map<String, dynamic>;
+        final query = body['keyWord'] as String;
+        return _searchResponse([
+          for (var index = 0; index < 50; index++)
+            _searchRecord(
+              title: '$query 公告 $index',
+              url: 'https://www.shu.edu.cn/info/1051/$index.htm',
+            ),
+        ]);
+      }),
+    );
+    addTearDown(service.dispose);
+    await tester.pumpWidget(MaterialApp(
+      home: AnnouncementSearchPage(
+        repository: _repositoryWith(),
+        searchService: service,
+      ),
+    ));
+    await _startAnnouncementSearch(tester, query: '第一轮');
+    await tester.pumpAndSettle();
+    final scrollView = find.byType(CustomScrollView).last;
+    await tester.drag(scrollView, const Offset(0, -300));
+    await tester.pumpAndSettle();
+    final scrollable = tester.state<ScrollableState>(
+      find.descendant(of: scrollView, matching: find.byType(Scrollable)),
+    );
+    expect(scrollable.position.pixels, greaterThan(0));
+
+    await tester.enterText(find.byType(TextField), '第二轮');
+    await tester.tap(find.byTooltip('开始搜索'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 600));
+    // A ScrollEnd caused by resetting the previous list must not leave the
+    // next run's fast response waiting behind an obsolete frame callback.
+    expect(tester.widget<TextField>(find.byType(TextField)).enabled, isTrue);
+    expect(find.text('第二轮 公告 0'), findsOneWidget);
+    expect(
+      tester
+          .widget<Text>(find.byKey(
+            const ValueKey<String>('announcement-search-found-count'),
+          ))
+          .data,
+      '50',
+    );
   });
 
   testWidgets('title match and searched count use the theme color',
@@ -990,7 +964,9 @@ void main() {
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);
-    SharedPreferences.setMockInitialValues({});
+    SharedPreferences.setMockInitialValues({
+      'announcements.search.selectedSources': ['shu']
+    });
     await tester.pumpWidget(MaterialApp(
       home: AnnouncementSearchPage(
         repository: _repositoryWith(),
@@ -1027,7 +1003,6 @@ void main() {
     expect(
         tester.widget<Text>(find.text('/')).style!.color, colors.textPrimary);
     expect(find.text('搜索范围：标题'), findsOneWidget);
-    expect(find.text('搜索强度：High'), findsOneWidget);
     expect(find.text('搜到'), findsNothing);
     expect(find.text('搜寻'), findsNothing);
     expect(
@@ -1043,7 +1018,9 @@ void main() {
 
   testWidgets('search controls stay visible while results scroll',
       (tester) async {
-    SharedPreferences.setMockInitialValues({});
+    SharedPreferences.setMockInitialValues({
+      'announcements.search.selectedSources': ['shu']
+    });
     final items = [
       for (var index = 0; index < 30; index++)
         AnnouncementListItem(
@@ -1073,7 +1050,9 @@ void main() {
 
   testWidgets('interleaved dates still produce one header per department',
       (tester) async {
-    SharedPreferences.setMockInitialValues({});
+    SharedPreferences.setMockInitialValues({
+      'announcements.search.selectedSources': ['bksy', 'xgb', 'sfs']
+    });
     final repository = _FakeAnnouncementRepository(
       items: [
         AnnouncementListItem(
@@ -1176,7 +1155,9 @@ void main() {
   });
 
   testWidgets('search department and month pin independently', (tester) async {
-    SharedPreferences.setMockInitialValues({});
+    SharedPreferences.setMockInitialValues({
+      'announcements.search.selectedSources': ['bksy', 'xgb']
+    });
     final items = [
       for (var index = 0; index < 12; index++)
         AnnouncementListItem(
@@ -1262,16 +1243,18 @@ void main() {
     expect(find.text('2026年8月'), findsOneWidget);
   });
 
-  testWidgets('search settings control body matching and retain strength',
+  testWidgets('search scope settings preserve body matching and typography',
       (tester) async {
-    SharedPreferences.setMockInitialValues({});
+    SharedPreferences.setMockInitialValues({
+      'announcements.search.selectedSources': ['shu'],
+    });
     await tester.pumpWidget(MaterialApp(
       home: AnnouncementSearchPage(
         repository: _repositoryWith(),
         isDemo: true,
       ),
     ));
-
+    await tester.pumpAndSettle();
     await tester.tap(find.byTooltip('更多'));
     await tester.pumpAndSettle();
     await tester.tap(find.text('搜索范围'));
@@ -1282,18 +1265,6 @@ void main() {
     await tester.tap(find.widgetWithText(OutlinedButton, '内容'));
     await tester.tapAt(const Offset(8, 8));
     await tester.pumpAndSettle();
-    await tester.tap(find.byTooltip('更多'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('搜索强度'));
-    await tester.pumpAndSettle();
-    expect(find.text('High'), findsOneWidget);
-    await tester.drag(find.byType(Slider), const Offset(500, 0));
-    await tester.pumpAndSettle();
-    expect(find.text('Ultra'), findsOneWidget);
-    expect(find.text('完成'), findsNothing);
-    await tester.tapAt(const Offset(8, 8));
-    await tester.pumpAndSettle();
-
     await tester.enterText(find.byType(TextField), _detailBody);
     await tester.tap(find.byTooltip('开始搜索'));
     await tester.pumpAndSettle();
@@ -1301,43 +1272,19 @@ void main() {
     expect(find.text('上海大学官网'), findsOneWidget);
     expect(
         find.descendant(
-            of: find.byType(CustomScrollView).last,
-            matching: find.text(_detailBody)),
+          of: find.byType(CustomScrollView).last,
+          matching: find.text(_detailBody),
+        ),
         findsOneWidget);
-
-    await tester.tap(find.byTooltip('更多'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('搜索强度'));
-    await tester.pumpAndSettle();
-    expect(find.text('Ultra'), findsOneWidget);
-    expect(find.text('搜索强度：Ultra'), findsOneWidget);
-  });
-
-  testWidgets('saved strength keeps its meaning after adding XHigh',
-      (tester) async {
-    SharedPreferences.setMockInitialValues({
-      'announcements.search.strength': 3,
-    });
-    await tester.pumpWidget(MaterialApp(
-      home: AnnouncementSearchPage(
-        repository: _repositoryWith(),
-        isDemo: true,
-      ),
-    ));
-    await tester.pumpAndSettle();
-    expect(find.text('搜索强度：Max'), findsOneWidget);
-
-    await tester.tap(find.byTooltip('更多'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('搜索强度'));
-    await tester.pumpAndSettle();
-    expect(find.text('Max'), findsOneWidget);
-    expect(tester.widget<Slider>(find.byType(Slider)).divisions, 5);
+    final prefs = await SharedPreferences.getInstance();
+    expect(prefs.getBool('announcements.search.includeBody'), isTrue);
+    expect(find.text('搜索范围：标题+正文'), findsOneWidget);
   });
 
   testWidgets('search scope allows content only and requires one selection',
       (tester) async {
     SharedPreferences.setMockInitialValues({
+      'announcements.search.selectedSources': ['shu'],
       'announcements.search.includeTitle': false,
       'announcements.search.includeBody': true,
     });
@@ -1464,7 +1411,13 @@ void main() {
           findsNothing);
     }
 
-    SharedPreferences.setMockInitialValues({});
+    SharedPreferences.setMockInitialValues({
+      'announcements.search.selectedSources': [
+        for (final source
+            in AnnouncementSource.all.where((source) => source.supportsSearch))
+          source.id
+      ]
+    });
     await tester.pumpWidget(MaterialApp(
       home: AnnouncementSearchPage(
         repository: _repositoryWith(),
@@ -1553,8 +1506,85 @@ void main() {
     expect(
         prefs.getStringList('announcements.search.selectedSources')!.toSet(),
         AnnouncementSource.inGroup(AnnouncementSourceGroup.college)
+            .where((source) => source.supportsSearch)
             .map((source) => source.id)
             .toSet());
+  });
+
+  testWidgets('unsupported saved search sources are removed and disabled',
+      (tester) async {
+    SharedPreferences.setMockInitialValues({
+      'announcements.search.selectedSources': ['shu', 'shvfs'],
+    });
+    final repository = _repositoryWith();
+    repository.sectionExpansion[AnnouncementMenuSection.schoolPortal] = false;
+    repository.sectionExpansion[AnnouncementMenuSection.schoolDepartment] =
+        false;
+    repository.sectionExpansion[AnnouncementMenuSection.college] = true;
+    await tester.pumpWidget(MaterialApp(
+      home: AnnouncementSearchPage(repository: repository, isDemo: true),
+    ));
+    await tester.pumpAndSettle();
+    final prefs = await SharedPreferences.getInstance();
+    expect(
+        prefs.getStringList('announcements.search.selectedSources'), ['shu']);
+    await tester.tap(find.byTooltip('筛选部门'));
+    await tester.pumpAndSettle();
+    final menuScrollable = find.descendant(
+      of: find.byKey(announcementSourceMenuKey),
+      matching: find.byType(Scrollable),
+    );
+    final sourceName = AnnouncementSource.byId('shvfs').name;
+    await tester.scrollUntilVisible(find.text(sourceName), 300,
+        scrollable: menuScrollable);
+    await tester.pumpAndSettle();
+    final row = find.ancestor(
+      of: find.text(sourceName),
+      matching: find.byType(ListTile),
+    );
+    expect(tester.widget<ListTile>(row).enabled, isFalse);
+    expect(tester.widget<ListTile>(row).onTap, isNull);
+    final checkbox = tester.widget<Checkbox>(find.descendant(
+      of: row,
+      matching: find.byType(Checkbox),
+    ));
+    expect(checkbox.value, isFalse);
+    expect(checkbox.onChanged, isNull);
+    await tester.tap(find.text(sourceName));
+    await tester.pumpAndSettle();
+    expect(
+        prefs.getStringList('announcements.search.selectedSources'), ['shu']);
+  });
+
+  testWidgets('unsupported search source remains selectable in normal browsing',
+      (tester) async {
+    final repository = _repositoryWith();
+    repository.sectionExpansion[AnnouncementMenuSection.schoolPortal] = false;
+    repository.sectionExpansion[AnnouncementMenuSection.schoolDepartment] =
+        false;
+    repository.sectionExpansion[AnnouncementMenuSection.college] = true;
+    await tester.pumpWidget(MaterialApp(
+      home: AnnouncementsPage(repository: repository),
+    ));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('选择公告来源'));
+    await tester.pumpAndSettle();
+    final source = AnnouncementSource.byId('shvfs');
+    final menuScrollable = find.descendant(
+      of: find.byKey(announcementSourceMenuKey),
+      matching: find.byType(Scrollable),
+    );
+    await tester.scrollUntilVisible(find.text(source.name), 300,
+        scrollable: menuScrollable);
+    await tester.pumpAndSettle();
+    final row = find.ancestor(
+      of: find.text(source.name),
+      matching: find.byType(ListTile),
+    );
+    expect(tester.widget<ListTile>(row).enabled, isTrue);
+    await tester.tap(find.text(source.name));
+    await tester.pumpAndSettle();
+    expect(repository.requestedSources.last, source.id);
   });
 
   testWidgets('school notice tap surface spans the screen width',

@@ -2,7 +2,8 @@ import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
-import 'package:flutter/rendering.dart' show ScrollCacheExtent;
+import 'package:flutter/rendering.dart'
+    show RenderSliverList, ScrollCacheExtent, SliverMultiBoxAdaptorParentData;
 import 'package:flutter/services.dart';
 import 'package:flutter/gestures.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -13,7 +14,6 @@ import '../../data/models/announcement_source.dart';
 import '../../data/repositories/announcement_repository.dart';
 import '../../data/services/announcement_api_client.dart';
 import '../../data/services/announcement_search_service.dart';
-import '../../data/services/announcement_search_worker.dart';
 import '../../shared/shuyo_text_styles.dart';
 import '../../shared/navigation/shuyo_route.dart';
 import '../../shared/theme/shuyo_theme.dart';
@@ -567,6 +567,8 @@ class AnnouncementSearchPage extends StatefulWidget {
   State<AnnouncementSearchPage> createState() => _AnnouncementSearchPageState();
 }
 
+enum _SearchTimePreset { all, week, month, year, custom }
+
 class _AnnouncementSearchPageState extends State<AnnouncementSearchPage> {
   static final Map<String, int> _sourceOrder = {
     for (final entry in [
@@ -580,49 +582,38 @@ class _AnnouncementSearchPageState extends State<AnnouncementSearchPage> {
   };
   static const _includeBodyKey = 'announcements.search.includeBody';
   static const _includeTitleKey = 'announcements.search.includeTitle';
-  static const _strengthKey = 'announcements.search.strength';
-  static const _strengthVersionKey = 'announcements.search.strengthVersion';
-  static const _fastKey = 'announcements.search.fast';
   static const _retryFailuresKey = 'announcements.search.retryFailures';
   static const _selectedSourcesKey = 'announcements.search.selectedSources';
-  static const _searchStrengthLabels = [
-    'Low',
-    'Medium',
-    'High',
-    'Xhigh',
-    'Max',
-    'Ultra',
-  ];
   final TextEditingController _queryController = TextEditingController();
   final FocusNode _queryFocusNode = FocusNode();
   final ScrollController _resultsScrollController = ScrollController();
   String _activeQuery = '';
   bool _activeIncludeTitle = true;
   bool _activeIncludeBody = false;
-  bool _activeFast = false;
   bool _activeRetryFailures = true;
-  int _activeStrength = 0;
   Set<String> _activeSelectedSourceIds = {};
+  DateTimeRange? _dateRange;
+  DateTimeRange? _activeDateRange;
+  _SearchTimePreset _timePreset = _SearchTimePreset.all;
   final Map<String, int> _resultIndexByKey = {};
   final List<AnnouncementListItem> _results = [];
   final Map<String, List<AnnouncementListItem>> _resultsBySource = {};
-  List<Object> _resultRows = const [];
   List<Widget> _resultSlivers = const [];
   final Map<String, Widget> _sourceSlivers = {};
   final Map<String, AnnouncementListItem> _pendingMatches = {};
-  AnnouncementSearchWorkerService? _searchService;
-  AnnouncementSearchWorkerRun? _session;
+  AnnouncementSearchService? _searchService;
+  bool _ownsSearchService = false;
+  AnnouncementSearchRun? _session;
   StreamSubscription<AnnouncementSearchProgress>? _subscription;
   AnnouncementSearchProgress? _pendingProgress;
   Timer? _progressTimer;
+  bool _progressFrameScheduled = false;
+  bool _resultsScrolling = false;
   bool _includeBody = false;
   bool _includeTitle = true;
-  bool _fast = false;
   bool _retryFailures = true;
-  int _searchStrength = 0;
   bool _started = false;
   bool _searching = false;
-  bool _cancelled = false;
   bool _failureNoticeShown = false;
   final ValueNotifier<bool> _updatesPaused = ValueNotifier(false);
   bool get _detailRouteOpen => _updatesPaused.value;
@@ -639,9 +630,8 @@ class _AnnouncementSearchPageState extends State<AnnouncementSearchPage> {
   void initState() {
     super.initState();
     if (!widget.isDemo) {
-      _searchService = AnnouncementSearchWorkerService(
-        fallback: widget.searchService,
-      );
+      _ownsSearchService = widget.searchService == null;
+      _searchService = widget.searchService ?? AnnouncementSearchService();
     }
     unawaited(_loadSearchSettings());
     unawaited(_loadSelectedSources());
@@ -668,9 +658,15 @@ class _AnnouncementSearchPageState extends State<AnnouncementSearchPage> {
       final prefs = await SharedPreferences.getInstance();
       final saved = prefs.getStringList(_selectedSourcesKey);
       if (!mounted || _selectionTouched || saved == null) return;
-      final validIds =
-          AnnouncementSource.all.map((source) => source.id).toSet();
-      setState(() => _selectedSourceIds = saved.toSet().intersection(validIds));
+      final validIds = AnnouncementSource.all
+          .where((source) => source.supportsSearch)
+          .map((source) => source.id)
+          .toSet();
+      final selected = saved.toSet().intersection(validIds);
+      setState(() => _selectedSourceIds = selected);
+      if (selected.length != saved.toSet().length) {
+        await _saveSelectedSources();
+      }
     } on Object {
       // Keep no sources selected when local settings are unavailable.
     }
@@ -683,14 +679,7 @@ class _AnnouncementSearchPageState extends State<AnnouncementSearchPage> {
       setState(() {
         _includeTitle = prefs.getBool(_includeTitleKey) ?? true;
         _includeBody = prefs.getBool(_includeBodyKey) ?? false;
-        _fast = prefs.getBool(_fastKey) ?? false;
         _retryFailures = prefs.getBool(_retryFailuresKey) ?? true;
-        final savedStrength = prefs.getInt(_strengthKey) ?? 0;
-        final migratedStrength =
-            (prefs.getInt(_strengthVersionKey) ?? 1) < 2 && savedStrength >= 3
-                ? savedStrength + 1
-                : savedStrength;
-        _searchStrength = migratedStrength.clamp(0, 5);
       });
     } on Object {
       // Keep the defaults if local settings are unavailable.
@@ -704,7 +693,7 @@ class _AnnouncementSearchPageState extends State<AnnouncementSearchPage> {
     final subscription = _subscription;
     if (subscription != null) unawaited(subscription.cancel());
     _session?.cancel();
-    _searchService?.dispose();
+    if (_ownsSearchService) _searchService?.dispose();
     _pendingMatches.clear();
     _updatesPaused.dispose();
     _queryFocusNode.dispose();
@@ -740,11 +729,11 @@ class _AnnouncementSearchPageState extends State<AnnouncementSearchPage> {
     _activeQuery = query;
     _activeIncludeTitle = _includeTitle;
     _activeIncludeBody = _includeBody;
-    _activeFast = _fast;
     _activeRetryFailures = _retryFailures;
-    _activeStrength = _searchStrength;
     _activeSelectedSourceIds = {..._selectedSourceIds};
+    _activeDateRange = _dateRange;
     final generation = ++_generation;
+    _resultsScrolling = false;
     final oldSubscription = _subscription;
     if (oldSubscription != null) unawaited(oldSubscription.cancel());
     _subscription = null;
@@ -758,12 +747,10 @@ class _AnnouncementSearchPageState extends State<AnnouncementSearchPage> {
       _resultIndexByKey.clear();
       _results.clear();
       _resultsBySource.clear();
-      _resultRows = const [];
       _resultSlivers = const [];
       _sourceSlivers.clear();
       _started = true;
       _searching = true;
-      _cancelled = false;
       _failureNoticeShown = false;
       _discoveredArticles = 0;
       _error = null;
@@ -779,11 +766,17 @@ class _AnnouncementSearchPageState extends State<AnnouncementSearchPage> {
         query: query,
         includeTitle: _activeIncludeTitle,
         includeBody: _activeIncludeBody,
-        strength: _activeStrength,
-        fast: _activeFast,
         retryFailures: _activeRetryFailures,
+        dateRange: _activeDateRange == null
+            ? null
+            : AnnouncementSearchDateRange(
+                begin: _activeDateRange!.start,
+                end: _activeDateRange!.end,
+              ),
         sources: AnnouncementSource.all
-            .where((source) => _activeSelectedSourceIds.contains(source.id))
+            .where((source) =>
+                source.supportsSearch &&
+                _activeSelectedSourceIds.contains(source.id))
             .toList(),
       );
       _session = session;
@@ -810,26 +803,6 @@ class _AnnouncementSearchPageState extends State<AnnouncementSearchPage> {
         _searching = false;
       });
     }
-  }
-
-  void _cancelSearch() {
-    if (!_searching) return;
-    _progressTimer?.cancel();
-    _flushProgress(_generation);
-    _generation++;
-    final subscription = _subscription;
-    _subscription = null;
-    if (subscription != null) unawaited(subscription.cancel());
-    _session?.cancel();
-    _session = null;
-    _pendingProgress = null;
-    _pendingMatches.clear();
-    _searchStreamDone = false;
-    _pendingSearchError = null;
-    setState(() {
-      _searching = false;
-      _cancelled = true;
-    });
   }
 
   void _queueProgress(AnnouncementSearchProgress progress, int generation) {
@@ -895,7 +868,13 @@ class _AnnouncementSearchPageState extends State<AnnouncementSearchPage> {
   Set<String> _mergePendingMatches() {
     if (_pendingMatches.isEmpty) return const <String>{};
     final changedSources = <String>{};
-    for (final entry in _pendingMatches.entries) {
+    final additionsBySource = <String, List<AnnouncementListItem>>{};
+    final replacedKeysBySource = <String, Set<String>>{};
+    // A fast connection can finish many pages before the UI gets a frame.
+    // Bound each application batch instead of draining the entire backlog in
+    // the final progress callback.
+    final entries = _pendingMatches.entries.take(100).toList();
+    for (final entry in entries) {
       final item = entry.value;
       final index = _resultIndexByKey[entry.key];
       if (index == null) {
@@ -905,30 +884,48 @@ class _AnnouncementSearchPageState extends State<AnnouncementSearchPage> {
         final previous = _results[index];
         if (identical(previous, item)) continue;
         _results[index] = item;
+        replacedKeysBySource
+            .putIfAbsent(previous.sourceId, () => <String>{})
+            .add(entry.key);
       }
       changedSources.add(item.sourceId);
+      additionsBySource.putIfAbsent(item.sourceId, () => []).add(item);
     }
-    _pendingMatches.clear();
+    for (final entry in entries) {
+      _pendingMatches.remove(entry.key);
+    }
     if (changedSources.isEmpty) return changedSources;
 
-    // One grouping and one sort per changed source replace a sorted-list
-    // insertion for every match in a large worker update.
-    final indexedBySource =
-        <String, List<({int index, AnnouncementListItem item})>>{
-      for (final sourceId in changedSources) sourceId: [],
-    };
-    for (var index = 0; index < _results.length; index++) {
-      final item = _results[index];
-      indexedBySource[item.sourceId]?.add((index: index, item: item));
+    int compare(AnnouncementListItem a, AnnouncementListItem b) {
+      final byDate = _compareSearchDate(a, b);
+      return byDate != 0
+          ? byDate
+          : _resultIndexByKey[_searchResultKey(a)]!
+              .compareTo(_resultIndexByKey[_searchResultKey(b)]!);
     }
-    for (final entry in indexedBySource.entries) {
-      entry.value.sort((a, b) {
-        final byDate = _compareSearchDate(a.item, b.item);
-        return byDate != 0 ? byDate : a.index.compareTo(b.index);
-      });
-      _resultsBySource[entry.key] = [
-        for (final indexed in entry.value) indexed.item,
-      ];
+
+    for (final entry in additionsBySource.entries) {
+      final additions = entry.value..sort(compare);
+      final replacedKeys = replacedKeysBySource[entry.key];
+      final existing = _resultsBySource[entry.key] ?? const [];
+      final retained = replacedKeys == null
+          ? existing
+          : existing
+              .where((item) => !replacedKeys.contains(_searchResultKey(item)))
+              .toList();
+      final merged = <AnnouncementListItem>[];
+      var previous = 0;
+      var next = 0;
+      while (previous < retained.length && next < additions.length) {
+        if (compare(retained[previous], additions[next]) <= 0) {
+          merged.add(retained[previous++]);
+        } else {
+          merged.add(additions[next++]);
+        }
+      }
+      merged.addAll(retained.skip(previous));
+      merged.addAll(additions.skip(next));
+      _resultsBySource[entry.key] = merged;
     }
     return changedSources;
   }
@@ -941,11 +938,14 @@ class _AnnouncementSearchPageState extends State<AnnouncementSearchPage> {
             .compareTo(_sourceOrder[b] ?? _sourceOrder.length);
         return byOrder != 0 ? byOrder : a.compareTo(b);
       });
-    final rows = <Object>[];
-    var index = 0;
     for (final sourceId in sourceIds) {
-      rows.add(_AnnouncementDepartmentHeader(
-          sourceId, AnnouncementSource.byId(sourceId).name));
+      if (_sourceSlivers.containsKey(sourceId) &&
+          changedSources != null &&
+          !changedSources.contains(sourceId)) {
+        continue;
+      }
+      final rows = <Object>[];
+      var index = 0;
       String? previousMonth;
       for (final item in _resultsBySource[sourceId]!) {
         final date = item.publishedAt;
@@ -957,18 +957,35 @@ class _AnnouncementSearchPageState extends State<AnnouncementSearchPage> {
         rows.add(_AnnouncementItemRow(index, item));
         index++;
       }
+      _sourceSlivers[sourceId] = _SearchSourceSection(
+        key: ValueKey('announcement-search-source-$sourceId'),
+        department: AnnouncementSource.byId(sourceId).name,
+        rows: rows,
+        itemBuilder: _searchItem,
+      );
     }
-    _resultRows = rows;
-    _resultSlivers = _searchSlivers(rows, changedSources: changedSources);
+    _resultSlivers = [
+      const SliverToBoxAdapter(child: SizedBox(height: 8)),
+      for (final sourceId in sourceIds) _sourceSlivers[sourceId]!,
+      const SliverToBoxAdapter(child: SizedBox(height: 24)),
+    ];
   }
 
   void _flushProgress(int generation) {
     _progressTimer = null;
-    if (!mounted || generation != _generation || _detailRouteOpen) return;
+    if (!mounted ||
+        generation != _generation ||
+        _detailRouteOpen ||
+        _resultsScrolling ||
+        _progressFrameScheduled) {
+      return;
+    }
     final progress = _pendingProgress;
     if (progress == null && !_searchStreamDone) return;
     _pendingProgress = null;
-    final searching = !_searchStreamDone && !(progress?.isFinished ?? false);
+    final streamSearching =
+        !_searchStreamDone && !(progress?.isFinished ?? false);
+    final searching = streamSearching || _pendingMatches.length > 100;
     if (progress?.isFinished == true && !_failureNoticeShown) {
       _failureNoticeShown = true;
       final otherFailureCount = progress!.unfinishedCount -
@@ -1003,13 +1020,31 @@ class _AnnouncementSearchPageState extends State<AnnouncementSearchPage> {
       _searching = searching;
       _error = _pendingSearchError ?? _error;
     });
+    if (_pendingMatches.isNotEmpty) {
+      _pendingProgress ??= progress;
+      _scheduleProgressFrame();
+    }
+  }
+
+  void _scheduleProgressFrame() {
+    if (_progressFrameScheduled) return;
+    _progressFrameScheduled = true;
+    WidgetsBinding.instance.scheduleFrameCallback((_) {
+      _progressFrameScheduled = false;
+      // A ScrollEnd from resetting an old list can queue this frame just
+      // before a new run starts. The pending queue always belongs to the
+      // current run, so an old generation must not strand its fast response.
+      _flushProgress(_generation);
+    });
   }
 
   Future<void> _searchDemo(String query, int generation) async {
     final normalized = query.toLowerCase();
     try {
       final items = (await widget.repository.fetchAnnouncements())
-          .where((item) => _activeSelectedSourceIds.contains(item.sourceId))
+          .where((item) =>
+              _activeSelectedSourceIds.contains(item.sourceId) &&
+              _matchesActiveDateRange(item))
           .toList();
       if (!mounted || generation != _generation) return;
       setState(() {
@@ -1057,6 +1092,15 @@ class _AnnouncementSearchPageState extends State<AnnouncementSearchPage> {
         });
       }
     }
+  }
+
+  bool _matchesActiveDateRange(AnnouncementListItem item) {
+    final range = _activeDateRange;
+    if (range == null) return true;
+    final date = item.publishedAt;
+    if (date == null) return false;
+    final day = DateUtils.dateOnly(date);
+    return !day.isBefore(range.start) && !day.isAfter(range.end);
   }
 
   Future<void> _chooseSearchSources() async {
@@ -1114,7 +1158,11 @@ class _AnnouncementSearchPageState extends State<AnnouncementSearchPage> {
 
   void _changeSelectedSources(Set<String> selectedIds) {
     _selectionTouched = true;
-    setState(() => _selectedSourceIds = selectedIds);
+    setState(() => _selectedSourceIds = {
+          for (final source in AnnouncementSource.all)
+            if (source.supportsSearch && selectedIds.contains(source.id))
+              source.id,
+        });
     unawaited(_saveSelectedSources());
   }
 
@@ -1124,7 +1172,8 @@ class _AnnouncementSearchPageState extends State<AnnouncementSearchPage> {
       await prefs.setStringList(
         _selectedSourcesKey,
         AnnouncementSource.all
-            .where((source) => _selectedSourceIds.contains(source.id))
+            .where((source) =>
+                source.supportsSearch && _selectedSourceIds.contains(source.id))
             .map((source) => source.id)
             .toList(),
       );
@@ -1157,8 +1206,8 @@ class _AnnouncementSearchPageState extends State<AnnouncementSearchPage> {
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   ListTile(
-                    leading: const Icon(Icons.tune),
-                    title: const Text('搜索强度'),
+                    leading: const Icon(Icons.refresh),
+                    title: const Text('失败重试'),
                     onTap: () => Navigator.of(context).pop(0),
                   ),
                   ListTile(
@@ -1175,13 +1224,13 @@ class _AnnouncementSearchPageState extends State<AnnouncementSearchPage> {
     );
     if (!mounted) return;
     if (section == 0) {
-      await _openStrengthSettings();
+      await _openRetrySettings();
     } else if (section == 1) {
       await _openScopeSettings();
     }
   }
 
-  Future<void> _openStrengthSettings() async {
+  Future<void> _openRetrySettings() async {
     await showModalBottomSheet<void>(
       context: context,
       backgroundColor: Colors.transparent,
@@ -1206,47 +1255,6 @@ class _AnnouncementSearchPageState extends State<AnnouncementSearchPage> {
                   mainAxisSize: MainAxisSize.min,
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    ListTile(
-                      title: _searchSettingTitleWithHelp(
-                        '搜索强度',
-                        tooltip: '搜索强度说明',
-                        onHelp: _showStrengthInfo,
-                      ),
-                      trailing: Text(
-                        _searchStrengthLabels[_searchStrength],
-                        style: TextStyle(
-                          color: colors.textPrimary,
-                          fontSize: 17,
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
-                    ),
-                    Slider(
-                      min: 0,
-                      max: 5,
-                      divisions: 5,
-                      value: _searchStrength.toDouble(),
-                      onChanged: (value) {
-                        _settingsTouched = true;
-                        setState(() => _searchStrength = value.round());
-                        updateSheet(() {});
-                      },
-                      onChangeEnd: (_) => unawaited(_saveSearchSettings()),
-                    ),
-                    SwitchListTile(
-                      title: _searchSettingTitleWithHelp(
-                        'Fast模式',
-                        tooltip: 'Fast模式说明',
-                        onHelp: _showFastInfo,
-                      ),
-                      value: _fast,
-                      onChanged: (value) {
-                        _settingsTouched = true;
-                        setState(() => _fast = value);
-                        updateSheet(() {});
-                        unawaited(_saveSearchSettings());
-                      },
-                    ),
                     SwitchListTile(
                       title: Transform.translate(
                         offset: const Offset(0, 4.5),
@@ -1291,69 +1299,6 @@ class _AnnouncementSearchPageState extends State<AnnouncementSearchPage> {
       ),
     );
   }
-
-  Widget _searchSettingTitleWithHelp(
-    String title, {
-    required String tooltip,
-    required VoidCallback onHelp,
-  }) {
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Transform.translate(
-          offset: const Offset(0, 4.5),
-          child: Text(title),
-        ),
-        Transform.translate(
-          offset: const Offset(-3, 4),
-          child: Opacity(
-            opacity: 0.65,
-            child: IconButton(
-              tooltip: tooltip,
-              visualDensity: VisualDensity.compact,
-              padding: EdgeInsets.zero,
-              constraints: const BoxConstraints(
-                minWidth: 28,
-                minHeight: 28,
-              ),
-              icon: const Icon(Icons.info_outline, size: 18),
-              onPressed: onHelp,
-            ),
-          ),
-        ),
-      ],
-    );
-  }
-
-  Future<void> _showStrengthInfo() => showDialog<void>(
-        context: context,
-        builder: (context) => AlertDialog(
-          title: const Text('搜索强度说明'),
-          content: const Text(
-              '从 Low 到 Ultra，搜索强度越高，同时处理的请求越多，翻页等待越短，通常能更快完成搜索，也会占用更多网络资源。'),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.of(context).pop(),
-              child: const Text('知道了'),
-            ),
-          ],
-        ),
-      );
-
-  Future<void> _showFastInfo() => showDialog<void>(
-        context: context,
-        builder: (context) => AlertDialog(
-          title: const Text('Fast模式说明'),
-          content: const Text(
-              'Fast模式会缩短翻页等待，并在处理当前列表时提前请求同一栏目最多三页后续列表。搜索范围、文章内容和结果不会因此减少。'),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.of(context).pop(),
-              child: const Text('知道了'),
-            ),
-          ],
-        ),
-      );
 
   Future<void> _openScopeSettings() async {
     await showModalBottomSheet<void>(
@@ -1432,13 +1377,67 @@ class _AnnouncementSearchPageState extends State<AnnouncementSearchPage> {
       final prefs = await SharedPreferences.getInstance();
       await prefs.setBool(_includeTitleKey, _includeTitle);
       await prefs.setBool(_includeBodyKey, _includeBody);
-      await prefs.setBool(_fastKey, _fast);
       await prefs.setBool(_retryFailuresKey, _retryFailures);
-      await prefs.setInt(_strengthKey, _searchStrength);
-      await prefs.setInt(_strengthVersionKey, 2);
     } on Object {
       // Keep the current choice in memory if local storage is unavailable.
     }
+  }
+
+  String get _dateRangeLabel {
+    switch (_timePreset) {
+      case _SearchTimePreset.all:
+        return '时间不限';
+      case _SearchTimePreset.week:
+        return '近一周';
+      case _SearchTimePreset.month:
+        return '近一月';
+      case _SearchTimePreset.year:
+        return '近一年';
+      case _SearchTimePreset.custom:
+        String format(DateTime day) =>
+            '${day.year}/${day.month.toString().padLeft(2, '0')}/${day.day.toString().padLeft(2, '0')}';
+        return '${format(_dateRange!.start)}—${format(_dateRange!.end)}';
+    }
+  }
+
+  Future<void> _chooseSearchTime(_SearchTimePreset preset) async {
+    final today = DateUtils.dateOnly(DateTime.now());
+    DateTimeRange? range;
+    switch (preset) {
+      case _SearchTimePreset.all:
+        break;
+      case _SearchTimePreset.week:
+        range = DateTimeRange(
+          start: DateTime(today.year, today.month, today.day - 6),
+          end: today,
+        );
+      case _SearchTimePreset.month:
+      case _SearchTimePreset.year:
+        final months = preset == _SearchTimePreset.month ? 1 : 12;
+        final first = DateTime(today.year, today.month - months);
+        final lastDay = DateTime(first.year, first.month + 1, 0).day;
+        range = DateTimeRange(
+          start:
+              DateTime(first.year, first.month, math.min(today.day, lastDay)),
+          end: today,
+        );
+      case _SearchTimePreset.custom:
+        range = await showDateRangePicker(
+          context: context,
+          firstDate: DateTime(1900),
+          lastDate: today,
+          initialDateRange: _dateRange,
+          helpText: '自定义搜索日期',
+          cancelText: '取消',
+          confirmText: '确定',
+          saveText: '确定',
+        );
+        if (!mounted || range == null) return;
+    }
+    setState(() {
+      _timePreset = preset;
+      _dateRange = range;
+    });
   }
 
   @override
@@ -1448,6 +1447,31 @@ class _AnnouncementSearchPageState extends State<AnnouncementSearchPage> {
       appBar: AppBar(
         title: const Text('搜索公告'),
         actions: [
+          PopupMenuButton<_SearchTimePreset>(
+            key: const ValueKey('announcement-search-time-filter'),
+            tooltip: '搜索时间：$_dateRangeLabel',
+            onSelected: (preset) => unawaited(_chooseSearchTime(preset)),
+            icon: Icon(
+              _dateRange == null ? Icons.date_range_outlined : Icons.date_range,
+              color: _dateRange == null
+                  ? null
+                  : Theme.of(context).colorScheme.primary,
+            ),
+            itemBuilder: (context) => [
+              for (final entry in const {
+                _SearchTimePreset.all: '时间不限',
+                _SearchTimePreset.week: '近一周',
+                _SearchTimePreset.month: '近一月',
+                _SearchTimePreset.year: '近一年',
+                _SearchTimePreset.custom: '自定义日期',
+              }.entries)
+                CheckedPopupMenuItem(
+                  value: entry.key,
+                  checked: _timePreset == entry.key,
+                  child: Text(entry.value),
+                ),
+            ],
+          ),
           IconButton(
             tooltip: '筛选部门',
             onPressed: _chooseSearchSources,
@@ -1459,7 +1483,10 @@ class _AnnouncementSearchPageState extends State<AnnouncementSearchPage> {
                   right: -6,
                   bottom: -4,
                   child: Text(
-                    _selectedSourceIds.length == AnnouncementSource.all.length
+                    _selectedSourceIds.length ==
+                            AnnouncementSource.all
+                                .where((source) => source.supportsSearch)
+                                .length
                         ? 'ALL'
                         : '${_selectedSourceIds.length}',
                     style: Theme.of(context).textTheme.labelSmall?.copyWith(
@@ -1521,10 +1548,10 @@ class _AnnouncementSearchPageState extends State<AnnouncementSearchPage> {
               ),
               const SizedBox(width: 6),
               IconButton(
-                tooltip: _searching ? '取消搜索' : '开始搜索',
-                onPressed: _searching ? _cancelSearch : _startSearch,
+                tooltip: '开始搜索',
+                onPressed: _searching ? null : _startSearch,
                 icon: Icon(
-                  _searching ? Icons.close_rounded : Icons.play_arrow_rounded,
+                  Icons.play_arrow_rounded,
                   color: Theme.of(context).colorScheme.primary,
                 ),
               ),
@@ -1546,9 +1573,6 @@ class _AnnouncementSearchPageState extends State<AnnouncementSearchPage> {
             : body
                 ? '正文'
                 : '未选范围';
-    final strength =
-        _searchStrengthLabels[_searching ? _activeStrength : _searchStrength];
-    final fast = _searching ? _activeFast : _fast;
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 2, 16, 12),
       child: Row(
@@ -1597,9 +1621,6 @@ class _AnnouncementSearchPageState extends State<AnnouncementSearchPage> {
               Text('搜索范围：$scope',
                   maxLines: 1,
                   style: TextStyle(color: colors.textMuted, fontSize: 12)),
-              Text('搜索强度：$strength${fast ? ' · Fast模式' : ''}',
-                  maxLines: 1,
-                  style: TextStyle(color: colors.textMuted, fontSize: 12)),
             ],
           ),
         ],
@@ -1636,21 +1657,11 @@ class _AnnouncementSearchPageState extends State<AnnouncementSearchPage> {
       }
       return EmptyState(
         icon: _started ? Icons.search_off : Icons.search,
-        title: _started
-            ? _cancelled
-                ? '搜索公告'
-                : '没有找到公告'
-            : '搜索公告',
-        message: _started
-            ? _cancelled
-                ? '可重新开始搜索。'
-                : '试试其他关键词。'
-            : '输入关键词后点击搜索。',
+        title: _started ? '没有找到公告' : '搜索公告',
+        message: _started ? '试试其他关键词。' : '输入关键词后点击搜索。',
       );
     }
-    final slivers = _resultSlivers.isEmpty
-        ? _resultSlivers = _searchSlivers(_resultRows)
-        : _resultSlivers;
+    if (_resultSlivers.isEmpty) _rebuildResultRows();
     return ScrollbarTheme(
       data: ScrollbarThemeData(
         thumbColor: WidgetStatePropertyAll(
@@ -1663,103 +1674,49 @@ class _AnnouncementSearchPageState extends State<AnnouncementSearchPage> {
         controller: _resultsScrollController,
         thumbVisibility: true,
         interactive: true,
-        child: CustomScrollView(
-          controller: _resultsScrollController,
-          scrollCacheExtent: const ScrollCacheExtent.pixels(0),
-          slivers: slivers,
+        child: NotificationListener<ScrollNotification>(
+          onNotification: (notification) {
+            if (notification.depth != 0) return false;
+            if (notification is ScrollStartNotification) {
+              _resultsScrolling = true;
+            } else if (notification is ScrollEndNotification) {
+              _resultsScrolling = false;
+              if (_pendingProgress != null || _searchStreamDone) {
+                _scheduleProgressFrame();
+              }
+            }
+            return false;
+          },
+          child: CustomScrollView(
+            controller: _resultsScrollController,
+            scrollCacheExtent: const ScrollCacheExtent.pixels(0),
+            slivers: _resultSlivers,
+          ),
         ),
       ),
     );
   }
 
-  List<Widget> _searchSlivers(List<Object> rows,
-      {Set<String>? changedSources}) {
-    final slivers = <Widget>[
-      const SliverToBoxAdapter(child: SizedBox(height: 8)),
-    ];
-    var position = 0;
-    while (position < rows.length) {
-      final header = rows[position] as _AnnouncementDepartmentHeader;
-      final department = header.label;
-      position++;
-      final cached = _sourceSlivers[header.sourceId];
-      if (cached != null &&
-          changedSources != null &&
-          !changedSources.contains(header.sourceId)) {
-        while (position < rows.length &&
-            rows[position] is! _AnnouncementDepartmentHeader) {
-          position++;
-        }
-        slivers.add(cached);
-        continue;
-      }
-      final departmentSlivers = <Widget>[
-        SliverPersistentHeader(
-          pinned: true,
-          delegate: _AnnouncementDepartmentStickyHeaderDelegate(department),
+  Widget _searchItem(BuildContext context, _AnnouncementItemRow row,
+      {required bool showDivider}) {
+    final item = row.item;
+    return Column(
+      key: ValueKey(_searchResultKey(item)),
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        _AnnouncementTile(
+          index: row.index,
+          item: item,
+          repository: widget.repository,
+          external: _isExternalAnnouncement(item),
+          updatesPaused: _updatesPaused,
+          previewVersion: _generation,
+          highlightQuery: _activeQuery,
+          onTap: () => unawaited(_openSearchResult(item)),
         ),
-      ];
-      while (position < rows.length &&
-          rows[position] is! _AnnouncementDepartmentHeader) {
-        String? month;
-        if (rows[position] is _AnnouncementMonthHeader) {
-          month = (rows[position] as _AnnouncementMonthHeader).label;
-          position++;
-        }
-        final itemRows = <_AnnouncementItemRow>[];
-        while (
-            position < rows.length && rows[position] is _AnnouncementItemRow) {
-          itemRows.add(rows[position++] as _AnnouncementItemRow);
-        }
-        if (itemRows.isEmpty) continue;
-        final itemList = _searchItemList(itemRows);
-        departmentSlivers.add(month == null
-            ? itemList
-            : SliverMainAxisGroup(slivers: [
-                SliverPersistentHeader(
-                  pinned: true,
-                  delegate: _AnnouncementStickyHeaderDelegate(
-                    month: month,
-                    department: department,
-                  ),
-                ),
-                itemList,
-              ]));
-      }
-      final sourceSliver = SliverMainAxisGroup(slivers: departmentSlivers);
-      _sourceSlivers[header.sourceId] = sourceSliver;
-      slivers.add(sourceSliver);
-    }
-    slivers.add(const SliverToBoxAdapter(child: SizedBox(height: 24)));
-    return slivers;
-  }
-
-  Widget _searchItemList(List<_AnnouncementItemRow> rows) {
-    return SliverList.builder(
-      itemCount: rows.length,
-      itemBuilder: (context, index) {
-        final itemRow = rows[index];
-        final item = itemRow.item;
-        return Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            _AnnouncementTile(
-              key: ValueKey(_searchResultKey(item)),
-              index: itemRow.index,
-              item: item,
-              repository: widget.repository,
-              external: _isExternalAnnouncement(item),
-              updatesPaused: _updatesPaused,
-              previewVersion: _generation,
-              highlightQuery: _activeQuery,
-              onTap: () => unawaited(_openSearchResult(item)),
-            ),
-            if (index + 1 < rows.length &&
-                CustomBackgroundScope.maybeOf(context) == null)
-              Divider(height: 1, color: context.shuyoColors.border),
-          ],
-        );
-      },
+        if (showDivider && CustomBackgroundScope.maybeOf(context) == null)
+          Divider(height: 1, color: context.shuyoColors.border),
+      ],
     );
   }
 
@@ -1782,7 +1739,7 @@ class _AnnouncementSearchPageState extends State<AnnouncementSearchPage> {
     try {
       await Navigator.of(context).push<void>(route);
       // The push Future completes at pop time; wait until the reverse animation
-      // finishes before applying the accumulated worker update.
+      // finishes before applying the accumulated page update.
       if (route is TransitionRoute<void>) await route.completed;
     } finally {
       if (mounted) {
@@ -1791,13 +1748,6 @@ class _AnnouncementSearchPageState extends State<AnnouncementSearchPage> {
       }
     }
   }
-}
-
-class _AnnouncementDepartmentHeader {
-  const _AnnouncementDepartmentHeader(this.sourceId, this.label);
-
-  final String sourceId;
-  final String label;
 }
 
 class _LoadedAnnouncementList {
@@ -1904,6 +1854,272 @@ class _AnnouncementItemRow {
 
   final int index;
   final AnnouncementListItem item;
+}
+
+typedef _SearchItemBuilder = Widget Function(
+  BuildContext context,
+  _AnnouncementItemRow row, {
+  required bool showDivider,
+});
+
+typedef _SearchMonthViewport = ({String? month, double pushOffset});
+
+/// Each department has one lazy child delegate, regardless of how many years
+/// its results cover. A delegate per month would build an offscreen article
+/// for every month just to estimate that delegate's scroll extent.
+class _SearchSourceSection extends StatefulWidget {
+  const _SearchSourceSection({
+    super.key,
+    required this.department,
+    required this.rows,
+    required this.itemBuilder,
+  });
+
+  final String department;
+  final List<Object> rows;
+  final _SearchItemBuilder itemBuilder;
+
+  @override
+  State<_SearchSourceSection> createState() => _SearchSourceSectionState();
+}
+
+class _SearchSourceSectionState extends State<_SearchSourceSection> {
+  late List<Object> _rows;
+  late List<String?> _months;
+  late Map<Key, int> _indices;
+  late Set<int> _monthHeaders;
+  late final ValueNotifier<_SearchMonthViewport> _viewport;
+  _SearchMonthViewport? _pendingViewport;
+  bool _viewportScheduled = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _readRows();
+    _viewport = ValueNotifier((
+      month: _months.isEmpty ? null : _months.first,
+      pushOffset: 0,
+    ));
+  }
+
+  @override
+  void didUpdateWidget(covariant _SearchSourceSection oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.rows != widget.rows) _readRows();
+  }
+
+  void _readRows() {
+    _rows = widget.rows.toList();
+    // The first month is represented by the persistent header; later months
+    // retain their normal position inside the one lazy list.
+    if (_rows.firstOrNull is _AnnouncementMonthHeader) _rows.removeAt(0);
+    _indices = {};
+    _monthHeaders = {};
+    _months = [];
+    String? month = widget.rows.firstOrNull is _AnnouncementMonthHeader
+        ? (widget.rows.first as _AnnouncementMonthHeader).label
+        : null;
+    for (var index = 0; index < _rows.length; index++) {
+      final row = _rows[index];
+      final Key key;
+      if (row is _AnnouncementMonthHeader) {
+        month = row.label;
+        _monthHeaders.add(index);
+        key = ValueKey('month-${row.label}');
+      } else {
+        final item = (row as _AnnouncementItemRow).item;
+        key = ValueKey(
+            '${item.sourceId}\u0000${item.url}\u0000${item.title.trim().toLowerCase()}');
+      }
+      _indices[key] = index;
+      _months.add(month);
+    }
+  }
+
+  void _reportViewport(_SearchMonthViewport viewport) {
+    if (viewport == _viewport.value) {
+      _pendingViewport = null;
+      return;
+    }
+    if (viewport == _pendingViewport) return;
+    _pendingViewport = viewport;
+    if (_viewportScheduled) return;
+    _viewportScheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _viewportScheduled = false;
+      if (!mounted) return;
+      final next = _pendingViewport;
+      _pendingViewport = null;
+      if (next == null) return;
+      final monthChanged = next.month != _viewport.value.month;
+      _viewport.value = next;
+      if (monthChanged) setState(() {});
+    });
+  }
+
+  @override
+  void dispose() {
+    _viewport.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return SliverMainAxisGroup(slivers: [
+      SliverPersistentHeader(
+        pinned: true,
+        delegate:
+            _AnnouncementDepartmentStickyHeaderDelegate(widget.department),
+      ),
+      if (_months.any((month) => month != null))
+        SliverPersistentHeader(
+          pinned: true,
+          delegate: _SearchMonthStickyHeaderDelegate(
+            department: widget.department,
+            viewport: _viewport,
+          ),
+        ),
+      _SearchMonthList(
+        months: _months,
+        monthHeaders: _monthHeaders,
+        onViewport: _reportViewport,
+        delegate: SliverChildBuilderDelegate(
+          (context, index) {
+            final row = _rows[index];
+            if (row is _AnnouncementMonthHeader) {
+              return SizedBox(
+                key: ValueKey('month-${row.label}'),
+                height: _stickyHeaderExtent,
+                child: row.label == _viewport.value.month
+                    ? null
+                    : _AnnouncementStickyHeaderDelegate(month: row.label)
+                        .build(context, 0, false),
+              );
+            }
+            return widget.itemBuilder(
+              context,
+              row as _AnnouncementItemRow,
+              showDivider: index + 1 < _rows.length &&
+                  _rows[index + 1] is _AnnouncementItemRow,
+            );
+          },
+          childCount: _rows.length,
+          findChildIndexCallback: (key) => _indices[key],
+        ),
+      ),
+    ]);
+  }
+}
+
+class _SearchMonthStickyHeaderDelegate extends SliverPersistentHeaderDelegate {
+  const _SearchMonthStickyHeaderDelegate({
+    required this.department,
+    required this.viewport,
+  });
+
+  final String department;
+  final ValueNotifier<_SearchMonthViewport> viewport;
+
+  @override
+  double get minExtent => _stickyHeaderExtent;
+
+  @override
+  double get maxExtent => _stickyHeaderExtent;
+
+  @override
+  Widget build(
+      BuildContext context, double shrinkOffset, bool overlapsContent) {
+    return ClipRect(
+      child: ValueListenableBuilder<_SearchMonthViewport>(
+        valueListenable: viewport,
+        builder: (context, value, child) => Transform.translate(
+          offset: Offset(0, value.pushOffset),
+          child: _AnnouncementStickyHeaderDelegate(
+            department: department,
+            month: value.month ?? '',
+          ).build(context, shrinkOffset, overlapsContent),
+        ),
+      ),
+    );
+  }
+
+  @override
+  bool shouldRebuild(_SearchMonthStickyHeaderDelegate oldDelegate) =>
+      department != oldDelegate.department || viewport != oldDelegate.viewport;
+}
+
+class _SearchMonthList extends SliverList {
+  const _SearchMonthList({
+    required super.delegate,
+    required this.months,
+    required this.monthHeaders,
+    required this.onViewport,
+  });
+
+  final List<String?> months;
+  final Set<int> monthHeaders;
+  final ValueChanged<_SearchMonthViewport> onViewport;
+
+  @override
+  RenderSliverList createRenderObject(BuildContext context) =>
+      _RenderSearchMonthList(
+        childManager: context as SliverMultiBoxAdaptorElement,
+        months: months,
+        monthHeaders: monthHeaders,
+        onViewport: onViewport,
+      );
+
+  @override
+  void updateRenderObject(
+      BuildContext context, covariant _RenderSearchMonthList renderObject) {
+    renderObject
+      ..months = months
+      ..monthHeaders = monthHeaders
+      ..onViewport = onViewport
+      ..markNeedsLayout();
+  }
+}
+
+class _RenderSearchMonthList extends RenderSliverList {
+  _RenderSearchMonthList({
+    required super.childManager,
+    required this.months,
+    required this.monthHeaders,
+    required this.onViewport,
+  });
+
+  List<String?> months;
+  Set<int> monthHeaders;
+  ValueChanged<_SearchMonthViewport> onViewport;
+
+  @override
+  void performLayout() {
+    super.performLayout();
+    if (firstChild == null || geometry!.paintExtent == 0 || months.isEmpty) {
+      return;
+    }
+    // The month changes when the next in-flow header reaches the *top* of
+    // the pinned month, rather than its bottom. During that last header-height
+    // of travel, slide the old month upward just like a normal sticky group.
+    final threshold = constraints.scrollOffset +
+        math.max(0, constraints.overlap - _stickyHeaderExtent);
+    var child = firstChild;
+    String? month = months[indexOf(child!)];
+    var pushOffset = 0.0;
+    while (child != null) {
+      final index = indexOf(child);
+      final offset =
+          (child.parentData! as SliverMultiBoxAdaptorParentData).layoutOffset!;
+      if (offset <= threshold) {
+        month = months[index];
+      } else if (monthHeaders.contains(index)) {
+        pushOffset = math.min(0, offset - threshold - _stickyHeaderExtent);
+        break;
+      }
+      child = childAfter(child);
+    }
+    onViewport((month: month, pushOffset: pushOffset));
+  }
 }
 
 bool _isExternalAnnouncement(AnnouncementListItem item) {
@@ -2276,6 +2492,7 @@ class _AnnouncementSourceMenuState extends State<_AnnouncementSourceMenu> {
   }
 
   bool? _groupSelection(List<AnnouncementSource> sources) {
+    sources = sources.where((source) => source.supportsSearch).toList();
     final selected =
         sources.where((source) => _selectedIds.contains(source.id)).length;
     if (selected == 0) return false;
@@ -2284,6 +2501,7 @@ class _AnnouncementSourceMenuState extends State<_AnnouncementSourceMenu> {
   }
 
   void _toggleGroupSelection(List<AnnouncementSource> sources) {
+    sources = sources.where((source) => source.supportsSearch).toList();
     final allSelected =
         sources.every((source) => _selectedIds.contains(source.id));
     setState(() {
@@ -2331,6 +2549,7 @@ class _AnnouncementSourceMenuState extends State<_AnnouncementSourceMenu> {
   Widget _sourceRow(AnnouncementSource source) {
     final favorite = _favorites.contains(source.id);
     final selecting = widget.selectedIds != null;
+    final enabled = !selecting || source.supportsSearch;
     void toggleSelection() {
       setState(() {
         if (!_selectedIds.add(source.id)) _selectedIds.remove(source.id);
@@ -2339,6 +2558,7 @@ class _AnnouncementSourceMenuState extends State<_AnnouncementSourceMenu> {
     }
 
     return ListTile(
+      enabled: enabled,
       contentPadding: const EdgeInsets.only(left: 16, right: 12),
       title: Text(
         source.name,
@@ -2346,11 +2566,15 @@ class _AnnouncementSourceMenuState extends State<_AnnouncementSourceMenu> {
         overflow: TextOverflow.ellipsis,
       ),
       selected: !selecting && widget.selected == source,
-      onTap: selecting ? toggleSelection : () => widget.onSelect(source),
+      onTap: !enabled
+          ? null
+          : selecting
+              ? toggleSelection
+              : () => widget.onSelect(source),
       trailing: selecting
           ? Checkbox(
               value: _selectedIds.contains(source.id),
-              onChanged: (_) => toggleSelection(),
+              onChanged: enabled ? (_) => toggleSelection() : null,
             )
           : IconButton(
               iconSize: 22,
