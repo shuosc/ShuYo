@@ -7,12 +7,11 @@ import 'package:flutter/foundation.dart';
 import 'package:html/dom.dart' as dom;
 import 'package:html/parser.dart' as html_parser;
 import 'package:http/http.dart' as http;
-import 'package:http/io_client.dart';
 
-import '../../core/client_user_agent.dart';
 import '../models/announcement.dart';
 import '../models/announcement_source.dart';
 import 'announcement_film_date_order.dart';
+import 'announcement_request_client.dart';
 import 'http_timeout.dart';
 
 class AnnouncementApiException implements Exception {
@@ -54,44 +53,81 @@ class AnnouncementColumnPage {
 }
 
 class AnnouncementApiClient {
-  AnnouncementApiClient({http.Client? httpClient, bool ownsHttpClient = true})
-      : _httpClient = httpClient ?? IOClient(HttpClient()),
-        _ownsHttpClient = httpClient == null || ownsHttpClient;
+  AnnouncementApiClient({
+    http.Client? httpClient,
+    bool ownsHttpClient = true,
+    Duration requestTimeout = HttpTimeout.normal,
+    Duration operationTimeout = HttpTimeout.composed,
+    Duration retryBaseDelay = const Duration(milliseconds: 250),
+    int maxRequestAttempts = 3,
+    DateTime Function()? now,
+  }) : _requests = AnnouncementRequestClient(
+          httpClient: httpClient,
+          ownsHttpClient: ownsHttpClient,
+          requestTimeout: requestTimeout,
+          operationTimeout: operationTimeout,
+          retryBaseDelay: retryBaseDelay,
+          maxAttempts: maxRequestAttempts,
+          now: now,
+        );
 
   static const _maxConcurrentParses = 4;
-  final http.Client _httpClient;
-  final bool _ownsHttpClient;
-  final Queue<Completer<void>> _parseWaiters = Queue();
+  static const _maxConcurrentDetailParses = _maxConcurrentParses - 1;
+  final AnnouncementRequestClient _requests;
+  final Queue<Completer<void>> _listParseWaiters = Queue();
+  final Queue<Completer<void>> _detailParseWaiters = Queue();
   int _activeParses = 0;
+  int _activeDetailParses = 0;
   bool _closed = false;
+
+  void clearResponseCache() => _requests.clearResponseCache();
 
   void close() {
     if (_closed) return;
     _closed = true;
-    if (_ownsHttpClient) _httpClient.close();
-    while (_parseWaiters.isNotEmpty) {
-      _parseWaiters.removeFirst().complete();
+    _requests.close();
+    for (final queue in [_listParseWaiters, _detailParseWaiters]) {
+      while (queue.isNotEmpty) {
+        queue.removeFirst().complete();
+      }
     }
   }
 
   /// Limits isolate creation after HTTP requests have already been sent.
-  Future<T> _withParse<T>(Future<T> Function() parse) async {
+  /// Keep one slot available for lists while details/previews are saturated.
+  Future<T> _withParse<T>(
+    Future<T> Function() parse, {
+    bool prioritizeList = false,
+  }) async {
     if (_closed) throw StateError('AnnouncementApiClient is closed');
-    if (_activeParses >= _maxConcurrentParses) {
+    if (_activeParses >= _maxConcurrentParses ||
+        (!prioritizeList &&
+            _activeDetailParses >= _maxConcurrentDetailParses)) {
       final waiter = Completer<void>();
-      _parseWaiters.add(waiter);
+      (prioritizeList ? _listParseWaiters : _detailParseWaiters).add(waiter);
       await waiter.future;
       if (_closed) throw StateError('AnnouncementApiClient is closed');
     } else {
       _activeParses++;
+      if (!prioritizeList) _activeDetailParses++;
     }
     try {
       return await parse();
     } finally {
-      if (_parseWaiters.isNotEmpty) {
-        _parseWaiters.removeFirst().complete();
-      } else {
-        _activeParses--;
+      _activeParses--;
+      if (!prioritizeList) _activeDetailParses--;
+      while (!_closed && _activeParses < _maxConcurrentParses) {
+        if (_listParseWaiters.isNotEmpty) {
+          _activeParses++;
+          _listParseWaiters.removeFirst().complete();
+        } else if (_detailParseWaiters.isNotEmpty &&
+            _activeDetailParses < _maxConcurrentDetailParses) {
+          _activeParses++;
+          _activeDetailParses++;
+          _detailParseWaiters.removeFirst().complete();
+        } else {
+          break;
+        }
       }
     }
   }
@@ -120,18 +156,21 @@ class AnnouncementApiClient {
         final column =
             index < source.columnNames.length ? source.columnNames[index] : '';
         try {
-          final response = await _getHtml(pageUrl);
           // A source can have many columns, all of which may finish loading in
           // one frame. Keep HTML decoding and DOM traversal off the UI isolate.
-          final parsed = await _withParse(
-            () => compute(
-              _parseColumn,
-              (
-                bytes: response.bodyBytes,
-                url: pageUrl,
-                source: source,
-                column: column
+          final parsed = await _withHtml(
+            pageUrl,
+            (response) => _withParse(
+              () => compute(
+                _parseColumn,
+                (
+                  bytes: response.bodyBytes,
+                  url: pageUrl,
+                  source: source,
+                  column: column
+                ),
               ),
+              prioritizeList: true,
             ),
           );
           var items = parsed.items;
@@ -203,36 +242,30 @@ class AnnouncementApiClient {
   }
 
   Future<AnnouncementDetail> fetchDetail(AnnouncementListItem item) async {
-    late final http.Response response;
     try {
-      response = await _getHtml(item.url);
+      return await _withHtml(
+        item.url,
+        (response) => _withParse(
+          () => compute(
+            _parseDetailResponse,
+            (
+              bytes: response.bodyBytes,
+              url: item.url,
+              title: item.title,
+              dateText: item.dateText,
+              publishedAt: item.publishedAt,
+              sourceId: item.sourceId,
+            ),
+          ),
+        ),
+        priority: AnnouncementRequestPriority.detail,
+      );
     } on AnnouncementApiException catch (error) {
       if (error.statusCode == 404 || error.statusCode == 410) {
         throw AnnouncementUnavailableException(statusCode: error.statusCode);
       }
       rethrow;
     }
-    final htmlPreview = utf8.decode(
-      response.bodyBytes.length > 32768
-          ? response.bodyBytes.sublist(0, 32768)
-          : response.bodyBytes,
-      allowMalformed: true,
-    );
-    if (_isUnavailableAnnouncementPage(htmlPreview)) {
-      throw const AnnouncementUnavailableException();
-    }
-    final request = (
-      bytes: response.bodyBytes,
-      url: item.url,
-      title: item.title,
-      dateText: item.dateText,
-      publishedAt: item.publishedAt,
-      sourceId: item.sourceId,
-    );
-    if (response.bodyBytes.length >= 16384) {
-      return compute(_parseDetailResponse, request);
-    }
-    return _parseDetailResponse(request);
   }
 
   static List<AnnouncementListItem> parseAnnouncementList(
@@ -522,20 +555,19 @@ class AnnouncementApiClient {
         : _cleanText(box?.text);
   }
 
-  Future<http.Response> _getHtml(String url) async {
-    final response = await HttpTimeout.request(
-      _httpClient.get(
-        Uri.parse(url),
-        headers: {
-          'accept': 'text/html,application/xhtml+xml',
-          'user-agent': ClientUserAgent.mobileBrowser,
+  Future<T> _withHtml<T>(
+    String url,
+    Future<T> Function(http.Response response) action, {
+    AnnouncementRequestPriority priority = AnnouncementRequestPriority.list,
+  }) =>
+      _requests.withResponse(
+        url,
+        (response) {
+          _ensureSuccess(response);
+          return action(response);
         },
-      ),
-      message: '通知公告请求超时，请稍后再试',
-    );
-    _ensureSuccess(response);
-    return response;
-  }
+        priority: priority,
+      );
 
   Future<List<AnnouncementListItem>> _enrichFilmNotices(
     List<AnnouncementListItem> items, {
@@ -555,11 +587,15 @@ class AnnouncementApiClient {
               return;
             }
             try {
-              final response = await _getHtml(item.url);
-              final metadata = _parseFilmNoticeMetadata(
-                html_parser.parse(_decodeHtml(response)),
+              final metadata = await _withHtml(
+                item.url,
+                (response) => _withParse(
+                  () =>
+                      compute(_parseFilmNoticeDateResponse, response.bodyBytes),
+                ),
+                priority: AnnouncementRequestPriority.detail,
               );
-              final date = _parseDate(metadata.dateText);
+              final date = metadata.publishedAt;
               if (date == null) return;
               result[index] = AnnouncementListItem(
                 title: item.title,
@@ -586,8 +622,9 @@ class AnnouncementApiClient {
     String fallbackTitle = '',
     String fallbackDateText = '',
     DateTime? fallbackPublishedAt,
+    dom.Document? parsedDocument,
   }) {
-    final document = html_parser.parse(html);
+    final document = parsedDocument ?? html_parser.parse(html);
     final isShvfsNews = sourceId == 'shvfs';
     final isVsbLegacyDetail =
         sourceId == 'sfa' || sourceId == 'alumni' || sourceId == 'shuedf';
@@ -662,8 +699,11 @@ class AnnouncementApiClient {
     );
   }
 
-  static bool _isUnavailableAnnouncementPage(String html) {
-    final document = html_parser.parse(html);
+  static bool _isUnavailableAnnouncementPage(
+    String html, {
+    dom.Document? parsedDocument,
+  }) {
+    final document = parsedDocument ?? html_parser.parse(html);
     final title = _cleanText(document.querySelector('title')?.text);
     final message = _cleanText(document.body?.text);
     return title.contains('404错误提示') ||
@@ -1359,10 +1399,6 @@ class AnnouncementApiClient {
       );
     }
   }
-
-  static String _decodeHtml(http.Response response) {
-    return utf8.decode(response.bodyBytes, allowMalformed: true);
-  }
 }
 
 AnnouncementDetail _parseDetailResponse(
@@ -1374,13 +1410,33 @@ AnnouncementDetail _parseDetailResponse(
       DateTime? publishedAt,
       String sourceId,
     }) request) {
+  final html = utf8.decode(request.bytes, allowMalformed: true);
+  final document = html_parser.parse(html);
+  if (AnnouncementApiClient._isUnavailableAnnouncementPage(
+    html,
+    parsedDocument: document,
+  )) {
+    throw const AnnouncementUnavailableException();
+  }
   return AnnouncementApiClient.parseAnnouncementDetail(
-    utf8.decode(request.bytes, allowMalformed: true),
+    html,
     url: request.url,
     fallbackTitle: request.title,
     fallbackDateText: request.dateText,
     fallbackPublishedAt: request.publishedAt,
     sourceId: request.sourceId,
+    parsedDocument: document,
+  );
+}
+
+({String dateText, DateTime? publishedAt}) _parseFilmNoticeDateResponse(
+    List<int> bytes) {
+  final metadata = AnnouncementApiClient._parseFilmNoticeMetadata(
+    html_parser.parse(utf8.decode(bytes, allowMalformed: true)),
+  );
+  return (
+    dateText: metadata.dateText,
+    publishedAt: AnnouncementApiClient._parseDate(metadata.dateText),
   );
 }
 

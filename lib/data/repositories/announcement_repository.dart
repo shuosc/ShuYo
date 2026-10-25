@@ -8,6 +8,7 @@ import '../models/announcement.dart';
 import '../models/announcement_source.dart';
 import '../models/common.dart';
 import '../services/announcement_api_client.dart';
+import '../services/announcement_memory_cache.dart';
 import '../services/client_settings_service.dart';
 
 class AnnouncementHomeSummary {
@@ -36,9 +37,11 @@ class AnnouncementRepository {
   AnnouncementRepository({
     AnnouncementApiClient? apiClient,
     Future<SharedPreferences> Function()? preferencesLoader,
+    DateTime Function()? now,
     this.autoRefreshInterval = defaultAutoRefreshInterval,
   })  : _apiClient = apiClient ?? AnnouncementApiClient(),
-        _preferencesLoader = preferencesLoader ?? SharedPreferences.getInstance;
+        _preferencesLoader = preferencesLoader ?? SharedPreferences.getInstance,
+        _now = now ?? DateTime.now;
 
   static const defaultAutoRefreshInterval = Duration(hours: 12);
   static const _listCacheKey = 'announcements.list.cache';
@@ -57,17 +60,35 @@ class AnnouncementRepository {
 
   final AnnouncementApiClient _apiClient;
   final Future<SharedPreferences> Function() _preferencesLoader;
+  final DateTime Function() _now;
   final Duration autoRefreshInterval;
 
   final Map<String, List<AnnouncementListItem>> _memoryLists = {};
   final Map<String, List<String?>> _nextPageUrls = {};
   final Map<String, Set<String>> _visitedPageUrls = {};
-  final LinkedHashMap<String, String?> _previews = LinkedHashMap();
+  late final _previews = AnnouncementMemoryCache<String?>(
+    maxEntries: 160,
+    maxBytes: 256 * 1024,
+    ttl: const Duration(minutes: 5),
+    sizeOf: (value) => (value?.length ?? 0) * 2,
+    now: _now,
+  );
   final Map<String, Future<String?>> _pendingPreviews = {};
-  final Map<String, AnnouncementDetail> _recentDetails = {};
+  late final _recentDetails = AnnouncementMemoryCache<AnnouncementDetail>(
+    maxEntries: 12,
+    maxBytes: 8 * 1024 * 1024,
+    ttl: const Duration(minutes: 5),
+    sizeOf: _detailCacheBytes,
+    now: _now,
+  );
   final Map<String, Future<AnnouncementDetail>> _pendingDetails = {};
-  final Queue<({AnnouncementListItem item, Completer<String?> completer})>
-      _previewQueue = Queue();
+  final Map<String, int> _cacheGenerations = {};
+  final Queue<
+      ({
+        AnnouncementListItem item,
+        Completer<String?> completer,
+        int cacheGeneration,
+      })> _previewQueue = Queue();
   int _activePreviewRequests = 0;
   static const _maximumQueuedPreviews = 24;
 
@@ -80,12 +101,9 @@ class AnnouncementRepository {
     if (item.summary.isNotEmpty && item.sourceId != 'shvfs') {
       return Future.value(item.summary);
     }
-    final key = '${item.sourceId}|${item.url}';
-    if (_previews.containsKey(key)) {
-      final cached = _previews.remove(key);
-      _previews[key] = cached;
-      return Future.value(cached);
-    }
+    final key = _detailKey(item);
+    final cached = _previews.lookup(key);
+    if (cached != null) return Future.value(cached.value);
     final pending = _pendingPreviews[key];
     if (pending != null) return pending;
     // A fast fling should not leave hundreds of offscreen detail requests in
@@ -95,7 +113,11 @@ class AnnouncementRepository {
     }
     final completer = Completer<String?>();
     _pendingPreviews[key] = completer.future;
-    _previewQueue.add((item: item, completer: completer));
+    _previewQueue.add((
+      item: item,
+      completer: completer,
+      cacheGeneration: _cacheGenerations[item.sourceId] ?? 0,
+    ));
     _pumpPreviewQueue();
     return completer.future;
   }
@@ -109,10 +131,14 @@ class AnnouncementRepository {
   }
 
   Future<void> _loadQueuedPreview(
-    ({AnnouncementListItem item, Completer<String?> completer}) request,
+    ({
+      AnnouncementListItem item,
+      Completer<String?> completer,
+      int cacheGeneration,
+    }) request,
   ) async {
     final item = request.item;
-    final key = '${item.sourceId}|${item.url}';
+    final key = _detailKey(item);
     try {
       final detail = await fetchDetail(item);
       // Only the first readable paragraph is needed for a two-line preview.
@@ -146,14 +172,17 @@ class AnnouncementRepository {
           : text.length > 110
               ? '${text.substring(0, 110)}…'
               : text;
-      _previews[key] = preview;
-      if (_previews.length > 160) _previews.remove(_previews.keys.first);
+      if (request.cacheGeneration == (_cacheGenerations[item.sourceId] ?? 0)) {
+        _previews.put(key, preview);
+      }
       request.completer.complete(preview);
     } on Object {
       // A failed detail request is retried if the item is built again later.
       request.completer.complete(null);
     } finally {
-      _pendingPreviews.remove(key);
+      if (identical(_pendingPreviews[key], request.completer.future)) {
+        _pendingPreviews.remove(key);
+      }
       _activePreviewRequests--;
       _pumpPreviewQueue();
     }
@@ -271,6 +300,7 @@ class AnnouncementRepository {
     bool loadNextPage = false,
   }) async {
     final selected = source ?? await defaultSource();
+    if (forceRefresh && !loadNextPage) _invalidateSourceDetails(selected);
     final cached = await loadCachedAnnouncements(source: selected);
     if (loadNextPage) {
       final nextPageUrls = _nextPageUrls[selected.id];
@@ -320,28 +350,70 @@ class AnnouncementRepository {
   }
 
   Future<AnnouncementDetail> fetchDetail(AnnouncementListItem item) {
-    final key = '${item.sourceId}|${item.url}';
-    final cached = _recentDetails[key];
-    if (cached != null) return Future.value(cached);
+    final key = _detailKey(item);
+    final cached = _recentDetails.lookup(key);
+    if (cached != null) return Future.value(cached.value);
     final pending = _pendingDetails[key];
     if (pending != null) return pending;
-    Future<AnnouncementDetail> load() async {
-      try {
-        final detail = await _apiClient.fetchDetail(item);
-        _recentDetails.remove(key);
-        _recentDetails[key] = detail;
-        if (_recentDetails.length > 12) {
-          _recentDetails.remove(_recentDetails.keys.first);
-        }
-        return detail;
-      } finally {
+    final generation = _cacheGenerations[item.sourceId] ?? 0;
+    late final Future<AnnouncementDetail> task;
+    task = Future<AnnouncementDetail>.sync(() => _apiClient.fetchDetail(item))
+        .then((detail) {
+      if (generation == (_cacheGenerations[item.sourceId] ?? 0)) {
+        _recentDetails.put(key, detail);
+      }
+      return detail;
+    }).whenComplete(() {
+      if (identical(_pendingDetails[key], task)) {
         _pendingDetails.remove(key);
       }
-    }
-
-    final task = load();
+    });
     _pendingDetails[key] = task;
     return task;
+  }
+
+  String _detailKey(AnnouncementListItem item) =>
+      '${item.sourceId}|${_announcementUrlKey(item.url)}';
+
+  void _invalidateSourceDetails(AnnouncementSource source) {
+    _cacheGenerations.update(source.id, (value) => value + 1,
+        ifAbsent: () => 1);
+    final prefix = '${source.id}|';
+    _recentDetails.removeWhere((key, _) => key.startsWith(prefix));
+    _previews.removeWhere((key, _) => key.startsWith(prefix));
+    _pendingDetails.removeWhere((key, _) => key.startsWith(prefix));
+    _pendingPreviews.removeWhere((key, _) => key.startsWith(prefix));
+    _previewQueue.removeWhere((request) {
+      if (request.item.sourceId != source.id) return false;
+      request.completer.complete(null);
+      return true;
+    });
+    _apiClient.clearResponseCache();
+  }
+
+  static int _detailCacheBytes(AnnouncementDetail detail) {
+    var characters = detail.title.length +
+        detail.url.length +
+        detail.dateText.length +
+        detail.author.length +
+        detail.department.length;
+    for (final block in detail.blocks) {
+      characters += block.value.length + block.alt.length + block.label.length;
+      for (final part in block.parts) {
+        characters += part.text.length + part.url.length;
+      }
+      for (final row in block.rows) {
+        for (final cell in row) {
+          characters += cell.length;
+        }
+      }
+      for (final cell in block.cells) {
+        characters += cell.text.length +
+            cell.textAlignment.length +
+            cell.verticalAlignment.length;
+      }
+    }
+    return characters * 2;
   }
 
   Future<AnnouncementHomeSummary> homeSummary() async {
