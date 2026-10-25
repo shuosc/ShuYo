@@ -93,14 +93,8 @@ class _AnnouncementsPageState extends State<AnnouncementsPage> {
   bool _loadingMore = false;
   bool _hasMore = false;
   int _requestGeneration = 0;
-  final Map<String, String?> _readyPreviews = {};
-  final Set<String> _stagedUrls = {};
-  final Set<String> _revealedUrls = {};
-  final List<AnnouncementListItem> _revealQueue = [];
-  final List<Timer> _previewDeadlines = [];
-  Timer? _revealTimer;
-  int _revealCursor = 0;
-  int _revealGeneration = 0;
+  final ValueNotifier<bool> _updatesPaused = ValueNotifier(false);
+  Completer<void>? _listVisibilityGate;
 
   @override
   void initState() {
@@ -111,10 +105,10 @@ class _AnnouncementsPageState extends State<AnnouncementsPage> {
 
   @override
   void dispose() {
-    _revealTimer?.cancel();
-    for (final timer in _previewDeadlines) {
-      timer.cancel();
-    }
+    _requestGeneration++;
+    _listVisibilityGate?.complete();
+    _listVisibilityGate = null;
+    _updatesPaused.dispose();
     _scrollController
       ..removeListener(_onScroll)
       ..dispose();
@@ -143,8 +137,8 @@ class _AnnouncementsPageState extends State<AnnouncementsPage> {
       forceRefresh: forceRefresh,
       loadNextPage: loadNextPage,
     );
-    // Some sites pin old notices above recent ones. Sort before any card enters
-    // the display queue, preserving the source order for equal/missing dates.
+    // Some sites pin old notices above recent ones. Sort before displaying any
+    // cards, preserving the source order for equal/missing dates.
     final indexed = items.asMap().entries.toList();
     indexed.sort((a, b) {
       final left = a.value.publishedAt;
@@ -158,70 +152,6 @@ class _AnnouncementsPageState extends State<AnnouncementsPage> {
     });
     final sorted = [for (final entry in indexed) entry.value];
     return _LoadedAnnouncementList(sorted, _announcementRows(sorted));
-  }
-
-  void _stagePage(List<AnnouncementListItem> items,
-      {Set<String> previousUrls = const {}}) {
-    _revealTimer?.cancel();
-    for (final timer in _previewDeadlines) {
-      timer.cancel();
-    }
-    _previewDeadlines.clear();
-    final generation = ++_revealGeneration;
-    _readyPreviews.clear();
-    _stagedUrls.clear();
-    _revealedUrls.clear();
-    _revealCursor = 0;
-    _revealQueue
-      ..clear()
-      ..addAll(items.where((item) => !previousUrls.contains(item.url)).take(8));
-    for (final item in _revealQueue) {
-      _stagedUrls.add(item.url);
-      if (_isExternalAnnouncement(item)) {
-        _readyPreviews[item.url] = null;
-        continue;
-      }
-      final deadline = Timer(const Duration(seconds: 2), () {
-        if (!mounted ||
-            generation != _revealGeneration ||
-            _readyPreviews.containsKey(item.url)) {
-          return;
-        }
-        _readyPreviews[item.url] = null;
-        _drainRevealQueue();
-      });
-      _previewDeadlines.add(deadline);
-      final article = _announcementForUrlOwner(item);
-      widget.repository.loadPreview(article).then((preview) {
-        deadline.cancel();
-        if (!mounted || generation != _revealGeneration) return;
-        final previous = _readyPreviews[item.url];
-        _readyPreviews[item.url] = preview;
-        if (_revealedUrls.contains(item.url) && previous != preview) {
-          setState(() {});
-        } else {
-          _drainRevealQueue();
-        }
-      }, onError: (Object error, StackTrace stackTrace) {
-        deadline.cancel();
-        if (!mounted || generation != _revealGeneration) return;
-        _readyPreviews[item.url] = null;
-        _drainRevealQueue();
-      });
-    }
-    _drainRevealQueue();
-  }
-
-  void _drainRevealQueue() {
-    if (_revealTimer?.isActive == true ||
-        _revealCursor >= _revealQueue.length) {
-      return;
-    }
-    final url = _revealQueue[_revealCursor].url;
-    if (!_readyPreviews.containsKey(url)) return;
-    _revealCursor++;
-    setState(() => _revealedUrls.add(url));
-    _revealTimer = Timer(const Duration(milliseconds: 55), _drainRevealQueue);
   }
 
   @override
@@ -326,11 +256,9 @@ class _AnnouncementsPageState extends State<AnnouncementsPage> {
                 item: item,
                 repository: widget.repository,
                 external: _isExternalAnnouncement(item),
-                awaitReveal: _stagedUrls.contains(item.url) &&
-                    !_revealedUrls.contains(item.url),
-                initialPreviewReady: _revealedUrls.contains(item.url),
-                initialPreview: _readyPreviews[item.url],
-                onTap: () => _openAnnouncement(item),
+                updatesPaused: _updatesPaused,
+                previewVersion: _requestGeneration,
+                onTap: () => unawaited(_openAnnouncement(item)),
               ),
               if (index + 1 < end - start &&
                   CustomBackgroundScope.maybeOf(context) == null)
@@ -395,7 +323,7 @@ class _AnnouncementsPageState extends State<AnnouncementsPage> {
   }
 
   void _onScroll() {
-    if (!_scrollController.hasClients) {
+    if (_updatesPaused.value || !_scrollController.hasClients) {
       return;
     }
     if (_scrollController.position.extentAfter > 280 ||
@@ -471,25 +399,24 @@ class _AnnouncementsPageState extends State<AnnouncementsPage> {
       _hasMore = false;
       _isBusy = true;
     });
-    _revealGeneration++;
-    _revealTimer?.cancel();
-    for (final timer in _previewDeadlines) {
-      timer.cancel();
-    }
-    _previewDeadlines.clear();
-    _stagedUrls.clear();
     await _fetchPage(choice, forceRefresh: true);
   }
 
   Future<void> _refresh() async {
     final source = _source;
-    if (source == null || _isBusy) return;
+    if (source == null || _isBusy || _updatesPaused.value) return;
     await _fetchPage(source, forceRefresh: true);
   }
 
   Future<void> _loadNextPage() async {
     final source = _source;
-    if (source == null || !_hasMore || _isBusy || _loadingMore) return;
+    if (source == null ||
+        !_hasMore ||
+        _isBusy ||
+        _loadingMore ||
+        _updatesPaused.value) {
+      return;
+    }
     final generation = _requestGeneration;
     setState(() {
       _loadingMore = true;
@@ -497,21 +424,19 @@ class _AnnouncementsPageState extends State<AnnouncementsPage> {
     });
     try {
       final loaded = await _loadList(source, loadNextPage: true);
-      if (!mounted || generation != _requestGeneration) return;
-      final previousUrls = _loaded?.items.map((item) => item.url).toSet() ?? {};
-      _stagePage(loaded.items, previousUrls: previousUrls);
+      if (!await _waitForListVisibility(generation)) return;
       setState(() {
         _loaded = loaded;
         _hasMore = widget.repository.hasMoreAnnouncements(source: source);
       });
     } on Object catch (error) {
-      if (mounted && generation == _requestGeneration) {
+      if (await _waitForListVisibility(generation) && mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text(_friendlyError(error))),
         );
       }
     } finally {
-      if (mounted && generation == _requestGeneration) {
+      if (await _waitForListVisibility(generation)) {
         setState(() {
           _loadingMore = false;
           _isBusy = false;
@@ -539,14 +464,14 @@ class _AnnouncementsPageState extends State<AnnouncementsPage> {
     });
     try {
       final loaded = await _loadList(source, forceRefresh: forceRefresh);
-      if (!mounted || generation != _requestGeneration) return;
-      _stagePage(loaded.items);
+      if (!await _waitForListVisibility(generation)) return;
       setState(() {
         _loaded = loaded;
         _hasMore = widget.repository.hasMoreAnnouncements(source: source);
       });
     } on Object catch (error) {
-      if (!mounted || generation != _requestGeneration) return;
+      if (!await _waitForListVisibility(generation)) return;
+      if (!mounted) return;
       if (_loaded == null) {
         setState(() => _loadError = error);
       } else {
@@ -555,15 +480,48 @@ class _AnnouncementsPageState extends State<AnnouncementsPage> {
         );
       }
     } finally {
-      if (mounted && generation == _requestGeneration) {
+      if (await _waitForListVisibility(generation)) {
         setState(() => _isBusy = false);
         if (_loaded != null && _hasMore) _scheduleLoadMoreCheck();
       }
     }
   }
 
-  void _openAnnouncement(AnnouncementListItem item) {
-    _openAnnouncementItem(context, widget.repository, item);
+  Future<bool> _waitForListVisibility(int generation) async {
+    final gate = _listVisibilityGate;
+    if (gate != null) await gate.future;
+    return mounted && generation == _requestGeneration;
+  }
+
+  Future<void> _openAnnouncement(AnnouncementListItem item) async {
+    final article = _announcementForUrlOwner(item);
+    if (_isExternalAnnouncement(article)) {
+      await _openExternalAnnouncementUrl(context, article.url);
+      return;
+    }
+    if (_updatesPaused.value) return;
+    final gate = Completer<void>();
+    _listVisibilityGate = gate;
+    _updatesPaused.value = true;
+    final route = shuyoRoute<void>(
+      builder: (context) => AnnouncementDetailPage(
+        repository: widget.repository,
+        item: article,
+      ),
+    );
+    try {
+      await Navigator.of(context).push<void>(route);
+      // A pop completes the push Future before its reverse animation finishes.
+      // Keep preview/layout work out of both route transitions.
+      if (route is TransitionRoute<void>) await route.completed;
+    } finally {
+      if (mounted) {
+        _listVisibilityGate = null;
+        _updatesPaused.value = false;
+        if (!gate.isCompleted) gate.complete();
+        _scheduleLoadMoreCheck();
+      }
+    }
   }
 
   String _friendlyError(Object error) {
@@ -709,24 +667,17 @@ AnnouncementListItem _announcementForUrlOwner(AnnouncementListItem item) {
   );
 }
 
-void _openAnnouncementItem(
-  BuildContext context,
-  AnnouncementRepository repository,
-  AnnouncementListItem item,
-) {
-  final article = _announcementForUrlOwner(item);
-  if (_isExternalAnnouncement(article)) {
-    unawaited(_openExternalAnnouncementUrl(context, article.url));
-    return;
+bool _canLoadAnnouncementPreview(AnnouncementListItem item) {
+  final uri = Uri.tryParse(item.url);
+  if (uri == null ||
+      (uri.scheme != 'http' && uri.scheme != 'https') ||
+      !uri.hasAuthority) {
+    return false;
   }
-  Navigator.of(context).push<void>(
-    shuyoRoute(
-      builder: (context) => AnnouncementDetailPage(
-        repository: repository,
-        item: article,
-      ),
-    ),
-  );
+  return !RegExp(
+          r'\.(pdf|docx?|xlsx?|pptx?|zip|rar|7z|png|jpe?g|gif|webp|svg|bmp|ico|mp[34]|wav|avi|mov|css|js)$',
+          caseSensitive: false)
+      .hasMatch(uri.path);
 }
 
 Future<void> _openExternalAnnouncementUrl(
@@ -2255,9 +2206,8 @@ class _AnnouncementTile extends StatefulWidget {
     required this.item,
     required this.repository,
     required this.external,
-    required this.awaitReveal,
-    required this.initialPreviewReady,
-    required this.initialPreview,
+    this.updatesPaused,
+    this.previewVersion = 0,
     required this.onTap,
   });
 
@@ -2265,9 +2215,8 @@ class _AnnouncementTile extends StatefulWidget {
   final AnnouncementListItem item;
   final AnnouncementRepository repository;
   final bool external;
-  final bool awaitReveal;
-  final bool initialPreviewReady;
-  final String? initialPreview;
+  final ValueNotifier<bool>? updatesPaused;
+  final int previewVersion;
   final VoidCallback onTap;
 
   @override
@@ -2279,8 +2228,11 @@ class _AnnouncementTileState extends State<_AnnouncementTile>
   late final AnimationController _entrance;
   Timer? _entranceTimer;
   int _previewGeneration = 0;
-  late bool _previewReady;
   String? _resolvedPreview;
+  bool _hasPendingPreview = false;
+  String? _pendingPreview;
+
+  bool get _updatesPaused => widget.updatesPaused?.value ?? false;
 
   @override
   void initState() {
@@ -2289,37 +2241,22 @@ class _AnnouncementTileState extends State<_AnnouncementTile>
       vsync: this,
       duration: const Duration(milliseconds: 280),
     );
+    widget.updatesPaused?.addListener(_onUpdatePauseChanged);
     _loadPreview();
   }
 
   @override
   void didUpdateWidget(covariant _AnnouncementTile oldWidget) {
     super.didUpdateWidget(oldWidget);
-    // Appending another page drops the parent's small staging cache. Keep an
-    // already visible card as-is instead of replaying its entrance animation.
-    if (oldWidget.item.url == widget.item.url &&
-        oldWidget.item.sourceId == widget.item.sourceId &&
-        oldWidget.item.summary == widget.item.summary &&
-        oldWidget.initialPreviewReady &&
-        !widget.initialPreviewReady &&
-        !widget.awaitReveal &&
-        _previewReady) {
-      return;
-    }
-    if (oldWidget.item.url == widget.item.url &&
-        oldWidget.initialPreviewReady &&
-        widget.initialPreviewReady &&
-        oldWidget.initialPreview != widget.initialPreview &&
-        _previewReady) {
-      _resolvedPreview = widget.initialPreview ?? widget.item.summary;
-      return;
+    if (oldWidget.updatesPaused != widget.updatesPaused) {
+      oldWidget.updatesPaused?.removeListener(_onUpdatePauseChanged);
+      widget.updatesPaused?.addListener(_onUpdatePauseChanged);
+      _onUpdatePauseChanged();
     }
     if (oldWidget.item.url != widget.item.url ||
         oldWidget.item.sourceId != widget.item.sourceId ||
         oldWidget.item.summary != widget.item.summary ||
-        oldWidget.initialPreviewReady != widget.initialPreviewReady ||
-        oldWidget.initialPreview != widget.initialPreview ||
-        oldWidget.awaitReveal != widget.awaitReveal ||
+        oldWidget.previewVersion != widget.previewVersion ||
         oldWidget.external != widget.external ||
         oldWidget.repository != widget.repository) {
       _loadPreview();
@@ -2330,59 +2267,68 @@ class _AnnouncementTileState extends State<_AnnouncementTile>
     final generation = ++_previewGeneration;
     _entranceTimer?.cancel();
     _entrance.reset();
-    if (widget.awaitReveal) {
-      _previewReady = false;
-      _resolvedPreview = null;
-      return;
-    }
+    _hasPendingPreview = false;
+    _pendingPreview = null;
     final article = _announcementForUrlOwner(widget.item);
     final needsArticlePreview = article.sourceId == 'shvfs';
-    _previewReady = widget.initialPreviewReady ||
-        (!needsArticlePreview && widget.item.summary.isNotEmpty);
-    _resolvedPreview = needsArticlePreview
-        ? widget.initialPreview ?? widget.item.summary
-        : widget.item.summary.isNotEmpty
-            ? widget.item.summary
-            : widget.initialPreview;
-    if (widget.external) {
-      _previewReady = true;
-      _resolvedPreview = null;
-      _startEntrance();
-      return;
-    }
-    if (_previewReady) {
-      _startEntrance();
+    _resolvedPreview = widget.item.summary;
+    _startEntrance();
+    if ((!needsArticlePreview && widget.item.summary.isNotEmpty) ||
+        !_canLoadAnnouncementPreview(widget.item)) {
       return;
     }
     widget.repository.loadPreview(article).then(
       (preview) {
         if (!mounted || generation != _previewGeneration) return;
-        setState(() {
-          _previewReady = true;
-          _resolvedPreview = preview ?? widget.item.summary;
-        });
-        _startEntrance();
+        final resolved = preview ?? widget.item.summary;
+        if (_updatesPaused) {
+          _hasPendingPreview = true;
+          _pendingPreview = resolved;
+        } else if (_resolvedPreview != resolved) {
+          setState(() => _resolvedPreview = resolved);
+        }
       },
       onError: (Object error, StackTrace stackTrace) {
         if (!mounted || generation != _previewGeneration) return;
-        setState(() => _previewReady = true);
-        _startEntrance();
+        // The title and any list excerpt remain useful when a preview fails.
       },
     );
   }
 
   void _startEntrance() {
-    if (_announcementForUrlOwner(widget.item).sourceId == 'sfa') return;
+    if (_updatesPaused ||
+        _announcementForUrlOwner(widget.item).sourceId == 'sfa') {
+      return;
+    }
     _entranceTimer = Timer(
       Duration(milliseconds: (widget.index % 6) * 55),
       () {
-        if (mounted) _entrance.forward();
+        if (mounted && !_updatesPaused) _entrance.forward();
       },
     );
   }
 
+  void _onUpdatePauseChanged() {
+    if (_updatesPaused) {
+      _entranceTimer?.cancel();
+      _entrance.stop();
+      return;
+    }
+    if (_hasPendingPreview) {
+      final preview = _pendingPreview;
+      _hasPendingPreview = false;
+      _pendingPreview = null;
+      if (_resolvedPreview != preview) {
+        setState(() => _resolvedPreview = preview);
+      }
+    }
+    if (!_entrance.isCompleted) _startEntrance();
+  }
+
   @override
   void dispose() {
+    _previewGeneration++;
+    widget.updatesPaused?.removeListener(_onUpdatePauseChanged);
     _entranceTimer?.cancel();
     _entrance.dispose();
     super.dispose();
@@ -2394,18 +2340,6 @@ class _AnnouncementTileState extends State<_AnnouncementTile>
     // behind an optional article preview after the dated list is ready.
     if (_announcementForUrlOwner(widget.item).sourceId == 'sfa') {
       return _tile(_resolvedPreview ?? widget.item.summary);
-    }
-    if (!_previewReady) {
-      return const SizedBox(
-        height: 104,
-        child: Center(
-          child: SizedBox(
-            width: 18,
-            height: 18,
-            child: CircularProgressIndicator(strokeWidth: 2),
-          ),
-        ),
-      );
     }
     return SlideTransition(
       position: Tween<Offset>(

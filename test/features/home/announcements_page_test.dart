@@ -137,6 +137,38 @@ class _ShortPageAnnouncementRepository extends _FakeAnnouncementRepository {
   bool hasMoreAnnouncements({AnnouncementSource? source}) => pagesLoaded == 0;
 }
 
+class _DeferredPageAnnouncementRepository extends _FakeAnnouncementRepository {
+  _DeferredPageAnnouncementRepository({super.previewFutures})
+      : super(
+          items: const [_listItem],
+          details: {
+            _listTitle: AnnouncementDetail(
+              title: _listTitle,
+              url: _listItem.url,
+              blocks: const [AnnouncementContentBlock.text(_detailBody)],
+            ),
+          },
+        );
+
+  final nextPage = Completer<List<AnnouncementListItem>>();
+  int pagesRequested = 0;
+
+  @override
+  Future<List<AnnouncementListItem>> fetchAnnouncements({
+    AnnouncementSource? source,
+    bool forceRefresh = false,
+    bool loadNextPage = false,
+  }) async {
+    if (!loadNextPage) return items;
+    pagesRequested++;
+    return nextPage.future;
+  }
+
+  @override
+  bool hasMoreAnnouncements({AnnouncementSource? source}) =>
+      !nextPage.isCompleted;
+}
+
 _FakeAnnouncementRepository _repositoryWith({
   List<AnnouncementContentBlock> blocks = const [
     AnnouncementContentBlock.text(_detailBody),
@@ -643,17 +675,24 @@ void main() {
     expect(repository.previewRequests.length, lessThan(items.length));
   });
 
-  testWidgets('list appears while the first preview is still loading',
+  testWidgets('title and date stay usable while the first preview is loading',
       (tester) async {
     final pending = Completer<String?>();
     const item = AnnouncementListItem(
       title: '等待正文的公告',
       url: 'https://bksy.shu.edu.cn/info/1000/wait.htm',
       sourceId: 'bksy',
+      dateText: '2026-10-25',
     );
     final repository = _FakeAnnouncementRepository(
       items: const [item],
-      details: const {},
+      details: {
+        item.title: AnnouncementDetail(
+          title: item.title,
+          url: item.url,
+          blocks: const [AnnouncementContentBlock.text('已打开通知正文')],
+        ),
+      },
       previewFutures: {item.url: pending.future},
     );
     await tester.pumpWidget(
@@ -662,17 +701,25 @@ void main() {
     await tester.pump();
     expect(find.byType(CustomScrollView), findsOneWidget);
     expect(find.byType(RefreshIndicator), findsOneWidget);
-    expect(find.text(item.title), findsNothing);
+    expect(find.text(item.title), findsOneWidget);
+    expect(find.text(item.dateText), findsOneWidget);
     expect(repository.previewRequests, [item.url]);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text(item.title));
+    await tester.pumpAndSettle();
+    expect(find.text('已打开通知正文'), findsOneWidget);
 
     pending.complete('完整正文摘要');
+    await tester.pump();
+    expect(find.text('完整正文摘要', skipOffstage: false), findsNothing);
+    await tester.pageBack();
     await tester.pumpAndSettle();
     expect(find.text(item.title), findsOneWidget);
     expect(find.text('完整正文摘要'), findsOneWidget);
     expect(find.byType(SlideTransition), findsWidgets);
   });
 
-  testWidgets('notices reveal in date order despite out-of-order previews',
+  testWidgets('titles keep date order despite out-of-order previews',
       (tester) async {
     final pending = Completer<String?>();
     final oldItem = AnnouncementListItem(
@@ -697,8 +744,10 @@ void main() {
       MaterialApp(home: AnnouncementsPage(repository: repository)),
     );
     await tester.pump(const Duration(milliseconds: 100));
-    expect(find.text('旧通知'), findsNothing);
-    expect(find.text('新通知'), findsNothing);
+    expect(find.text('旧通知'), findsOneWidget);
+    expect(find.text('新通知'), findsOneWidget);
+    expect(tester.getTopLeft(find.text('新通知')).dy,
+        lessThan(tester.getTopLeft(find.text('旧通知')).dy));
     pending.complete('新通知概览');
     await tester.pumpAndSettle();
     expect(find.text('新通知'), findsOneWidget);
@@ -763,7 +812,7 @@ void main() {
         tester.getSize(find.byKey(ValueKey(item.url))).height, lessThan(104));
   });
 
-  testWidgets('scrolled-to rows wait for their preview before sliding in',
+  testWidgets('scrolled-to titles appear before their previews finish',
       (tester) async {
     final items = List.generate(
       20,
@@ -792,12 +841,220 @@ void main() {
     );
     await tester.pump();
     expect(repository.previewRequests, contains(items[10].url));
-    expect(find.text(items[10].title), findsNothing);
+    expect(find.text(items[10].title), findsOneWidget);
 
     pending.complete('滚动后才加载的摘要');
     await tester.pumpAndSettle();
     expect(find.text(items[10].title), findsOneWidget);
     expect(find.text('滚动后才加载的摘要'), findsOneWidget);
+  });
+
+  testWidgets('a preview updates only its card without rebuilding the list',
+      (tester) async {
+    final pending = Completer<String?>();
+    const first = AnnouncementListItem(
+      title: '异步概览通知',
+      url: 'https://bksy.shu.edu.cn/info/1000/async.htm',
+      sourceId: 'bksy',
+    );
+    const second = AnnouncementListItem(
+      title: '保持不变的通知',
+      url: 'https://bksy.shu.edu.cn/info/1000/stable.htm',
+      sourceId: 'bksy',
+      summary: '已有概览',
+    );
+    final repository = _FakeAnnouncementRepository(
+      items: const [first, second],
+      details: const {},
+      previewFutures: {first.url: pending.future},
+    );
+    await tester.pumpWidget(
+      MaterialApp(home: AnnouncementsPage(repository: repository)),
+    );
+    await tester.pumpAndSettle();
+    final list = tester.widget<CustomScrollView>(find.byType(CustomScrollView));
+    final unchangedTitle = tester.widget<Text>(find.text(second.title));
+    final firstTile = find.byKey(ValueKey(first.url));
+    final titleHeight = tester.getSize(firstTile).height;
+    pending.complete('稍后补齐的短概览');
+    await tester.pumpAndSettle();
+    expect(find.text('稍后补齐的短概览'), findsOneWidget);
+    expect(tester.widget<CustomScrollView>(find.byType(CustomScrollView)),
+        same(list));
+    expect(tester.widget<Text>(find.text(second.title)), same(unchangedTitle));
+    expect(tester.getSize(firstTile).height, greaterThan(titleHeight));
+    expect(tester.getSize(firstTile).height, lessThan(104));
+    expect(repository.previewRequests, [first.url]);
+  });
+
+  testWidgets(
+      'refresh reloads a preview when its URL and summary stay the same',
+      (tester) async {
+    const item = AnnouncementListItem(
+      title: '正文会更新的通知',
+      url: 'https://bksy.shu.edu.cn/info/1000/refreshed.htm',
+      sourceId: 'bksy',
+    );
+    final previewFutures = {item.url: Future<String?>.value('刷新前的概览')};
+    final repository = _FakeAnnouncementRepository(
+      items: const [item],
+      details: const {},
+      previewFutures: previewFutures,
+    );
+    await tester.pumpWidget(
+      MaterialApp(home: AnnouncementsPage(repository: repository)),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('刷新前的概览'), findsOneWidget);
+
+    final updatedPreview = Completer<String?>();
+    previewFutures[item.url] = updatedPreview.future;
+    final refresh = tester
+        .state<RefreshIndicatorState>(find.byType(RefreshIndicator))
+        .show();
+    await tester.pumpAndSettle();
+    await refresh;
+    expect(find.text(item.title), findsOneWidget);
+    expect(repository.previewRequests, [item.url, item.url]);
+    updatedPreview.complete('刷新后的新概览');
+    await tester.pumpAndSettle();
+    expect(find.text('刷新后的新概览'), findsOneWidget);
+    expect(find.text('刷新前的概览'), findsNothing);
+    expect(repository.previewRequests, [item.url, item.url]);
+  });
+
+  testWidgets(
+      'covered previews and pages wait until the reverse transition ends',
+      (tester) async {
+    final preview = Completer<String?>();
+    final repository = _DeferredPageAnnouncementRepository(
+      previewFutures: {_listItem.url: preview.future},
+    );
+    await tester.pumpWidget(
+      MaterialApp(home: AnnouncementsPage(repository: repository)),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(repository.pagesRequested, 1);
+    await tester.tap(find.text(_listTitle));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+    await tester.pump();
+    final homeList = find.byType(CustomScrollView, skipOffstage: false);
+    final coveredList = tester.widget<CustomScrollView>(homeList);
+    preview.complete('返回列表后显示的概览');
+    repository.nextPage.complete(const [
+      _listItem,
+      AnnouncementListItem(
+        title: '详情期间完成的下一页',
+        url: 'https://www.shu.edu.cn/info/1051/2.htm',
+        summary: '下一页的概览',
+      ),
+    ]);
+    await tester.pump(const Duration(milliseconds: 500));
+    expect(tester.widget<CustomScrollView>(homeList), same(coveredList));
+    expect(find.text('返回列表后显示的概览', skipOffstage: false), findsNothing);
+    expect(find.text('详情期间完成的下一页', skipOffstage: false), findsNothing);
+    expect(repository.pagesRequested, 1);
+
+    Navigator.of(tester.element(find.byType(AnnouncementDetailPage))).pop();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 80));
+    expect(find.text('返回列表后显示的概览', skipOffstage: false), findsNothing);
+    expect(find.text('详情期间完成的下一页', skipOffstage: false), findsNothing);
+    await tester.pumpAndSettle();
+    expect(find.text('返回列表后显示的概览'), findsOneWidget);
+    expect(find.text('详情期间完成的下一页'), findsOneWidget);
+    expect(repository.pagesRequested, 1);
+    expect(repository.previewRequests, [_listItem.url]);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('late preview completions are ignored after the list is removed',
+      (tester) async {
+    final success = Completer<String?>();
+    final failure = Completer<String?>();
+    final items = [
+      for (var index = 0; index < 2; index++)
+        AnnouncementListItem(
+          title: '待完成通知 $index',
+          url: 'https://bksy.shu.edu.cn/info/1000/pending$index.htm',
+          sourceId: 'bksy',
+        ),
+    ];
+    final repository = _FakeAnnouncementRepository(
+      items: items,
+      details: const {},
+      previewFutures: {
+        items[0].url: success.future,
+        items[1].url: failure.future
+      },
+    );
+    await tester.pumpWidget(
+      MaterialApp(home: AnnouncementsPage(repository: repository)),
+    );
+    await tester.pumpAndSettle();
+    expect(repository.previewRequests, hasLength(2));
+    await tester.pumpWidget(const SizedBox.shrink());
+    success.complete('已卸载的概览');
+    failure.completeError(StateError('已卸载的请求失败'));
+    await tester.pump();
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('removing a covered list releases deferred page updates safely',
+      (tester) async {
+    final repository = _DeferredPageAnnouncementRepository();
+    await tester.pumpWidget(
+      MaterialApp(home: AnnouncementsPage(repository: repository)),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(repository.pagesRequested, 1);
+    await tester.tap(find.text(_listTitle));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+    repository.nextPage.complete(const [_listItem]);
+    await tester.pump();
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pump();
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets(
+      'static resource links skip previews and keep external navigation',
+      (tester) async {
+    final items = [
+      for (final suffix in ['pdf?download=1', 'PNG', 'zip'])
+        AnnouncementListItem(
+          title: '附件 $suffix',
+          url: 'https://hr.shu.edu.cn/attachment.$suffix',
+          sourceId: 'hr',
+        ),
+    ];
+    final repository =
+        _FakeAnnouncementRepository(items: items, details: const {});
+    const urlLauncher = MethodChannel('plugins.flutter.io/url_launcher');
+    String? openedUrl;
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      urlLauncher,
+      (call) async {
+        openedUrl = (call.arguments as Map<Object?, Object?>)['url'] as String?;
+        return true;
+      },
+    );
+    addTearDown(() => tester.binding.defaultBinaryMessenger
+        .setMockMethodCallHandler(urlLauncher, null));
+    await tester.pumpWidget(
+      MaterialApp(home: AnnouncementsPage(repository: repository)),
+    );
+    await tester.pumpAndSettle();
+    expect(repository.previewRequests, isEmpty);
+    await tester.tap(find.text(items.first.title));
+    await tester.pumpAndSettle();
+    expect(openedUrl, items.first.url);
+    expect(repository.detailRequestCount, 0);
+    expect(find.byType(AnnouncementDetailPage), findsNothing);
   });
 
   testWidgets('share button copies the article URL', (tester) async {
@@ -941,7 +1198,7 @@ void main() {
         '邮箱：info@mathworks.cn');
   });
 
-  testWidgets('non-info announcement links skip parsing and open externally',
+  testWidgets('external HTML links show previews and still open externally',
       (tester) async {
     const item = AnnouncementListItem(
       title: '关于2026年下半年博士后人员高级专业技术职务申报的通知',
@@ -980,7 +1237,8 @@ void main() {
 
     expect(find.byType(AnnouncementDetailPage), findsNothing);
     expect(repository.detailRequestCount, 0);
-    expect(repository.previewRequests, isEmpty);
+    expect(repository.previewRequests, [item.url]);
+    expect(find.text('申报详情'), findsOneWidget);
     expect(openedUrl, item.url);
   });
 
