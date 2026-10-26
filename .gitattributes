@@ -1,0 +1,16 @@
+# Normalize text files to LF in the repository and on checkout on every platform.
+* text=auto eol=lf
+
+# Keep Windows command scripts in their native checkout format.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Binary resources must never undergo line-ending conversion.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.icns binary
+*.jar binary
