@@ -177,13 +177,23 @@ class _FakeAnnouncementRepository extends AnnouncementRepository {
   }
 }
 
-double _cardOpacity(WidgetTester tester, AnnouncementListItem item) => tester
-    .widget<FadeTransition>(find.descendant(
-      of: find.byKey(ValueKey(item.url)),
-      matching: find.byType(FadeTransition),
-    ))
-    .opacity
-    .value;
+double _cardOpacity(WidgetTester tester, AnnouncementListItem item) {
+  final fade = find.descendant(
+    of: find.byKey(ValueKey(item.url)),
+    matching: find.byType(FadeTransition),
+  );
+  return fade.evaluate().isEmpty
+      ? 0
+      : tester.widget<FadeTransition>(fade).opacity.value;
+}
+
+// Settle finite entrances without advancing an unresolved request to its timeout.
+Future<void> _pumpPendingList(WidgetTester tester) async {
+  await tester.pump();
+  await tester.pump();
+  await tester.pump(const Duration(milliseconds: 300));
+  await tester.pump(const Duration(milliseconds: 300));
+}
 
 class _ShortPageAnnouncementRepository extends _FakeAnnouncementRepository {
   _ShortPageAnnouncementRepository()
@@ -371,6 +381,8 @@ void main() {
       );
       scrollable.position.jumpTo(scrollable.position.maxScrollExtent);
       await tester.pumpAndSettle();
+      scrollable.position.jumpTo(scrollable.position.maxScrollExtent);
+      await tester.pumpAndSettle();
       expectHeaderExtent('2026年9月');
       expect(
           tester
@@ -392,7 +404,6 @@ void main() {
             ? '$origin/site/newsDetail/6186'
             : '$origin/info/1010/6186.htm',
         sourceId: source.id,
-        summary: '列表已有概览',
       );
       final repository = _FakeAnnouncementRepository(
         items: [item],
@@ -403,14 +414,15 @@ void main() {
         key: UniqueKey(),
         home: AnnouncementsPage(repository: repository),
       ));
-      await tester.pumpAndSettle();
+      await _pumpPendingList(tester);
       final header = find.byKey(
         const ValueKey('announcement-sticky-home-2026年9月'),
       );
       expect(header, findsNothing, reason: source.id);
+      expect(find.text(item.title), findsNothing, reason: source.id);
       expect(_cardOpacity(tester, item), 0, reason: source.id);
       pending.complete(AnnouncementCardData(
-        summary: item.summary,
+        summary: '所有来源都应在补齐概览和日期之后才把卡片加入列表，这段完整文字会占用两行。',
         dateText: '2026-09-18',
         publishedAt: DateTime(2026, 9, 18),
       ));
@@ -425,13 +437,16 @@ void main() {
           tester.widget<FadeTransition>(headerFade).opacity.value;
       expect(headerOpacity(), _cardOpacity(tester, item), reason: source.id);
       expect(find.text('2026-09-18'), findsOneWidget, reason: source.id);
-      await tester.pump();
+      final finalHeight = tester.getSize(find.byKey(ValueKey(item.url))).height;
+      await tester.pump(Duration.zero);
       await tester.pump(const Duration(milliseconds: 140));
       expect(_cardOpacity(tester, item), inExclusiveRange(0, 1),
           reason: source.id);
       expect(headerOpacity(), _cardOpacity(tester, item), reason: source.id);
       await tester.pumpAndSettle();
       expect(headerOpacity(), 1, reason: source.id);
+      expect(tester.getSize(find.byKey(ValueKey(item.url))).height, finalHeight,
+          reason: source.id);
       expect(_cardOpacity(tester, item), 1, reason: source.id);
       expect(repository.cardRequests, hasLength(1), reason: source.id);
       expect(repository.requestedSources, [source.id]);
@@ -488,8 +503,9 @@ void main() {
     await tester.pumpWidget(MaterialApp(
       home: AnnouncementsPage(repository: repository),
     ));
-    await tester.pumpAndSettle();
+    await _pumpPendingList(tester);
     expect(_cardOpacity(tester, dated), 1);
+    final datedRect = tester.getRect(find.byKey(ValueKey(dated.url)));
     final datedState = tester.state(find.byKey(ValueKey(dated.url)));
 
     void expectOriginalOrder() {
@@ -508,9 +524,9 @@ void main() {
     ));
     await tester.idle();
     await tester.pump();
-    expect(find.text('2026年8月'), findsOneWidget);
-    expect(find.text('2026-08-18'), findsOneWidget);
-    expectOriginalOrder();
+    expect(find.text(undated.title), findsNothing);
+    expect(find.text('2026年8月'), findsNothing);
+    expect(tester.getRect(find.byKey(ValueKey(dated.url))), datedRect);
     pending[crossSite.url]!.complete(AnnouncementCardData(
       summary: crossSite.summary,
       dateText: '2026-09-18',
@@ -518,14 +534,15 @@ void main() {
     ));
     await tester.idle();
     await tester.pump();
-    expect(find.text('2026年9月'), findsOneWidget);
-    expect(find.text('2026-09-18'), findsOneWidget);
-    expectOriginalOrder();
+    expect(find.text(crossSite.title), findsNothing);
+    expect(find.text('2026年9月'), findsNothing);
+    expect(tester.getRect(find.byKey(ValueKey(dated.url))), datedRect);
     pending[external.url]!.complete(
       AnnouncementCardData(summary: external.summary),
     );
     await tester.pumpAndSettle();
     expectOriginalOrder();
+    expect(tester.getRect(find.byKey(ValueKey(dated.url))), datedRect);
     for (final item in items) {
       expect(_cardOpacity(tester, item), 1);
       expect(find.text(item.summary), findsOneWidget);
@@ -545,7 +562,7 @@ void main() {
 
   for (final initiallyDated in [false, true]) {
     testWidgets(
-        'a slow first card does not hide its entered month '
+        'same-month cards wait in order without an undersized slot '
         'with initial dates $initiallyDated', (tester) async {
       final monthDate = DateTime(2026, 9, 18);
       final items = [
@@ -574,7 +591,7 @@ void main() {
       await tester.pumpWidget(MaterialApp(
         home: AnnouncementsPage(repository: repository),
       ));
-      await tester.pumpAndSettle();
+      await _pumpPendingList(tester);
       final header = find.byKey(
         const ValueKey('announcement-sticky-home-2026年9月'),
       );
@@ -592,17 +609,10 @@ void main() {
       ));
       await tester.idle();
       await tester.pump();
-      expect(header, findsOneWidget);
-      expect(find.text('2026-09-18'), findsNWidgets(initiallyDated ? 2 : 1));
-      expect(_cardOpacity(tester, items[0]), 0);
-      await tester.pump(const Duration(milliseconds: 55));
-      await tester.pump(const Duration(milliseconds: 140));
-      expect(_cardOpacity(tester, items[1]), inExclusiveRange(0, 1));
-      expect(headerOpacity(), _cardOpacity(tester, items[1]));
-      await tester.pumpAndSettle();
-      expect(headerOpacity(), 1);
-      expect(_cardOpacity(tester, items[1]), 1);
-      final enteredState = tester.state(find.byKey(ValueKey(items[1].url)));
+      expect(header, findsNothing);
+      expect(find.text(items[0].title), findsNothing);
+      expect(find.text(items[1].title), findsNothing);
+      expect(repository.cardRequests, hasLength(2));
       pending[0].complete(AnnouncementCardData(
         summary: items[0].summary,
         dateText: '2026-09-18',
@@ -612,11 +622,12 @@ void main() {
       await tester.pump();
       expect(header, findsOneWidget);
       expect(find.text('2026-09-18'), findsNWidgets(2));
-      expect(headerOpacity(), 1);
-      expect(_cardOpacity(tester, items[0]), 0);
-      expect(_cardOpacity(tester, items[1]), 1);
-      expect(
-          tester.state(find.byKey(ValueKey(items[1].url))), same(enteredState));
+      expect(headerOpacity(), _cardOpacity(tester, items[0]));
+      final firstHeight =
+          tester.getSize(find.byKey(ValueKey(items[0].url))).height;
+      await tester.pump(const Duration(milliseconds: 140));
+      expect(tester.getSize(find.byKey(ValueKey(items[0].url))).height,
+          firstHeight);
       await tester.pumpAndSettle();
       for (final item in items) {
         expect(_cardOpacity(tester, item), 1);
@@ -1033,8 +1044,8 @@ void main() {
     }
     expect(repository.previewRequests, contains(item.url));
     await tester.pump();
-    expect(find.text('电影学院通知'), findsOneWidget);
-    expect(find.text('2026-10-20'), findsOneWidget);
+    expect(find.text('电影学院通知'), findsNothing);
+    expect(find.text('2026-10-20'), findsNothing);
     expect(_cardOpacity(tester, item), 0);
     expect(repository.publicationDateRequests, isEmpty);
 
@@ -1062,10 +1073,10 @@ void main() {
     await tester.pumpWidget(
       MaterialApp(home: AnnouncementsPage(repository: repository)),
     );
-    await tester.pumpAndSettle();
+    await _pumpPendingList(tester);
 
-    expect(find.text(item.title), findsOneWidget);
-    expect(find.text(item.summary), findsOneWidget);
+    expect(find.text(item.title), findsNothing);
+    expect(find.text(item.summary), findsNothing);
     expect(find.text('2026-03-18'), findsNothing);
     expect(repository.previewRequests, isEmpty);
     expect(repository.publicationDateRequests, [same(item)]);
@@ -1110,10 +1121,10 @@ void main() {
       await tester.pumpWidget(
         MaterialApp(home: AnnouncementsPage(repository: repository)),
       );
-      await tester.pumpAndSettle();
+      await _pumpPendingList(tester);
 
-      expect(find.text(item.title), findsOneWidget);
-      expect(find.text(item.summary), findsOneWidget);
+      expect(find.text(item.title), findsNothing);
+      expect(find.text(item.summary), findsNothing);
       expect(repository.previewRequests, isEmpty);
       expect(repository.publicationDateRequests, [same(item)]);
       expect(_cardOpacity(tester, item), 0);
@@ -1158,18 +1169,17 @@ void main() {
     await tester.pumpWidget(
       MaterialApp(home: AnnouncementsPage(repository: repository)),
     );
-    await tester.pumpAndSettle();
+    await _pumpPendingList(tester);
     final controller = tester
         .widget<CustomScrollView>(find.byType(CustomScrollView))
         .controller!;
     final position = controller.position;
     final offset = controller.offset;
     final firstState = tester.state(find.byKey(ValueKey(first.url)));
-    final secondState = tester.state(find.byKey(ValueKey(second.url)));
+    final firstRect = tester.getRect(find.byKey(ValueKey(first.url)));
     expect(_cardOpacity(tester, first), 1);
     expect(_cardOpacity(tester, second), 0);
-    expect(tester.getTopLeft(find.text(first.title)).dy,
-        lessThan(tester.getTopLeft(find.text(second.title)).dy));
+    expect(find.text(second.title), findsNothing);
 
     date.complete(AnnouncementListItem(
       title: second.title,
@@ -1186,7 +1196,7 @@ void main() {
     expect(find.text('2026-09-18'), findsOneWidget);
     expect(_cardOpacity(tester, first), 1);
     expect(tester.state(find.byKey(ValueKey(first.url))), same(firstState));
-    expect(tester.state(find.byKey(ValueKey(second.url))), same(secondState));
+    expect(tester.getRect(find.byKey(ValueKey(first.url))), firstRect);
     await tester.pumpAndSettle();
 
     expect(find.text('2026-09-18'), findsOneWidget);
@@ -1200,7 +1210,7 @@ void main() {
     expect(controller.position, same(position));
     expect(controller.offset, offset);
     expect(tester.state(find.byKey(ValueKey(first.url))), same(firstState));
-    expect(tester.state(find.byKey(ValueKey(second.url))), same(secondState));
+    expect(tester.getRect(find.byKey(ValueKey(first.url))), firstRect);
     expect(_cardOpacity(tester, first), 1);
     expect(_cardOpacity(tester, second), 1);
     for (final item in [first, second]) {
@@ -1323,7 +1333,7 @@ void main() {
     await tester.pumpWidget(
       MaterialApp(home: AnnouncementsPage(repository: repository)),
     );
-    await tester.pumpAndSettle();
+    await _pumpPendingList(tester);
     expect(repository.publicationDateRequests, hasLength(1));
 
     await tester.pumpWidget(const MaterialApp(home: SizedBox.shrink()));
@@ -1371,7 +1381,7 @@ void main() {
     await tester.pumpWidget(
       MaterialApp(home: AnnouncementsPage(repository: repository)),
     );
-    await tester.pumpAndSettle();
+    await _pumpPendingList(tester);
     expect(_cardOpacity(tester, item), 0);
     await tester.tap(find.text(ready.title));
     await tester.pumpAndSettle();
@@ -1577,9 +1587,9 @@ void main() {
       MaterialApp(home: AnnouncementsPage(repository: repository)),
     );
     await tester.pump();
-    expect(find.byType(CustomScrollView), findsOneWidget);
-    expect(find.byType(RefreshIndicator), findsOneWidget);
-    expect(find.text(item.title), findsOneWidget);
+    expect(find.byType(CustomScrollView), findsNothing);
+    expect(find.byType(RefreshIndicator), findsNothing);
+    expect(find.text(item.title), findsNothing);
     expect(repository.previewRequests, [item.url]);
     expect(repository.publicationDateRequests, [same(item)]);
     expect(_cardOpacity(tester, item), 0);
@@ -1595,6 +1605,7 @@ void main() {
       dateText: '2026-10-25',
       publishedAt: DateTime(2026, 10, 25),
     ));
+    await tester.idle();
     await tester.pump();
     expect(find.text('完整正文摘要'), findsOneWidget);
     expect(find.text('2026-10-25'), findsOneWidget);
@@ -1759,10 +1770,8 @@ void main() {
       MaterialApp(home: AnnouncementsPage(repository: repository)),
     );
     await tester.pump(const Duration(milliseconds: 100));
-    expect(find.text('旧通知'), findsOneWidget);
-    expect(find.text('新通知'), findsOneWidget);
-    expect(tester.getTopLeft(find.text('新通知')).dy,
-        lessThan(tester.getTopLeft(find.text('旧通知')).dy));
+    expect(find.text('旧通知'), findsNothing);
+    expect(find.text('新通知'), findsNothing);
     pending.complete('新通知概览');
     await tester.pumpAndSettle();
     expect(find.text('新通知'), findsOneWidget);
@@ -1818,8 +1827,8 @@ void main() {
       MaterialApp(home: AnnouncementsPage(repository: repository)),
     );
     await tester.pump(const Duration(seconds: 2));
-    await tester.pumpAndSettle();
-    expect(find.text(item.title), findsOneWidget);
+    await _pumpPendingList(tester);
+    expect(find.text(item.title), findsNothing);
     pending.complete('延迟返回的概览');
     await tester.pumpAndSettle();
     expect(find.text('延迟返回的概览'), findsOneWidget);
@@ -1830,7 +1839,7 @@ void main() {
   testWidgets('scrolled-to cards wait for their preview before entering',
       (tester) async {
     final items = List.generate(
-      20,
+      30,
       (index) => AnnouncementListItem(
         title: '公告 $index',
         url: 'https://bksy.shu.edu.cn/info/1000/$index.htm',
@@ -1841,67 +1850,210 @@ void main() {
     final repository = _FakeAnnouncementRepository(
       items: items,
       details: const {},
-      previewFutures: {items[10].url: pending.future},
+      previewFutures: {items[20].url: pending.future},
     );
     await tester.pumpWidget(
       MaterialApp(home: AnnouncementsPage(repository: repository)),
     );
     await tester.pumpAndSettle();
-    expect(repository.previewRequests, isNot(contains(items[10].url)));
+    expect(repository.previewRequests, isNot(contains(items[20].url)));
 
-    await tester.scrollUntilVisible(
-      find.byKey(ValueKey(items[10].url)),
-      350,
-      scrollable: find.byType(Scrollable).first,
-    );
-    await tester.pump();
-    expect(repository.previewRequests, contains(items[10].url));
-    expect(find.text(items[10].title), findsOneWidget);
-    expect(_cardOpacity(tester, items[10]), 0);
+    final controller = tester
+        .widget<CustomScrollView>(find.byType(CustomScrollView))
+        .controller!;
+    for (var attempt = 0;
+        attempt < 6 && !repository.previewRequests.contains(items[20].url);
+        attempt++) {
+      controller.jumpTo(controller.position.maxScrollExtent);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 20));
+    }
+    expect(repository.previewRequests, contains(items[20].url));
+    expect(find.text(items[20].title), findsNothing);
+    expect(_cardOpacity(tester, items[20]), 0);
 
     pending.complete('滚动后才加载的摘要');
     await tester.pumpAndSettle();
-    expect(find.text(items[10].title), findsOneWidget);
+    await tester.scrollUntilVisible(
+      find.byKey(ValueKey(items[20].url)),
+      350,
+      scrollable: find.byType(Scrollable).first,
+    );
+    await tester.pumpAndSettle();
+    expect(find.text(items[20].title), findsOneWidget);
     expect(find.text('滚动后才加载的摘要'), findsOneWidget);
-    expect(_cardOpacity(tester, items[10]), 1);
+    expect(_cardOpacity(tester, items[20]), 1);
   });
 
-  testWidgets('a preview updates only its card without rebuilding the list',
+  testWidgets('prepared cards append without resizing or moving entered rows',
       (tester) async {
-    final pending = Completer<String?>();
-    const first = AnnouncementListItem(
-      title: '异步概览通知',
-      url: 'https://bksy.shu.edu.cn/info/1000/async.htm',
-      sourceId: 'bksy',
-    );
-    const second = AnnouncementListItem(
-      title: '保持不变的通知',
+    final middle = Completer<AnnouncementCardData>();
+    final last = Completer<AnnouncementCardData>();
+    final first = AnnouncementListItem(
+      title: '已经完整显示的公告',
       url: 'https://bksy.shu.edu.cn/info/1000/stable.htm',
       sourceId: 'bksy',
-      summary: '已有概览',
+      summary: '短概览',
+      dateText: '2026-10-20',
+      publishedAt: DateTime(2026, 10, 20),
+    );
+    const second = AnnouncementListItem(
+      title: '需要补齐两行概览的公告',
+      url: 'https://bksy.shu.edu.cn/info/1000/middle.htm',
+      sourceId: 'bksy',
+    );
+    const third = AnnouncementListItem(
+      title: '先于前一篇准备完成的公告',
+      url: 'https://bksy.shu.edu.cn/info/1000/last.htm',
+      sourceId: 'bksy',
     );
     final repository = _FakeAnnouncementRepository(
-      items: const [first, second],
+      items: [first, second, third],
       details: const {},
-      previewFutures: {first.url: pending.future},
+      cardFutures: {second.url: middle.future, third.url: last.future},
     );
-    await tester.pumpWidget(
-      MaterialApp(home: AnnouncementsPage(repository: repository)),
-    );
-    await tester.pumpAndSettle();
-    final list = tester.widget<CustomScrollView>(find.byType(CustomScrollView));
-    final unchangedTitle = tester.widget<Text>(find.text(second.title));
+    await tester.pumpWidget(MaterialApp(
+      home: AnnouncementsPage(repository: repository),
+    ));
+    await _pumpPendingList(tester);
+    expect(repository.cardRequests, hasLength(3));
+    expect(_cardOpacity(tester, first), 1);
     final firstTile = find.byKey(ValueKey(first.url));
-    final titleHeight = tester.getSize(firstTile).height;
-    pending.complete('稍后补齐的短概览');
+    final firstRect = tester.getRect(firstTile);
+    final firstState = tester.state(firstTile);
+    final controller = tester
+        .widget<CustomScrollView>(find.byType(CustomScrollView))
+        .controller!;
+    final offset = controller.offset;
+    expect(find.text(second.title), findsNothing);
+    expect(find.text(third.title), findsNothing);
+
+    last.complete(AnnouncementCardData(
+      summary: '提前准备好的第三篇概览',
+      dateText: '2026-08-18',
+      publishedAt: DateTime(2026, 8, 18),
+    ));
+    await tester.idle();
+    await tester.pump();
+    expect(find.text(third.title), findsNothing);
+    expect(tester.getRect(firstTile), firstRect);
+    expect(controller.offset, offset);
+
+    middle.complete(AnnouncementCardData(
+      summary: '这是一段需要显示成两行的完整公告概览，用来检查首次滑入以前卡片已经具有最终高度，'
+          '而不会在用户阅读时临时加上一段文字挤动其他公告。',
+      dateText: '2026-09-18',
+      publishedAt: DateTime(2026, 9, 18),
+    ));
+    await tester.idle();
+    await tester.pump();
+    final secondTile = find.byKey(ValueKey(second.url));
+    final thirdTile = find.byKey(ValueKey(third.url));
+    final secondHeight = tester.getSize(secondTile).height;
+    final thirdHeight = tester.getSize(thirdTile).height;
+    expect(find.text('2026年9月'), findsOneWidget);
+    expect(find.text('2026年8月'), findsOneWidget);
+    expect(_cardOpacity(tester, second), 0);
+    expect(tester.getRect(firstTile), firstRect);
+    await tester.pump(const Duration(milliseconds: 55));
+    await tester.pump(const Duration(milliseconds: 140));
+    expect(_cardOpacity(tester, second), inExclusiveRange(0, 1));
+    expect(tester.getSize(secondTile).height, secondHeight);
+    expect(tester.getSize(thirdTile).height, thirdHeight);
+    expect(tester.getRect(firstTile), firstRect);
     await tester.pumpAndSettle();
-    expect(find.text('稍后补齐的短概览'), findsOneWidget);
-    expect(tester.widget<CustomScrollView>(find.byType(CustomScrollView)),
-        same(list));
-    expect(tester.widget<Text>(find.text(second.title)), same(unchangedTitle));
-    expect(tester.getSize(firstTile).height, greaterThan(titleHeight));
-    expect(tester.getSize(firstTile).height, lessThan(104));
-    expect(repository.previewRequests, [first.url]);
+    expect(tester.getSize(secondTile).height, secondHeight);
+    expect(tester.getSize(thirdTile).height, thirdHeight);
+    expect(tester.getRect(firstTile), firstRect);
+    expect(tester.state(firstTile), same(firstState));
+    expect(controller.offset, offset);
+    expect(tester.getTopLeft(find.text(second.title)).dy,
+        lessThan(tester.getTopLeft(find.text(third.title)).dy));
+    expect(repository.cardRequests, hasLength(3));
+  });
+
+  testWidgets(
+      'preparing more cards preserves a scrolled reader and entered heights',
+      (tester) async {
+    final pending = {
+      for (var index = 6; index < 12; index++)
+        index: Completer<AnnouncementCardData>(),
+    };
+    final items = [
+      for (var index = 0; index < 30; index++)
+        AnnouncementListItem(
+          title: '浏览中的通知 $index',
+          url: 'https://utseus.shu.edu.cn/info/1010/${7000 + index}.htm',
+          sourceId: 'utseus',
+          summary: index < 6
+              ? '已完整显示的两行概览，用来让首批公告具备足够的滚动空间。'
+                  '这些内容在后续文章补齐时不能发生变化。'
+              : '',
+          dateText: index < 6 ? '2026-10-20' : '',
+          publishedAt: index < 6 ? DateTime(2026, 10, 20) : null,
+        ),
+    ];
+    final repository = _FakeAnnouncementRepository(
+      items: items,
+      details: const {},
+      cardFutures: {
+        for (final entry in pending.entries)
+          items[entry.key].url: entry.value.future,
+      },
+    );
+    await tester.pumpWidget(MaterialApp(
+      home: AnnouncementsPage(repository: repository),
+    ));
+    await _pumpPendingList(tester);
+    final controller = tester
+        .widget<CustomScrollView>(find.byType(CustomScrollView))
+        .controller!;
+    controller.jumpTo(100);
+    await _pumpPendingList(tester);
+    expect(repository.cardRequests.map((item) => item.url),
+        contains(items[6].url));
+    expect(repository.cardRequests.length, lessThanOrEqualTo(12));
+    final visible = find.byKey(ValueKey(items[2].url));
+    final rect = tester.getRect(visible);
+    final state = tester.state(visible);
+    final offset = controller.offset;
+    final position = controller.position;
+    final sizes = {
+      for (var index = 1; index < 5; index++)
+        index: tester.getSize(find.byKey(ValueKey(items[index].url))),
+    };
+    AnnouncementCardData completeCard(int index) => AnnouncementCardData(
+          summary: '后续公告 $index 返回的完整概览，在进入滚动布局前就必须确定最终高度。'
+              '这是一段会显示为两行的概览文字。',
+          dateText: '2026-09-18',
+          publishedAt: DateTime(2026, 9, 18),
+        );
+    pending[11]!.complete(completeCard(11));
+    await tester.idle();
+    await tester.pump();
+    expect(find.text(items[11].title), findsNothing);
+    expect(tester.getRect(visible), rect);
+    pending[6]!.complete(completeCard(6));
+    await tester.idle();
+    await tester.pump();
+    expect(controller.offset, offset);
+    expect(tester.getRect(visible), rect);
+    for (var index = 7; index < 11; index++) {
+      pending[index]!.complete(completeCard(index));
+    }
+    await tester.pumpAndSettle();
+    expect(controller.position, same(position));
+    expect(controller.offset, offset);
+    expect(tester.getRect(visible), rect);
+    expect(tester.state(visible), same(state));
+    for (final entry in sizes.entries) {
+      expect(tester.getSize(find.byKey(ValueKey(items[entry.key].url))),
+          entry.value);
+      expect(_cardOpacity(tester, items[entry.key]), 1);
+    }
+    expect(repository.cardRequests.map((item) => item.url).toSet(),
+        hasLength(repository.cardRequests.length));
+    expect(tester.takeException(), isNull);
   });
 
   testWidgets(
@@ -1963,11 +2115,13 @@ void main() {
     expect(repository.cardRequests, hasLength(1));
 
     network.complete(repository.items);
-    await tester.pumpAndSettle();
-    expect(find.byType(RefreshProgressIndicator), findsNothing);
+    await _pumpPendingList(tester);
+    expect(find.byType(RefreshProgressIndicator), findsOneWidget);
     expect(find.byType(LinearProgressIndicator), findsNothing);
     expect(repository.cardRequests, hasLength(2));
-    expect(_cardOpacity(tester, _listItem), 0);
+    expect(_cardOpacity(tester, _listItem), 1);
+    expect(tester.getSize(tile), oldSize);
+    expect(find.text('已有概览'), findsOneWidget);
     prepared.complete(const AnnouncementCardData(summary: '更新后的概览'));
     await tester.pumpAndSettle();
     expect(_cardOpacity(tester, _listItem), 1);
@@ -2038,12 +2192,13 @@ void main() {
     final refresh = tester
         .state<RefreshIndicatorState>(find.byType(RefreshIndicator))
         .show();
-    await tester.pumpAndSettle();
-    await refresh;
+    await _pumpPendingList(tester);
+    expect(find.text('刷新前的概览'), findsOneWidget);
     expect(find.text(item.title), findsOneWidget);
     expect(repository.previewRequests, [item.url, item.url]);
     updatedPreview.complete('刷新后的新概览');
     await tester.pumpAndSettle();
+    await refresh;
     expect(find.text('刷新后的新概览'), findsOneWidget);
     expect(find.text('刷新前的概览'), findsNothing);
     expect(repository.previewRequests, [item.url, item.url]);
@@ -2055,27 +2210,27 @@ void main() {
     final refreshed = Completer<AnnouncementCardData>();
     final futures = {_listItem.url: previous.future};
     final repository = _FakeAnnouncementRepository(
-      items: const [_listItem],
+      items: const [_readyListItem, _listItem],
       details: const {},
       cardFutures: futures,
     );
     await tester.pumpWidget(
       MaterialApp(home: AnnouncementsPage(repository: repository)),
     );
-    await tester.pumpAndSettle();
+    await _pumpPendingList(tester);
     futures[_listItem.url] = refreshed.future;
     final refresh = tester
         .state<RefreshIndicatorState>(find.byType(RefreshIndicator))
         .show();
-    await tester.pumpAndSettle();
+    await _pumpPendingList(tester);
     await refresh;
-    expect(repository.cardRequests, hasLength(2));
+    expect(repository.cardRequests, hasLength(4));
 
     previous.complete(const AnnouncementCardData(
       summary: '旧代次的概览',
       dateText: '2025-01-01',
     ));
-    await tester.pumpAndSettle();
+    await _pumpPendingList(tester);
     expect(find.text('旧代次的概览'), findsNothing);
     expect(_cardOpacity(tester, _listItem), 0);
 
@@ -2085,7 +2240,11 @@ void main() {
     ));
     await tester.pumpAndSettle();
     expect(find.text('刷新后的概览'), findsOneWidget);
-    expect(find.text('2026-10-26'), findsOneWidget);
+    expect(
+        find.descendant(
+            of: find.byKey(ValueKey(_listItem.url)),
+            matching: find.text('2026-10-26')),
+        findsOneWidget);
     expect(_cardOpacity(tester, _listItem), 1);
   });
 
@@ -2094,7 +2253,9 @@ void main() {
       (tester) async {
     final preview = Completer<String?>();
     final repository = _DeferredPageAnnouncementRepository(
-      previewFutures: {_listItem.url: preview.future},
+      previewFutures: {
+        'https://www.shu.edu.cn/info/1051/2.htm': preview.future
+      },
       withReadyCard: true,
     );
     await tester.pumpWidget(
@@ -2109,16 +2270,16 @@ void main() {
     await tester.pump();
     final homeList = find.byType(CustomScrollView, skipOffstage: false);
     final coveredList = tester.widget<CustomScrollView>(homeList);
-    preview.complete('返回列表后显示的概览');
     repository.nextPage.complete(const [
       _readyListItem,
       _listItem,
       AnnouncementListItem(
         title: '详情期间完成的下一页',
         url: 'https://www.shu.edu.cn/info/1051/2.htm',
-        summary: '下一页的概览',
       ),
     ]);
+    await tester.pump();
+    preview.complete('返回列表后显示的概览');
     await tester.pump(const Duration(milliseconds: 500));
     expect(tester.widget<CustomScrollView>(homeList), same(coveredList));
     expect(find.text('返回列表后显示的概览', skipOffstage: false), findsNothing);
@@ -2134,7 +2295,10 @@ void main() {
     expect(find.text('返回列表后显示的概览'), findsOneWidget);
     expect(find.text('详情期间完成的下一页'), findsOneWidget);
     expect(repository.pagesRequested, 1);
-    expect(repository.previewRequests, [_listItem.url]);
+    expect(
+        repository.previewRequests
+            .where((url) => url == 'https://www.shu.edu.cn/info/1051/2.htm'),
+        hasLength(1));
     expect(tester.takeException(), isNull);
   });
 
@@ -2161,7 +2325,7 @@ void main() {
     await tester.pumpWidget(
       MaterialApp(home: AnnouncementsPage(repository: repository)),
     );
-    await tester.pumpAndSettle();
+    await _pumpPendingList(tester);
     expect(repository.previewRequests, hasLength(2));
     await tester.pumpWidget(const SizedBox.shrink());
     success.complete('已卸载的概览');
@@ -2599,7 +2763,7 @@ void main() {
         await tester.pumpWidget(
           MaterialApp(home: AnnouncementsPage(repository: repository)),
         );
-        await tester.pumpAndSettle();
+        await _pumpPendingList(tester);
 
         void expectVisibleSourceSlot() {
           final newestTitle = find.text(newer.title).hitTestable();

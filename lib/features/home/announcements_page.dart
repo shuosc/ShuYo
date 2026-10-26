@@ -99,6 +99,7 @@ class _AnnouncementsPageState extends State<AnnouncementsPage> {
   int _requestGeneration = 0;
   final ValueNotifier<bool> _updatesPaused = ValueNotifier(false);
   Completer<void>? _listVisibilityGate;
+  final Set<_AnnouncementItemRow> _preparingCards = {};
 
   @override
   void initState() {
@@ -110,6 +111,7 @@ class _AnnouncementsPageState extends State<AnnouncementsPage> {
   @override
   void dispose() {
     _requestGeneration++;
+    _cancelCardPreparation();
     _listVisibilityGate?.complete();
     _listVisibilityGate = null;
     _updatesPaused.dispose();
@@ -144,14 +146,25 @@ class _AnnouncementsPageState extends State<AnnouncementsPage> {
     final sorted = orderAnnouncements(items);
     // Refreshes own new card states; pagination preserves entered presentations.
     final previous = loadNextPage ? _loaded?.cardsByUrl : null;
-    return _LoadedAnnouncementList(sorted, [
-      for (var index = 0; index < sorted.length; index++)
+    // Enrichment must not move an article that is already on screen.
+    final ordered = previous == null
+        ? sorted
+        : [
+            for (final row in _loaded!.cards) row.item,
+            for (final item in sorted)
+              if (!previous.containsKey(item.url)) item,
+          ];
+    final loaded = _LoadedAnnouncementList(ordered, [
+      for (var index = 0; index < ordered.length; index++)
         _AnnouncementItemRow(
           index,
-          sorted[index],
-          presentation: previous?[sorted[index].url]?.presentation,
+          ordered[index],
+          presentation: previous?[ordered[index].url]?.presentation,
         ),
     ]);
+    // Prepare ahead in parallel, but publish as soon as the first card settles.
+    await _prepareCards(loaded);
+    return loaded;
   }
 
   @override
@@ -171,9 +184,10 @@ class _AnnouncementsPageState extends State<AnnouncementsPage> {
         ],
         bottom: PreferredSize(
           preferredSize: const Size.fromHeight(3),
-          child: _isBusy && !_isPullRefreshing
-              ? const LinearProgressIndicator(minHeight: 3)
-              : const SizedBox(height: 3),
+          child:
+              (_isBusy || (_loaded?.preparing ?? false)) && !_isPullRefreshing
+                  ? const LinearProgressIndicator(minHeight: 3)
+                  : const SizedBox(height: 3),
         ),
       ),
       body: _buildList(),
@@ -271,6 +285,8 @@ class _AnnouncementsPageState extends State<AnnouncementsPage> {
           group[index].presentation.key: index,
       };
       final itemList = SliverList.builder(
+        // Refresh the extent estimate even when the old tail is off screen.
+        key: ValueKey(group.length),
         itemCount: group.length,
         findChildIndexCallback: (key) => indices[key],
         itemBuilder: (context, index) {
@@ -284,11 +300,9 @@ class _AnnouncementsPageState extends State<AnnouncementsPage> {
                 key: ValueKey(item.url),
                 index: itemRow.index,
                 item: item,
-                repository: widget.repository,
                 external: itemRow.external,
                 updatesPaused: _updatesPaused,
                 presentation: itemRow.presentation,
-                onPrepared: () => _onCardPrepared(itemRow),
                 onTap: () => unawaited(_openAnnouncement(item)),
               ),
               if (index + 1 < end - start &&
@@ -301,13 +315,11 @@ class _AnnouncementsPageState extends State<AnnouncementsPage> {
       if (header == null) {
         slivers.add(itemList);
       } else {
-        // A slow first article must not hold back an already entered month.
+        // Appending prepared cards must not fade an already entered month.
         var visibleCard = group.first.presentation;
         for (final row in group) {
           final candidate = row.presentation;
-          if (candidate.card != null &&
-              (visibleCard.card == null ||
-                  candidate.entrance.value > visibleCard.entrance.value)) {
+          if (candidate.entrance.value > visibleCard.entrance.value) {
             visibleCard = candidate;
           }
         }
@@ -345,27 +357,69 @@ class _AnnouncementsPageState extends State<AnnouncementsPage> {
     );
   }
 
-  void _onCardPrepared(_AnnouncementItemRow row) {
-    if (_loaded?.cardsByUrl[row.item.url]?.presentation != row.presentation ||
-        (row.presentation.card?.publishedAt ?? row.item.publishedAt) == null) {
-      return;
+  void _cancelCardPreparation() {
+    for (final row in _preparingCards.toList()) {
+      widget.repository.cancelCard(row.item);
     }
-    // Flutter batches completions into one build alongside the entered cards.
-    // Stable presentations keep their state when a resolved date changes groups.
-    setState(() {});
+  }
+
+  Future<void> _prepareCards(_LoadedAnnouncementList loaded) {
+    if (loaded.preparing) return Future.value();
+    final pending = loaded.cards
+        .where((row) => row.presentation.card == null)
+        .take(6)
+        .toList();
+    if (pending.isEmpty) return Future.value();
+    final generation = _requestGeneration;
+    loaded.preparing = true;
+    if (identical(_loaded, loaded)) setState(() {});
+    final work = [
+      for (final row in pending)
+        () async {
+          AnnouncementCardData card;
+          _preparingCards.add(row);
+          try {
+            card = await widget.repository.loadCard(row.item);
+          } on Object {
+            card = AnnouncementCardData.fromItem(row.item);
+          } finally {
+            _preparingCards.remove(row);
+          }
+          if (!await _waitForListVisibility(generation)) return;
+          final previousCount = loaded.visibleCount;
+          row.presentation.card = card;
+          // Only append a ready prefix. A later result can never insert content
+          // above entered cards or change their height, even while transparent.
+          if (identical(_loaded, loaded) &&
+              loaded.visibleCount != previousCount) {
+            setState(() {});
+          }
+        }(),
+    ];
+    unawaited(Future.wait(work).whenComplete(() {
+      loaded.preparing = false;
+      if (mounted && identical(_loaded, loaded)) {
+        setState(() {});
+        _scheduleLoadMoreCheck();
+      }
+    }));
+    return work.first;
   }
 
   void _onScroll() {
     if (_updatesPaused.value || !_scrollController.hasClients) {
       return;
     }
-    if (_scrollController.position.extentAfter > 280 ||
-        !_hasMore ||
-        _loadingMore ||
-        _isBusy) {
+    if (_scrollController.position.extentAfter > 280 || _isBusy) {
       return;
     }
-    unawaited(_loadNextPage());
+    final loaded = _loaded;
+    if (loaded == null || loaded.preparing) return;
+    if (loaded.visibleCount < loaded.cards.length) {
+      unawaited(_prepareCards(loaded));
+    } else if (_hasMore && !_loadingMore) {
+      unawaited(_loadNextPage());
+    }
   }
 
   Future<void> _chooseSource() async {
@@ -423,6 +477,7 @@ class _AnnouncementsPageState extends State<AnnouncementsPage> {
       ),
     );
     if (!mounted || choice == null) return;
+    _cancelCardPreparation();
     setState(() {
       _source = choice;
       _loaded = null;
@@ -496,6 +551,7 @@ class _AnnouncementsPageState extends State<AnnouncementsPage> {
     bool isPullRefresh = false,
   }) async {
     final generation = ++_requestGeneration;
+    _cancelCardPreparation();
     setState(() {
       _isBusy = true;
       _isPullRefreshing = isPullRefresh;
@@ -529,7 +585,7 @@ class _AnnouncementsPageState extends State<AnnouncementsPage> {
         SnackBar(content: Text(_friendlyError(failure))),
       );
     }
-    if (_loaded != null && _hasMore) _scheduleLoadMoreCheck();
+    if (_loaded != null) _scheduleLoadMoreCheck();
   }
 
   Future<bool> _waitForListVisibility(int generation) async {
@@ -585,11 +641,16 @@ class _LoadedAnnouncementList {
   final List<AnnouncementListItem> items;
   final List<_AnnouncementItemRow> cards;
   final Map<String, _AnnouncementItemRow> cardsByUrl;
+  bool preparing = false;
+
+  int get visibleCount =>
+      cards.takeWhile((row) => row.presentation.card != null).length;
 
   List<Object> get rows {
     final rows = <Object>[];
     String? previousMonth;
     for (final row in cards) {
+      if (row.presentation.card == null) break;
       final date = row.presentation.card?.publishedAt ?? row.item.publishedAt;
       final month = date == null ? null : '${date.year}年${date.month}月';
       if (month != null && month != previousMonth) {
@@ -679,6 +740,7 @@ class _AnnouncementCardPresentation {
   final key = GlobalKey();
   final entrance = ProxyAnimation(const AlwaysStoppedAnimation<double>(0));
   AnnouncementCardData? card;
+  bool entered = false;
 }
 
 Future<void> _openExternalAnnouncementUrl(
@@ -2211,21 +2273,17 @@ class _AnnouncementTile extends StatefulWidget {
     super.key,
     required this.index,
     required this.item,
-    required this.repository,
     required this.external,
     this.updatesPaused,
     required this.presentation,
-    required this.onPrepared,
     required this.onTap,
   });
 
   final int index;
   final AnnouncementListItem item;
-  final AnnouncementRepository repository;
   final bool external;
   final ValueNotifier<bool>? updatesPaused;
   final _AnnouncementCardPresentation presentation;
-  final VoidCallback onPrepared;
   final VoidCallback onTap;
 
   @override
@@ -2237,10 +2295,7 @@ class _AnnouncementTileState extends State<_AnnouncementTile>
   late final AnimationController _entrance;
   late final Animation<Offset> _slide;
   Timer? _entranceTimer;
-  int _cardGeneration = 0;
-  late AnnouncementCardData _card;
-  AnnouncementCardData? _pendingCard;
-  bool _cardReady = false;
+  AnnouncementCardData get _card => widget.presentation.card!;
 
   bool get _updatesPaused => widget.updatesPaused?.value ?? false;
 
@@ -2256,15 +2311,10 @@ class _AnnouncementTileState extends State<_AnnouncementTile>
       end: Offset.zero,
     ).chain(CurveTween(curve: Curves.easeOutCubic)).animate(_entrance);
     widget.updatesPaused?.addListener(_onUpdatePauseChanged);
-    final prepared = widget.presentation.card;
-    if (prepared == null) {
-      _loadCard();
-    } else {
-      _card = prepared;
-      _cardReady = true;
-      _entrance.value = 1;
-    }
+    _entrance.value = widget.presentation.entered ? 1 : 0;
     widget.presentation.entrance.parent = _entrance;
+    widget.presentation.entered = true;
+    _startEntrance();
   }
 
   @override
@@ -2275,57 +2325,10 @@ class _AnnouncementTileState extends State<_AnnouncementTile>
       widget.updatesPaused?.addListener(_onUpdatePauseChanged);
       _onUpdatePauseChanged();
     }
-    // Pagination can return the repository's enriched copy of an existing
-    // notice. Keep the entered snapshot until a real refresh so neither its
-    // height nor its entrance changes underneath the reader.
-    if (oldWidget.item.url != widget.item.url ||
-        oldWidget.item.sourceId != widget.item.sourceId ||
-        oldWidget.external != widget.external ||
-        oldWidget.repository != widget.repository ||
-        (!_cardReady &&
-            (oldWidget.item.summary != widget.item.summary ||
-                oldWidget.item.dateText != widget.item.dateText ||
-                oldWidget.item.publishedAt != widget.item.publishedAt))) {
-      oldWidget.repository.cancelCard(oldWidget.item);
-      _loadCard();
-    }
-  }
-
-  void _loadCard() {
-    final generation = ++_cardGeneration;
-    _entranceTimer?.cancel();
-    _entrance.reset();
-    _cardReady = false;
-    _pendingCard = null;
-    _card = AnnouncementCardData.fromItem(widget.item);
-    Future<AnnouncementCardData>.sync(
-        () => widget.repository.loadCard(widget.item)).then(
-      (card) => _completeCard(generation, card),
-      onError: (Object error, StackTrace stackTrace) {
-        // Failed preparation still exposes the original title and list fields.
-        _completeCard(generation, _card);
-      },
-    );
-  }
-
-  void _completeCard(int generation, AnnouncementCardData card) {
-    if (!mounted || generation != _cardGeneration) return;
-    if (_updatesPaused) {
-      _pendingCard = card;
-      return;
-    }
-    setState(() {
-      _card = card;
-      _cardReady = true;
-      widget.presentation.card = card;
-    });
-    widget.onPrepared();
-    _startEntrance();
   }
 
   void _startEntrance() {
-    if (!_cardReady ||
-        _updatesPaused ||
+    if (_updatesPaused ||
         _entrance.isCompleted ||
         (_entranceTimer?.isActive ?? false)) {
       return;
@@ -2344,25 +2347,17 @@ class _AnnouncementTileState extends State<_AnnouncementTile>
       _entrance.stop();
       return;
     }
-    final card = _pendingCard;
-    _pendingCard = null;
-    if (card != null) {
-      _completeCard(_cardGeneration, card);
-    } else {
-      _startEntrance();
-    }
+    _startEntrance();
   }
 
   @override
   void dispose() {
-    _cardGeneration++;
-    widget.repository.cancelCard(widget.item);
     widget.updatesPaused?.removeListener(_onUpdatePauseChanged);
     _entranceTimer?.cancel();
     // The month header can remain pinned after this tile leaves the viewport.
     if (identical(widget.presentation.entrance.parent, _entrance)) {
       widget.presentation.entrance.parent =
-          AlwaysStoppedAnimation<double>(_cardReady ? 1 : 0);
+          const AlwaysStoppedAnimation<double>(1);
     }
     _entrance.dispose();
     super.dispose();
@@ -2374,10 +2369,7 @@ class _AnnouncementTileState extends State<_AnnouncementTile>
       position: _slide,
       child: FadeTransition(
         opacity: _entrance,
-        child: IgnorePointer(
-          ignoring: !_cardReady,
-          child: _tile(_card.summary),
-        ),
+        child: _tile(_card.summary),
       ),
     );
   }
