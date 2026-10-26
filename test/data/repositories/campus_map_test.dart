@@ -179,7 +179,7 @@ void main() {
     final noCoordinates = data.places.firstWhere((p) => p.navigation == null);
     urls.clear();
     await expectLater(
-        service.open(CampusMapNavigationProvider.amap, noCoordinates),
+        () => service.open(CampusMapNavigationProvider.amap, noCoordinates),
         throwsA(isA<CampusMapNavigationException>()));
     expect(urls, isEmpty);
   });
@@ -187,7 +187,7 @@ void main() {
   test('unavailable external navigation reports a recoverable error', () async {
     final service = CampusMapNavigationService(launcher: (_) async => false);
     await expectLater(
-      service.open(CampusMapNavigationProvider.baidu,
+      () => service.open(CampusMapNavigationProvider.baidu,
           data.placeById['place_baoshan_building-a']!),
       throwsA(isA<CampusMapNavigationException>()),
     );
