@@ -97,7 +97,6 @@ class _AnnouncementsPageState extends State<AnnouncementsPage> {
   bool _hasMore = false;
   bool _loadMoreCheckScheduled = false;
   int _requestGeneration = 0;
-  int _cardPreparationVersion = 0;
   final ValueNotifier<bool> _updatesPaused = ValueNotifier(false);
   Completer<void>? _listVisibilityGate;
 
@@ -143,7 +142,16 @@ class _AnnouncementsPageState extends State<AnnouncementsPage> {
       loadNextPage: loadNextPage,
     );
     final sorted = orderAnnouncements(items);
-    return _LoadedAnnouncementList(sorted, _announcementRows(sorted));
+    // Refreshes own new card states; pagination preserves entered presentations.
+    final previous = loadNextPage ? _loaded?.cardsByUrl : null;
+    return _LoadedAnnouncementList(sorted, [
+      for (var index = 0; index < sorted.length; index++)
+        _AnnouncementItemRow(
+          index,
+          sorted[index],
+          presentation: previous?[sorted[index].url]?.presentation,
+        ),
+    ]);
   }
 
   @override
@@ -257,12 +265,19 @@ class _AnnouncementsPageState extends State<AnnouncementsPage> {
       }
       final end = position;
       if (start == end) continue;
+      final group = rows.sublist(start, end).cast<_AnnouncementItemRow>();
+      final indices = {
+        for (var index = 0; index < group.length; index++)
+          group[index].presentation.key: index,
+      };
       final itemList = SliverList.builder(
-        itemCount: end - start,
+        itemCount: group.length,
+        findChildIndexCallback: (key) => indices[key],
         itemBuilder: (context, index) {
-          final itemRow = rows[start + index] as _AnnouncementItemRow;
+          final itemRow = group[index];
           final item = itemRow.item;
           return Column(
+            key: itemRow.presentation.key,
             mainAxisSize: MainAxisSize.min,
             children: [
               _AnnouncementTile(
@@ -272,7 +287,8 @@ class _AnnouncementsPageState extends State<AnnouncementsPage> {
                 repository: widget.repository,
                 external: itemRow.external,
                 updatesPaused: _updatesPaused,
-                preparationVersion: _cardPreparationVersion,
+                presentation: itemRow.presentation,
+                onPrepared: () => _onCardPrepared(itemRow),
                 onTap: () => unawaited(_openAnnouncement(item)),
               ),
               if (index + 1 < end - start &&
@@ -285,10 +301,23 @@ class _AnnouncementsPageState extends State<AnnouncementsPage> {
       if (header == null) {
         slivers.add(itemList);
       } else {
+        // A slow first article must not hold back an already entered month.
+        var visibleCard = group.first.presentation;
+        for (final row in group) {
+          final candidate = row.presentation;
+          if (candidate.card != null &&
+              (visibleCard.card == null ||
+                  candidate.entrance.value > visibleCard.entrance.value)) {
+            visibleCard = candidate;
+          }
+        }
         slivers.add(SliverMainAxisGroup(slivers: [
           SliverPersistentHeader(
             pinned: true,
-            delegate: _AnnouncementStickyHeaderDelegate(month: header.label),
+            delegate: _AnnouncementStickyHeaderDelegate(
+              month: header.label,
+              opacity: visibleCard.entrance,
+            ),
           ),
           itemList,
         ]));
@@ -316,25 +345,14 @@ class _AnnouncementsPageState extends State<AnnouncementsPage> {
     );
   }
 
-  List<Object> _announcementRows(List<AnnouncementListItem> items) {
-    final rows = <Object>[];
-    String? previousMonth;
-    for (var index = 0; index < items.length; index++) {
-      final item = items[index];
-      final date = item.publishedAt;
-      if (date == null) {
-        rows.add(_AnnouncementItemRow(index, item));
-        previousMonth = null;
-        continue;
-      }
-      final month = '${date.year}年${date.month}月';
-      if (month != previousMonth) {
-        rows.add(_AnnouncementMonthHeader(month, index));
-        previousMonth = month;
-      }
-      rows.add(_AnnouncementItemRow(index, item));
+  void _onCardPrepared(_AnnouncementItemRow row) {
+    if (_loaded?.cardsByUrl[row.item.url]?.presentation != row.presentation ||
+        (row.presentation.card?.publishedAt ?? row.item.publishedAt) == null) {
+      return;
     }
-    return rows;
+    // Flutter batches completions into one build alongside the entered cards.
+    // Stable presentations keep their state when a resolved date changes groups.
+    setState(() {});
   }
 
   void _onScroll() {
@@ -502,9 +520,6 @@ class _AnnouncementsPageState extends State<AnnouncementsPage> {
       if (result != null) {
         _loaded = result;
         _hasMore = hasMore;
-        // Request cancellation and visible-card preparation have different
-        // lifetimes. Keep the entered cards intact until a new list succeeds.
-        _cardPreparationVersion++;
       } else if (_loaded == null) {
         _loadError = failure;
       }
@@ -564,25 +579,45 @@ class _AnnouncementsPageState extends State<AnnouncementsPage> {
 }
 
 class _LoadedAnnouncementList {
-  const _LoadedAnnouncementList(this.items, this.rows);
+  _LoadedAnnouncementList(this.items, this.cards)
+      : cardsByUrl = {for (final row in cards) row.item.url: row};
 
   final List<AnnouncementListItem> items;
-  final List<Object> rows;
+  final List<_AnnouncementItemRow> cards;
+  final Map<String, _AnnouncementItemRow> cardsByUrl;
+
+  List<Object> get rows {
+    final rows = <Object>[];
+    String? previousMonth;
+    for (final row in cards) {
+      final date = row.presentation.card?.publishedAt ?? row.item.publishedAt;
+      final month = date == null ? null : '${date.year}年${date.month}月';
+      if (month != null && month != previousMonth) {
+        rows.add(_AnnouncementMonthHeader(month));
+      }
+      rows.add(row);
+      previousMonth = month;
+    }
+    return rows;
+  }
 }
 
 class _AnnouncementMonthHeader {
-  const _AnnouncementMonthHeader(this.label, this.index);
+  const _AnnouncementMonthHeader(this.label);
 
   final String label;
-  final int index;
 }
 
 const _stickyHeaderExtent = 34.0;
 
 class _AnnouncementStickyHeaderDelegate extends SliverPersistentHeaderDelegate {
-  const _AnnouncementStickyHeaderDelegate({required this.month});
+  const _AnnouncementStickyHeaderDelegate({
+    required this.month,
+    required this.opacity,
+  });
 
   final String month;
+  final Animation<double> opacity;
 
   @override
   double get minExtent => maxExtent;
@@ -597,14 +632,19 @@ class _AnnouncementStickyHeaderDelegate extends SliverPersistentHeaderDelegate {
     return Material(
       key: ValueKey('announcement-sticky-home-$month'),
       color: Theme.of(context).scaffoldBackgroundColor,
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(16, 14, 16, 4),
-        child: Text(
-          month,
-          style: ShuYoTextStyles.meta(
-            color: colors.textSecondary,
-            size: 12.5,
-            weight: FontWeight.w600,
+      child: SizedBox.expand(
+        child: FadeTransition(
+          opacity: opacity,
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(16, 14, 16, 4),
+            child: Text(
+              month,
+              style: ShuYoTextStyles.meta(
+                color: colors.textSecondary,
+                size: 12.5,
+                weight: FontWeight.w600,
+              ),
+            ),
           ),
         ),
       ),
@@ -613,17 +653,29 @@ class _AnnouncementStickyHeaderDelegate extends SliverPersistentHeaderDelegate {
 
   @override
   bool shouldRebuild(_AnnouncementStickyHeaderDelegate oldDelegate) =>
-      month != oldDelegate.month;
+      month != oldDelegate.month || opacity != oldDelegate.opacity;
 }
 
 class _AnnouncementItemRow {
-  _AnnouncementItemRow(this.index, this.item);
+  _AnnouncementItemRow(
+    this.index,
+    this.item, {
+    _AnnouncementCardPresentation? presentation,
+  }) : presentation = presentation ?? _AnnouncementCardPresentation();
 
   final int index;
   final AnnouncementListItem item;
+  final _AnnouncementCardPresentation presentation;
   late final bool external =
       !AnnouncementTarget.resolve(item.url, sourceId: item.sourceId)
           .canOpenInApp;
+}
+
+/// Survives month regrouping and viewport recycling without retaining a ticker.
+class _AnnouncementCardPresentation {
+  final key = GlobalKey();
+  final entrance = ProxyAnimation(const AlwaysStoppedAnimation<double>(0));
+  AnnouncementCardData? card;
 }
 
 Future<void> _openExternalAnnouncementUrl(
@@ -2159,7 +2211,8 @@ class _AnnouncementTile extends StatefulWidget {
     required this.repository,
     required this.external,
     this.updatesPaused,
-    this.preparationVersion = 0,
+    required this.presentation,
+    required this.onPrepared,
     required this.onTap,
   });
 
@@ -2168,7 +2221,8 @@ class _AnnouncementTile extends StatefulWidget {
   final AnnouncementRepository repository;
   final bool external;
   final ValueNotifier<bool>? updatesPaused;
-  final int preparationVersion;
+  final _AnnouncementCardPresentation presentation;
+  final VoidCallback onPrepared;
   final VoidCallback onTap;
 
   @override
@@ -2199,7 +2253,15 @@ class _AnnouncementTileState extends State<_AnnouncementTile>
       end: Offset.zero,
     ).chain(CurveTween(curve: Curves.easeOutCubic)).animate(_entrance);
     widget.updatesPaused?.addListener(_onUpdatePauseChanged);
-    _loadCard();
+    final prepared = widget.presentation.card;
+    if (prepared == null) {
+      _loadCard();
+    } else {
+      _card = prepared;
+      _cardReady = true;
+      _entrance.value = 1;
+    }
+    widget.presentation.entrance.parent = _entrance;
   }
 
   @override
@@ -2215,7 +2277,6 @@ class _AnnouncementTileState extends State<_AnnouncementTile>
     // height nor its entrance changes underneath the reader.
     if (oldWidget.item.url != widget.item.url ||
         oldWidget.item.sourceId != widget.item.sourceId ||
-        oldWidget.preparationVersion != widget.preparationVersion ||
         oldWidget.external != widget.external ||
         oldWidget.repository != widget.repository ||
         (!_cardReady &&
@@ -2253,7 +2314,9 @@ class _AnnouncementTileState extends State<_AnnouncementTile>
     setState(() {
       _card = card;
       _cardReady = true;
+      widget.presentation.card = card;
     });
+    widget.onPrepared();
     _startEntrance();
   }
 
@@ -2293,6 +2356,11 @@ class _AnnouncementTileState extends State<_AnnouncementTile>
     widget.repository.cancelCard(widget.item);
     widget.updatesPaused?.removeListener(_onUpdatePauseChanged);
     _entranceTimer?.cancel();
+    // The month header can remain pinned after this tile leaves the viewport.
+    if (identical(widget.presentation.entrance.parent, _entrance)) {
+      widget.presentation.entrance.parent =
+          AlwaysStoppedAnimation<double>(_cardReady ? 1 : 0);
+    }
     _entrance.dispose();
     super.dispose();
   }

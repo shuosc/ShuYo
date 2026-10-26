@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/services.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shuyo/data/models/announcement.dart';
 import 'package:shuyo/data/models/announcement_source.dart';
@@ -302,53 +303,333 @@ Future<void> _openDetail(
 }
 
 void main() {
-  testWidgets('home month header stays pinned and switches at next month',
+  for (final textScale in [0.8, 1.0, 1.3]) {
+    testWidgets(
+        'home month header stays pinned and switches at next month '
+        'at $textScale text scale', (tester) async {
+      final items = [
+        for (var index = 0; index < 12; index++)
+          AnnouncementListItem(
+            title: '十月公告 $index',
+            url: 'https://example.org/oct/$index',
+            publishedAt: DateTime(2026, 10, 20 - index),
+            summary: '公告概览',
+          ),
+        for (var index = 0; index < 12; index++)
+          AnnouncementListItem(
+            title: '九月公告 $index',
+            url: 'https://example.org/sep/$index',
+            publishedAt: DateTime(2026, 9, 20 - index),
+            summary: '公告概览',
+          ),
+      ];
+      await tester.pumpWidget(MaterialApp(
+        builder: (context, child) => MediaQuery(
+          data: MediaQuery.of(context).copyWith(
+            textScaler: TextScaler.linear(textScale),
+          ),
+          child: child!,
+        ),
+        home: AnnouncementsPage(
+          repository:
+              _FakeAnnouncementRepository(items: items, details: const {}),
+        ),
+      ));
+      await tester.pump();
+      expect(tester.takeException(), isNull);
+      await tester.pumpAndSettle();
+      final scrollView = find.byType(CustomScrollView).first;
+      void expectHeaderExtent(String month) {
+        final header = find.byKey(ValueKey('announcement-sticky-home-$month'));
+        expect(tester.getSize(header).height, 34,
+            reason: '$month at text scale $textScale');
+        final persistentHeader = find.ancestor(
+          of: header,
+          matching: find.byType(SliverPersistentHeader),
+        );
+        final render = tester.renderObject<RenderSliverPinnedPersistentHeader>(
+          persistentHeader,
+        );
+        expect(render.geometry!.scrollExtent, 34);
+        expect(render.geometry!.maxScrollObstructionExtent, 34);
+        expect(render.geometry!.paintExtent, 34);
+      }
+
+      expectHeaderExtent('2026年10月');
+      await tester.drag(scrollView, const Offset(0, -400));
+      await tester.pumpAndSettle();
+      expectHeaderExtent('2026年10月');
+      expect(
+          tester
+              .getTopLeft(find
+                  .byKey(const ValueKey('announcement-sticky-home-2026年10月')))
+              .dy,
+          closeTo(tester.getTopLeft(scrollView).dy, 1));
+
+      final scrollable = tester.state<ScrollableState>(
+        find.descendant(of: scrollView, matching: find.byType(Scrollable)),
+      );
+      scrollable.position.jumpTo(scrollable.position.maxScrollExtent);
+      await tester.pumpAndSettle();
+      expectHeaderExtent('2026年9月');
+      expect(
+          tester
+              .getTopLeft(find
+                  .byKey(const ValueKey('announcement-sticky-home-2026年9月')))
+              .dy,
+          closeTo(tester.getTopLeft(scrollView).dy, 1));
+    });
+  }
+
+  testWidgets('every source reveals an enriched month with its card entrance',
       (tester) async {
-    final items = [
-      for (var index = 0; index < 12; index++)
-        AnnouncementListItem(
-          title: '十月公告 $index',
-          url: 'https://example.org/oct/$index',
-          publishedAt: DateTime(2026, 10, 20 - index),
-          summary: '公告概览',
-        ),
-      for (var index = 0; index < 12; index++)
-        AnnouncementListItem(
-          title: '九月公告 $index',
-          url: 'https://example.org/sep/$index',
-          publishedAt: DateTime(2026, 9, 20 - index),
-          summary: '公告概览',
-        ),
-    ];
+    for (final source in AnnouncementSource.all) {
+      final pending = Completer<AnnouncementCardData>();
+      final origin = Uri.parse(source.listUrl).origin;
+      final item = AnnouncementListItem(
+        title: '${source.name}补齐日期的公告',
+        url: source.id == 'shvfs'
+            ? '$origin/site/newsDetail/6186'
+            : '$origin/info/1010/6186.htm',
+        sourceId: source.id,
+        summary: '列表已有概览',
+      );
+      final repository = _FakeAnnouncementRepository(
+        items: [item],
+        details: const {},
+        cardFutures: {item.url: pending.future},
+      )..currentDefault = source;
+      await tester.pumpWidget(MaterialApp(
+        key: UniqueKey(),
+        home: AnnouncementsPage(repository: repository),
+      ));
+      await tester.pumpAndSettle();
+      final header = find.byKey(
+        const ValueKey('announcement-sticky-home-2026年9月'),
+      );
+      expect(header, findsNothing, reason: source.id);
+      expect(_cardOpacity(tester, item), 0, reason: source.id);
+      pending.complete(AnnouncementCardData(
+        summary: item.summary,
+        dateText: '2026-09-18',
+        publishedAt: DateTime(2026, 9, 18),
+      ));
+      await tester.idle();
+      await tester.pump();
+      expect(header, findsOneWidget, reason: source.id);
+      final headerFade = find.descendant(
+        of: header,
+        matching: find.byType(FadeTransition),
+      );
+      double headerOpacity() =>
+          tester.widget<FadeTransition>(headerFade).opacity.value;
+      expect(headerOpacity(), _cardOpacity(tester, item), reason: source.id);
+      expect(find.text('2026-09-18'), findsOneWidget, reason: source.id);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 140));
+      expect(_cardOpacity(tester, item), inExclusiveRange(0, 1),
+          reason: source.id);
+      expect(headerOpacity(), _cardOpacity(tester, item), reason: source.id);
+      await tester.pumpAndSettle();
+      expect(headerOpacity(), 1, reason: source.id);
+      expect(_cardOpacity(tester, item), 1, reason: source.id);
+      expect(repository.cardRequests, hasLength(1), reason: source.id);
+      expect(repository.requestedSources, [source.id]);
+      expect(tester.takeException(), isNull, reason: source.id);
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pump();
+    }
+  });
+
+  testWidgets('out-of-order month preparation preserves mixed notice order',
+      (tester) async {
+    tester.view.physicalSize = const Size(800, 1200);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final dated = AnnouncementListItem(
+      title: '已有日期的公告',
+      url: 'https://sfa.shu.edu.cn/info/1212/100.htm',
+      sourceId: 'sfa',
+      summary: '列表已有概览',
+      dateText: '2026-10-20',
+      publishedAt: DateTime(2026, 10, 20),
+    );
+    const external = AnnouncementListItem(
+      title: '没有日期的微信公告',
+      url: 'https://mp.weixin.qq.com/s/mixed-month-order',
+      sourceId: 'sfa',
+      summary: '微信公告概览',
+    );
+    const crossSite = AnnouncementListItem(
+      title: '招生网跨站公告',
+      url: 'https://bkzsw.shu.edu.cn/info/1798/38490.htm',
+      sourceId: 'sfa',
+      column: '通知公告',
+      summary: '跨站公告概览',
+    );
+    const undated = AnnouncementListItem(
+      title: '待补齐日期的站内公告',
+      url: 'https://sfa.shu.edu.cn/info/1212/101.htm',
+      sourceId: 'sfa',
+      summary: '站内公告概览',
+    );
+    final items = [dated, external, crossSite, undated];
+    final pending = {
+      for (final item in [external, crossSite, undated])
+        item.url: Completer<AnnouncementCardData>(),
+    };
+    final repository = _FakeAnnouncementRepository(
+      items: items,
+      details: const {},
+      cardFutures:
+          pending.map((url, completer) => MapEntry(url, completer.future)),
+    )..currentDefault = AnnouncementSource.byId('sfa');
     await tester.pumpWidget(MaterialApp(
-      home: AnnouncementsPage(
-        repository:
-            _FakeAnnouncementRepository(items: items, details: const {}),
-      ),
+      home: AnnouncementsPage(repository: repository),
     ));
     await tester.pumpAndSettle();
-    final scrollView = find.byType(CustomScrollView).first;
-    await tester.drag(scrollView, const Offset(0, -400));
-    await tester.pumpAndSettle();
-    expect(
-        tester
-            .getTopLeft(
-                find.byKey(const ValueKey('announcement-sticky-home-2026年10月')))
-            .dy,
-        closeTo(tester.getTopLeft(scrollView).dy, 1));
+    expect(_cardOpacity(tester, dated), 1);
+    final datedState = tester.state(find.byKey(ValueKey(dated.url)));
 
-    final scrollable = tester.state<ScrollableState>(
-      find.descendant(of: scrollView, matching: find.byType(Scrollable)),
+    void expectOriginalOrder() {
+      for (var index = 1; index < items.length; index++) {
+        expect(tester.getTopLeft(find.text(items[index - 1].title)).dy,
+            lessThan(tester.getTopLeft(find.text(items[index].title)).dy));
+      }
+      expect(tester.state(find.byKey(ValueKey(dated.url))), same(datedState));
+      expect(_cardOpacity(tester, dated), 1);
+    }
+
+    pending[undated.url]!.complete(AnnouncementCardData(
+      summary: undated.summary,
+      dateText: '2026-08-18',
+      publishedAt: DateTime(2026, 8, 18),
+    ));
+    await tester.idle();
+    await tester.pump();
+    expect(find.text('2026年8月'), findsOneWidget);
+    expect(find.text('2026-08-18'), findsOneWidget);
+    expectOriginalOrder();
+    pending[crossSite.url]!.complete(AnnouncementCardData(
+      summary: crossSite.summary,
+      dateText: '2026-09-18',
+      publishedAt: DateTime(2026, 9, 18),
+    ));
+    await tester.idle();
+    await tester.pump();
+    expect(find.text('2026年9月'), findsOneWidget);
+    expect(find.text('2026-09-18'), findsOneWidget);
+    expectOriginalOrder();
+    pending[external.url]!.complete(
+      AnnouncementCardData(summary: external.summary),
     );
-    scrollable.position.jumpTo(scrollable.position.maxScrollExtent);
     await tester.pumpAndSettle();
-    expect(
-        tester
-            .getTopLeft(
-                find.byKey(const ValueKey('announcement-sticky-home-2026年9月')))
-            .dy,
-        closeTo(tester.getTopLeft(scrollView).dy, 1));
+    expectOriginalOrder();
+    for (final item in items) {
+      expect(_cardOpacity(tester, item), 1);
+      expect(find.text(item.summary), findsOneWidget);
+      expect(
+          repository.cardRequests.where((request) => request.url == item.url),
+          hasLength(1));
+    }
+    expect(find.text('2026-10-20'), findsOneWidget);
+    expect(find.text('2026-09-18'), findsOneWidget);
+    expect(find.text('2026-08-18'), findsOneWidget);
+    final requestedCrossSite = repository.cardRequests
+        .singleWhere((request) => request.url == crossSite.url);
+    expect(requestedCrossSite.sourceId, crossSite.sourceId);
+    expect(requestedCrossSite.column, crossSite.column);
+    expect(tester.takeException(), isNull);
   });
+
+  for (final initiallyDated in [false, true]) {
+    testWidgets(
+        'a slow first card does not hide its entered month '
+        'with initial dates $initiallyDated', (tester) async {
+      final monthDate = DateTime(2026, 9, 18);
+      final items = [
+        for (var index = 0; index < 2; index++)
+          AnnouncementListItem(
+            title: index == 0 ? '较慢的首条公告' : '先就绪的第二条公告',
+            url: 'https://utseus.shu.edu.cn/info/1010/${6186 - index}.htm',
+            sourceId: 'utseus',
+            summary: '列表已有概览',
+            dateText: initiallyDated ? '2026-09-18' : '',
+            publishedAt: initiallyDated ? monthDate : null,
+          ),
+      ];
+      final pending = [
+        Completer<AnnouncementCardData>(),
+        Completer<AnnouncementCardData>(),
+      ];
+      final repository = _FakeAnnouncementRepository(
+        items: items,
+        details: const {},
+        cardFutures: {
+          for (var index = 0; index < items.length; index++)
+            items[index].url: pending[index].future,
+        },
+      )..currentDefault = AnnouncementSource.byId('utseus');
+      await tester.pumpWidget(MaterialApp(
+        home: AnnouncementsPage(repository: repository),
+      ));
+      await tester.pumpAndSettle();
+      final header = find.byKey(
+        const ValueKey('announcement-sticky-home-2026年9月'),
+      );
+      double headerOpacity() => tester
+          .widget<FadeTransition>(find.descendant(
+            of: header,
+            matching: find.byType(FadeTransition),
+          ))
+          .opacity
+          .value;
+      pending[1].complete(AnnouncementCardData(
+        summary: items[1].summary,
+        dateText: '2026-09-18',
+        publishedAt: monthDate,
+      ));
+      await tester.idle();
+      await tester.pump();
+      expect(header, findsOneWidget);
+      expect(find.text('2026-09-18'), findsNWidgets(initiallyDated ? 2 : 1));
+      expect(_cardOpacity(tester, items[0]), 0);
+      await tester.pump(const Duration(milliseconds: 55));
+      await tester.pump(const Duration(milliseconds: 140));
+      expect(_cardOpacity(tester, items[1]), inExclusiveRange(0, 1));
+      expect(headerOpacity(), _cardOpacity(tester, items[1]));
+      await tester.pumpAndSettle();
+      expect(headerOpacity(), 1);
+      expect(_cardOpacity(tester, items[1]), 1);
+      final enteredState = tester.state(find.byKey(ValueKey(items[1].url)));
+      pending[0].complete(AnnouncementCardData(
+        summary: items[0].summary,
+        dateText: '2026-09-18',
+        publishedAt: monthDate,
+      ));
+      await tester.idle();
+      await tester.pump();
+      expect(header, findsOneWidget);
+      expect(find.text('2026-09-18'), findsNWidgets(2));
+      expect(headerOpacity(), 1);
+      expect(_cardOpacity(tester, items[0]), 0);
+      expect(_cardOpacity(tester, items[1]), 1);
+      expect(
+          tester.state(find.byKey(ValueKey(items[1].url))), same(enteredState));
+      await tester.pumpAndSettle();
+      for (final item in items) {
+        expect(_cardOpacity(tester, item), 1);
+        expect(
+            repository.cardRequests.where((request) => request.url == item.url),
+            hasLength(1));
+      }
+      expect(headerOpacity(), 1);
+      expect(tester.getTopLeft(find.text(items[0].title)).dy,
+          lessThan(tester.getTopLeft(find.text(items[1].title)).dy));
+      expect(tester.takeException(), isNull);
+    });
+  }
 
   testWidgets('school notice tap surface spans the screen width',
       (tester) async {
@@ -878,8 +1159,15 @@ void main() {
       MaterialApp(home: AnnouncementsPage(repository: repository)),
     );
     await tester.pumpAndSettle();
-    final list = tester.widget<CustomScrollView>(find.byType(CustomScrollView));
-    final unchangedTitle = tester.widget<Text>(find.text(first.title));
+    final controller = tester
+        .widget<CustomScrollView>(find.byType(CustomScrollView))
+        .controller!;
+    final position = controller.position;
+    final offset = controller.offset;
+    final firstState = tester.state(find.byKey(ValueKey(first.url)));
+    final secondState = tester.state(find.byKey(ValueKey(second.url)));
+    expect(_cardOpacity(tester, first), 1);
+    expect(_cardOpacity(tester, second), 0);
     expect(tester.getTopLeft(find.text(first.title)).dy,
         lessThan(tester.getTopLeft(find.text(second.title)).dy));
 
@@ -891,14 +1179,35 @@ void main() {
       dateText: '2026-09-18',
       publishedAt: DateTime(2026, 9, 18),
     ));
+    await tester.idle();
+    await tester.pump();
+    expect(find.byKey(const ValueKey('announcement-sticky-home-2026年9月')),
+        findsOneWidget);
+    expect(find.text('2026-09-18'), findsOneWidget);
+    expect(_cardOpacity(tester, first), 1);
+    expect(tester.state(find.byKey(ValueKey(first.url))), same(firstState));
+    expect(tester.state(find.byKey(ValueKey(second.url))), same(secondState));
     await tester.pumpAndSettle();
 
     expect(find.text('2026-09-18'), findsOneWidget);
     expect(tester.getTopLeft(find.text(first.title)).dy,
         lessThan(tester.getTopLeft(find.text(second.title)).dy));
-    expect(tester.widget<CustomScrollView>(find.byType(CustomScrollView)),
-        same(list));
-    expect(tester.widget<Text>(find.text(first.title)), same(unchangedTitle));
+    expect(
+        tester
+            .widget<CustomScrollView>(find.byType(CustomScrollView))
+            .controller,
+        same(controller));
+    expect(controller.position, same(position));
+    expect(controller.offset, offset);
+    expect(tester.state(find.byKey(ValueKey(first.url))), same(firstState));
+    expect(tester.state(find.byKey(ValueKey(second.url))), same(secondState));
+    expect(_cardOpacity(tester, first), 1);
+    expect(_cardOpacity(tester, second), 1);
+    for (final item in [first, second]) {
+      expect(
+          repository.cardRequests.where((request) => request.url == item.url),
+          hasLength(1));
+    }
   });
 
   testWidgets('metadata for later rows starts after scrolling', (tester) async {
@@ -930,6 +1239,71 @@ void main() {
     expect(repository.publicationDateRequests.length,
         greaterThan(initialRequests));
     expect(repository.publicationDateRequests.length, lessThan(items.length));
+  });
+
+  testWidgets('resolved same-month dates keep later cards lazy',
+      (tester) async {
+    final date = DateTime(2026, 9, 18);
+    final items = [
+      for (var index = 0; index < 30; index++)
+        AnnouncementListItem(
+          title: '同月待补日期公告 $index',
+          url: 'https://utseus.shu.edu.cn/info/1010/${6200 + index}.htm',
+          sourceId: 'utseus',
+          summary: '列表已有概览',
+        ),
+    ];
+    final repository = _FakeAnnouncementRepository(
+      items: items,
+      details: const {},
+      publicationDateFutures: {
+        for (final item in items)
+          item.url: Future.value(AnnouncementListItem(
+            title: item.title,
+            url: item.url,
+            sourceId: item.sourceId,
+            summary: item.summary,
+            dateText: '2026-09-18',
+            publishedAt: date,
+          )),
+      },
+    )..currentDefault = AnnouncementSource.byId('utseus');
+    await tester.pumpWidget(MaterialApp(
+      home: AnnouncementsPage(repository: repository),
+    ));
+    await tester.pumpAndSettle();
+    final initialRequests = repository.cardRequests.length;
+    expect(initialRequests, greaterThan(0));
+    expect(initialRequests, lessThan(items.length));
+    expect(repository.publicationDateRequests, hasLength(initialRequests));
+    final header = find.byKey(
+      const ValueKey('announcement-sticky-home-2026年9月'),
+    );
+    expect(header, findsOneWidget);
+    expect(find.text('2026-09-18'), findsWidgets);
+    expect(repository.cardRequests.map((item) => item.url),
+        isNot(contains(items[15].url)));
+
+    final scrollable = find.byType(Scrollable).first;
+    await tester.scrollUntilVisible(
+      find.byKey(ValueKey(items[15].url)),
+      350,
+      scrollable: scrollable,
+    );
+    await tester.pumpAndSettle();
+    expect(repository.cardRequests.map((item) => item.url),
+        contains(items[15].url));
+    expect(repository.cardRequests.length, greaterThan(initialRequests));
+    expect(repository.cardRequests.length, lessThan(items.length));
+    expect(header, findsOneWidget);
+    expect(_cardOpacity(tester, items[15]), 1);
+
+    tester.state<ScrollableState>(scrollable).position.jumpTo(0);
+    await tester.pumpAndSettle();
+    expect(_cardOpacity(tester, items.first), 1);
+    expect(repository.cardRequests.map((item) => item.url).toSet(),
+        hasLength(repository.cardRequests.length));
+    expect(tester.takeException(), isNull);
   });
 
   testWidgets('a removed Film Academy card ignores its pending date',
