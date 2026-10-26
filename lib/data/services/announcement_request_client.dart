@@ -41,7 +41,6 @@ class AnnouncementRequestClient {
         _responses = AnnouncementMemoryCache<http.Response>(
           maxEntries: 300,
           maxBytes: 16 * 1024 * 1024,
-          ttl: const Duration(minutes: 5),
           sizeOf: (response) => response.bodyBytes.length,
           now: now,
         );

@@ -60,7 +60,6 @@ class AnnouncementApiClient {
         _articles = AnnouncementMemoryCache<_ArticleState>(
             maxEntries: 300,
             maxBytes: 1024 * 1024,
-            ttl: const Duration(minutes: 5),
             sizeOf: (state) => state.bytes,
             now: now);
 

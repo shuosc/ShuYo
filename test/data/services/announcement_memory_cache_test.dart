@@ -2,6 +2,43 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:shuyo/data/services/announcement_memory_cache.dart';
 
 void main() {
+  test(
+      'field updates retain the original TTL and cannot revive an expired entry',
+      () {
+    var now = DateTime(2026, 10, 27);
+    final cache = AnnouncementMemoryCache<String>(
+      maxEntries: 2,
+      maxBytes: 100,
+      sizeOf: (value) => value.length,
+      now: () => now,
+    );
+    cache.put('a', 'partial');
+    now = now.add(const Duration(minutes: 4));
+    cache.update('a', 'complete');
+    expect(cache.lookup('a')?.value, 'complete');
+    now = now.add(const Duration(minutes: 1));
+    cache.update('a', 'too late');
+    expect(cache.lookup('a'), isNull);
+    cache.update('absent', 'new');
+    expect(cache.lookup('absent'), isNull);
+  });
+
+  test('field updates account for their new size and retain the bounded budget',
+      () {
+    final cache = AnnouncementMemoryCache<String>(
+      maxEntries: 3,
+      maxBytes: 12,
+      sizeOf: (value) => value.length,
+    );
+    cache.put('a', '12');
+    cache.put('b', '12');
+    cache.update('b', '1234567');
+    expect(cache.lookup('a'), isNull);
+    expect(cache.lookup('b')?.value, '1234567');
+    cache.update('b', '12345678901');
+    expect(cache.lookup('b'), isNull);
+  });
+
   test('reads refresh LRU order without extending the cached value lifetime',
       () {
     var now = DateTime(2026, 10, 25);
