@@ -7,6 +7,24 @@ plugins {
     id("dev.flutter.flutter-gradle-plugin")
 }
 
+// Capture this checkout when Gradle configures the native app, including plain
+// `flutter run` builds. The installed app never queries a moving remote HEAD.
+fun gitValue(vararg arguments: String): String = try {
+    providers.exec {
+        workingDir(rootProject.projectDir.parentFile)
+        commandLine("git", *arguments)
+        isIgnoreExitValue = true
+    }.standardOutput.asText.get().trim()
+} catch (_: Exception) {
+    ""
+}
+
+fun buildConfigString(value: String): String =
+    "\"${value.replace("\\", "\\\\").replace("\"", "\\\"")}\""
+
+val gitCommit = gitValue("rev-parse", "--verify", "HEAD")
+val gitBranch = gitValue("symbolic-ref", "--quiet", "--short", "HEAD")
+
 val keystoreProperties = Properties()
 val keystorePropertiesFile = rootProject.file("key.properties")
 if (keystorePropertiesFile.exists()) {
@@ -17,6 +35,10 @@ android {
     namespace = "work.shuyo.app"
     compileSdk = flutter.compileSdkVersion
     ndkVersion = flutter.ndkVersion
+
+    buildFeatures {
+        buildConfig = true
+    }
 
     compileOptions {
         isCoreLibraryDesugaringEnabled = true
@@ -32,6 +54,8 @@ android {
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
+        buildConfigField("String", "GIT_BRANCH", buildConfigString(gitBranch))
+        buildConfigField("String", "GIT_COMMIT", buildConfigString(gitCommit))
     }
 
     signingConfigs {
