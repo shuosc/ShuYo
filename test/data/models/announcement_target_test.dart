@@ -28,6 +28,20 @@ void main() {
         department: false
       ),
       (
+        url: 'https://ac.shu.edu.cn/info/1010/2944.htm',
+        listedFrom: 'shu',
+        owner: 'ac',
+        kind: AnnouncementArticleKind.vsb,
+        department: false
+      ),
+      (
+        url: 'https://www.shu.edu.cn/info/1053/376905.htm',
+        listedFrom: 'ac',
+        owner: 'shu',
+        kind: AnnouncementArticleKind.vsb,
+        department: true
+      ),
+      (
         url: 'https://www.scie.shu.edu.cn/info/1022/1.htm',
         listedFrom: 'xiangying',
         owner: 'scie',

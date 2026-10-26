@@ -1,4 +1,3 @@
-import 'dart:convert';
 import 'dart:async';
 import 'dart:collection';
 
@@ -7,7 +6,6 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../models/announcement.dart';
 import '../models/announcement_source.dart';
 import '../models/announcement_target.dart';
-import '../models/common.dart';
 import '../services/announcement_api_client.dart';
 import '../services/announcement_memory_cache.dart';
 import '../services/announcement_order.dart';
@@ -22,7 +20,8 @@ class AnnouncementHomeSummary {
 enum AnnouncementMenuSection {
   favorites,
   schoolPortal,
-  schoolDepartment,
+  administrativeDepartment,
+  affiliatedInstitution,
   college,
   researchInstitute,
 }
@@ -30,7 +29,8 @@ enum AnnouncementMenuSection {
 typedef AnnouncementMenuExpansion = ({
   bool favorites,
   bool schoolPortal,
-  bool schoolDepartment,
+  bool administrativeDepartment,
+  bool affiliatedInstitution,
   bool college,
   bool researchInstitute,
 });
@@ -40,7 +40,6 @@ class AnnouncementRepository {
     AnnouncementApiClient? apiClient,
     Future<SharedPreferences> Function()? preferencesLoader,
     DateTime Function()? now,
-    this.autoRefreshInterval = defaultAutoRefreshInterval,
     this.cardLoadTimeout = cardPreparationTimeout,
   })  : _apiClient = apiClient ?? AnnouncementApiClient(),
         _preferencesLoader = preferencesLoader ?? SharedPreferences.getInstance,
@@ -52,41 +51,37 @@ class AnnouncementRepository {
     for (final request in _pendingCards.values.toList()) {
       _finishCard(request, cancelOptional: true);
     }
+    _lists.clear();
+    _recentDetails.clear();
     _apiClient.close();
   }
 
-  static const defaultAutoRefreshInterval = Duration(hours: 12);
   static const cardPreparationTimeout = Duration(seconds: 5);
-  static const _listCacheKey = 'announcements.list.cache';
-  static const _lastRefreshKey = 'announcements.lastRefreshAt';
-  static const _cacheVersionKey = 'announcements.cacheVersion';
   static const _defaultSourceKey =
       ClientSettingsService.defaultAnnouncementSourceKey;
   static const _favoritesKey = 'announcements.favoriteSources';
   static const _menuExpansionKey = 'announcements.menu.expanded';
-  static const _cacheVersion = 5;
-  static const _sourceCacheVersions = {'sfa': 9, 'cs': 6};
-  static int _cacheVersionFor(AnnouncementSource source) =>
-      _sourceCacheVersions[source.id] ?? _cacheVersion;
 
   final AnnouncementApiClient _apiClient;
   final Future<SharedPreferences> Function() _preferencesLoader;
   final DateTime Function() _now;
-  final Duration autoRefreshInterval;
   final Duration cardLoadTimeout;
 
-  final Map<String, List<AnnouncementListItem>> _memoryLists = {};
-  final Map<String, List<String?>> _nextPageUrls = {};
-  final Map<String, Set<String>> _visitedPageUrls = {};
+  late final _lists = AnnouncementMemoryCache<_AnnouncementListState>(
+    maxEntries: 12,
+    maxBytes: 8 * 1024 * 1024,
+    sizeOf: (state) => state.bytes,
+    now: _now,
+  );
   late final _recentDetails = AnnouncementMemoryCache<AnnouncementDetail>(
     maxEntries: 12,
     maxBytes: 8 * 1024 * 1024,
-    ttl: const Duration(minutes: 5),
     sizeOf: _detailCacheBytes,
     now: _now,
   );
   final Map<String, Future<AnnouncementDetail>> _pendingDetails = {};
-  final Map<String, Future<void>> _pendingListWrites = {};
+  Future<void>? _legacyCacheCleanup;
+  final Map<String, int> _listGenerations = {};
   final Map<String, int> _cacheGenerations = {};
   final Map<String, int> _articleGenerations = {};
   final Map<String, Set<String>> _sourceArticleUrls = {};
@@ -231,17 +226,17 @@ class AnnouncementRepository {
   }
 
   Future<AnnouncementSource> defaultSource() async {
-    final prefs = await _preferencesLoader();
+    final prefs = await _preferences();
     return AnnouncementSource.byId(prefs.getString(_defaultSourceKey));
   }
 
   Future<void> setDefaultSource(AnnouncementSource source) async {
-    final prefs = await _preferencesLoader();
+    final prefs = await _preferences();
     await prefs.setString(_defaultSourceKey, source.id);
   }
 
   Future<Set<String>> favoriteSourceIds() async {
-    final prefs = await _preferencesLoader();
+    final prefs = await _preferences();
     final known = AnnouncementSource.all.map((source) => source.id).toSet();
     return (prefs.getStringList(_favoritesKey) ?? const <String>[])
         .where(known.contains)
@@ -249,7 +244,7 @@ class AnnouncementRepository {
   }
 
   Future<Set<String>> toggleFavoriteSource(AnnouncementSource source) async {
-    final prefs = await _preferencesLoader();
+    final prefs = await _preferences();
     final ids = await favoriteSourceIds();
     if (!ids.add(source.id)) ids.remove(source.id);
     await prefs.setStringList(_favoritesKey, ids.toList());
@@ -257,8 +252,8 @@ class AnnouncementRepository {
   }
 
   Future<AnnouncementMenuExpansion> menuExpansion() async {
-    final prefs = await _preferencesLoader();
-    final schoolDepartmentExpanded =
+    final prefs = await _preferences();
+    final legacyDepartmentExpanded =
         prefs.getBool('$_menuExpansionKey.schoolDepartment') ??
             ((prefs.getBool('$_menuExpansionKey.campusAcademic') ??
                     prefs.getBool('$_menuExpansionKey.campus') ??
@@ -269,8 +264,13 @@ class AnnouncementRepository {
     return (
       favorites: prefs.getBool('$_menuExpansionKey.favorites') ?? true,
       schoolPortal: prefs.getBool('$_menuExpansionKey.schoolPortal') ??
-          schoolDepartmentExpanded,
-      schoolDepartment: schoolDepartmentExpanded,
+          legacyDepartmentExpanded,
+      administrativeDepartment:
+          prefs.getBool('$_menuExpansionKey.administrativeDepartment') ??
+              legacyDepartmentExpanded,
+      affiliatedInstitution:
+          prefs.getBool('$_menuExpansionKey.affiliatedInstitution') ??
+              legacyDepartmentExpanded,
       college: prefs.getBool('$_menuExpansionKey.college') ?? false,
       researchInstitute:
           prefs.getBool('$_menuExpansionKey.researchInstitute') ?? false,
@@ -281,7 +281,7 @@ class AnnouncementRepository {
     AnnouncementMenuSection section,
     bool expanded,
   ) async {
-    final prefs = await _preferencesLoader();
+    final prefs = await _preferences();
     await prefs.setBool('$_menuExpansionKey.${section.name}', expanded);
   }
 
@@ -289,66 +289,14 @@ class AnnouncementRepository {
     AnnouncementSource? source,
   }) async {
     final selected = source ?? await defaultSource();
-    if (_memoryLists.containsKey(selected.id)) {
-      final current = _keepActiveColumns(selected, _memoryLists[selected.id]!);
-      _memoryLists[selected.id] = current;
-      return current;
-    }
-    final prefs = await _preferencesLoader();
-    final raw = prefs.getString('$_listCacheKey.${selected.id}') ??
-        (selected == AnnouncementSource.official
-            ? prefs.getString(_listCacheKey)
-            : null);
-    if (raw == null || raw.isEmpty) {
-      return const <AnnouncementListItem>[];
-    }
-    final decoded = jsonDecode(raw);
-    if (decoded is! List) {
-      return const <AnnouncementListItem>[];
-    }
-    final items = decoded
-        .whereType<JsonMap>()
-        .map(AnnouncementListItem.fromJson)
-        .map(_withoutUnverifiedDate)
-        .toList();
-    final recent = _keepActiveColumns(
-      selected,
-      _mergeAnnouncements(const [], items),
-    );
-    _memoryLists[selected.id] = recent;
-    return recent;
-  }
-
-  static AnnouncementListItem _withoutUnverifiedDate(
-      AnnouncementListItem item) {
-    if (item.dateText.isNotEmpty || item.publishedAt == null) return item;
-    // Older caches can contain an ordering estimate without a verified date.
-    // Keep the article and let the shared metadata request resolve its date.
-    return AnnouncementListItem(
-      title: item.title,
-      url: item.url,
-      summary: item.summary,
-      sourceId: item.sourceId,
-      column: item.column,
-    );
-  }
-
-  List<AnnouncementListItem> _keepActiveColumns(
-    AnnouncementSource source,
-    List<AnnouncementListItem> items,
-  ) {
-    if (source.columnNames.isEmpty) return items;
-    final activeColumns = source.columnNames.toSet();
-    return items
-        .where((item) =>
-            item.column.isEmpty || activeColumns.contains(item.column))
-        .toList(growable: false);
+    return _lists.lookup(selected.id)?.value.items ?? const [];
   }
 
   bool hasMoreAnnouncements({AnnouncementSource? source}) {
     final id = source?.id;
     if (id == null) return false;
-    return _nextPageUrls[id]?.any((url) => url != null) ?? false;
+    return _lists.lookup(id)?.value.nextPageUrls.any((url) => url != null) ??
+        false;
   }
 
   Future<List<AnnouncementListItem>> fetchAnnouncements({
@@ -357,59 +305,50 @@ class AnnouncementRepository {
     bool loadNextPage = false,
   }) async {
     final selected = source ?? await defaultSource();
-    final cached = await loadCachedAnnouncements(source: selected);
+    if (_disposed) return const [];
+    final state = _lists.lookup(selected.id)?.value;
+    final cached = state?.items ?? const <AnnouncementListItem>[];
     if (forceRefresh && !loadNextPage) _invalidateSourceDetails(selected);
-    if (loadNextPage) {
-      final nextPageUrls = _nextPageUrls[selected.id];
-      if (nextPageUrls == null || !nextPageUrls.any((url) => url != null)) {
-        return cached;
-      }
-      try {
-        final visited = _visitedPageUrls.putIfAbsent(
-          selected.id,
-          () => selected.listUrls.toSet(),
-        )..addAll(nextPageUrls.whereType<String>());
-        final page = await _apiClient.fetchPage(
-          source: selected,
-          pageUrls: nextPageUrls,
-        );
-        _nextPageUrls[selected.id] = [
-          for (final next in page.nextPageUrls)
-            if (next != null && !visited.contains(next)) next else null,
-        ];
-        final merged = _mergeAnnouncements(
-            _memoryLists[selected.id] ?? cached, page.items);
-        await _saveList(selected, merged);
-        return merged;
-      } on Object {
-        if (cached.isNotEmpty) return cached;
-        rethrow;
-      }
-    }
-    if (!forceRefresh && !await _shouldAutoRefresh(selected)) {
-      return loadCachedAnnouncements(source: selected);
-    }
+    if (!forceRefresh && !loadNextPage && state != null) return cached;
+    final pageUrls = loadNextPage ? state?.nextPageUrls : null;
+    if (pageUrls != null && !pageUrls.any((url) => url != null)) return cached;
+    final generation = pageUrls == null
+        ? _listGenerations.update(selected.id, (value) => value + 1,
+            ifAbsent: () => 1)
+        : _listGenerations[selected.id] ?? 0;
+    final visited = pageUrls == null
+        ? selected.listUrls.toSet()
+        : {...state!.visitedPageUrls, ...pageUrls.whereType<String>()};
     try {
-      final page = await _apiClient.fetchPage(source: selected);
-      final visited = _visitedPageUrls[selected.id] = selected.listUrls.toSet();
-      _nextPageUrls[selected.id] = [
+      final page =
+          await _apiClient.fetchPage(source: selected, pageUrls: pageUrls);
+      if (!_isCurrentListGeneration(selected, generation)) {
+        return _lists.lookup(selected.id)?.value.items ?? const [];
+      }
+      final next = [
         for (final next in page.nextPageUrls)
           if (next != null && !visited.contains(next)) next else null,
       ];
       final items = _mergeAnnouncements(
-        _memoryLists[selected.id] ?? cached,
+        _lists.lookup(selected.id)?.value.items ?? cached,
         page.items,
-        preferIncomingOrder: true,
+        preferIncomingOrder: pageUrls == null,
       );
-      await _saveList(selected, items);
+      _lists.put(selected.id, _AnnouncementListState(items, next, visited));
       return items;
     } on Object {
+      if (!_isCurrentListGeneration(selected, generation)) {
+        return _lists.lookup(selected.id)?.value.items ?? const [];
+      }
       if (cached.isNotEmpty) {
         return cached;
       }
       rethrow;
     }
   }
+
+  bool _isCurrentListGeneration(AnnouncementSource source, int generation) =>
+      !_disposed && generation == (_listGenerations[source.id] ?? 0);
 
   /// Fills a visible card's missing date, including historical items that were
   /// not returned by the latest list page. Preserve its original list source.
@@ -436,47 +375,41 @@ class AnnouncementRepository {
       return null;
     }
     if (dated != null) {
-      // Disk writes must not delay a card's entrance. A source generation
-      // check in the patch also rejects results from an older refresh.
-      unawaited(_patchPublicationDate(dated, generation, articleGeneration));
+      _patchPublicationDate(dated, generation, articleGeneration);
     }
     return dated;
   }
 
-  Future<void> _patchPublicationDate(
-      AnnouncementListItem dated, int generation, int articleGeneration) async {
-    try {
-      final source = AnnouncementSource.byId(dated.sourceId);
-      if (source.id != dated.sourceId) return;
-      final current = await loadCachedAnnouncements(source: source);
-      final key = announcementUrlKey(dated.url);
-      if (_disposed ||
-          generation != (_cacheGenerations[source.id] ?? 0) ||
-          articleGeneration != (_articleGenerations[key] ?? 0)) {
-        return;
-      }
-      // Replace in place: optional date completion cannot move a card already
-      // being read, or change an external link's position among dated items.
-      final items =
-          List<AnnouncementListItem>.of(_memoryLists[source.id] ?? current);
-      final index = items.indexWhere((entry) =>
-          announcementUrlKey(entry.url) == key && entry.dateText.isEmpty);
-      if (index < 0) return;
-      final entry = items[index];
-      items[index] = AnnouncementListItem(
-        title: entry.title,
-        url: entry.url,
-        summary: entry.summary,
-        dateText: dated.dateText,
-        publishedAt: dated.publishedAt,
-        sourceId: entry.sourceId,
-        column: entry.column,
-      );
-      _memoryLists[source.id] = items;
-      await _persistList(source, markRefreshed: false);
-    } on Object {
-      // The verified fields remain usable even if optional persistence fails.
+  void _patchPublicationDate(
+      AnnouncementListItem dated, int generation, int articleGeneration) {
+    final current = _lists.lookup(dated.sourceId)?.value;
+    final key = announcementUrlKey(dated.url);
+    if (_disposed ||
+        current == null ||
+        generation != (_cacheGenerations[dated.sourceId] ?? 0) ||
+        articleGeneration != (_articleGenerations[key] ?? 0)) {
+      return;
     }
+    // Replace in place: optional date completion cannot move a card already
+    // being read, or change an external link's position among dated items.
+    final items = List<AnnouncementListItem>.of(current.items);
+    final index = items.indexWhere((entry) =>
+        announcementUrlKey(entry.url) == key && entry.dateText.isEmpty);
+    if (index < 0) return;
+    final entry = items[index];
+    items[index] = AnnouncementListItem(
+      title: entry.title,
+      url: entry.url,
+      summary: entry.summary,
+      dateText: dated.dateText,
+      publishedAt: dated.publishedAt,
+      sourceId: entry.sourceId,
+      column: entry.column,
+    );
+    _lists.update(
+        dated.sourceId,
+        _AnnouncementListState(
+            items, current.nextPageUrls, current.visitedPageUrls));
   }
 
   Future<AnnouncementDetail> fetchDetail(AnnouncementListItem item) {
@@ -513,7 +446,8 @@ class AnnouncementRepository {
         ifAbsent: () => 1);
     final urls = <String>{
       ...?_sourceArticleUrls[source.id],
-      for (final item in _memoryLists[source.id] ?? <AnnouncementListItem>[])
+      for (final item
+          in _lists.lookup(source.id)?.value.items ?? <AnnouncementListItem>[])
         announcementUrlKey(item.url),
     };
     for (final url in urls) {
@@ -567,55 +501,29 @@ class AnnouncementRepository {
     return AnnouncementHomeSummary('点击查看${source.name}公告');
   }
 
-  Future<bool> _shouldAutoRefresh(AnnouncementSource source) async {
+  Future<SharedPreferences> _preferences() async {
     final prefs = await _preferencesLoader();
-    if (prefs.getInt('$_cacheVersionKey.${source.id}') !=
-        _cacheVersionFor(source)) {
-      return true;
+    try {
+      await (_legacyCacheCleanup ??= _removeLegacyListCache(prefs));
+    } on Object {
+      // Retired data cleanup must not prevent reading or saving user settings.
+      _legacyCacheCleanup = null;
     }
-    final raw = prefs.getString('$_lastRefreshKey.${source.id}');
-    final lastRefresh = raw == null ? null : DateTime.tryParse(raw);
-    if (lastRefresh == null) {
-      return true;
-    }
-    return _now().difference(lastRefresh) >= autoRefreshInterval;
+    return prefs;
   }
 
-  Future<void> _saveList(
-    AnnouncementSource source,
-    List<AnnouncementListItem> items,
-  ) async {
-    final uniqueItems = _mergeAnnouncements(const [], items);
-    _memoryLists[source.id] = uniqueItems;
-    await _persistList(source);
-  }
-
-  Future<void> _persistList(AnnouncementSource source,
-      {bool markRefreshed = true}) {
-    final previous = _pendingListWrites[source.id] ?? Future<void>.value();
-    late final Future<void> task;
-    task = previous.catchError((Object _) {}).then((_) async {
-      final prefs = await _preferencesLoader();
-      final items = _memoryLists[source.id] ?? const <AnnouncementListItem>[];
-      await prefs.setString(
-        '$_listCacheKey.${source.id}',
-        jsonEncode(items.map((item) => item.toJson()).toList()),
-      );
-      if (markRefreshed) {
-        await prefs.setString(
-          '$_lastRefreshKey.${source.id}',
-          _now().toIso8601String(),
-        );
-        await prefs.setInt(
-            '$_cacheVersionKey.${source.id}', _cacheVersionFor(source));
-      }
-    }).whenComplete(() {
-      if (identical(_pendingListWrites[source.id], task)) {
-        _pendingListWrites.remove(source.id);
-      }
-    });
-    _pendingListWrites[source.id] = task;
-    return task;
+  static Future<void> _removeLegacyListCache(SharedPreferences prefs) async {
+    const retiredKeys = [
+      'announcements.list.cache',
+      'announcements.lastRefreshAt',
+      'announcements.cacheVersion'
+    ];
+    final keys = prefs
+        .getKeys()
+        .where((key) =>
+            retiredKeys.any((base) => key == base || key.startsWith('$base.')))
+        .toList();
+    await Future.wait(keys.map(prefs.remove));
   }
 
   List<AnnouncementListItem> _mergeAnnouncements(
@@ -659,6 +567,32 @@ class AnnouncementRepository {
     };
     return orderAnnouncements([for (final key in keys) byUrl[key]!]);
   }
+}
+
+class _AnnouncementListState {
+  _AnnouncementListState(
+      List<AnnouncementListItem> items, this.nextPageUrls, this.visitedPageUrls)
+      : items = List.of(items);
+
+  final List<AnnouncementListItem> items;
+  final List<String?> nextPageUrls;
+  final Set<String> visitedPageUrls;
+
+  int get bytes =>
+      items.fold<int>(
+          0,
+          (total, item) =>
+              total +
+              (item.title.length +
+                      item.url.length +
+                      item.summary.length +
+                      item.dateText.length +
+                      item.sourceId.length +
+                      item.column.length) *
+                  2 +
+              8) +
+      [...nextPageUrls.whereType<String>(), ...visitedPageUrls]
+          .fold<int>(0, (total, url) => total + url.length * 2);
 }
 
 class _QueuedAnnouncementCard {

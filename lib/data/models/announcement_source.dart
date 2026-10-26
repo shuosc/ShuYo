@@ -66,7 +66,8 @@ enum AnnouncementCollegeCategory {
 
 enum AnnouncementSourceGroup {
   schoolPortal('学校门户'),
-  schoolDepartment('学校下属部门'),
+  administrativeDepartment('行政部门'),
+  affiliatedInstitution('直属机构'),
   college('学院'),
   researchInstitute('研究院所');
 
@@ -93,8 +94,7 @@ class AnnouncementSource {
     required this.adapter,
     this.additionalListUrls = const [],
     this.columnNames = const [],
-    this.group = AnnouncementSourceGroup.schoolDepartment,
-    this.hasBrowsingLimitations = false,
+    this.group = AnnouncementSourceGroup.administrativeDepartment,
   });
 
   final String id;
@@ -105,7 +105,6 @@ class AnnouncementSource {
   final List<String> additionalListUrls;
   final List<String> columnNames;
   final AnnouncementSourceGroup group;
-  final bool hasBrowsingLimitations;
 
   List<String> get listUrls => [listUrl, ...additionalListUrls];
 
@@ -231,6 +230,7 @@ class AnnouncementSource {
         listFormat: AnnouncementListFormat.rightList,
         hideListColumn: true,
       ),
+      group: AnnouncementSourceGroup.affiliatedInstitution,
     ),
     AnnouncementSource(
       id: 'alumni',
@@ -245,6 +245,7 @@ class AnnouncementSource {
       listUrl: 'https://shuedf.shu.edu.cn/sylm/tzgg.htm',
       adapter: AnnouncementSourceAdapter(
           listFormat: AnnouncementListFormat.whitespaceList),
+      group: AnnouncementSourceGroup.affiliatedInstitution,
     ),
     AnnouncementSource(
       id: 'kyglb',
@@ -252,6 +253,16 @@ class AnnouncementSource {
       listUrl: 'https://kyglb.shu.edu.cn/dhl/tzgg.htm',
       adapter: AnnouncementSourceAdapter(
           listFormat: AnnouncementListFormat.unorderedList),
+    ),
+    AnnouncementSource(
+      id: 'ac',
+      name: '学术委员会',
+      listUrl: 'https://ac.shu.edu.cn/synr/tzfw.htm',
+      additionalListUrls: ['https://ac.shu.edu.cn/synr/sdxs.htm'],
+      columnNames: ['通知发文', '上大学术'],
+      adapter: AnnouncementSourceAdapter(
+        listFormat: AnnouncementListFormat.vsbNewList,
+      ),
     ),
     AnnouncementSource(
       id: 'baoweichu',
@@ -296,6 +307,7 @@ class AnnouncementSource {
       listUrl: 'https://xyy.shu.edu.cn/sylm/ggl.htm',
       adapter: AnnouncementSourceAdapter(
           listFormat: AnnouncementListFormat.vsbTable),
+      group: AnnouncementSourceGroup.affiliatedInstitution,
     ),
     AnnouncementSource(
       id: 'archive',
@@ -304,6 +316,7 @@ class AnnouncementSource {
       adapter: AnnouncementSourceAdapter(
         listFormat: AnnouncementListFormat.bareSpanList,
       ),
+      group: AnnouncementSourceGroup.affiliatedInstitution,
     ),
     AnnouncementSource(
       id: 'sbc',
@@ -485,7 +498,7 @@ class AnnouncementSource {
       listUrl: 'https://museum.shu.edu.cn/bggk/xwkd.htm',
       adapter: AnnouncementSourceAdapter(
           listFormat: AnnouncementListFormat.bareSpanList),
-      group: AnnouncementSourceGroup.schoolDepartment,
+      group: AnnouncementSourceGroup.affiliatedInstitution,
     ),
     AnnouncementSource(
       id: 'suns',
@@ -723,7 +736,6 @@ class AnnouncementSource {
     ),
     AnnouncementSource(
       id: 'sfa',
-      hasBrowsingLimitations: true,
       name: '上海电影学院',
       listUrl: 'https://sfa.shu.edu.cn/index/tzgg.htm',
       adapter: AnnouncementSourceAdapter(
@@ -732,7 +744,6 @@ class AnnouncementSource {
     ),
     AnnouncementSource(
       id: 'shvfs',
-      hasBrowsingLimitations: true,
       name: '上海温哥华电影学院',
       listUrl: 'https://www.shvfs.cn/site/news/4',
       additionalListUrls: ['https://www.shvfs.cn/site/news/8'],
@@ -810,7 +821,6 @@ class AnnouncementSource {
     ),
     AnnouncementSource(
       id: 'utseus',
-      hasBrowsingLimitations: true,
       name: '中欧工程技术学院',
       listUrl: 'https://utseus.shu.edu.cn/symkzj/gg.htm',
       adapter: AnnouncementSourceAdapter(
@@ -819,26 +829,34 @@ class AnnouncementSource {
     ),
   ];
 
-  static const _schoolDepartmentOrder = <String>[
-    'bksy',
-    'gs',
+  // Follow the university's organization directory. Party and mass
+  // organizations share the administrative section in this two-group menu.
+  static const _administrativeDepartmentOrder = <String>[
     'xgb',
     'dwygb',
     'youth',
-    'kyglb',
-    'global',
-    'alumni',
-    'shuedf',
+    'ac',
     'hr',
+    'kyglb',
+    'gs',
+    'bksy',
     'cwc',
+    'alumni',
+    'its',
+    'global',
+    'hbb',
+    'baoweichu',
     'sbc',
+  ];
+
+  // The directory lists the first three as affiliated units; the internal
+  // hospital and nonprofit foundation are grouped with these service entities.
+  static const _affiliatedInstitutionOrder = <String>[
     'lib',
     'archive',
     'museum',
-    'its',
-    'hbb',
-    'baoweichu',
     'xyy',
+    'shuedf',
   ];
 
   static const _researchInstituteOrder = <String>[
@@ -858,6 +876,13 @@ class AnnouncementSource {
     'fpd',
   ];
 
+  static const _groupOrders = {
+    AnnouncementSourceGroup.administrativeDepartment:
+        _administrativeDepartmentOrder,
+    AnnouncementSourceGroup.affiliatedInstitution: _affiliatedInstitutionOrder,
+    AnnouncementSourceGroup.researchInstitute: _researchInstituteOrder,
+  };
+
   static List<AnnouncementSource> inGroup(AnnouncementSourceGroup group) {
     if (group == AnnouncementSourceGroup.college) {
       return [
@@ -865,11 +890,8 @@ class AnnouncementSource {
           ...inCollegeCategory(category),
       ];
     }
-    if (group == AnnouncementSourceGroup.schoolDepartment ||
-        group == AnnouncementSourceGroup.researchInstitute) {
-      final order = group == AnnouncementSourceGroup.schoolDepartment
-          ? _schoolDepartmentOrder
-          : _researchInstituteOrder;
+    final order = _groupOrders[group];
+    if (order != null) {
       final sourcesById = {
         for (final source in all)
           if (source.group == group) source.id: source,

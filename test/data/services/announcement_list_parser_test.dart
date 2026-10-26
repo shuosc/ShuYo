@@ -202,9 +202,9 @@ void main() {
     expect(AnnouncementListParser.profiles.keys,
         unorderedEquals(AnnouncementListFormat.values));
     expect(_samples.keys, unorderedEquals(AnnouncementListFormat.values));
-    expect(AnnouncementSource.all, hasLength(72));
+    expect(AnnouncementSource.all, hasLength(73));
     expect(AnnouncementSource.all.expand((source) => source.listUrls),
-        hasLength(116));
+        hasLength(118));
   });
 
   for (final source in AnnouncementSource.all) {

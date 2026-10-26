@@ -92,9 +92,12 @@ class _AnnouncementsPageState extends State<AnnouncementsPage> {
   _LoadedAnnouncementList? _loaded;
   Object? _loadError;
   bool _isBusy = true;
+  bool _isPullRefreshing = false;
   bool _loadingMore = false;
   bool _hasMore = false;
+  bool _loadMoreCheckScheduled = false;
   int _requestGeneration = 0;
+  int _cardPreparationVersion = 0;
   final ValueNotifier<bool> _updatesPaused = ValueNotifier(false);
   Completer<void>? _listVisibilityGate;
 
@@ -160,7 +163,7 @@ class _AnnouncementsPageState extends State<AnnouncementsPage> {
         ],
         bottom: PreferredSize(
           preferredSize: const Size.fromHeight(3),
-          child: _isBusy
+          child: _isBusy && !_isPullRefreshing
               ? const LinearProgressIndicator(minHeight: 3)
               : const SizedBox(height: 3),
         ),
@@ -172,12 +175,10 @@ class _AnnouncementsPageState extends State<AnnouncementsPage> {
   Widget _buildSourceInfo() {
     final source = _source;
     if (source == null) return const SizedBox.shrink();
-    final limitationNotice =
-        source.hasBrowsingLimitations ? '\n由于网站限制，浏览有概率出现问题' : '';
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
       child: Text(
-        '通知来源：${source.name} ${Uri.parse(source.listUrl).host}$limitationNotice',
+        '通知来源：${source.name} ${Uri.parse(source.listUrl).host}',
         textAlign: TextAlign.center,
         style: ShuYoTextStyles.meta(color: context.shuyoColors.textMuted),
       ),
@@ -207,7 +208,7 @@ class _AnnouncementsPageState extends State<AnnouncementsPage> {
     if (items.isEmpty) {
       return _withAnnouncementScrollbar(
         RefreshIndicator(
-          onRefresh: _refresh,
+          onRefresh: () => _refresh(isPullRefresh: true),
           child: ListView(
             controller: _scrollController,
             physics: const AlwaysScrollableScrollPhysics(),
@@ -227,7 +228,7 @@ class _AnnouncementsPageState extends State<AnnouncementsPage> {
     final rows = loaded.rows;
     return _withAnnouncementScrollbar(
       RefreshIndicator(
-        onRefresh: _refresh,
+        onRefresh: () => _refresh(isPullRefresh: true),
         child: CustomScrollView(
           controller: _scrollController,
           physics: const AlwaysScrollableScrollPhysics(),
@@ -269,11 +270,9 @@ class _AnnouncementsPageState extends State<AnnouncementsPage> {
                 index: itemRow.index,
                 item: item,
                 repository: widget.repository,
-                external: !AnnouncementTarget.resolve(item.url,
-                        sourceId: item.sourceId)
-                    .canOpenInApp,
+                external: itemRow.external,
                 updatesPaused: _updatesPaused,
-                preparationVersion: _requestGeneration,
+                preparationVersion: _cardPreparationVersion,
                 onTap: () => unawaited(_openAnnouncement(item)),
               ),
               if (index + 1 < end - start &&
@@ -366,9 +365,10 @@ class _AnnouncementsPageState extends State<AnnouncementsPage> {
       expansion = (
         favorites: true,
         schoolPortal: true,
+        administrativeDepartment: true,
+        affiliatedInstitution: true,
         college: false,
         researchInstitute: false,
-        schoolDepartment: true,
       );
     }
     if (!mounted || _source == null) return;
@@ -383,10 +383,7 @@ class _AnnouncementsPageState extends State<AnnouncementsPage> {
           position: Tween<Offset>(
             begin: const Offset(0.18, 0),
             end: Offset.zero,
-          ).animate(CurvedAnimation(
-            parent: animation,
-            curve: Curves.easeOutCubic,
-          )),
+          ).chain(CurveTween(curve: Curves.easeOutCubic)).animate(animation),
           child: FadeTransition(opacity: animation, child: child),
         );
       },
@@ -414,14 +411,15 @@ class _AnnouncementsPageState extends State<AnnouncementsPage> {
       _loadError = null;
       _hasMore = false;
       _isBusy = true;
+      _isPullRefreshing = false;
     });
     await _fetchPage(choice, forceRefresh: true);
   }
 
-  Future<void> _refresh() async {
+  Future<void> _refresh({bool isPullRefresh = false}) async {
     final source = _source;
     if (source == null || _isBusy || _updatesPaused.value) return;
-    await _fetchPage(source, forceRefresh: true);
+    await _fetchPage(source, forceRefresh: true, isPullRefresh: isPullRefresh);
   }
 
   Future<void> _loadNextPage() async {
@@ -438,32 +436,38 @@ class _AnnouncementsPageState extends State<AnnouncementsPage> {
       _loadingMore = true;
       _isBusy = true;
     });
+    _LoadedAnnouncementList? result;
+    Object? failure;
+    var hasMore = false;
     try {
       final loaded = await _loadList(source, loadNextPage: true);
-      if (!await _waitForListVisibility(generation)) return;
-      setState(() {
-        _loaded = loaded;
-        _hasMore = widget.repository.hasMoreAnnouncements(source: source);
-      });
+      hasMore = widget.repository.hasMoreAnnouncements(source: source);
+      result = loaded;
     } on Object catch (error) {
-      if (await _waitForListVisibility(generation) && mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(_friendlyError(error))),
-        );
-      }
-    } finally {
-      if (await _waitForListVisibility(generation)) {
-        setState(() {
-          _loadingMore = false;
-          _isBusy = false;
-        });
-        _scheduleLoadMoreCheck();
-      }
+      failure = error;
     }
+    if (!await _waitForListVisibility(generation) || !mounted) return;
+    setState(() {
+      _loadingMore = false;
+      _isBusy = false;
+      if (result != null) {
+        _loaded = result;
+        _hasMore = hasMore;
+      }
+    });
+    if (failure != null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(_friendlyError(failure))),
+      );
+    }
+    _scheduleLoadMoreCheck();
   }
 
   void _scheduleLoadMoreCheck() {
+    if (_loadMoreCheckScheduled) return;
+    _loadMoreCheckScheduled = true;
     WidgetsBinding.instance.addPostFrameCallback((_) {
+      _loadMoreCheckScheduled = false;
       if (mounted) _onScroll();
     });
   }
@@ -471,36 +475,46 @@ class _AnnouncementsPageState extends State<AnnouncementsPage> {
   Future<void> _fetchPage(
     AnnouncementSource source, {
     bool forceRefresh = false,
+    bool isPullRefresh = false,
   }) async {
     final generation = ++_requestGeneration;
     setState(() {
       _isBusy = true;
+      _isPullRefreshing = isPullRefresh;
       _loadError = null;
       _loadingMore = false;
     });
+    _LoadedAnnouncementList? result;
+    Object? failure;
+    var hasMore = false;
     try {
       final loaded = await _loadList(source, forceRefresh: forceRefresh);
-      if (!await _waitForListVisibility(generation)) return;
-      setState(() {
-        _loaded = loaded;
-        _hasMore = widget.repository.hasMoreAnnouncements(source: source);
-      });
+      hasMore = widget.repository.hasMoreAnnouncements(source: source);
+      result = loaded;
     } on Object catch (error) {
-      if (!await _waitForListVisibility(generation)) return;
-      if (!mounted) return;
-      if (_loaded == null) {
-        setState(() => _loadError = error);
-      } else {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(_friendlyError(error))),
-        );
-      }
-    } finally {
-      if (await _waitForListVisibility(generation)) {
-        setState(() => _isBusy = false);
-        if (_loaded != null && _hasMore) _scheduleLoadMoreCheck();
-      }
+      failure = error;
     }
+    if (!await _waitForListVisibility(generation) || !mounted) return;
+    final showError = failure != null && _loaded != null;
+    setState(() {
+      _isBusy = false;
+      _isPullRefreshing = false;
+      if (result != null) {
+        _loaded = result;
+        _hasMore = hasMore;
+        // Request cancellation and visible-card preparation have different
+        // lifetimes. Keep the entered cards intact until a new list succeeds.
+        _cardPreparationVersion++;
+      } else if (_loaded == null) {
+        _loadError = failure;
+      }
+    });
+    if (showError) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(_friendlyError(failure))),
+      );
+    }
+    if (_loaded != null && _hasMore) _scheduleLoadMoreCheck();
   }
 
   Future<bool> _waitForListVisibility(int generation) async {
@@ -603,10 +617,13 @@ class _AnnouncementStickyHeaderDelegate extends SliverPersistentHeaderDelegate {
 }
 
 class _AnnouncementItemRow {
-  const _AnnouncementItemRow(this.index, this.item);
+  _AnnouncementItemRow(this.index, this.item);
 
   final int index;
   final AnnouncementListItem item;
+  late final bool external =
+      !AnnouncementTarget.resolve(item.url, sourceId: item.sourceId)
+          .canOpenInApp;
 }
 
 Future<void> _openExternalAnnouncementUrl(
@@ -659,8 +676,10 @@ class _AnnouncementSourceMenuState extends State<_AnnouncementSourceMenu> {
   late bool _collegeExpanded = widget.initialExpansion.college;
   late bool _researchInstituteExpanded =
       widget.initialExpansion.researchInstitute;
-  late bool _schoolDepartmentExpanded =
-      widget.initialExpansion.schoolDepartment;
+  late bool _administrativeDepartmentExpanded =
+      widget.initialExpansion.administrativeDepartment;
+  late bool _affiliatedInstitutionExpanded =
+      widget.initialExpansion.affiliatedInstitution;
   bool _saving = false;
 
   @override
@@ -678,8 +697,10 @@ class _AnnouncementSourceMenuState extends State<_AnnouncementSourceMenu> {
         AnnouncementSource.inGroup(AnnouncementSourceGroup.researchInstitute);
     final schoolPortalSources =
         AnnouncementSource.inGroup(AnnouncementSourceGroup.schoolPortal);
-    final schoolDepartmentSources =
-        AnnouncementSource.inGroup(AnnouncementSourceGroup.schoolDepartment);
+    final administrativeDepartmentSources = AnnouncementSource.inGroup(
+        AnnouncementSourceGroup.administrativeDepartment);
+    final affiliatedInstitutionSources = AnnouncementSource.inGroup(
+        AnnouncementSourceGroup.affiliatedInstitution);
     final menuWidth = math.min(264.0, MediaQuery.sizeOf(context).width * 0.68);
     final menuChildren = <Widget>[
       _sectionHeader('收藏', _favoritesExpanded,
@@ -700,12 +721,20 @@ class _AnnouncementSourceMenuState extends State<_AnnouncementSourceMenu> {
       if (_schoolPortalExpanded)
         for (final source in schoolPortalSources) _sourceRow(source),
       _sectionHeader(
-        AnnouncementSourceGroup.schoolDepartment.label,
-        _schoolDepartmentExpanded,
-        () => _toggleSection(AnnouncementMenuSection.schoolDepartment),
+        AnnouncementSourceGroup.administrativeDepartment.label,
+        _administrativeDepartmentExpanded,
+        () => _toggleSection(AnnouncementMenuSection.administrativeDepartment),
       ),
-      if (_schoolDepartmentExpanded)
-        for (final source in schoolDepartmentSources) _sourceRow(source),
+      if (_administrativeDepartmentExpanded)
+        for (final source in administrativeDepartmentSources)
+          _sourceRow(source),
+      _sectionHeader(
+        AnnouncementSourceGroup.affiliatedInstitution.label,
+        _affiliatedInstitutionExpanded,
+        () => _toggleSection(AnnouncementMenuSection.affiliatedInstitution),
+      ),
+      if (_affiliatedInstitutionExpanded)
+        for (final source in affiliatedInstitutionSources) _sourceRow(source),
       _sectionHeader(
         AnnouncementSourceGroup.college.label,
         _collegeExpanded,
@@ -874,8 +903,12 @@ class _AnnouncementSourceMenuState extends State<_AnnouncementSourceMenu> {
           expanded = _collegeExpanded = !_collegeExpanded;
         case AnnouncementMenuSection.researchInstitute:
           expanded = _researchInstituteExpanded = !_researchInstituteExpanded;
-        case AnnouncementMenuSection.schoolDepartment:
-          expanded = _schoolDepartmentExpanded = !_schoolDepartmentExpanded;
+        case AnnouncementMenuSection.administrativeDepartment:
+          expanded = _administrativeDepartmentExpanded =
+              !_administrativeDepartmentExpanded;
+        case AnnouncementMenuSection.affiliatedInstitution:
+          expanded =
+              _affiliatedInstitutionExpanded = !_affiliatedInstitutionExpanded;
       }
     });
     unawaited(widget.onExpansionChanged(section, expanded).catchError(
@@ -2145,6 +2178,7 @@ class _AnnouncementTile extends StatefulWidget {
 class _AnnouncementTileState extends State<_AnnouncementTile>
     with SingleTickerProviderStateMixin {
   late final AnimationController _entrance;
+  late final Animation<Offset> _slide;
   Timer? _entranceTimer;
   int _cardGeneration = 0;
   late AnnouncementCardData _card;
@@ -2160,6 +2194,10 @@ class _AnnouncementTileState extends State<_AnnouncementTile>
       vsync: this,
       duration: const Duration(milliseconds: 280),
     );
+    _slide = Tween<Offset>(
+      begin: const Offset(0.12, 0),
+      end: Offset.zero,
+    ).chain(CurveTween(curve: Curves.easeOutCubic)).animate(_entrance);
     widget.updatesPaused?.addListener(_onUpdatePauseChanged);
     _loadCard();
   }
@@ -2262,13 +2300,7 @@ class _AnnouncementTileState extends State<_AnnouncementTile>
   @override
   Widget build(BuildContext context) {
     return SlideTransition(
-      position: Tween<Offset>(
-        begin: const Offset(0.12, 0),
-        end: Offset.zero,
-      ).animate(CurvedAnimation(
-        parent: _entrance,
-        curve: Curves.easeOutCubic,
-      )),
+      position: _slide,
       child: FadeTransition(
         opacity: _entrance,
         child: IgnorePointer(
@@ -2282,9 +2314,7 @@ class _AnnouncementTileState extends State<_AnnouncementTile>
   Widget _tile(String? preview) {
     final item = widget.item;
     final colors = context.shuyoColors;
-    final metadata = [
-      if (_card.dateText.isNotEmpty) _card.dateText,
-    ].join(' · ');
+    final metadata = _card.dateText;
     return InkWell(
       onTap: widget.onTap,
       child: Padding(

@@ -1,7 +1,4 @@
-import 'dart:convert';
-
 import 'package:flutter_test/flutter_test.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 import 'package:shuyo/data/models/announcement.dart';
 import 'package:shuyo/data/models/announcement_source.dart';
 import 'package:shuyo/data/repositories/announcement_repository.dart';
@@ -58,7 +55,7 @@ void main() {
   for (final sourceId in ['sfa', 'utseus']) {
     test(
         '$sourceId refresh restores external links among dated history and '
-        'keeps them through metadata, pagination and cache reload', () async {
+        'keeps them through metadata, pagination and memory reuse', () async {
       final source = AnnouncementSource.byId(sourceId);
       final newest = _article(sourceId, 'newest',
           date: DateTime(2026, 10, 20), summary: 'Saved list summary');
@@ -70,17 +67,6 @@ void main() {
         for (var day = 20; day > 0; day--)
           _article(sourceId, 'history-$day', date: DateTime(2026, 1, day)),
       ];
-      // This mirrors an old cache where all unknown-date links sank below a
-      // long dated history. The fresh source page must restore their slots.
-      SharedPreferences.setMockInitialValues({
-        'announcements.list.cache.$sourceId': jsonEncode([
-          newest.toJson(),
-          oldest.toJson(),
-          ...history.map((item) => item.toJson()),
-          firstExternal.toJson(),
-          secondExternal.toJson(),
-        ]),
-      });
       final firstPage = [
         _article(sourceId, 'newest'),
         firstExternal,
@@ -96,6 +82,17 @@ void main() {
       final datedMiddle = _article(sourceId, 'middle',
           date: DateTime(2026, 10, 19), summary: 'Resolved summary');
       final api = _OrderingApi([
+        // Seed history through the same API as every other list. A later
+        // refresh must restore the source's current external-link slots.
+        AnnouncementPageBatch(items: [
+          newest,
+          oldest,
+          ...history,
+          firstExternal,
+          secondExternal,
+        ], nextPageUrls: [
+          null
+        ]),
         AnnouncementPageBatch(items: firstPage, nextPageUrls: [nextUrl]),
         AnnouncementPageBatch(items: firstPage, nextPageUrls: [nextUrl]),
         AnnouncementPageBatch(
@@ -105,6 +102,7 @@ void main() {
       });
       final repository = AnnouncementRepository(apiClient: api);
       addTearDown(repository.dispose);
+      await repository.fetchAnnouncements(source: source);
 
       void expectSourceLinks(List<AnnouncementListItem> items) {
         expect(items[1].url, firstExternal.url);
@@ -120,7 +118,7 @@ void main() {
       }
 
       final initial = await repository.fetchAnnouncements(
-          source: source, forceRefresh: sourceId == 'sfa');
+          source: source, forceRefresh: true);
       expect(initial, hasLength(history.length + firstPage.length));
       expect(initial.take(firstPage.length).map((item) => item.url),
           firstPageUrls);
@@ -167,19 +165,21 @@ void main() {
       expect(api.pageRequests, [
         null,
         null,
+        null,
         [nextUrl]
       ]);
 
-      final restored = AnnouncementRepository();
+      final reused = await repository.loadCachedAnnouncements(source: source);
+      expect(reused.map((item) => item.url), paginated.map((item) => item.url));
+      expectSourceLinks(reused);
+      expect(reused[0].summary, newest.summary);
+      expect(reused[2].dateText, datedMiddle.dateText);
+      expect(reused[2].summary, middle.summary);
+      expect(reused.every((item) => item.sourceId == sourceId), isTrue);
+
+      final restored = AnnouncementRepository(apiClient: _OrderingApi([], {}));
       addTearDown(restored.dispose);
-      final persisted = await restored.loadCachedAnnouncements(source: source);
-      expect(
-          persisted.map((item) => item.url), paginated.map((item) => item.url));
-      expectSourceLinks(persisted);
-      expect(persisted[0].summary, newest.summary);
-      expect(persisted[2].dateText, datedMiddle.dateText);
-      expect(persisted[2].summary, middle.summary);
-      expect(persisted.every((item) => item.sourceId == sourceId), isTrue);
+      expect(await restored.loadCachedAnnouncements(source: source), isEmpty);
     });
   }
 }

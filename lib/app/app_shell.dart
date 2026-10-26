@@ -275,7 +275,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
         (_) => unawaited(_refreshScheduleSummaryQuietly()),
       );
       _announcementSummaryTimer = Timer.periodic(
-        AnnouncementRepository.defaultAutoRefreshInterval,
+        const Duration(hours: 12),
         (_) => unawaited(_refreshAnnouncementSummaryQuietly()),
       );
       unawaited(_scheduleNotificationService.syncScheduleReminders());

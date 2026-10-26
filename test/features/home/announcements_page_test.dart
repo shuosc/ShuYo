@@ -90,8 +90,12 @@ class _FakeAnnouncementRepository extends AnnouncementRepository {
         researchInstitute:
             sectionExpansion[AnnouncementMenuSection.researchInstitute] ??
                 false,
-        schoolDepartment:
-            sectionExpansion[AnnouncementMenuSection.schoolDepartment] ?? true,
+        administrativeDepartment: sectionExpansion[
+                AnnouncementMenuSection.administrativeDepartment] ??
+            true,
+        affiliatedInstitution:
+            sectionExpansion[AnnouncementMenuSection.affiliatedInstitution] ??
+                true,
       );
 
   @override
@@ -211,6 +215,25 @@ class _ShortPageAnnouncementRepository extends _FakeAnnouncementRepository {
 
   @override
   bool hasMoreAnnouncements({AnnouncementSource? source}) => pagesLoaded == 0;
+}
+
+class _ControlledRefreshRepository extends _FakeAnnouncementRepository {
+  _ControlledRefreshRepository({super.cardFutures})
+      : super(items: const [_listItem], details: const {});
+
+  Future<List<AnnouncementListItem>>? refreshResult;
+  int listRequests = 0;
+
+  @override
+  Future<List<AnnouncementListItem>> fetchAnnouncements({
+    AnnouncementSource? source,
+    bool forceRefresh = false,
+    bool loadNextPage = false,
+  }) async {
+    listRequests++;
+    if (listRequests == 1) return items;
+    return await (refreshResult ?? Future.value(items));
+  }
 }
 
 class _DeferredPageAnnouncementRepository extends _FakeAnnouncementRepository {
@@ -370,23 +393,33 @@ void main() {
     expect(find.textContaining('设为默认'), findsNothing);
     await tester.tap(find.text('学校门户'));
     await tester.pumpAndSettle();
+    final menuScrollable = find.descendant(
+      of: find.byKey(announcementSourceMenuKey),
+      matching: find.byType(Scrollable),
+    );
+    await tester.scrollUntilVisible(
+      find.byTooltip('收藏本科生院'),
+      100,
+      scrollable: menuScrollable,
+    );
     await tester.tap(find.byTooltip('收藏本科生院'));
     await tester.pumpAndSettle();
     expect(repository.favoriteIds, {'bksy'});
     expect(repository.currentDefault.id, 'shu');
     expect(repository.requestedSources, ['shu']);
+    tester
+        .widget<CustomScrollView>(find.byType(CustomScrollView).last)
+        .controller!
+        .jumpTo(0);
+    await tester.pumpAndSettle();
     expect(find.text('收藏'), findsOneWidget);
-    expect(find.byIcon(Icons.star), findsNWidgets(2));
-    expect(find.text('本科生院'), findsNWidgets(2));
+    expect(find.byIcon(Icons.star), findsWidgets);
+    expect(find.text('本科生院'), findsWidgets);
     final star = find.byIcon(Icons.star).first;
     expect(tester.widget<Icon>(star).color,
         Theme.of(tester.element(star)).colorScheme.primary);
     expect(find.text(_listTitle), findsOneWidget);
 
-    final menuScrollable = find.descendant(
-      of: find.byKey(announcementSourceMenuKey),
-      matching: find.byType(Scrollable),
-    );
     await tester.scrollUntilVisible(
       find.byTooltip('收藏本科生工作处'),
       100,
@@ -481,6 +514,65 @@ void main() {
         repository.sectionExpansion[AnnouncementMenuSection.college], isFalse);
   });
 
+  testWidgets(
+      'source groups keep their order and independent department expansion',
+      (tester) async {
+    final repository = _repositoryWith();
+    final administrativeName = AnnouncementSource.inGroup(
+            AnnouncementSourceGroup.administrativeDepartment)
+        .first
+        .name;
+    for (final section in AnnouncementMenuSection.values) {
+      repository.sectionExpansion[section] = false;
+    }
+    await tester.pumpWidget(
+      MaterialApp(home: AnnouncementsPage(repository: repository)),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('选择公告来源'));
+    await tester.pumpAndSettle();
+
+    const sections = ['收藏', '学校门户', '行政部门', '直属机构', '学院', '研究院所'];
+    for (var index = 1; index < sections.length; index++) {
+      expect(tester.getTopLeft(find.text(sections[index])).dy,
+          greaterThan(tester.getTopLeft(find.text(sections[index - 1])).dy));
+    }
+    expect(find.text('学校下属部门'), findsNothing);
+    expect(find.text(administrativeName), findsNothing);
+    expect(find.text('博物馆'), findsNothing);
+
+    await tester.tap(find.text('行政部门'));
+    await tester.pumpAndSettle();
+    expect(find.text(administrativeName), findsOneWidget);
+    expect(find.text('博物馆'), findsNothing);
+    expect(
+        repository
+            .sectionExpansion[AnnouncementMenuSection.affiliatedInstitution],
+        isFalse);
+    await tester.tap(find.text('行政部门'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('直属机构'));
+    await tester.pumpAndSettle();
+    expect(find.text(administrativeName), findsNothing);
+    expect(find.text('博物馆'), findsOneWidget);
+    expect(
+        repository
+            .sectionExpansion[AnnouncementMenuSection.administrativeDepartment],
+        isFalse);
+    expect(
+        repository
+            .sectionExpansion[AnnouncementMenuSection.affiliatedInstitution],
+        isTrue);
+
+    await tester.tapAt(const Offset(20, 300));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('选择公告来源'));
+    await tester.pumpAndSettle();
+    expect(find.text(administrativeName), findsNothing);
+    expect(find.text('博物馆'), findsOneWidget);
+    expect(find.byIcon(Icons.expand_less), findsOneWidget);
+  });
+
   testWidgets('source menu restores all group states when reopened',
       (tester) async {
     final repository = _repositoryWith();
@@ -498,7 +590,9 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.text('学校门户'));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('学校下属部门'));
+    await tester.tap(find.text('行政部门'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('直属机构'));
     await tester.pumpAndSettle();
     await tester.tap(find.text('学院'));
     await tester.pumpAndSettle();
@@ -524,7 +618,8 @@ void main() {
       AnnouncementMenuSection.schoolPortal: false,
       AnnouncementMenuSection.college: true,
       AnnouncementMenuSection.researchInstitute: true,
-      AnnouncementMenuSection.schoolDepartment: false,
+      AnnouncementMenuSection.administrativeDepartment: false,
+      AnnouncementMenuSection.affiliatedInstitution: false,
     });
 
     await tester.tapAt(const Offset(20, 300));
@@ -1433,6 +1528,115 @@ void main() {
     expect(tester.getSize(firstTile).height, greaterThan(titleHeight));
     expect(tester.getSize(firstTile).height, lessThan(104));
     expect(repository.previewRequests, [first.url]);
+  });
+
+  testWidgets(
+      'bottom pagination shows the AppBar progress without a pull spinner',
+      (tester) async {
+    final repository = _DeferredPageAnnouncementRepository(withReadyCard: true);
+    await tester.pumpWidget(
+      MaterialApp(home: AnnouncementsPage(repository: repository)),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(repository.pagesRequested, 1);
+    expect(
+        find.descendant(
+            of: find.byType(AppBar),
+            matching: find.byType(LinearProgressIndicator)),
+        findsOneWidget);
+    expect(find.byType(RefreshProgressIndicator), findsNothing);
+    repository.nextPage.complete(repository.items);
+    await tester.pumpAndSettle();
+    expect(find.byType(LinearProgressIndicator), findsNothing);
+    expect(_cardOpacity(tester, _readyListItem), 1);
+  });
+
+  testWidgets(
+      'pull refresh uses its spinner and keeps entered cards while waiting',
+      (tester) async {
+    final cards = {
+      _listItem.url: Future.value(const AnnouncementCardData(summary: '已有概览')),
+    };
+    final repository = _ControlledRefreshRepository(cardFutures: cards);
+    await tester.pumpWidget(
+      MaterialApp(home: AnnouncementsPage(repository: repository)),
+    );
+    await tester.pumpAndSettle();
+    final tile = find
+        .ancestor(of: find.text(_listTitle), matching: find.byType(InkWell))
+        .first;
+    final oldSize = tester.getSize(tile);
+    final network = Completer<List<AnnouncementListItem>>();
+    final prepared = Completer<AnnouncementCardData>();
+    repository.refreshResult = network.future;
+    cards[_listItem.url] = prepared.future;
+    final gesture = await tester
+        .startGesture(tester.getCenter(find.byType(CustomScrollView)));
+    await gesture.moveBy(const Offset(0, 300));
+    await tester.pump();
+    expect(find.byType(LinearProgressIndicator), findsNothing);
+    expect(repository.listRequests, 1);
+    await gesture.up();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 250));
+    expect(repository.listRequests, 2);
+    expect(find.byType(RefreshProgressIndicator), findsOneWidget);
+    expect(find.byType(LinearProgressIndicator), findsNothing);
+    expect(_cardOpacity(tester, _listItem), 1);
+    expect(tester.getSize(tile), oldSize);
+    expect(find.text('已有概览'), findsOneWidget);
+    expect(repository.cardRequests, hasLength(1));
+
+    network.complete(repository.items);
+    await tester.pumpAndSettle();
+    expect(find.byType(RefreshProgressIndicator), findsNothing);
+    expect(find.byType(LinearProgressIndicator), findsNothing);
+    expect(repository.cardRequests, hasLength(2));
+    expect(_cardOpacity(tester, _listItem), 0);
+    prepared.complete(const AnnouncementCardData(summary: '更新后的概览'));
+    await tester.pumpAndSettle();
+    expect(_cardOpacity(tester, _listItem), 1);
+    expect(find.text('更新后的概览'), findsOneWidget);
+  });
+
+  testWidgets(
+      'failed pull refresh retains entered cards and allows another refresh',
+      (tester) async {
+    final repository = _ControlledRefreshRepository(cardFutures: {
+      _listItem.url: Future.value(const AnnouncementCardData(summary: '已有概览')),
+    });
+    await tester.pumpWidget(
+      MaterialApp(home: AnnouncementsPage(repository: repository)),
+    );
+    await tester.pumpAndSettle();
+    final network = Completer<List<AnnouncementListItem>>();
+    repository.refreshResult = network.future;
+    final refresh = tester
+        .state<RefreshIndicatorState>(find.byType(RefreshIndicator))
+        .show();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 250));
+    expect(find.byType(RefreshProgressIndicator), findsOneWidget);
+    expect(find.byType(LinearProgressIndicator), findsNothing);
+    expect(_cardOpacity(tester, _listItem), 1);
+    network.completeError(const AnnouncementApiException('刷新暂时失败'));
+    await tester.pumpAndSettle();
+    await refresh;
+    expect(find.text('刷新暂时失败'), findsOneWidget);
+    expect(find.text('已有概览'), findsOneWidget);
+    expect(_cardOpacity(tester, _listItem), 1);
+    expect(repository.cardRequests, hasLength(1));
+    expect(find.byType(RefreshProgressIndicator), findsNothing);
+    expect(find.byType(LinearProgressIndicator), findsNothing);
+    repository.refreshResult = Future.value(repository.items);
+    final retry = tester
+        .state<RefreshIndicatorState>(find.byType(RefreshIndicator))
+        .show();
+    await tester.pumpAndSettle();
+    await retry;
+    expect(repository.listRequests, 3);
+    expect(repository.cardRequests, hasLength(2));
   });
 
   testWidgets(

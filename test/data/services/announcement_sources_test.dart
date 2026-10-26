@@ -42,29 +42,10 @@ void main() {
     }
   });
 
-  test('Film Academy repairs cached dates on demand after returning its list',
+  test('Film Academy fills cross-site dates after returning its list',
       () async {
     final source = AnnouncementSource.byId('sfa');
     const recentUrl = 'https://sfa.shu.edu.cn/info/1212/recent.htm';
-    SharedPreferences.setMockInitialValues({
-      'announcements.cacheVersion.sfa': 8,
-      'announcements.lastRefreshAt.sfa': DateTime.now().toIso8601String(),
-      'announcements.list.cache.sfa': jsonEncode([
-        AnnouncementListItem(
-          title: _bkzswFilmNoticeTitle,
-          url: _bkzswFilmNoticeUrl,
-          sourceId: 'sfa',
-          publishedAt: DateTime(2026, 12, 31),
-        ).toJson(),
-        AnnouncementListItem(
-          title: '已缓存的历史公告',
-          url: 'https://sfa.shu.edu.cn/info/1212/history.htm',
-          sourceId: 'sfa',
-          dateText: '2026-03-01',
-          publishedAt: DateTime(2026, 3, 1),
-        ).toJson(),
-      ]),
-    });
     final requests = <String>[];
     final api = AnnouncementApiClient(
       httpClient: MockClient((request) async {
@@ -78,6 +59,7 @@ void main() {
           _ => '<div class="right">'
               '<li class="notice-item"><a class="notice-title" href="$_bkzswFilmNoticeUrl">$_bkzswFilmNoticeTitle</a></li>'
               '<li class="notice-item"><a class="notice-title" href="$recentUrl">较新的本院公告</a></li>'
+              '<li class="notice-item"><a class="notice-title" href="/info/1212/history.htm">历史公告</a></li>'
               '</div>',
         };
         return http.Response(html, 200,
@@ -89,7 +71,7 @@ void main() {
 
     final items = await repository.fetchAnnouncements(source: source);
     expect(items.map((item) => item.title),
-        [_bkzswFilmNoticeTitle, '较新的本院公告', '已缓存的历史公告']);
+        [_bkzswFilmNoticeTitle, '较新的本院公告', '历史公告']);
     final article =
         items.singleWhere((item) => item.url == _bkzswFilmNoticeUrl);
     expect(article.dateText, isEmpty);
@@ -107,126 +89,84 @@ void main() {
     await Future<void>.delayed(Duration.zero);
     final updated = await repository.loadCachedAnnouncements(source: source);
     expect(updated.map((item) => item.title),
-        [_bkzswFilmNoticeTitle, '较新的本院公告', '已缓存的历史公告']);
+        [_bkzswFilmNoticeTitle, '较新的本院公告', '历史公告']);
     expect(items.map((item) => item.title),
-        [_bkzswFilmNoticeTitle, '较新的本院公告', '已缓存的历史公告']);
+        [_bkzswFilmNoticeTitle, '较新的本院公告', '历史公告']);
     expect(requests,
         unorderedEquals([source.listUrl, _bkzswFilmNoticeUrl, recentUrl]));
-    final prefs = await SharedPreferences.getInstance();
-    expect(prefs.getInt('announcements.cacheVersion.sfa'), 9);
-
-    final restored = AnnouncementRepository(apiClient: api);
-    final cached = await restored.fetchAnnouncements(source: source);
-    expect(cached.map((item) => item.title),
-        ['较新的本院公告', _bkzswFilmNoticeTitle, '已缓存的历史公告']);
     expect(
-        cached.singleWhere((item) => item.url == _bkzswFilmNoticeUrl).dateText,
+        updated.singleWhere((item) => item.url == _bkzswFilmNoticeUrl).dateText,
         '2026-03-18');
-    expect(requests, hasLength(3));
   });
 
-  for (final scenario in [
-    (cacheVersion: 8, forceRefresh: false),
-    (cacheVersion: 9, forceRefresh: false),
-    (cacheVersion: 9, forceRefresh: true),
-  ]) {
-    test(
-        'Film Academy repairs historical dates on demand when absent from the '
-        'refreshed first page (cache ${scenario.cacheVersion}, '
-        '${scenario.forceRefresh ? 'forced' : 'automatic'} refresh)', () async {
-      final source = AnnouncementSource.byId('sfa');
-      const recentUrl = 'https://sfa.shu.edu.cn/info/1212/recent.htm';
-      SharedPreferences.setMockInitialValues({
-        'announcements.cacheVersion.sfa': scenario.cacheVersion,
-        'announcements.lastRefreshAt.sfa':
-            DateTime.now().subtract(const Duration(days: 1)).toIso8601String(),
-        'announcements.list.cache.sfa': jsonEncode([
-          AnnouncementListItem(
-            title: _bkzswFilmNoticeTitle,
-            url: _bkzswFilmNoticeUrl,
-            sourceId: 'sfa',
-            publishedAt: DateTime(2026, 12, 31),
-          ).toJson(),
-          AnnouncementListItem(
-            title: '有准确日期的历史公告',
-            url: 'https://sfa.shu.edu.cn/info/1212/history.htm',
-            sourceId: 'sfa',
-            dateText: '2026-03-01',
-            publishedAt: DateTime(2026, 3, 1),
-          ).toJson(),
-        ]),
-      });
-      final requests = <String>[];
-      final api = AnnouncementApiClient(
-        httpClient: MockClient((request) async {
-          final url = request.url.toString();
-          requests.add(url);
-          final html = switch (url) {
-            _bkzswFilmNoticeUrl => _bkzswFilmNoticeHtml,
-            recentUrl => '<table><tr valign="middle"><td>'
-                '<span>创建时间：</span><span>2026-04-01</span>'
-                '</td></tr></table>',
-            _ when url == source.listUrl => '<div class="right">'
-                '<li class="notice-item"><a class="notice-title" href="$recentUrl">较新的本院公告</a></li>'
-                '</div>',
-            _ => throw StateError('Unexpected announcement request: $url'),
-          };
-          return http.Response(html, 200,
-              headers: {'content-type': 'text/html; charset=utf-8'});
-        }),
-      );
-      final repository = AnnouncementRepository(apiClient: api);
-      addTearDown(repository.dispose);
+  test(
+      'Film Academy repairs historical dates on demand when absent from the '
+      'refreshed first page', () async {
+    final source = AnnouncementSource.byId('sfa');
+    const recentUrl = 'https://sfa.shu.edu.cn/info/1212/recent.htm';
+    var firstPage = true;
+    final requests = <String>[];
+    final api = AnnouncementApiClient(
+      httpClient: MockClient((request) async {
+        final url = request.url.toString();
+        requests.add(url);
+        final html = switch (url) {
+          _bkzswFilmNoticeUrl => _bkzswFilmNoticeHtml,
+          recentUrl => '<table><tr valign="middle"><td>'
+              '<span>创建时间：</span><span>2026-04-01</span>'
+              '</td></tr></table>',
+          _ when url == source.listUrl && firstPage => '<div class="right">'
+              '<li class="notice-item"><a class="notice-title" href="$_bkzswFilmNoticeUrl">$_bkzswFilmNoticeTitle</a></li>'
+              '<li class="notice-item"><a class="notice-title" href="/info/1212/history.htm">历史公告</a></li>'
+              '</div>',
+          _ when url == source.listUrl => '<div class="right">'
+              '<li class="notice-item"><a class="notice-title" href="$recentUrl">较新的本院公告</a></li>'
+              '</div>',
+          _ => throw StateError('Unexpected announcement request: $url'),
+        };
+        return http.Response(html, 200,
+            headers: {'content-type': 'text/html; charset=utf-8'});
+      }),
+    );
+    final repository = AnnouncementRepository(apiClient: api);
+    addTearDown(repository.dispose);
+    await repository.fetchAnnouncements(source: source);
+    firstPage = false;
 
-      final items = await repository.fetchAnnouncements(
-        source: source,
-        forceRefresh: scenario.forceRefresh,
-      );
-      final article =
-          items.singleWhere((item) => item.url == _bkzswFilmNoticeUrl);
-      expect(article.dateText, isEmpty);
-      expect(article.publishedAt, isNull);
-      expect(requests, [source.listUrl]);
+    final items = await repository.fetchAnnouncements(
+      source: source,
+      forceRefresh: true,
+    );
+    final article =
+        items.singleWhere((item) => item.url == _bkzswFilmNoticeUrl);
+    expect(article.dateText, isEmpty);
+    expect(article.publishedAt, isNull);
+    expect(requests, [source.listUrl, source.listUrl]);
 
-      final prefs = await SharedPreferences.getInstance();
-      const lastRefresh = '2026-10-24T09:30:00.000';
-      await prefs.setString('announcements.lastRefreshAt.sfa', lastRefresh);
-      final recent = items.singleWhere((item) => item.url == recentUrl);
-      expect(recent.dateText, isEmpty);
-      expect((await repository.loadPublicationDate(recent))!.dateText,
-          '2026-04-01');
-      final repaired = await repository.loadPublicationDate(article);
-      expect(repaired, isNotNull);
-      expect(repaired!.dateText, '2026-03-18');
-      expect(repaired.publishedAt, DateTime(2026, 3, 18));
-      expect(repaired.sourceId, 'sfa');
-      expect(requests, contains(_bkzswFilmNoticeUrl));
-      expect(prefs.getString('announcements.lastRefreshAt.sfa'), lastRefresh);
-      await Future<void>.delayed(Duration.zero);
+    final recent = items.singleWhere((item) => item.url == recentUrl);
+    expect(recent.dateText, isEmpty);
+    expect(
+        (await repository.loadPublicationDate(recent))!.dateText, '2026-04-01');
+    final repaired = await repository.loadPublicationDate(article);
+    expect(repaired, isNotNull);
+    expect(repaired!.dateText, '2026-03-18');
+    expect(repaired.publishedAt, DateTime(2026, 3, 18));
+    expect(repaired.sourceId, 'sfa');
+    expect(requests, contains(_bkzswFilmNoticeUrl));
+    await Future<void>.delayed(Duration.zero);
 
-      final memoryCached =
-          await repository.loadCachedAnnouncements(source: source);
-      expect(
-          memoryCached
-              .singleWhere((item) => item.url == _bkzswFilmNoticeUrl)
-              .dateText,
-          '2026-03-18');
-      expect(memoryCached.map((item) => item.title),
-          ['较新的本院公告', _bkzswFilmNoticeTitle, '有准确日期的历史公告']);
+    final memoryCached =
+        await repository.loadCachedAnnouncements(source: source);
+    expect(
+        memoryCached
+            .singleWhere((item) => item.url == _bkzswFilmNoticeUrl)
+            .dateText,
+        '2026-03-18');
+    expect(memoryCached.map((item) => item.title),
+        ['较新的本院公告', _bkzswFilmNoticeTitle, '历史公告']);
+  });
 
-      final restored = AnnouncementRepository();
-      addTearDown(restored.dispose);
-      final cached = await restored.loadCachedAnnouncements(source: source);
-      final persistedArticle =
-          cached.singleWhere((item) => item.url == _bkzswFilmNoticeUrl);
-      expect(persistedArticle.dateText, '2026-03-18');
-      expect(persistedArticle.publishedAt, DateTime(2026, 3, 18));
-      expect(cached.map((item) => item.title),
-          memoryCached.map((item) => item.title));
-    });
-  }
-
-  test('concurrent publication dates retain both memory and persisted updates',
+  test('concurrent publication dates retain both memory updates in place',
       () async {
     final source = AnnouncementSource.byId('sfa');
     final items = [
@@ -237,14 +177,10 @@ void main() {
           sourceId: 'sfa',
         ),
     ];
-    SharedPreferences.setMockInitialValues({
-      'announcements.list.cache.sfa':
-          jsonEncode(items.map((item) => item.toJson()).toList()),
-    });
-    final api = _QueuedPublicationDateApiClient();
+    final api = _QueuedPublicationDateApiClient(initialItems: items);
     final repository = AnnouncementRepository(apiClient: api);
     addTearDown(repository.dispose);
-    await repository.loadCachedAnnouncements(source: source);
+    await repository.fetchAnnouncements(source: source);
 
     final dates = items.map(repository.loadPublicationDate).toList();
     api.completeDate(0, '2026-03-18');
@@ -253,14 +189,8 @@ void main() {
     await Future<void>.delayed(Duration.zero);
 
     final memory = await repository.loadCachedAnnouncements(source: source);
-    // Completing optional metadata keeps the currently displayed order. A
-    // later disk reload applies the normal ordering to the now-known dates.
+    // Completing optional metadata keeps the currently displayed order.
     expect(memory.map((item) => item.dateText), ['2026-03-18', '2026-03-19']);
-    final restored = AnnouncementRepository();
-    addTearDown(restored.dispose);
-    final persisted = await restored.loadCachedAnnouncements(source: source);
-    expect(
-        persisted.map((item) => item.dateText), ['2026-03-19', '2026-03-18']);
   });
 
   test('force refresh rejects an older in-flight publication date', () async {
@@ -270,13 +200,10 @@ void main() {
       url: _bkzswFilmNoticeUrl,
       sourceId: 'sfa',
     );
-    SharedPreferences.setMockInitialValues({
-      'announcements.list.cache.sfa': jsonEncode([item.toJson()]),
-    });
-    final api = _QueuedPublicationDateApiClient();
+    final api = _QueuedPublicationDateApiClient(initialItems: const [item]);
     final repository = AnnouncementRepository(apiClient: api);
     addTearDown(repository.dispose);
-    await repository.loadCachedAnnouncements(source: source);
+    await repository.fetchAnnouncements(source: source);
 
     final old = repository.loadPublicationDate(item);
     await repository.fetchAnnouncements(source: source, forceRefresh: true);
@@ -289,9 +216,7 @@ void main() {
     expect((await fresh)!.dateText, '2026-03-18');
     await Future<void>.delayed(Duration.zero);
 
-    final restored = AnnouncementRepository();
-    addTearDown(restored.dispose);
-    final cached = await restored.loadCachedAnnouncements(source: source);
+    final cached = await repository.loadCachedAnnouncements(source: source);
     expect(cached.single.dateText, '2026-03-18');
   });
 
@@ -303,13 +228,13 @@ void main() {
       url: _bkzswFilmNoticeUrl,
       sourceId: 'sfa',
     );
-    SharedPreferences.setMockInitialValues({
-      'announcements.list.cache.sfa': jsonEncode([item.toJson()]),
-    });
-    final api = _QueuedPublicationDateApiClient(deferPage: true);
+    final api = _QueuedPublicationDateApiClient(
+      initialItems: const [item],
+      deferPage: true,
+    );
     final repository = AnnouncementRepository(apiClient: api);
     addTearDown(repository.dispose);
-    await repository.loadCachedAnnouncements(source: source);
+    await repository.fetchAnnouncements(source: source);
 
     final refreshed =
         repository.fetchAnnouncements(source: source, forceRefresh: true);
@@ -323,9 +248,7 @@ void main() {
     ));
     expect((await refreshed).single.dateText, '2026-03-18');
 
-    final restored = AnnouncementRepository();
-    addTearDown(restored.dispose);
-    final cached = await restored.loadCachedAnnouncements(source: source);
+    final cached = await repository.loadCachedAnnouncements(source: source);
     expect(cached.single.dateText, '2026-03-18');
   });
 
@@ -888,10 +811,24 @@ void main() {
   });
 
   test('college catalog and additional HTML layouts parse correctly', () {
+    expect(AnnouncementSource.all, hasLength(73));
+    expect(AnnouncementSource.all.expand((source) => source.listUrls),
+        hasLength(118));
+    final groupedSources = AnnouncementSourceGroup.values
+        .expand(AnnouncementSource.inGroup)
+        .toList();
+    expect(groupedSources.map((source) => source.id),
+        unorderedEquals(AnnouncementSource.all.map((source) => source.id)));
     expect(AnnouncementSource.inGroup(AnnouncementSourceGroup.schoolPortal),
         hasLength(4));
-    expect(AnnouncementSource.inGroup(AnnouncementSourceGroup.schoolDepartment),
-        hasLength(19));
+    expect(
+        AnnouncementSource.inGroup(
+            AnnouncementSourceGroup.administrativeDepartment),
+        hasLength(15));
+    expect(
+        AnnouncementSource.inGroup(
+            AnnouncementSourceGroup.affiliatedInstitution),
+        hasLength(5));
     expect(AnnouncementSource.inGroup(AnnouncementSourceGroup.college),
         hasLength(35));
     expect(
@@ -900,7 +837,7 @@ void main() {
     expect(AnnouncementSource.byId('mgi').group,
         AnnouncementSourceGroup.researchInstitute);
     expect(AnnouncementSource.byId('museum').group,
-        AnnouncementSourceGroup.schoolDepartment);
+        AnnouncementSourceGroup.affiliatedInstitution);
     expect(AnnouncementSource.byId('jgzx').group,
         AnnouncementSourceGroup.researchInstitute);
     expect(AnnouncementSource.byId('youth').name, '上海大学共青团委员会');
@@ -962,7 +899,7 @@ void main() {
     }
   });
 
-  test('school portals, departments, and institutes have stable menu order',
+  test('school portals, departments, and institutions have stable menu order',
       () {
     expect(
       AnnouncementSource.inGroup(AnnouncementSourceGroup.schoolPortal)
@@ -970,28 +907,36 @@ void main() {
       ['shu', 'bkzsw', 'yjszs', 'yingxin'],
     );
     expect(
-      AnnouncementSource.inGroup(AnnouncementSourceGroup.schoolDepartment)
+      AnnouncementSource.inGroup(
+              AnnouncementSourceGroup.administrativeDepartment)
           .map((source) => source.id),
       [
-        'bksy',
-        'gs',
         'xgb',
         'dwygb',
         'youth',
-        'kyglb',
-        'global',
-        'alumni',
-        'shuedf',
+        'ac',
         'hr',
+        'kyglb',
+        'gs',
+        'bksy',
         'cwc',
+        'alumni',
+        'its',
+        'global',
+        'hbb',
+        'baoweichu',
         'sbc',
+      ],
+    );
+    expect(
+      AnnouncementSource.inGroup(AnnouncementSourceGroup.affiliatedInstitution)
+          .map((source) => source.id),
+      [
         'lib',
         'archive',
         'museum',
-        'its',
-        'hbb',
-        'baoweichu',
         'xyy',
+        'shuedf',
       ],
     );
     expect(
@@ -1080,6 +1025,76 @@ void main() {
       'https://fpd.shu.edu.cn/kfyjl/tzgg/3.htm',
       'https://fpd.shu.edu.cn/kfyjl/xwzx/11.htm',
       'https://fpd.shu.edu.cn/kfyjl/xsjl1/1.htm',
+    ]);
+  });
+
+  test(
+      'academic committee columns retain dates, cross-site links and pagination',
+      () async {
+    final source = AnnouncementSource.byId('ac');
+    expect(source.name, '学术委员会');
+    expect(source.group, AnnouncementSourceGroup.administrativeDepartment);
+    expect(source.listUrls, [
+      'https://ac.shu.edu.cn/synr/tzfw.htm',
+      'https://ac.shu.edu.cn/synr/sdxs.htm',
+    ]);
+    expect(source.columnNames, ['通知发文', '上大学术']);
+    expect(source.format, AnnouncementListFormat.vsbNewList);
+    final requestedUrls = <String>[];
+    final client = AnnouncementApiClient(
+      httpClient: MockClient((request) async {
+        requestedUrls.add(request.url.toString());
+        final notices = request.url.path.endsWith('/tzfw.htm');
+        final slug = notices ? 'tzfw' : 'sdxs';
+        // The live columns use the shared VSB li/i shape. They include an
+        // external article and articles hosted by the main university site.
+        final rows = List.generate(10, (index) {
+          final href = index == 0
+              ? (notices
+                  ? 'https://article.xuexi.cn/articles/index.html?art_id=6257079017100233994'
+                  : 'https://www.shu.edu.cn/info/1053/376905.htm')
+              : '../info/${notices ? 1009 : 1010}/${2900 + index}.htm';
+          return '<li id="line_u5_$index"><a href="$href">'
+              '$slug 公告 $index</a><i>2025/12/${index + 1}</i></li>';
+        }).join();
+        final next = notices ? 'tzfw/3.htm' : 'sdxs/16.htm';
+        return http.Response(
+          '<ul>$rows</ul><a class="Next" href="$next">下页</a>'
+          '<a class="Next" href="$slug/1.htm">尾页</a>',
+          200,
+          headers: {'content-type': 'text/html; charset=utf-8'},
+        );
+      }),
+    );
+    addTearDown(client.close);
+
+    final page = await client.fetchPage(source: source);
+
+    expect(requestedUrls, unorderedEquals(source.listUrls));
+    expect(page.items, hasLength(20));
+    expect(page.items.every((item) => item.sourceId == 'ac'), isTrue);
+    for (final column in source.columnNames) {
+      final items = page.items.where((item) => item.column == column).toList();
+      expect(items, hasLength(10));
+      expect(items.every((item) => item.publishedAt != null), isTrue);
+      expect(items.map((item) => item.dateText).toSet(), {
+        for (var day = 1; day <= 10; day++)
+          '2025-12-${day.toString().padLeft(2, '0')}',
+      });
+    }
+    expect(
+      page.items
+          .where((item) => item.url.startsWith('https://www.shu.edu.cn/')),
+      hasLength(1),
+    );
+    expect(
+      page.items
+          .where((item) => item.url.startsWith('https://article.xuexi.cn/')),
+      hasLength(1),
+    );
+    expect(page.nextPageUrls, [
+      'https://ac.shu.edu.cn/synr/tzfw/3.htm',
+      'https://ac.shu.edu.cn/synr/sdxs/16.htm',
     ]);
   });
 
@@ -1337,7 +1352,11 @@ void main() {
       ),
     ];
     for (final (source, html, nextUrl, articleUrl, date) in cases) {
-      expect(source.group, AnnouncementSourceGroup.schoolDepartment);
+      expect(
+          source.group,
+          source.id == 'shuedf'
+              ? AnnouncementSourceGroup.affiliatedInstitution
+              : AnnouncementSourceGroup.administrativeDepartment);
       final client = AnnouncementApiClient(
         httpClient: MockClient((_) async => http.Response(
               html,
@@ -1713,28 +1732,23 @@ void main() {
   });
 
   test('default source and cached lists are independent', () async {
-    SharedPreferences.setMockInitialValues({
-      'announcements.list.cache': jsonEncode([
-        const AnnouncementListItem(
-          title: '官网旧缓存',
-          url: 'https://www.shu.edu.cn/old.htm',
-        ).toJson(),
-      ]),
-    });
+    SharedPreferences.setMockInitialValues({});
     final api = _FakeAnnouncementApiClient();
     final repository = AnnouncementRepository(apiClient: api);
+    addTearDown(repository.dispose);
+    await repository.fetchAnnouncements(source: AnnouncementSource.official);
     expect(
         (await repository.loadCachedAnnouncements(
           source: AnnouncementSource.official,
         ))
             .single
             .title,
-        '官网旧缓存');
+        '${AnnouncementSource.official.name}新通知');
 
     final bksy = AnnouncementSource.byId('bksy');
     await repository.setDefaultSource(bksy);
     await repository.fetchAnnouncements();
-    expect(api.requested, ['bksy']);
+    expect(api.requested, [AnnouncementSource.official.id, 'bksy']);
     expect((await repository.homeSummary()).text, startsWith('本科生院 · '));
     expect(
         (await repository.loadCachedAnnouncements(
@@ -1742,72 +1756,65 @@ void main() {
         ))
             .single
             .title,
-        '官网旧缓存');
+        '${AnnouncementSource.official.name}新通知');
   });
 
-  test('Film Academy refreshes caches from before cross-site date parsing',
+  test('Film Academy reuses its in-memory list without an extra request',
       () async {
     final source = AnnouncementSource.byId('sfa');
-    SharedPreferences.setMockInitialValues({
-      'announcements.cacheVersion.sfa': 7,
-      'announcements.lastRefreshAt.sfa': DateTime.now().toIso8601String(),
-      'announcements.list.cache.sfa': jsonEncode([
-        const AnnouncementListItem(
-          title: '无日期外链',
-          url: 'https://example.org/old-link',
-          sourceId: 'sfa',
-        ).toJson(),
-      ]),
-    });
     final api = _FakeAnnouncementApiClient();
-    await AnnouncementRepository(apiClient: api)
-        .fetchAnnouncements(source: source);
+    final repository = AnnouncementRepository(apiClient: api);
+    addTearDown(repository.dispose);
+    final first = await repository.fetchAnnouncements(source: source);
+    final cached = await repository.fetchAnnouncements(source: source);
+    expect(cached.single.title, first.single.title);
     expect(api.requested, ['sfa']);
   });
 
-  test('cached computer news remains available after restoring its column',
+  test('computer news and notices remain in the same in-memory source list',
       () async {
-    SharedPreferences.setMockInitialValues({
-      'announcements.list.cache.cs': jsonEncode([
-        const AnnouncementListItem(
-          title: '学院新闻',
-          url: 'https://cs.shu.edu.cn/info/news.htm',
-          sourceId: 'cs',
-          column: '新闻动态',
-        ).toJson(),
-        const AnnouncementListItem(
-          title: '重要通知',
-          url: 'https://cs.shu.edu.cn/info/notice.htm',
-          sourceId: 'cs',
-          column: '重要通知',
-        ).toJson(),
-      ]),
-    });
-    final repository = AnnouncementRepository();
+    final source = AnnouncementSource.byId('cs');
+    final api = _QueuedPublicationDateApiClient(initialItems: const [
+      AnnouncementListItem(
+        title: '学院新闻',
+        url: 'https://cs.shu.edu.cn/info/news.htm',
+        sourceId: 'cs',
+        column: '新闻动态',
+      ),
+      AnnouncementListItem(
+        title: '重要通知',
+        url: 'https://cs.shu.edu.cn/info/notice.htm',
+        sourceId: 'cs',
+        column: '重要通知',
+      ),
+    ]);
+    final repository = AnnouncementRepository(apiClient: api);
+    addTearDown(repository.dispose);
+    await repository.fetchAnnouncements(source: source);
     final cached = await repository.loadCachedAnnouncements(
-      source: AnnouncementSource.byId('cs'),
+      source: source,
     );
     expect(cached.map((item) => item.title), ['学院新闻', '重要通知']);
   });
 
-  test('restored computer news refreshes a cache from the notice-only version',
+  test('new repositories start without previously viewed announcement lists',
       () async {
     final source = AnnouncementSource.byId('cs');
-    SharedPreferences.setMockInitialValues({
-      'announcements.cacheVersion.cs': 5,
-      'announcements.lastRefreshAt.cs': DateTime.now().toIso8601String(),
-      'announcements.list.cache.cs': jsonEncode([
-        const AnnouncementListItem(
-          title: '旧重要通知',
-          url: 'https://cs.shu.edu.cn/info/old.htm',
-          sourceId: 'cs',
-          column: '重要通知',
-        ).toJson(),
-      ]),
-    });
     final api = _FakeAnnouncementApiClient();
-    await AnnouncementRepository(apiClient: api)
-        .fetchAnnouncements(source: source);
+    final first = AnnouncementRepository(
+      apiClient: api,
+      preferencesLoader: () =>
+          throw StateError('Article lists use memory only'),
+    );
+    addTearDown(first.dispose);
+    await first.fetchAnnouncements(source: source);
+    expect(await first.loadCachedAnnouncements(source: source), isNotEmpty);
+    final second = AnnouncementRepository(
+      preferencesLoader: () =>
+          throw StateError('Article lists use memory only'),
+    );
+    addTearDown(second.dispose);
+    expect(await second.loadCachedAnnouncements(source: source), isEmpty);
     expect(api.requested, ['cs']);
   });
 
@@ -1832,7 +1839,8 @@ void main() {
       schoolPortal: true,
       college: false,
       researchInstitute: false,
-      schoolDepartment: true,
+      administrativeDepartment: true,
+      affiliatedInstitution: true,
     ));
     await first.saveMenuExpansion(AnnouncementMenuSection.favorites, false);
     await first.saveMenuExpansion(AnnouncementMenuSection.schoolPortal, false);
@@ -1840,7 +1848,9 @@ void main() {
     await first.saveMenuExpansion(
         AnnouncementMenuSection.researchInstitute, true);
     await first.saveMenuExpansion(
-        AnnouncementMenuSection.schoolDepartment, false);
+        AnnouncementMenuSection.administrativeDepartment, false);
+    await first.saveMenuExpansion(
+        AnnouncementMenuSection.affiliatedInstitution, true);
 
     final second = AnnouncementRepository();
     expect(await second.menuExpansion(), (
@@ -1848,18 +1858,32 @@ void main() {
       schoolPortal: false,
       college: true,
       researchInstitute: true,
-      schoolDepartment: false,
+      administrativeDepartment: false,
+      affiliatedInstitution: true,
     ));
   });
 
-  test('new portal group respects a previously collapsed school group',
+  test('split department groups inherit a previously collapsed school group',
       () async {
     SharedPreferences.setMockInitialValues({
       'announcements.menu.expanded.schoolDepartment': false,
     });
     final expansion = await AnnouncementRepository().menuExpansion();
     expect(expansion.schoolPortal, isFalse);
-    expect(expansion.schoolDepartment, isFalse);
+    expect(expansion.administrativeDepartment, isFalse);
+    expect(expansion.affiliatedInstitution, isFalse);
+  });
+
+  test('split department preferences override the legacy group independently',
+      () async {
+    SharedPreferences.setMockInitialValues({
+      'announcements.menu.expanded.schoolDepartment': false,
+      'announcements.menu.expanded.administrativeDepartment': true,
+      'announcements.menu.expanded.affiliatedInstitution': false,
+    });
+    final expansion = await AnnouncementRepository().menuExpansion();
+    expect(expansion.administrativeDepartment, isTrue);
+    expect(expansion.affiliatedInstitution, isFalse);
   });
 
   test('image-only and PDF announcements use type labels in the list',
@@ -1933,13 +1957,18 @@ class _FakeAnnouncementApiClient extends AnnouncementApiClient {
 }
 
 class _QueuedPublicationDateApiClient extends AnnouncementApiClient {
-  _QueuedPublicationDateApiClient({this.deferPage = false});
+  _QueuedPublicationDateApiClient({
+    this.deferPage = false,
+    this.initialItems = const [],
+  });
 
   final bool deferPage;
+  final List<AnnouncementListItem> initialItems;
   final pageStarted = Completer<void>();
   final page = Completer<AnnouncementPageBatch>();
   final pendingDates = <Completer<AnnouncementListItem?>>[];
   final requestedItems = <AnnouncementListItem>[];
+  int pageRequests = 0;
 
   @override
   Future<AnnouncementListItem?> fetchPublicationDate(
@@ -1966,6 +1995,13 @@ class _QueuedPublicationDateApiClient extends AnnouncementApiClient {
     AnnouncementSource source = AnnouncementSource.official,
     List<String?>? pageUrls,
   }) {
+    pageRequests++;
+    if (pageRequests == 1) {
+      return Future.value(AnnouncementPageBatch(
+        items: initialItems,
+        nextPageUrls: List<String?>.filled(source.listUrls.length, null),
+      ));
+    }
     if (!pageStarted.isCompleted) pageStarted.complete();
     if (deferPage) return page.future;
     return Future.value(AnnouncementPageBatch(
