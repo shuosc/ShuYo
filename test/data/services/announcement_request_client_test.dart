@@ -9,6 +9,143 @@ import 'package:shuyo/data/services/announcement_api_client.dart';
 import 'package:shuyo/data/services/announcement_request_client.dart';
 
 void main() {
+  test('metadata stops a chunked export immediately after its header',
+      () async {
+    var cancelled = false;
+    var aborted = false;
+    final body = StreamController<List<int>>(onCancel: () {
+      cancelled = true;
+    });
+    final network = _HandlerClient((request, _) async {
+      (request as http.AbortableRequest).abortTrigger!.then((_) {
+        aborted = true;
+      });
+      return http.StreamedResponse(body.stream, 200,
+          request: request,
+          headers: {'content-type': 'application/octet-stream'});
+    });
+    final client = AnnouncementRequestClient(httpClient: network);
+    addTearDown(client.close);
+    var completed = false;
+    final response = client
+        .getMetadataPrefix('https://a.test/export',
+            isComplete: (bytes) => utf8.decode(bytes).endsWith('</header>'))
+        .then((value) {
+      completed = true;
+      return value;
+    });
+    await _flush();
+    body.add(utf8.encode('<header>2026-10-26'));
+    await _flush();
+    expect(completed, isFalse);
+    body.add(utf8.encode('</header>'));
+    await _flush();
+    expect((await response).body, '<header>2026-10-26</header>');
+    expect(cancelled, isTrue);
+    expect(aborted, isTrue);
+    body.add(List.filled(1024 * 1024, 65));
+    await body.close();
+  });
+
+  test(
+      'metadata bounds oversized chunks and does not cache incomplete '
+      'prefixes', () async {
+    final network = _HandlerClient((request, _) async => _response(
+          request,
+          '0123456789',
+          headers: {'content-type': 'application/msword'},
+        ));
+    final client = AnnouncementRequestClient(httpClient: network);
+    addTearDown(client.close);
+    for (var attempt = 0; attempt < 2; attempt++) {
+      final response = await client.getMetadataPrefix(
+        'https://a.test/export',
+        isComplete: (_) => false,
+        maxBytes: 5,
+      );
+      expect(response.body, '01234');
+    }
+    expect(network.requests, hasLength(2));
+  });
+
+  test('metadata deduplicates, caches and stays isolated from full HTML',
+      () async {
+    final network = _GatedClient();
+    final client = AnnouncementRequestClient(httpClient: network);
+    addTearDown(client.close);
+    bool complete(List<int> bytes) => bytes.isNotEmpty;
+    const url = 'https://a.test/shared';
+    final first = client.getMetadataPrefix('$url#one', isComplete: complete);
+    final second = client.getMetadataPrefix('$url#two', isComplete: complete);
+    expect(network.requests, hasLength(1));
+    expect(network.requests.single.url.toString(), url);
+    network.complete(0, 'metadata');
+    expect((await first).body, 'metadata');
+    expect((await second).body, 'metadata');
+    final full = client.get(url, priority: AnnouncementRequestPriority.detail);
+    expect(network.requests, hasLength(2));
+    network.complete(1, 'complete HTML document');
+    expect((await full).body, 'complete HTML document');
+    expect((await client.getMetadataPrefix(url, isComplete: complete)).body,
+        'metadata');
+    expect(
+        (await client.get(url, priority: AnnouncementRequestPriority.detail))
+            .body,
+        'complete HTML document');
+    expect(network.requests, hasLength(2));
+  });
+
+  test('metadata timeout cancels a body that never finishes', () async {
+    var cancelled = false;
+    var aborted = false;
+    final body = StreamController<List<int>>(onCancel: () {
+      cancelled = true;
+    });
+    final network = _HandlerClient((request, _) async {
+      (request as http.AbortableRequest).abortTrigger!.then((_) {
+        aborted = true;
+      });
+      return http.StreamedResponse(body.stream, 200,
+          headers: {'content-type': 'application/msword'});
+    });
+    final client = AnnouncementRequestClient(
+      httpClient: network,
+      requestTimeout: const Duration(milliseconds: 15),
+      maxAttempts: 1,
+    );
+    addTearDown(client.close);
+    final result = expectLater(
+        client.getMetadataPrefix('https://a.test/export',
+            isComplete: (_) => false),
+        throwsA(isA<TimeoutException>()));
+    await result;
+    expect(cancelled, isTrue);
+    expect(aborted, isTrue);
+    await body.close();
+  });
+
+  test('metadata refresh does not reuse or cache an older prefix', () async {
+    final network = _GatedClient();
+    final client = AnnouncementRequestClient(httpClient: network);
+    addTearDown(client.close);
+    bool complete(List<int> bytes) => bytes.isNotEmpty;
+    const url = 'https://a.test/export';
+    final old = client.getMetadataPrefix(url, isComplete: complete);
+    client.clearResponseCache();
+    final fresh = client.getMetadataPrefix(url, isComplete: complete);
+    expect(network.requests, hasLength(2));
+    network.complete(0, 'old');
+    expect((await old).body, 'old');
+    final duplicate = client.getMetadataPrefix(url, isComplete: complete);
+    expect(network.requests, hasLength(2));
+    network.complete(1, 'fresh');
+    expect((await fresh).body, 'fresh');
+    expect((await duplicate).body, 'fresh');
+    expect((await client.getMetadataPrefix(url, isComplete: complete)).body,
+        'fresh');
+    expect(network.requests, hasLength(2));
+  });
+
   test('fragment variants share transport while consumers parse separately',
       () async {
     final network = _GatedClient();
@@ -310,6 +447,7 @@ void main() {
   for (final responseCase in [
     (status: 404, contentType: 'text/html'),
     (status: 200, contentType: 'application/pdf'),
+    (status: 200, contentType: 'application/msword'),
   ]) {
     test(
         'headers stop unreadable ${responseCase.status} '
@@ -475,7 +613,10 @@ void main() {
     final api = AnnouncementApiClient(httpClient: network);
     addTearDown(api.close);
     final page = await api.fetchPage(source: source);
-    expect(page.items.single.publishedAt, DateTime(2026, 10, 20));
+    expect(page.items.single.publishedAt, isNull);
+    expect(network.requests, hasLength(1));
+    final dated = await api.fetchPublicationDate(page.items.single);
+    expect(dated!.publishedAt, DateTime(2026, 10, 20));
     final detail = await api.fetchDetail(page.items.single);
     expect(detail.blocks.single.value, '电影正文');
     expect(

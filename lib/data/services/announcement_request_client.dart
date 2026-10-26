@@ -6,6 +6,7 @@ import 'package:http/http.dart' as http;
 import 'package:http/io_client.dart';
 
 import '../../core/client_user_agent.dart';
+import '../models/announcement_target.dart';
 import 'announcement_memory_cache.dart';
 import 'http_timeout.dart';
 
@@ -80,11 +81,41 @@ class AnnouncementRequestClient {
   Future<http.Response> get(
     String url, {
     AnnouncementRequestPriority priority = AnnouncementRequestPriority.list,
+  }) =>
+      _get(url, priority: priority);
+
+  /// Reads only the bounded beginning of a VSB document export, then stops the
+  /// response as soon as its metadata is complete. Prefixes never share the
+  /// response cache or in-flight entries used by complete HTML downloads.
+  Future<http.Response> getMetadataPrefix(
+    String url, {
+    required bool Function(List<int>) isComplete,
+    int maxBytes = 16 * 1024,
+  }) {
+    if (maxBytes <= 0) {
+      return Future.error(ArgumentError.value(maxBytes, 'maxBytes'));
+    }
+    return _get(
+      url,
+      priority: AnnouncementRequestPriority.detail,
+      isComplete: isComplete,
+      maxBytes: maxBytes,
+    );
+  }
+
+  Future<http.Response> _get(
+    String url, {
+    required AnnouncementRequestPriority priority,
+    bool Function(List<int>)? isComplete,
+    int maxBytes = 0,
   }) {
     if (_closed) {
       return Future.error(StateError('Announcement client is closed'));
     }
-    final key = _urlKey(url);
+    final normalizedUrl = _urlKey(url);
+    final key = isComplete == null
+        ? normalizedUrl
+        : 'metadata:$maxBytes:$normalizedUrl';
     final cacheable = priority == AnnouncementRequestPriority.detail;
     if (cacheable) {
       final cached = _responses.lookup(key);
@@ -100,7 +131,15 @@ class AnnouncementRequestClient {
       }
       return existing.completer.future;
     }
-    final request = _Request(key, priority, cacheable, _cacheEpoch);
+    final request = _Request(
+      normalizedUrl,
+      key,
+      priority,
+      cacheable,
+      _cacheEpoch,
+      isComplete: isComplete,
+      maxBytes: maxBytes,
+    );
     _inflight[key] = request;
     _requests.add(request);
     _queued.add(request);
@@ -154,6 +193,31 @@ class AnnouncementRequestClient {
     _inflight.clear();
   }
 
+  /// Refresh one article without invalidating unrelated sites or consumers.
+  void invalidateUrls(Iterable<String> urls) {
+    final keys = urls.map(announcementUrlKey).toSet();
+    _responses.removeWhere((key, _) =>
+        keys.contains(key) || keys.any((url) => key.endsWith(':$url')));
+    for (final request in _requests) {
+      if (!keys.contains(request.url)) continue;
+      request.cacheable = false;
+      if (identical(_inflight[request.key], request)) {
+        _inflight.remove(request.key);
+      }
+    }
+  }
+
+  /// Release expired optional work, including requests still in the queue.
+  void cancelUrls(Iterable<String> urls) {
+    final keys = urls.map(announcementUrlKey).toSet();
+    for (final request in _requests.toList()) {
+      if (keys.contains(request.url)) {
+        _finishError(request, StateError('Announcement preparation cancelled'));
+      }
+    }
+    _pump();
+  }
+
   void close() {
     if (_closed) return;
     _closed = true;
@@ -166,8 +230,7 @@ class AnnouncementRequestClient {
     if (_ownsHttpClient) _httpClient.close();
   }
 
-  static String _urlKey(String url) =>
-      Uri.parse(url.trim()).removeFragment().toString();
+  static String _urlKey(String url) => announcementUrlKey(url);
 
   _Host _host(_Request request) => _hosts.putIfAbsent(
         Uri.parse(request.url).host.toLowerCase(),
@@ -238,8 +301,10 @@ class AnnouncementRequestClient {
           request.epoch == _cacheEpoch &&
           response.statusCode >= 200 &&
           response.statusCode < 300 &&
-          _readable(response.headers)) {
-        _responses.put(request.url, response);
+          (request.isMetadata
+              ? request.prefixComplete
+              : _readable(response.headers))) {
+        _responses.put(request.key, response);
       }
       _finishResponse(request, response);
     } on Object catch (error) {
@@ -263,6 +328,7 @@ class AnnouncementRequestClient {
   }
 
   Future<http.Response> _send(_Request request) async {
+    request.prefixComplete = false;
     final abort = Completer<void>();
     request.abort = abort;
     final outgoing = http.AbortableRequest(
@@ -270,14 +336,19 @@ class AnnouncementRequestClient {
       Uri.parse(request.url),
       abortTrigger: abort.future,
     )..headers.addAll({
-        'accept': 'text/html,application/xhtml+xml',
+        'accept': request.isMetadata
+            ? 'application/msword,application/octet-stream,multipart/related,'
+                'text/html;q=0.9'
+            : 'text/html,application/xhtml+xml',
         'user-agent': ClientUserAgent.mobileBrowser,
       });
     Future<http.Response> send() async {
       final streamed = await _httpClient.send(outgoing);
       if (streamed.statusCode < 200 ||
           streamed.statusCode >= 300 ||
-          !_readable(streamed.headers)) {
+          !(request.isMetadata
+              ? _metadataReadable(streamed.headers)
+              : _readable(streamed.headers))) {
         // Error pages and attachments are unnecessary for the HTML parsers.
         // Preserve headers/status for unavailable notices and Retry-After.
         final subscription = streamed.stream.listen((_) {}, onError: (_) {});
@@ -293,7 +364,15 @@ class AnnouncementRequestClient {
           reasonPhrase: streamed.reasonPhrase,
         );
       }
-      return http.Response.fromStream(streamed);
+      if (request.isMetadata) {
+        return _readMetadataPrefix(streamed, request, abort);
+      }
+      final response = await http.Response.fromStream(streamed);
+      return _ResponseWithUrl(
+          response,
+          streamed is http.BaseResponseWithUrl
+              ? (streamed as http.BaseResponseWithUrl).url
+              : outgoing.url);
     }
 
     try {
@@ -310,6 +389,82 @@ class AnnouncementRequestClient {
     } finally {
       if (identical(request.abort, abort)) request.abort = null;
     }
+  }
+
+  Future<http.Response> _readMetadataPrefix(
+    http.StreamedResponse streamed,
+    _Request request,
+    Completer<void> abort,
+  ) async {
+    final bytes = <int>[];
+    final finished = Completer<void>();
+    late StreamSubscription<List<int>> subscription;
+    var stopped = false;
+
+    void finish({Object? error, StackTrace? stackTrace, bool cancel = false}) {
+      if (stopped) return;
+      stopped = true;
+      if (cancel && !abort.isCompleted) abort.complete();
+      final cleanup = cancel ? subscription.cancel() : Future<void>.value();
+      cleanup.then((_) {
+        if (error != null) {
+          finished.completeError(error, stackTrace);
+        } else {
+          finished.complete();
+        }
+      }, onError: (Object cleanupError, StackTrace cleanupStack) {
+        finished.completeError(
+            error ?? cleanupError, stackTrace ?? cleanupStack);
+      });
+    }
+
+    subscription = streamed.stream.listen(
+      (chunk) {
+        try {
+          final remaining = request.maxBytes - bytes.length;
+          bytes.addAll(
+              chunk.length <= remaining ? chunk : chunk.take(remaining));
+          request.prefixComplete = request.isComplete!(bytes);
+          if (request.prefixComplete || bytes.length == request.maxBytes) {
+            finish(cancel: true);
+          }
+        } on Object catch (error, stackTrace) {
+          finish(error: error, stackTrace: stackTrace, cancel: true);
+        }
+      },
+      onError: (Object error, StackTrace stackTrace) {
+        finish(error: error, stackTrace: stackTrace, cancel: true);
+      },
+      onDone: finish,
+      cancelOnError: false,
+    );
+    unawaited(abort.future.then((_) {
+      finish(
+        error: http.ClientException(
+            'Metadata request aborted', Uri.parse(request.url)),
+        cancel: true,
+      );
+    }));
+    await finished.future;
+    return http.Response.bytes(
+      bytes,
+      streamed.statusCode,
+      request: streamed.request,
+      headers: streamed.headers,
+      isRedirect: streamed.isRedirect,
+      persistentConnection: streamed.persistentConnection,
+      reasonPhrase: streamed.reasonPhrase,
+    );
+  }
+
+  static bool _metadataReadable(Map<String, String> headers) {
+    final type =
+        (headers['content-type'] ?? '').split(';').first.trim().toLowerCase();
+    return _readable(headers) ||
+        type == 'application/msword' ||
+        type == 'application/octet-stream' ||
+        type == 'multipart/related' ||
+        type == 'message/rfc822';
   }
 
   static bool _readable(Map<String, String> headers) {
@@ -380,8 +535,8 @@ class AnnouncementRequestClient {
     request.timer?.cancel();
     _requests.remove(request);
     _queued.remove(request);
-    if (identical(_inflight[request.url], request)) {
-      _inflight.remove(request.url);
+    if (identical(_inflight[request.key], request)) {
+      _inflight.remove(request.key);
     }
   }
 
@@ -404,13 +559,33 @@ class AnnouncementRequestClient {
   }
 }
 
+class _ResponseWithUrl extends http.Response
+    implements http.BaseResponseWithUrl {
+  _ResponseWithUrl(http.Response response, this.url)
+      : super.bytes(response.bodyBytes, response.statusCode,
+            request: response.request,
+            headers: response.headers,
+            isRedirect: response.isRedirect,
+            persistentConnection: response.persistentConnection,
+            reasonPhrase: response.reasonPhrase);
+
+  @override
+  final Uri url;
+}
+
 class _Request {
-  _Request(this.url, this.priority, this.cacheable, this.epoch);
+  _Request(this.url, this.key, this.priority, this.cacheable, this.epoch,
+      {this.isComplete, this.maxBytes = 0});
 
   final String url;
+  final String key;
   AnnouncementRequestPriority priority;
   bool cacheable;
   final int epoch;
+  final bool Function(List<int>)? isComplete;
+  final int maxBytes;
+  bool prefixComplete = false;
+  bool get isMetadata => isComplete != null;
   final Completer<http.Response> completer = Completer();
   final Completer<void> stopped = Completer();
   Completer<void>? abort;
