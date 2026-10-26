@@ -77,6 +77,10 @@ jobs:
         if: steps.changes.outputs.code == 'true'
         run: flutter analyze
 
+      - name: Validate bundled contributors snapshot
+        if: steps.changes.outputs.code == 'true'
+        run: dart run tool/update_contributors.dart --check
+
       - name: Run tests
         if: steps.changes.outputs.code == 'true'
         run: flutter test

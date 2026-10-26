@@ -1,0 +1,57 @@
+{
+  "schemaVersion": 1,
+  "repository": "shuosc/ShuYo",
+  "generatedAt": "2026-10-26T02:17:58.111196Z",
+  "contributors": [
+    {
+      "login": "Lilin-1024",
+      "name": "Lilin",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/179945128?v=4",
+      "profileUrl": "https://github.com/Lilin-1024",
+      "commits": 371,
+      "additions": 169213,
+      "deletions": 91215,
+      "statisticsMessage": null
+    },
+    {
+      "login": "preca-hoshino",
+      "name": "Preca",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/185678356?v=4",
+      "profileUrl": "https://github.com/preca-hoshino",
+      "commits": 53,
+      "additions": 13875,
+      "deletions": 3272,
+      "statisticsMessage": null
+    },
+    {
+      "login": "DanielZhangyc",
+      "name": "Yuchen Zhang",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/134716838?v=4",
+      "profileUrl": "https://github.com/DanielZhangyc",
+      "commits": 11,
+      "additions": 4537,
+      "deletions": 364,
+      "statisticsMessage": null
+    },
+    {
+      "login": "Sun-haonan233",
+      "name": null,
+      "avatarUrl": "https://avatars.githubusercontent.com/u/301698711?v=4",
+      "profileUrl": "https://github.com/Sun-haonan233",
+      "commits": 1,
+      "additions": 1078,
+      "deletions": 3,
+      "statisticsMessage": null
+    },
+    {
+      "login": "diyiliumin",
+      "name": null,
+      "avatarUrl": "https://avatars.githubusercontent.com/u/116867486?v=4",
+      "profileUrl": "https://github.com/diyiliumin",
+      "commits": 1,
+      "additions": 349,
+      "deletions": 23,
+      "statisticsMessage": null
+    }
+  ]
+}

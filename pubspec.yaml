@@ -41,6 +41,7 @@ flutter:
   uses-material-design: true
   assets:
     - assets/images/
+    - assets/contributors/
     - assets/demo/README.md
     - assets/demo/academic/
     - assets/demo/announcements/

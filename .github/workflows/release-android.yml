@@ -106,6 +106,14 @@ jobs:
       - name: Install dependencies
         run: flutter pub get
 
+      - name: Generate bundled contributors snapshot
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: dart run tool/update_contributors.dart
+
+      - name: Validate bundled contributors snapshot
+        run: dart run tool/update_contributors.dart --check
+
       - name: Analyze Dart and Flutter code
         run: flutter analyze
 
