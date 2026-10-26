@@ -577,7 +577,7 @@ class _AnnouncementMonthHeader {
   final int index;
 }
 
-const _stickyHeaderExtent = 38.0;
+const _stickyHeaderExtent = 34.0;
 
 class _AnnouncementStickyHeaderDelegate extends SliverPersistentHeaderDelegate {
   const _AnnouncementStickyHeaderDelegate({required this.month});
@@ -598,7 +598,7 @@ class _AnnouncementStickyHeaderDelegate extends SliverPersistentHeaderDelegate {
       key: ValueKey('announcement-sticky-home-$month'),
       color: Theme.of(context).scaffoldBackgroundColor,
       child: Padding(
-        padding: const EdgeInsets.fromLTRB(16, 18, 16, 4),
+        padding: const EdgeInsets.fromLTRB(16, 14, 16, 4),
         child: Text(
           month,
           style: ShuYoTextStyles.meta(
