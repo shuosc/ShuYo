@@ -20,7 +20,7 @@ class _AssetBundle extends CachingAssetBundle {
         .whereType<File>()
         .where((file) =>
             file.path.endsWith('.json') || file.path.endsWith('.svg')))
-      file.path: file.readAsStringSync(),
+      file.path.replaceAll(r'\', '/'): file.readAsStringSync(),
   };
 
   @override
