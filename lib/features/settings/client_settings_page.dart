@@ -9,6 +9,7 @@ import 'package:image_picker/image_picker.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../../core/client_app_info.dart';
+import '../../core/client_build_info.dart';
 import '../../core/app_tab.dart';
 import '../../core/client_update_policy.dart';
 import '../../data/models/announcement_source.dart';
@@ -25,6 +26,7 @@ import '../../shared/widgets/client_update_prompt.dart';
 import '../../shared/widgets/empty_state.dart';
 import '../../shared/widgets/webvpn_toggle.dart';
 import 'client_feedback_page.dart';
+import 'contributors_page.dart';
 import 'privacy_data_page.dart';
 import '../onboarding/startup_onboarding.dart';
 
@@ -547,13 +549,10 @@ class _AboutClientPage extends StatefulWidget {
 
 class _AboutClientPageState extends State<_AboutClientPage> {
   static const _sourceUrl = 'https://github.com/shuosc/ShuYo';
-  static const _licenseUrl =
-      'https://github.com/shuosc/ShuYo/blob/main/LICENSE';
-  static const _contributorsUrl =
-      'https://github.com/shuosc/ShuYo/graphs/contributors';
   static const _termsUrl = 'https://shuyo.work/doc/terms.html';
   static const _privacyUrl = 'https://shuyo.work/doc/privacy.html';
 
+  late final Future<void> _buildInfo = ClientBuildInfo.load();
   bool _checkingUpdate = false;
 
   @override
@@ -605,6 +604,25 @@ class _AboutClientPageState extends State<_AboutClientPage> {
               ],
             ),
           ),
+          const SizedBox(height: 16),
+          FutureBuilder<void>(
+            future: _buildInfo,
+            builder: (context, snapshot) {
+              if (snapshot.connectionState != ConnectionState.done) {
+                return const SizedBox(height: 72);
+              }
+              final commitUrl = ClientBuildInfo.commitUrl;
+              return _AboutRow(
+                leading: const _GitBranchIcon(),
+                title: '构建信息',
+                subtitle: ClientBuildInfo.displayLabel,
+                external: true,
+                onTap: commitUrl == null
+                    ? null
+                    : () => _openExternalUrl(commitUrl.toString()),
+              );
+            },
+          ),
           const Padding(
             padding: EdgeInsets.symmetric(vertical: 24),
             child: Divider(),
@@ -614,13 +632,13 @@ class _AboutClientPageState extends State<_AboutClientPage> {
             icon: Icons.code,
             title: '源代码',
             subtitle: 'GitHub · shuosc/ShuYo',
+            external: true,
             onTap: () => _openExternalUrl(_sourceUrl),
           ),
-          _AboutRow(
+          const _AboutRow(
             icon: Icons.balance_outlined,
             title: '开源许可',
             subtitle: 'GNU General Public License v3.0',
-            onTap: () => _openExternalUrl(_licenseUrl),
           ),
           _AboutRow(
             icon: Icons.inventory_2_outlined,
@@ -630,8 +648,10 @@ class _AboutClientPageState extends State<_AboutClientPage> {
           _AboutRow(
             icon: Icons.groups_outlined,
             title: '贡献者',
-            subtitle: '查看 GitHub Contributors',
-            onTap: () => _openExternalUrl(_contributorsUrl),
+            subtitle: 'GitHub Contributors',
+            onTap: () => Navigator.of(context).push<void>(
+              shuyoRoute(builder: (_) => const ContributorsPage()),
+            ),
           ),
           const SizedBox(height: 18),
           const _AboutGroupTitle('隐私与声明'),
@@ -645,11 +665,13 @@ class _AboutClientPageState extends State<_AboutClientPage> {
           _AboutRow(
             icon: Icons.description_outlined,
             title: '使用条款',
+            external: true,
             onTap: () => _openExternalUrl(_termsUrl),
           ),
           _AboutRow(
             icon: Icons.privacy_tip_outlined,
             title: '隐私政策',
+            external: true,
             onTap: () => _openExternalUrl(_privacyUrl),
           ),
           if (!widget.isDemo) ...[
@@ -801,30 +823,96 @@ class _AboutGroupTitle extends StatelessWidget {
 
 class _AboutRow extends StatelessWidget {
   const _AboutRow({
-    required this.icon,
+    this.icon,
+    this.leading,
     required this.title,
-    required this.onTap,
+    this.onTap,
     this.subtitle,
     this.trailing,
-  });
+    this.external = false,
+  }) : assert((icon != null) != (leading != null));
 
-  final IconData icon;
+  final IconData? icon;
+  final Widget? leading;
   final String title;
   final String? subtitle;
   final VoidCallback? onTap;
   final Widget? trailing;
+  final bool external;
 
   @override
   Widget build(BuildContext context) {
+    final colors = context.shuyoColors;
+    final subtitleColor = CustomBackgroundScope.maybeOf(context) != null
+        ? colors.textTertiary
+        : Color.lerp(colors.textSecondary, colors.textTertiary, 0.7);
     return ListTile(
       contentPadding: const EdgeInsets.symmetric(horizontal: 4),
-      leading: Icon(icon),
+      leading: leading ?? Icon(icon),
       title: Text(title),
-      subtitle: subtitle == null ? null : Text(subtitle!),
-      trailing: trailing ?? const Icon(Icons.chevron_right),
+      subtitle: subtitle == null
+          ? null
+          : Text(subtitle!, style: TextStyle(color: subtitleColor)),
+      trailing: trailing ??
+          (onTap == null
+              ? null
+              : Icon(
+                  external ? Icons.open_in_new : Icons.chevron_right,
+                  size: external ? 18 : null,
+                )),
       onTap: onTap,
     );
   }
+}
+
+class _GitBranchIcon extends StatelessWidget {
+  const _GitBranchIcon();
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = IconTheme.of(context);
+    final color = theme.color ?? context.shuyoColors.textSecondary;
+    return SizedBox.square(
+      dimension: theme.size ?? 24,
+      child: CustomPaint(
+        painter: _GitBranchPainter(
+          color.withValues(alpha: color.a * (theme.opacity ?? 1)),
+        ),
+      ),
+    );
+  }
+}
+
+class _GitBranchPainter extends CustomPainter {
+  const _GitBranchPainter(this.color);
+
+  final Color color;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    canvas.scale(size.width / 24, size.height / 24);
+    final paint = Paint()
+      ..color = color
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 2
+      ..strokeCap = StrokeCap.round
+      ..strokeJoin = StrokeJoin.round;
+    canvas.drawLine(const Offset(6, 7), const Offset(6, 17), paint);
+    canvas.drawPath(
+      Path()
+        ..moveTo(6, 14)
+        ..lineTo(10, 14)
+        ..cubicTo(14.4, 14, 18, 10.4, 18, 7),
+      paint,
+    );
+    canvas.drawCircle(const Offset(6, 4.5), 2.5, paint);
+    canvas.drawCircle(const Offset(6, 19.5), 2.5, paint);
+    canvas.drawCircle(const Offset(18, 4.5), 2.5, paint);
+  }
+
+  @override
+  bool shouldRepaint(_GitBranchPainter oldDelegate) =>
+      color != oldDelegate.color;
 }
 
 class _PermissionInfoPage extends StatelessWidget {

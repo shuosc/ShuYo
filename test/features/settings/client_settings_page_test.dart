@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
@@ -19,10 +20,25 @@ import 'package:shuyo/features/settings/client_settings_page.dart';
 import 'package:shuyo/features/onboarding/startup_onboarding.dart';
 import 'package:shuyo/shared/widgets/webvpn_toggle.dart';
 import 'package:shuyo/core/client_app_info.dart';
+import 'package:shuyo/core/client_build_info.dart';
 import 'package:shuyo/shared/theme/custom_background.dart';
 import 'package:shuyo/shared/theme/shuyo_theme.dart';
 
 void main() {
+  const buildInfoChannel = MethodChannel('work.shuyo.app/build_info');
+  setUpAll(() {
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(
+            buildInfoChannel,
+            (_) async => {
+                  'branch': 'feat/about-page',
+                  'commitHash': '0123456789abcdef0123456789abcdef01234567',
+                });
+  });
+  tearDownAll(() {
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(buildInfoChannel, null);
+  });
   setUp(() => SharedPreferences.setMockInitialValues({}));
   tearDown(() => debugDefaultTargetPlatformOverride = null);
 
@@ -500,9 +516,36 @@ void main() {
       findsOneWidget,
     );
     expect(find.text('源代码'), findsOneWidget);
+    expect(find.text('构建信息'), findsOneWidget);
+    expect(find.text('feat/about-page · 0123456'), findsOneWidget);
+    final revisionRow = tester.widget<ListTile>(
+      find.widgetWithText(ListTile, ClientBuildInfo.displayLabel),
+    );
+    expect(revisionRow.onTap, isNotNull);
     expect(find.text('GNU General Public License v3.0'), findsOneWidget);
     expect(find.text('第三方开源许可'), findsOneWidget);
+    final sourceRow = find.widgetWithText(ListTile, '源代码');
+    expect(
+      find.descendant(
+        of: sourceRow,
+        matching: find.byIcon(Icons.open_in_new),
+      ),
+      findsOneWidget,
+    );
+    final licenseRow = tester.widget<ListTile>(
+      find.widgetWithText(ListTile, '开源许可'),
+    );
+    expect(licenseRow.onTap, isNull);
+    expect(licenseRow.trailing, isNull);
+    await tester.scrollUntilVisible(find.text('贡献者'), 200);
     expect(find.text('贡献者'), findsOneWidget);
+    expect(
+      find.descendant(
+        of: find.widgetWithText(ListTile, '贡献者'),
+        matching: find.byIcon(Icons.chevron_right),
+      ),
+      findsOneWidget,
+    );
 
     await tester.scrollUntilVisible(find.text('检查更新'), 300);
     expect(find.text('权限说明'), findsOneWidget);
@@ -510,6 +553,15 @@ void main() {
     expect(find.text('隐私政策'), findsOneWidget);
     expect(find.text('问题与反馈'), findsOneWidget);
     expect(find.text('检查更新'), findsOneWidget);
+    for (final title in ['使用条款', '隐私政策']) {
+      expect(
+        find.descendant(
+          of: find.widgetWithText(ListTile, title),
+          matching: find.byIcon(Icons.open_in_new),
+        ),
+        findsOneWidget,
+      );
+    }
   });
 
   testWidgets('about page explains Android permissions', (tester) async {
