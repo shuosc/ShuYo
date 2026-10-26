@@ -636,13 +636,16 @@ class _AnnouncementStickyHeaderDelegate extends SliverPersistentHeaderDelegate {
         child: FadeTransition(
           opacity: opacity,
           child: Padding(
-            padding: const EdgeInsets.fromLTRB(16, 14, 16, 4),
-            child: Text(
-              month,
-              style: ShuYoTextStyles.meta(
-                color: colors.textSecondary,
-                size: 12.5,
-                weight: FontWeight.w600,
+            padding: const EdgeInsets.symmetric(horizontal: 16),
+            child: Align(
+              alignment: Alignment.centerLeft,
+              child: Text(
+                month,
+                style: ShuYoTextStyles.meta(
+                  color: colors.textSecondary,
+                  size: 12.5,
+                  weight: FontWeight.w600,
+                ),
               ),
             ),
           ),
