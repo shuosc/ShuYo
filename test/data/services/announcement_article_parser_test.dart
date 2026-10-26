@@ -120,6 +120,87 @@ void main() {
     }
   });
 
+  test('Word styles beside an attachment never become visible article text',
+      () {
+    final html = _page('<p><style><!-- p.MsoNormal { margin: 0; } '
+        '@list l0 { mso-list-id: 123; } --></style>'
+        '<script>editorInternalCode()</script>'
+        '<span retain="true"><img '
+        'src="/system/resource/images/fileTypeImages/icon_rar.gif">'
+        '<a href="/system/_content/download.jsp?urltype=news.DownloadAttachUrl&id=1">'
+        '申请材料.rar</a></span></p><div><p>请按通知提交申请材料。</p></div>');
+    for (final includeBody in [false, true]) {
+      final result = AnnouncementArticleParser.parse(html,
+          url: 'https://utseus.shu.edu.cn/info/1010/4276.htm',
+          includeBody: includeBody);
+      expect(result.summary, '请按通知提交申请材料。');
+      if (!includeBody) continue;
+      expect(result.blocks.where((block) => block.isText).single.value,
+          '请按通知提交申请材料。');
+      expect(result.blocks.where((block) => block.isLink).single.label,
+          '申请材料.rar');
+      expect(result.blocks.where((block) => block.isImage), isEmpty);
+    }
+  });
+
+  test('attachment surrounding text preserves a repeated attachment label', () {
+    final html = _page('<p>请下载申请表.docx：'
+        '<a href="/files/form.docx">申请表.docx</a>并按要求填写。</p>');
+    final result = AnnouncementArticleParser.parse(html, url: _url);
+    expect(result.blocks.first.value, '请下载申请表.docx：并按要求填写。');
+    expect(result.blocks.last.label, '申请表.docx');
+  });
+
+  test('CMS attachment icons are omitted while links and article images remain',
+      () {
+    final attachments = [
+      for (final extension in [
+        'pdf',
+        'doc',
+        'docx',
+        'xls',
+        'xlsx',
+        'ppt',
+        'pptx',
+        'rar',
+        'zip'
+      ])
+        '<p><span retain="true"><img '
+            'orisrc="/system/resource/images/fileTypeImages/icon_$extension.gif" '
+            'src="/placeholder.gif">'
+            '<a href="/system/_content/download.jsp?urltype=news.DownloadAttachUrl&id=$extension">'
+            '申请材料.$extension</a></span></p>',
+    ].join();
+    final html = _page('$attachments<p>申请材料说明</p>'
+        '<p><img src="/__local/2/E0/CA/notice.gif"></p>'
+        '<p><img src="/uploads/icon_pdf.gif"></p>');
+    final result = AnnouncementArticleParser.parse(html,
+        url: 'https://utseus.shu.edu.cn/info/1010/4116.htm');
+    expect(result.blocks.where((block) => block.isLink), hasLength(9));
+    expect(
+        result.blocks
+            .where((block) => block.isImage)
+            .map((block) => block.value),
+        [
+          'https://utseus.shu.edu.cn/__local/2/E0/CA/notice.gif',
+          'https://utseus.shu.edu.cn/uploads/icon_pdf.gif'
+        ]);
+    expect(result.summary, '申请材料说明');
+  });
+
+  for (final attribute in ['src', 'data-src', 'orisrc', 'vurl']) {
+    test('a CMS icon alone is not a preview image ($attribute)', () {
+      final html = _page('<p><img $attribute="'
+          'https://utseus.shu.edu.cn/system/resource/images/FILETYPEIMAGES/icon_docx.gif?v=2"></p>');
+      for (final includeBody in [false, true]) {
+        final result = AnnouncementArticleParser.parse(html,
+            url: _url, includeBody: includeBody);
+        expect(result.summary, isEmpty);
+        expect(result.blocks, isEmpty);
+      }
+    });
+  }
+
   test('full articles preserve PDF pages, external attachments and table spans',
       () {
     final html = '${_page('<p>公告正文</p>'

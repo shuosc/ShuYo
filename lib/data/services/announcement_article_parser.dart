@@ -241,7 +241,7 @@ abstract final class AnnouncementArticleParser {
         return;
       }
       if (tag == 'img') {
-        hasBlock = hasBlock || _previewImageUrl(element, baseUrl).isNotEmpty;
+        hasBlock = hasBlock || _articleImageUrl(element, baseUrl).isNotEmpty;
         return;
       }
       for (final child in element.children) {
@@ -285,21 +285,28 @@ abstract final class AnnouncementArticleParser {
     }
     if (root
             ?.querySelectorAll('img')
-            .any((image) => _previewImageUrl(image, baseUrl).isNotEmpty) ==
+            .any((image) => _articleImageUrl(image, baseUrl).isNotEmpty) ==
         true) {
       return '[图片]';
     }
     return hasTable ? '[表格]' : '';
   }
 
-  static String _previewImageUrl(dom.Element image, String baseUrl) =>
-      resolveAnnouncementUrl(
-          baseUrl,
-          image.attributes['orisrc'] ??
-              image.attributes['data-src'] ??
-              image.attributes['src'] ??
-              image.attributes['vurl'] ??
-              '');
+  static String _articleImageUrl(dom.Element image, String baseUrl) {
+    final url = resolveAnnouncementUrl(
+        baseUrl,
+        image.attributes['orisrc'] ??
+            image.attributes['data-src'] ??
+            image.attributes['src'] ??
+            image.attributes['vurl'] ??
+            '');
+    // VSB decorates attachment links with CMS file-type icons. They are not
+    // article illustrations, even when an editor copies them into the body.
+    final path = Uri.tryParse(url)?.path.toLowerCase() ?? '';
+    return path.startsWith('/system/resource/images/filetypeimages/')
+        ? ''
+        : url;
+  }
 
   static bool _isPlainPreviewInline(dom.Node node) =>
       node is dom.Text ||
@@ -423,12 +430,7 @@ abstract final class AnnouncementArticleParser {
     final imaged = <String>{};
 
     void addImage(dom.Element image) {
-      final src = image.attributes['orisrc'] ??
-          image.attributes['data-src'] ??
-          image.attributes['src'] ??
-          image.attributes['vurl'] ??
-          '';
-      final imageUrl = resolveAnnouncementUrl(baseUrl, src);
+      final imageUrl = _articleImageUrl(image, baseUrl);
       if (imageUrl.isEmpty || !imaged.add(imageUrl)) return;
       blocks.add(AnnouncementContentBlock.image(
         imageUrl,
@@ -541,11 +543,7 @@ abstract final class AnnouncementArticleParser {
       if (tag == 'p' || tag == 'li' || tag == 'h2' || tag == 'h3') {
         final anchors = element.querySelectorAll('a[href]');
         if (anchors.isNotEmpty && anchors.every(_isAttachmentAnchor)) {
-          var surroundingText = element.text;
-          for (final anchor in anchors) {
-            surroundingText = surroundingText.replaceFirst(anchor.text, '');
-          }
-          final text = _cleanText(surroundingText);
+          final text = _cleanText(_visibleText(element, omitAttachments: true));
           if (text.isNotEmpty) {
             blocks.add(
                 AnnouncementContentBlock.text(tag == 'li' ? '• $text' : text));
@@ -784,14 +782,19 @@ abstract final class AnnouncementArticleParser {
         .any((child) => blockTags.contains(child.localName));
   }
 
-  static String _visibleText(dom.Node node) {
+  static String _visibleText(dom.Node node, {bool omitAttachments = false}) {
     if (node is dom.Text) return node.text;
     if (node is! dom.Element ||
         node.localName == 'script' ||
-        node.localName == 'style') {
+        node.localName == 'style' ||
+        (omitAttachments &&
+            node.localName == 'a' &&
+            _isAttachmentAnchor(node))) {
       return '';
     }
-    final text = node.nodes.map(_visibleText).join();
+    final text = node.nodes
+        .map((child) => _visibleText(child, omitAttachments: omitAttachments))
+        .join();
     return _isTextBlock(node.localName) ? ' $text ' : text;
   }
 
