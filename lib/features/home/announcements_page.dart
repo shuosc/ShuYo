@@ -9,8 +9,10 @@ import 'package:url_launcher/url_launcher.dart';
 
 import '../../data/models/announcement.dart';
 import '../../data/models/announcement_source.dart';
+import '../../data/models/announcement_target.dart';
 import '../../data/repositories/announcement_repository.dart';
 import '../../data/services/announcement_api_client.dart';
+import '../../data/services/announcement_order.dart';
 import '../../shared/shuyo_text_styles.dart';
 import '../../shared/navigation/shuyo_route.dart';
 import '../../shared/theme/shuyo_theme.dart';
@@ -137,20 +139,7 @@ class _AnnouncementsPageState extends State<AnnouncementsPage> {
       forceRefresh: forceRefresh,
       loadNextPage: loadNextPage,
     );
-    // Some sites pin old notices above recent ones. Sort before displaying any
-    // cards, preserving the source order for equal/missing dates.
-    final indexed = items.asMap().entries.toList();
-    indexed.sort((a, b) {
-      final left = a.value.publishedAt;
-      final right = b.value.publishedAt;
-      if (left == null || right == null) {
-        if (left == null && right == null) return a.key.compareTo(b.key);
-        return left == null ? 1 : -1;
-      }
-      final byDate = right.compareTo(left);
-      return byDate != 0 ? byDate : a.key.compareTo(b.key);
-    });
-    final sorted = [for (final entry in indexed) entry.value];
+    final sorted = orderAnnouncements(items);
     return _LoadedAnnouncementList(sorted, _announcementRows(sorted));
   }
 
@@ -184,9 +173,7 @@ class _AnnouncementsPageState extends State<AnnouncementsPage> {
     final source = _source;
     if (source == null) return const SizedBox.shrink();
     final limitationNotice =
-        const {'sfa', 'utseus', 'shvfs'}.contains(source.id)
-            ? '\n由于网站限制，浏览有概率出现问题'
-            : '';
+        source.hasBrowsingLimitations ? '\n由于网站限制，浏览有概率出现问题' : '';
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
       child: Text(
@@ -282,9 +269,11 @@ class _AnnouncementsPageState extends State<AnnouncementsPage> {
                 index: itemRow.index,
                 item: item,
                 repository: widget.repository,
-                external: _isExternalAnnouncement(item),
+                external: !AnnouncementTarget.resolve(item.url,
+                        sourceId: item.sourceId)
+                    .canOpenInApp,
                 updatesPaused: _updatesPaused,
-                previewVersion: _requestGeneration,
+                preparationVersion: _requestGeneration,
                 onTap: () => unawaited(_openAnnouncement(item)),
               ),
               if (index + 1 < end - start &&
@@ -521,9 +510,10 @@ class _AnnouncementsPageState extends State<AnnouncementsPage> {
   }
 
   Future<void> _openAnnouncement(AnnouncementListItem item) async {
-    final article = _announcementForUrlOwner(item);
-    if (_isExternalAnnouncement(article)) {
-      await _openExternalAnnouncementUrl(context, article.url);
+    final target =
+        AnnouncementTarget.resolve(item.url, sourceId: item.sourceId);
+    if (!target.canOpenInApp) {
+      await _openExternalAnnouncementUrl(context, item.url);
       return;
     }
     if (_updatesPaused.value) return;
@@ -533,7 +523,7 @@ class _AnnouncementsPageState extends State<AnnouncementsPage> {
     final route = shuyoRoute<void>(
       builder: (context) => AnnouncementDetailPage(
         repository: widget.repository,
-        item: article,
+        item: item,
       ),
     );
     try {
@@ -617,56 +607,6 @@ class _AnnouncementItemRow {
 
   final int index;
   final AnnouncementListItem item;
-}
-
-bool _isExternalAnnouncement(AnnouncementListItem item) {
-  final uri = Uri.tryParse(item.url);
-  if (uri == null ||
-      !uri.hasAuthority ||
-      (uri.scheme != 'http' && uri.scheme != 'https')) {
-    return true;
-  }
-  final host = uri.host.toLowerCase();
-  final sourceId = _announcementSourceForUrl(item)?.id ?? item.sourceId;
-  if (sourceId == 'shvfs' &&
-      host == 'www.shvfs.cn' &&
-      RegExp(r'^/site/newsDetail/\d+$', caseSensitive: false)
-          .hasMatch(uri.path)) {
-    return false;
-  }
-  return !(host == 'shu.edu.cn' || host.endsWith('.shu.edu.cn')) ||
-      !RegExp(r'^/info/[^/]+/[^/]+\.(?:htm|html|hmtl)$', caseSensitive: false)
-          .hasMatch(uri.path);
-}
-
-AnnouncementSource? _announcementSourceForUrl(AnnouncementListItem item) =>
-    AnnouncementSource.forUrl(item.url, preferredSourceId: item.sourceId);
-
-AnnouncementListItem _announcementForUrlOwner(AnnouncementListItem item) {
-  final source = _announcementSourceForUrl(item);
-  if (source == null || source.id == item.sourceId) return item;
-  return AnnouncementListItem(
-    title: item.title,
-    url: item.url,
-    summary: item.summary,
-    dateText: item.dateText,
-    publishedAt: item.publishedAt,
-    sourceId: source.id,
-    column: item.column,
-  );
-}
-
-bool _canLoadAnnouncementPreview(AnnouncementListItem item) {
-  final uri = Uri.tryParse(item.url);
-  if (uri == null ||
-      (uri.scheme != 'http' && uri.scheme != 'https') ||
-      !uri.hasAuthority) {
-    return false;
-  }
-  return !RegExp(
-          r'\.(pdf|docx?|xlsx?|pptx?|zip|rar|7z|png|jpe?g|gif|webp|svg|bmp|ico|mp[34]|wav|avi|mov|css|js)$',
-          caseSensitive: false)
-      .hasMatch(uri.path);
 }
 
 Future<void> _openExternalAnnouncementUrl(
@@ -1309,10 +1249,9 @@ class _AnnouncementDetailPageState extends State<AnnouncementDetailPage> {
                   const SizedBox(height: 12),
                   _AnnouncementMetadata(
                     detail: detail,
-                    showDepartment:
-                        !AnnouncementSource.byId(widget.item.sourceId)
-                            .adapter
-                            .hideDetailDepartment,
+                    showDepartment: AnnouncementTarget.resolve(detail.url,
+                            sourceId: widget.item.sourceId)
+                        .showDepartment,
                   ),
                   const SizedBox(height: 22),
                   if (!detail.hasContent)
@@ -2187,7 +2126,7 @@ class _AnnouncementTile extends StatefulWidget {
     required this.repository,
     required this.external,
     this.updatesPaused,
-    this.previewVersion = 0,
+    this.preparationVersion = 0,
     required this.onTap,
   });
 
@@ -2196,7 +2135,7 @@ class _AnnouncementTile extends StatefulWidget {
   final AnnouncementRepository repository;
   final bool external;
   final ValueNotifier<bool>? updatesPaused;
-  final int previewVersion;
+  final int preparationVersion;
   final VoidCallback onTap;
 
   @override
@@ -2207,13 +2146,10 @@ class _AnnouncementTileState extends State<_AnnouncementTile>
     with SingleTickerProviderStateMixin {
   late final AnimationController _entrance;
   Timer? _entranceTimer;
-  int _previewGeneration = 0;
-  String? _resolvedPreview;
-  bool _hasPendingPreview = false;
-  String? _pendingPreview;
-  int _publicationDateGeneration = 0;
-  String _resolvedDateText = '';
-  String? _pendingDateText;
+  int _cardGeneration = 0;
+  late AnnouncementCardData _card;
+  AnnouncementCardData? _pendingCard;
+  bool _cardReady = false;
 
   bool get _updatesPaused => widget.updatesPaused?.value ?? false;
 
@@ -2225,8 +2161,7 @@ class _AnnouncementTileState extends State<_AnnouncementTile>
       duration: const Duration(milliseconds: 280),
     );
     widget.updatesPaused?.addListener(_onUpdatePauseChanged);
-    _loadPreview();
-    _loadPublicationDate();
+    _loadCard();
   }
 
   @override
@@ -2237,91 +2172,58 @@ class _AnnouncementTileState extends State<_AnnouncementTile>
       widget.updatesPaused?.addListener(_onUpdatePauseChanged);
       _onUpdatePauseChanged();
     }
+    // Pagination can return the repository's enriched copy of an existing
+    // notice. Keep the entered snapshot until a real refresh so neither its
+    // height nor its entrance changes underneath the reader.
     if (oldWidget.item.url != widget.item.url ||
         oldWidget.item.sourceId != widget.item.sourceId ||
-        oldWidget.item.summary != widget.item.summary ||
-        oldWidget.previewVersion != widget.previewVersion ||
+        oldWidget.preparationVersion != widget.preparationVersion ||
         oldWidget.external != widget.external ||
-        oldWidget.repository != widget.repository) {
-      _loadPreview();
-    }
-    if (oldWidget.item.url != widget.item.url ||
-        oldWidget.item.sourceId != widget.item.sourceId ||
-        oldWidget.item.dateText != widget.item.dateText ||
-        oldWidget.previewVersion != widget.previewVersion ||
-        oldWidget.external != widget.external ||
-        oldWidget.repository != widget.repository) {
-      _loadPublicationDate();
+        oldWidget.repository != widget.repository ||
+        (!_cardReady &&
+            (oldWidget.item.summary != widget.item.summary ||
+                oldWidget.item.dateText != widget.item.dateText ||
+                oldWidget.item.publishedAt != widget.item.publishedAt))) {
+      oldWidget.repository.cancelCard(oldWidget.item);
+      _loadCard();
     }
   }
 
-  void _loadPublicationDate() {
-    final generation = ++_publicationDateGeneration;
-    _resolvedDateText = widget.item.dateText;
-    _pendingDateText = null;
-    if (widget.item.sourceId != 'sfa' ||
-        widget.item.dateText.isNotEmpty ||
-        widget.external) {
-      return;
-    }
-    // Older cached notices may no longer occur in the refreshed first page.
-    // Resolve visible dates separately from previews, including list excerpts.
-    widget.repository.loadPublicationDate(widget.item).then(
-      (resolved) {
-        if (!mounted || generation != _publicationDateGeneration) return;
-        if (resolved == null ||
-            resolved.dateText.isEmpty ||
-            resolved.publishedAt == null) {
-          return;
-        }
-        final dateText = resolved.dateText;
-        if (_updatesPaused) {
-          _pendingDateText = dateText;
-        } else if (_resolvedDateText != dateText) {
-          setState(() => _resolvedDateText = dateText);
-        }
-      },
-      onError: (Object error, StackTrace stackTrace) {
-        // An unavailable article must not prevent its list card from rendering.
-      },
-    );
-  }
-
-  void _loadPreview() {
-    final generation = ++_previewGeneration;
+  void _loadCard() {
+    final generation = ++_cardGeneration;
     _entranceTimer?.cancel();
     _entrance.reset();
-    _hasPendingPreview = false;
-    _pendingPreview = null;
-    final article = _announcementForUrlOwner(widget.item);
-    final needsArticlePreview = article.sourceId == 'shvfs';
-    _resolvedPreview = widget.item.summary;
-    _startEntrance();
-    if ((!needsArticlePreview && widget.item.summary.isNotEmpty) ||
-        !_canLoadAnnouncementPreview(widget.item)) {
-      return;
-    }
-    widget.repository.loadPreview(article).then(
-      (preview) {
-        if (!mounted || generation != _previewGeneration) return;
-        final resolved = preview ?? widget.item.summary;
-        if (_updatesPaused) {
-          _hasPendingPreview = true;
-          _pendingPreview = resolved;
-        } else if (_resolvedPreview != resolved) {
-          setState(() => _resolvedPreview = resolved);
-        }
-      },
+    _cardReady = false;
+    _pendingCard = null;
+    _card = AnnouncementCardData.fromItem(widget.item);
+    Future<AnnouncementCardData>.sync(
+        () => widget.repository.loadCard(widget.item)).then(
+      (card) => _completeCard(generation, card),
       onError: (Object error, StackTrace stackTrace) {
-        if (!mounted || generation != _previewGeneration) return;
-        // The title and any list excerpt remain useful when a preview fails.
+        // Failed preparation still exposes the original title and list fields.
+        _completeCard(generation, _card);
       },
     );
+  }
+
+  void _completeCard(int generation, AnnouncementCardData card) {
+    if (!mounted || generation != _cardGeneration) return;
+    if (_updatesPaused) {
+      _pendingCard = card;
+      return;
+    }
+    setState(() {
+      _card = card;
+      _cardReady = true;
+    });
+    _startEntrance();
   }
 
   void _startEntrance() {
-    if (_updatesPaused ||
-        _announcementForUrlOwner(widget.item).sourceId == 'sfa') {
+    if (!_cardReady ||
+        _updatesPaused ||
+        _entrance.isCompleted ||
+        (_entranceTimer?.isActive ?? false)) {
       return;
     }
     _entranceTimer = Timer(
@@ -2338,26 +2240,19 @@ class _AnnouncementTileState extends State<_AnnouncementTile>
       _entrance.stop();
       return;
     }
-    if (_hasPendingPreview) {
-      final preview = _pendingPreview;
-      _hasPendingPreview = false;
-      _pendingPreview = null;
-      if (_resolvedPreview != preview) {
-        setState(() => _resolvedPreview = preview);
-      }
+    final card = _pendingCard;
+    _pendingCard = null;
+    if (card != null) {
+      _completeCard(_cardGeneration, card);
+    } else {
+      _startEntrance();
     }
-    final dateText = _pendingDateText;
-    _pendingDateText = null;
-    if (dateText != null && _resolvedDateText != dateText) {
-      setState(() => _resolvedDateText = dateText);
-    }
-    if (!_entrance.isCompleted) _startEntrance();
   }
 
   @override
   void dispose() {
-    _previewGeneration++;
-    _publicationDateGeneration++;
+    _cardGeneration++;
+    widget.repository.cancelCard(widget.item);
     widget.updatesPaused?.removeListener(_onUpdatePauseChanged);
     _entranceTimer?.cancel();
     _entrance.dispose();
@@ -2366,11 +2261,6 @@ class _AnnouncementTileState extends State<_AnnouncementTile>
 
   @override
   Widget build(BuildContext context) {
-    // Film Academy dates are fetched with the list. Do not hold the whole card
-    // behind an optional article preview after the dated list is ready.
-    if (_announcementForUrlOwner(widget.item).sourceId == 'sfa') {
-      return _tile(_resolvedPreview ?? widget.item.summary);
-    }
     return SlideTransition(
       position: Tween<Offset>(
         begin: const Offset(0.12, 0),
@@ -2381,7 +2271,10 @@ class _AnnouncementTileState extends State<_AnnouncementTile>
       )),
       child: FadeTransition(
         opacity: _entrance,
-        child: _tile(_resolvedPreview),
+        child: IgnorePointer(
+          ignoring: !_cardReady,
+          child: _tile(_card.summary),
+        ),
       ),
     );
   }
@@ -2390,7 +2283,7 @@ class _AnnouncementTileState extends State<_AnnouncementTile>
     final item = widget.item;
     final colors = context.shuyoColors;
     final metadata = [
-      if (_resolvedDateText.isNotEmpty) _resolvedDateText,
+      if (_card.dateText.isNotEmpty) _card.dateText,
     ].join(' · ');
     return InkWell(
       onTap: widget.onTap,

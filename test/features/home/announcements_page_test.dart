@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shuyo/data/models/announcement.dart';
 import 'package:shuyo/data/models/announcement_source.dart';
+import 'package:shuyo/data/models/announcement_target.dart';
 import 'package:shuyo/data/repositories/announcement_repository.dart';
 import 'package:shuyo/data/services/announcement_api_client.dart';
 import 'package:shuyo/features/home/announcements_page.dart';
@@ -19,12 +20,20 @@ const _listItem = AnnouncementListItem(
   url: 'https://www.shu.edu.cn/info/1051/1.htm',
 );
 
+const _readyListItem = AnnouncementListItem(
+  title: '已就绪的公告',
+  url: 'https://www.shu.edu.cn/info/1051/ready.htm',
+  summary: '列表已有概览',
+  dateText: '2026-10-26',
+);
+
 class _FakeAnnouncementRepository extends AnnouncementRepository {
   _FakeAnnouncementRepository({
     required this.items,
     required this.details,
     this.previewFutures = const {},
     this.publicationDateFutures = const {},
+    this.cardFutures = const {},
     this.detailErrors = const {},
   });
 
@@ -32,10 +41,14 @@ class _FakeAnnouncementRepository extends AnnouncementRepository {
   final Map<String, AnnouncementDetail> details;
   final Map<String, Future<String?>> previewFutures;
   final Map<String, Future<AnnouncementListItem?>> publicationDateFutures;
+  final Map<String, Future<AnnouncementCardData>> cardFutures;
   final Map<String, Object> detailErrors;
   int detailRequestCount = 0;
   final previewRequests = <String>[];
   final publicationDateRequests = <AnnouncementListItem>[];
+  final cardRequests = <AnnouncementListItem>[];
+  final detailRequests = <AnnouncementListItem>[];
+  final cancelledCards = <AnnouncementListItem>[];
   AnnouncementSource currentDefault = AnnouncementSource.official;
   final favoriteIds = <String>{};
   final sectionExpansion = <AnnouncementMenuSection, bool>{};
@@ -92,6 +105,7 @@ class _FakeAnnouncementRepository extends AnnouncementRepository {
   @override
   Future<AnnouncementDetail> fetchDetail(AnnouncementListItem item) async {
     detailRequestCount++;
+    detailRequests.add(item);
     final error = detailErrors[item.title];
     if (error != null) throw error;
     return details[item.title]!;
@@ -116,7 +130,55 @@ class _FakeAnnouncementRepository extends AnnouncementRepository {
     publicationDateRequests.add(item);
     return publicationDateFutures[item.url] ?? Future.value(null);
   }
+
+  @override
+  Future<AnnouncementCardData> loadCard(AnnouncementListItem item) async {
+    cardRequests.add(item);
+    final pending = cardFutures[item.url];
+    if (pending != null) return pending;
+    final target =
+        AnnouncementTarget.resolve(item.url, sourceId: item.sourceId);
+    var summary = item.summary;
+    var dateText = item.dateText;
+    var publishedAt = item.publishedAt;
+    final work = <Future<void>>[];
+    if (summary.isEmpty && target.canPreview) {
+      work.add(loadPreview(item).then((value) {
+        summary = value ?? summary;
+      }, onError: (Object error, StackTrace stackTrace) {}));
+    }
+    if (dateText.isEmpty && target.canLoadMetadata) {
+      work.add(loadPublicationDate(item).then((value) {
+        if (value == null) return;
+        dateText = value.dateText;
+        publishedAt = value.publishedAt;
+      }, onError: (Object error, StackTrace stackTrace) {}));
+    }
+    await Future.wait(work).timeout(
+      AnnouncementRepository.cardPreparationTimeout,
+      onTimeout: () => <void>[],
+    );
+    return AnnouncementCardData(
+      summary: summary,
+      dateText: dateText,
+      publishedAt: publishedAt,
+    );
+  }
+
+  @override
+  void cancelCard(AnnouncementListItem item) {
+    cancelledCards.add(item);
+    super.cancelCard(item);
+  }
 }
+
+double _cardOpacity(WidgetTester tester, AnnouncementListItem item) => tester
+    .widget<FadeTransition>(find.descendant(
+      of: find.byKey(ValueKey(item.url)),
+      matching: find.byType(FadeTransition),
+    ))
+    .opacity
+    .value;
 
 class _ShortPageAnnouncementRepository extends _FakeAnnouncementRepository {
   _ShortPageAnnouncementRepository()
@@ -152,13 +214,20 @@ class _ShortPageAnnouncementRepository extends _FakeAnnouncementRepository {
 }
 
 class _DeferredPageAnnouncementRepository extends _FakeAnnouncementRepository {
-  _DeferredPageAnnouncementRepository({super.previewFutures})
-      : super(
-          items: const [_listItem],
+  _DeferredPageAnnouncementRepository({
+    super.previewFutures,
+    bool withReadyCard = false,
+  }) : super(
+          items: [if (withReadyCard) _readyListItem, _listItem],
           details: {
             _listTitle: AnnouncementDetail(
               title: _listTitle,
               url: _listItem.url,
+              blocks: const [AnnouncementContentBlock.text(_detailBody)],
+            ),
+            _readyListItem.title: AnnouncementDetail(
+              title: _readyListItem.title,
+              url: _readyListItem.url,
               blocks: const [AnnouncementContentBlock.text(_detailBody)],
             ),
           },
@@ -564,7 +633,7 @@ void main() {
     expect(find.textContaining('媒体关注'), findsNothing);
   });
 
-  testWidgets('Film Academy dates appear before article previews finish',
+  testWidgets('Film Academy cards wait for their preview before entering',
       (tester) async {
     final preview = Completer<String?>();
     const item = AnnouncementListItem(
@@ -590,11 +659,14 @@ void main() {
     await tester.pump();
     expect(find.text('电影学院通知'), findsOneWidget);
     expect(find.text('2026-10-20'), findsOneWidget);
+    expect(_cardOpacity(tester, item), 0);
+    expect(repository.publicationDateRequests, isEmpty);
 
     preview.complete('通知概览');
     await tester.pumpAndSettle();
     expect(find.text('通知概览'), findsOneWidget);
     expect(find.text('2026-10-20'), findsOneWidget);
+    expect(_cardOpacity(tester, item), 1);
   });
 
   testWidgets('visible cached Film Academy excerpts resolve cross-site dates',
@@ -622,6 +694,7 @@ void main() {
     expect(repository.previewRequests, isEmpty);
     expect(repository.publicationDateRequests, [same(item)]);
     expect(repository.publicationDateRequests.single.sourceId, 'sfa');
+    expect(_cardOpacity(tester, item), 0);
 
     date.complete(AnnouncementListItem(
       title: item.title,
@@ -637,6 +710,131 @@ void main() {
     expect(find.descendant(of: list, matching: find.text('2026-03-18')),
         findsOneWidget);
     expect(repository.detailRequestCount, 0);
+    expect(_cardOpacity(tester, item), 1);
+  });
+
+  for (final sourceId in ['utseus', 'bksy', 'xiangying']) {
+    testWidgets('$sourceId excerpts resolve missing dates without previews',
+        (tester) async {
+      final date = Completer<AnnouncementListItem?>();
+      final item = AnnouncementListItem(
+        title: '$sourceId 缺少日期的通知',
+        url: sourceId == 'xiangying'
+            ? 'https://scie.shu.edu.cn/info/1070/46185.htm'
+            : 'https://$sourceId.shu.edu.cn/info/1010/6186.htm',
+        sourceId: sourceId,
+        summary: '保留列表摘要',
+        publishedAt: DateTime(2099, 1, 1),
+      );
+      final repository = _FakeAnnouncementRepository(
+        items: [item],
+        details: const {},
+        publicationDateFutures: {item.url: date.future},
+      )..currentDefault = AnnouncementSource.byId(sourceId);
+      await tester.pumpWidget(
+        MaterialApp(home: AnnouncementsPage(repository: repository)),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text(item.title), findsOneWidget);
+      expect(find.text(item.summary), findsOneWidget);
+      expect(repository.previewRequests, isEmpty);
+      expect(repository.publicationDateRequests, [same(item)]);
+      expect(_cardOpacity(tester, item), 0);
+
+      date.complete(AnnouncementListItem(
+        title: item.title,
+        url: item.url,
+        sourceId: item.sourceId,
+        summary: item.summary,
+        dateText: '2026-09-18',
+        publishedAt: DateTime(2026, 9, 18),
+      ));
+      await tester.pumpAndSettle();
+
+      expect(find.text('2026-09-18'), findsOneWidget);
+      expect(repository.publicationDateRequests.single.sourceId, sourceId);
+      expect(repository.detailRequestCount, 0);
+      expect(_cardOpacity(tester, item), 1);
+    });
+  }
+
+  testWidgets('resolved dates update one card without reordering the list',
+      (tester) async {
+    final date = Completer<AnnouncementListItem?>();
+    const first = AnnouncementListItem(
+      title: '保持当前位置的通知',
+      url: 'https://utseus.shu.edu.cn/info/1010/6185.htm',
+      sourceId: 'utseus',
+      summary: '已有摘要',
+    );
+    const second = AnnouncementListItem(
+      title: '稍后补齐日期的通知',
+      url: 'https://utseus.shu.edu.cn/info/1010/6186.htm',
+      sourceId: 'utseus',
+      summary: '已有摘要',
+    );
+    final repository = _FakeAnnouncementRepository(
+      items: const [first, second],
+      details: const {},
+      publicationDateFutures: {second.url: date.future},
+    )..currentDefault = AnnouncementSource.byId('utseus');
+    await tester.pumpWidget(
+      MaterialApp(home: AnnouncementsPage(repository: repository)),
+    );
+    await tester.pumpAndSettle();
+    final list = tester.widget<CustomScrollView>(find.byType(CustomScrollView));
+    final unchangedTitle = tester.widget<Text>(find.text(first.title));
+    expect(tester.getTopLeft(find.text(first.title)).dy,
+        lessThan(tester.getTopLeft(find.text(second.title)).dy));
+
+    date.complete(AnnouncementListItem(
+      title: second.title,
+      url: second.url,
+      sourceId: second.sourceId,
+      summary: second.summary,
+      dateText: '2026-09-18',
+      publishedAt: DateTime(2026, 9, 18),
+    ));
+    await tester.pumpAndSettle();
+
+    expect(find.text('2026-09-18'), findsOneWidget);
+    expect(tester.getTopLeft(find.text(first.title)).dy,
+        lessThan(tester.getTopLeft(find.text(second.title)).dy));
+    expect(tester.widget<CustomScrollView>(find.byType(CustomScrollView)),
+        same(list));
+    expect(tester.widget<Text>(find.text(first.title)), same(unchangedTitle));
+  });
+
+  testWidgets('metadata for later rows starts after scrolling', (tester) async {
+    final items = List.generate(
+      30,
+      (index) => AnnouncementListItem(
+        title: '中欧学院通知 $index',
+        url: 'https://utseus.shu.edu.cn/info/1010/$index.htm',
+        sourceId: 'utseus',
+        summary: '已有摘要',
+      ),
+    );
+    final repository = _FakeAnnouncementRepository(
+      items: items,
+      details: const {},
+    )..currentDefault = AnnouncementSource.byId('utseus');
+    await tester.pumpWidget(
+      MaterialApp(home: AnnouncementsPage(repository: repository)),
+    );
+    await tester.pumpAndSettle();
+    final initialRequests = repository.publicationDateRequests.length;
+    expect(initialRequests, greaterThan(0));
+    expect(initialRequests, lessThan(items.length));
+    expect(repository.previewRequests, isEmpty);
+
+    await tester.drag(
+        find.byType(CustomScrollView).first, const Offset(0, -1150));
+    await tester.pumpAndSettle();
+    expect(repository.publicationDateRequests.length,
+        greaterThan(initialRequests));
+    expect(repository.publicationDateRequests.length, lessThan(items.length));
   });
 
   testWidgets('a removed Film Academy card ignores its pending date',
@@ -660,6 +858,7 @@ void main() {
     expect(repository.publicationDateRequests, hasLength(1));
 
     await tester.pumpWidget(const MaterialApp(home: SizedBox.shrink()));
+    expect(repository.cancelledCards, [same(item)]);
     date.complete(AnnouncementListItem(
       title: item.title,
       url: item.url,
@@ -673,31 +872,39 @@ void main() {
     expect(find.text('2026-03-18'), findsNothing);
   });
 
-  testWidgets('Film Academy date waits until the detail transition finishes',
+  testWidgets('a resolved date waits until the detail transition finishes',
       (tester) async {
     final date = Completer<AnnouncementListItem?>();
+    const ready = AnnouncementListItem(
+      title: '可以打开的通知',
+      url: 'https://utseus.shu.edu.cn/info/1010/6185.htm',
+      sourceId: 'utseus',
+      summary: '已就绪摘要',
+      dateText: '2026-03-19',
+    );
     const item = AnnouncementListItem(
-      title: '详情期间补齐电影学院日期',
-      url: 'https://bkzsw.shu.edu.cn/info/1798/38490.htm',
-      sourceId: 'sfa',
+      title: '详情期间补齐中欧学院日期',
+      url: 'https://utseus.shu.edu.cn/info/1010/6186.htm',
+      sourceId: 'utseus',
       summary: '已有摘要',
     );
     final repository = _FakeAnnouncementRepository(
-      items: const [item],
+      items: const [ready, item],
       details: {
-        item.title: AnnouncementDetail(
-          title: item.title,
-          url: item.url,
+        ready.title: AnnouncementDetail(
+          title: ready.title,
+          url: ready.url,
           blocks: const [AnnouncementContentBlock.text('公告正文')],
         ),
       },
       publicationDateFutures: {item.url: date.future},
-    )..currentDefault = AnnouncementSource.byId('sfa');
+    )..currentDefault = AnnouncementSource.byId('utseus');
     await tester.pumpWidget(
       MaterialApp(home: AnnouncementsPage(repository: repository)),
     );
     await tester.pumpAndSettle();
-    await tester.tap(find.text(item.title));
+    expect(_cardOpacity(tester, item), 0);
+    await tester.tap(find.text(ready.title));
     await tester.pumpAndSettle();
     date.complete(AnnouncementListItem(
       title: item.title,
@@ -784,6 +991,72 @@ void main() {
     }
   });
 
+  testWidgets('official details display publication date department and author',
+      (tester) async {
+    const item = AnnouncementListItem(
+      title: '官网完整元数据',
+      url: 'https://www.shu.edu.cn/info/1051/1.htm',
+    );
+    final repository = _FakeAnnouncementRepository(
+      items: const [item],
+      details: {
+        item.title: AnnouncementDetail(
+          title: item.title,
+          url: item.url,
+          dateText: '2026-10-26',
+          publishedAt: DateTime(2026, 10, 26, 19, 46, 41),
+          department: '党委宣传部',
+          author: '韩晓霞',
+          blocks: const [AnnouncementContentBlock.text('正文')],
+        ),
+      },
+    );
+    await tester.pumpWidget(MaterialApp(
+      home: AnnouncementDetailPage(repository: repository, item: item),
+    ));
+    await tester.pumpAndSettle();
+
+    expect(find.text('2026-10-26 · 党委宣传部 · 韩晓霞'), findsOneWidget);
+    expect(find.text('正文'), findsOneWidget);
+  });
+
+  for (final official in [true, false]) {
+    testWidgets(
+        'department display follows actual article ownership: $official',
+        (tester) async {
+      final item = AnnouncementListItem(
+        title: '跨部门转载公告',
+        url: official
+            ? 'https://www.shu.edu.cn/info/1051/402205.htm'
+            : 'https://bksy.shu.edu.cn/info/1015/308634.htm',
+        sourceId: 'sfa',
+      );
+      final repository = _FakeAnnouncementRepository(
+        items: [item],
+        details: {
+          item.title: AnnouncementDetail(
+            title: item.title,
+            url: item.url,
+            dateText: '2026-10-26',
+            author: '公告作者',
+            department: '真实发布部门',
+            blocks: const [AnnouncementContentBlock.text('正文')],
+          ),
+        },
+      );
+      await tester.pumpWidget(MaterialApp(
+        home: AnnouncementDetailPage(repository: repository, item: item),
+      ));
+      await tester.pumpAndSettle();
+
+      expect(
+          find.text(
+              official ? '2026-10-26 · 真实发布部门 · 公告作者' : '2026-10-26 · 公告作者'),
+          findsOneWidget);
+      expect(repository.detailRequests.single.sourceId, 'sfa');
+    });
+  }
+
   testWidgets('previews for later rows start after scrolling', (tester) async {
     final items = List.generate(
       30,
@@ -810,14 +1083,14 @@ void main() {
     expect(repository.previewRequests.length, lessThan(items.length));
   });
 
-  testWidgets('title and date stay usable while the first preview is loading',
+  testWidgets('cards enter once after summary and date have both settled',
       (tester) async {
     final pending = Completer<String?>();
+    final date = Completer<AnnouncementListItem?>();
     const item = AnnouncementListItem(
       title: '等待正文的公告',
       url: 'https://bksy.shu.edu.cn/info/1000/wait.htm',
       sourceId: 'bksy',
-      dateText: '2026-10-25',
     );
     final repository = _FakeAnnouncementRepository(
       items: const [item],
@@ -829,6 +1102,7 @@ void main() {
         ),
       },
       previewFutures: {item.url: pending.future},
+      publicationDateFutures: {item.url: date.future},
     );
     await tester.pumpWidget(
       MaterialApp(home: AnnouncementsPage(repository: repository)),
@@ -837,21 +1111,158 @@ void main() {
     expect(find.byType(CustomScrollView), findsOneWidget);
     expect(find.byType(RefreshIndicator), findsOneWidget);
     expect(find.text(item.title), findsOneWidget);
-    expect(find.text(item.dateText), findsOneWidget);
     expect(repository.previewRequests, [item.url]);
+    expect(repository.publicationDateRequests, [same(item)]);
+    expect(_cardOpacity(tester, item), 0);
+
+    pending.complete('完整正文摘要');
+    await tester.pump();
+    expect(find.text('完整正文摘要'), findsNothing);
+    expect(_cardOpacity(tester, item), 0);
+
+    date.complete(AnnouncementListItem(
+      title: item.title,
+      url: item.url,
+      dateText: '2026-10-25',
+      publishedAt: DateTime(2026, 10, 25),
+    ));
+    await tester.pump();
+    expect(find.text('完整正文摘要'), findsOneWidget);
+    expect(find.text('2026-10-25'), findsOneWidget);
+    final readyHeight = tester.getSize(find.byKey(ValueKey(item.url))).height;
+    await tester.pump(const Duration(milliseconds: 1));
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(_cardOpacity(tester, item), greaterThan(0));
+    expect(_cardOpacity(tester, item), lessThan(1));
     await tester.pumpAndSettle();
+    expect(_cardOpacity(tester, item), 1);
+    expect(tester.getSize(find.byKey(ValueKey(item.url))).height, readyHeight);
     await tester.tap(find.text(item.title));
     await tester.pumpAndSettle();
     expect(find.text('已打开通知正文'), findsOneWidget);
 
-    pending.complete('完整正文摘要');
-    await tester.pump();
-    expect(find.text('完整正文摘要', skipOffstage: false), findsNothing);
     await tester.pageBack();
     await tester.pumpAndSettle();
     expect(find.text(item.title), findsOneWidget);
     expect(find.text('完整正文摘要'), findsOneWidget);
     expect(find.byType(SlideTransition), findsWidgets);
+    expect(_cardOpacity(tester, item), 1);
+    expect(repository.cardRequests, [same(item)]);
+  });
+
+  testWidgets('complete list cards enter without optional article requests',
+      (tester) async {
+    final repository = _FakeAnnouncementRepository(
+      items: const [_readyListItem],
+      details: const {},
+    );
+    await tester.pumpWidget(
+      MaterialApp(home: AnnouncementsPage(repository: repository)),
+    );
+    await tester.pumpAndSettle();
+
+    expect(_cardOpacity(tester, _readyListItem), 1);
+    expect(find.text(_readyListItem.summary), findsOneWidget);
+    expect(find.text(_readyListItem.dateText), findsOneWidget);
+    expect(repository.previewRequests, isEmpty);
+    expect(repository.publicationDateRequests, isEmpty);
+    expect(repository.detailRequests, isEmpty);
+  });
+
+  testWidgets('failed card preparation still enters with available list fields',
+      (tester) async {
+    final card = Completer<AnnouncementCardData>();
+    final repository = _FakeAnnouncementRepository(
+      items: const [_readyListItem],
+      details: const {},
+      cardFutures: {_readyListItem.url: card.future},
+    );
+    await tester.pumpWidget(
+      MaterialApp(home: AnnouncementsPage(repository: repository)),
+    );
+    await tester.pump();
+    expect(_cardOpacity(tester, _readyListItem), 0);
+    card.completeError(StateError('Optional preparation failed'));
+    await tester.pumpAndSettle();
+
+    expect(_cardOpacity(tester, _readyListItem), 1);
+    expect(find.text(_readyListItem.summary), findsOneWidget);
+    expect(find.text(_readyListItem.dateText), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('card deadline keeps completed dates and ignores a late summary',
+      (tester) async {
+    final preview = Completer<String?>();
+    const item = AnnouncementListItem(
+      title: '有截止时间的公告',
+      url: 'https://utseus.shu.edu.cn/info/1010/6186.htm',
+      sourceId: 'utseus',
+    );
+    final repository = _FakeAnnouncementRepository(
+      items: const [item],
+      details: const {},
+      previewFutures: {item.url: preview.future},
+      publicationDateFutures: {
+        item.url: Future.value(AnnouncementListItem(
+          title: item.title,
+          url: item.url,
+          dateText: '2026-09-18',
+          publishedAt: DateTime(2026, 9, 18),
+        )),
+      },
+    );
+    await tester.pumpWidget(
+      MaterialApp(home: AnnouncementsPage(repository: repository)),
+    );
+    await tester.pump();
+    expect(_cardOpacity(tester, item), 0);
+    await tester.pump(AnnouncementRepository.cardPreparationTimeout);
+    await tester.pumpAndSettle();
+    expect(_cardOpacity(tester, item), 1);
+    expect(find.text('2026-09-18'), findsOneWidget);
+    final height = tester.getSize(find.byKey(ValueKey(item.url))).height;
+
+    preview.complete('迟到的概览不再改变已经入场的卡片');
+    await tester.pumpAndSettle();
+    expect(find.text('迟到的概览不再改变已经入场的卡片'), findsNothing);
+    expect(tester.getSize(find.byKey(ValueKey(item.url))).height, height);
+    expect(_cardOpacity(tester, item), 1);
+  });
+
+  testWidgets('paging keeps entered cards stable without replaying entrance',
+      (tester) async {
+    final repository = _DeferredPageAnnouncementRepository(withReadyCard: true);
+    await tester.pumpWidget(
+      MaterialApp(home: AnnouncementsPage(repository: repository)),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(_cardOpacity(tester, _readyListItem), 1);
+    expect(repository.pagesRequested, 1);
+    final height =
+        tester.getSize(find.byKey(ValueKey(_readyListItem.url))).height;
+    repository.nextPage.complete([
+      AnnouncementListItem(
+        title: _readyListItem.title,
+        url: _readyListItem.url,
+        summary: '分页缓存中更新的较长概览，不能改变已经入场的卡片高度或重新播放动画。',
+        dateText: '2026-10-27',
+      ),
+      _listItem,
+    ]);
+    await tester.pump();
+    expect(_cardOpacity(tester, _readyListItem), 1);
+    await tester.pumpAndSettle();
+
+    expect(find.text(_readyListItem.summary), findsOneWidget);
+    expect(find.text('2026-10-27'), findsNothing);
+    expect(tester.getSize(find.byKey(ValueKey(_readyListItem.url))).height,
+        height);
+    expect(
+        repository.cardRequests.where((item) => item.url == _readyListItem.url),
+        hasLength(1));
   });
 
   testWidgets('titles keep date order despite out-of-order previews',
@@ -947,7 +1358,7 @@ void main() {
         tester.getSize(find.byKey(ValueKey(item.url))).height, lessThan(104));
   });
 
-  testWidgets('scrolled-to titles appear before their previews finish',
+  testWidgets('scrolled-to cards wait for their preview before entering',
       (tester) async {
     final items = List.generate(
       20,
@@ -977,11 +1388,13 @@ void main() {
     await tester.pump();
     expect(repository.previewRequests, contains(items[10].url));
     expect(find.text(items[10].title), findsOneWidget);
+    expect(_cardOpacity(tester, items[10]), 0);
 
     pending.complete('滚动后才加载的摘要');
     await tester.pumpAndSettle();
     expect(find.text(items[10].title), findsOneWidget);
     expect(find.text('滚动后才加载的摘要'), findsOneWidget);
+    expect(_cardOpacity(tester, items[10]), 1);
   });
 
   testWidgets('a preview updates only its card without rebuilding the list',
@@ -1058,12 +1471,53 @@ void main() {
     expect(repository.previewRequests, [item.url, item.url]);
   });
 
+  testWidgets('refresh ignores card completion from an older generation',
+      (tester) async {
+    final previous = Completer<AnnouncementCardData>();
+    final refreshed = Completer<AnnouncementCardData>();
+    final futures = {_listItem.url: previous.future};
+    final repository = _FakeAnnouncementRepository(
+      items: const [_listItem],
+      details: const {},
+      cardFutures: futures,
+    );
+    await tester.pumpWidget(
+      MaterialApp(home: AnnouncementsPage(repository: repository)),
+    );
+    await tester.pumpAndSettle();
+    futures[_listItem.url] = refreshed.future;
+    final refresh = tester
+        .state<RefreshIndicatorState>(find.byType(RefreshIndicator))
+        .show();
+    await tester.pumpAndSettle();
+    await refresh;
+    expect(repository.cardRequests, hasLength(2));
+
+    previous.complete(const AnnouncementCardData(
+      summary: '旧代次的概览',
+      dateText: '2025-01-01',
+    ));
+    await tester.pumpAndSettle();
+    expect(find.text('旧代次的概览'), findsNothing);
+    expect(_cardOpacity(tester, _listItem), 0);
+
+    refreshed.complete(const AnnouncementCardData(
+      summary: '刷新后的概览',
+      dateText: '2026-10-26',
+    ));
+    await tester.pumpAndSettle();
+    expect(find.text('刷新后的概览'), findsOneWidget);
+    expect(find.text('2026-10-26'), findsOneWidget);
+    expect(_cardOpacity(tester, _listItem), 1);
+  });
+
   testWidgets(
       'covered previews and pages wait until the reverse transition ends',
       (tester) async {
     final preview = Completer<String?>();
     final repository = _DeferredPageAnnouncementRepository(
       previewFutures: {_listItem.url: preview.future},
+      withReadyCard: true,
     );
     await tester.pumpWidget(
       MaterialApp(home: AnnouncementsPage(repository: repository)),
@@ -1071,7 +1525,7 @@ void main() {
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 400));
     expect(repository.pagesRequested, 1);
-    await tester.tap(find.text(_listTitle));
+    await tester.tap(find.text(_readyListItem.title));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 300));
     await tester.pump();
@@ -1079,6 +1533,7 @@ void main() {
     final coveredList = tester.widget<CustomScrollView>(homeList);
     preview.complete('返回列表后显示的概览');
     repository.nextPage.complete(const [
+      _readyListItem,
       _listItem,
       AnnouncementListItem(
         title: '详情期间完成的下一页',
@@ -1185,6 +1640,7 @@ void main() {
     );
     await tester.pumpAndSettle();
     expect(repository.previewRequests, isEmpty);
+    expect(repository.publicationDateRequests, isEmpty);
     await tester.tap(find.text(items.first.title));
     await tester.pumpAndSettle();
     expect(openedUrl, items.first.url);
@@ -1377,7 +1833,7 @@ void main() {
     expect(openedUrl, item.url);
   });
 
-  testWidgets('Vancouver Film School detail opens in app with body preview',
+  testWidgets('Vancouver Film School keeps its existing list summary',
       (tester) async {
     const item = AnnouncementListItem(
       title: '电影课堂的新实践',
@@ -1400,9 +1856,9 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(repository.previewRequests, [item.url]);
-    expect(find.text('从正文解析出的两行概览'), findsOneWidget);
-    expect(find.text('列表页摘要'), findsNothing);
+    expect(repository.previewRequests, isEmpty);
+    expect(find.text('从正文解析出的两行概览'), findsNothing);
+    expect(find.text('列表页摘要'), findsOneWidget);
     await tester.tap(find.text(item.title));
     await tester.pumpAndSettle();
     expect(find.byType(AnnouncementDetailPage), findsOneWidget);
@@ -1466,6 +1922,8 @@ void main() {
       await tester.pumpAndSettle();
     }
     expect(repository.detailRequestCount, items.length);
+    expect(repository.detailRequests.map((item) => item.sourceId),
+        items.map((item) => item.sourceId));
   });
 
   testWidgets('incomplete info URLs open outside the app', (tester) async {
@@ -1501,6 +1959,116 @@ void main() {
     expect(repository.detailRequestCount, 0);
     expect(openedUrl, item.url);
   });
+
+  for (final sourceId in ['sfa', 'hr']) {
+    for (final previewOutcome in ['failed', 'empty', 'pending']) {
+      testWidgets(
+          '$sourceId undated external notices keep their source slot with a '
+          '$previewOutcome preview', (tester) async {
+        final preview = Completer<String?>();
+        final older = AnnouncementListItem(
+          title: '较旧的已知日期公告',
+          url: 'https://$sourceId.shu.edu.cn/info/1212/100.htm',
+          sourceId: sourceId,
+          summary: '列表已有摘要',
+          dateText: '2026-09-03',
+          publishedAt: DateTime(2026, 9, 3),
+        );
+        final external = AnnouncementListItem(
+          title: '保留原位置的微信公众号公告',
+          url: 'https://mp.weixin.qq.com/s/$sourceId-source-slot',
+          sourceId: sourceId,
+        );
+        final newer = AnnouncementListItem(
+          title: '较新的已知日期公告',
+          url: 'https://$sourceId.shu.edu.cn/info/1212/101.htm',
+          sourceId: sourceId,
+          summary: '列表已有摘要',
+          dateText: '2026-09-04',
+          publishedAt: DateTime(2026, 9, 4),
+        );
+        final items = [
+          older,
+          external,
+          newer,
+          for (var index = 0; index < 24; index++)
+            AnnouncementListItem(
+              title: '历史公告 $index',
+              url: 'https://$sourceId.shu.edu.cn/info/1212/${200 + index}.htm',
+              sourceId: sourceId,
+              summary: '列表已有摘要',
+              dateText: '2026-08-${(31 - index).toString().padLeft(2, '0')}',
+              publishedAt: DateTime(2026, 8, 31 - index),
+            ),
+        ];
+        final repository = _FakeAnnouncementRepository(
+          items: items,
+          details: const {},
+          previewFutures: {external.url: preview.future},
+        )..currentDefault = AnnouncementSource.byId(sourceId);
+        const urlLauncher = MethodChannel('plugins.flutter.io/url_launcher');
+        String? openedUrl;
+        tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          urlLauncher,
+          (call) async {
+            openedUrl =
+                (call.arguments as Map<Object?, Object?>)['url'] as String?;
+            return true;
+          },
+        );
+        addTearDown(() => tester.binding.defaultBinaryMessenger
+            .setMockMethodCallHandler(urlLauncher, null));
+        await tester.pumpWidget(
+          MaterialApp(home: AnnouncementsPage(repository: repository)),
+        );
+        await tester.pumpAndSettle();
+
+        void expectVisibleSourceSlot() {
+          final newestTitle = find.text(newer.title).hitTestable();
+          final externalTitle = find.text(external.title).hitTestable();
+          final olderTitle = find.text(older.title).hitTestable();
+          expect(newestTitle, findsOneWidget);
+          expect(externalTitle, findsOneWidget);
+          expect(olderTitle, findsOneWidget);
+          expect(tester.getTopLeft(newestTitle).dy,
+              lessThan(tester.getTopLeft(externalTitle).dy));
+          expect(tester.getTopLeft(externalTitle).dy,
+              lessThan(tester.getTopLeft(olderTitle).dy));
+        }
+
+        expect(_cardOpacity(tester, external), 0);
+        expect(find.text(external.title).hitTestable(), findsNothing);
+        expect(repository.previewRequests, [external.url]);
+        expect(repository.publicationDateRequests, isEmpty);
+        if (previewOutcome == 'failed') {
+          preview.completeError(StateError('WeChat preview is unavailable'));
+        } else if (previewOutcome == 'empty') {
+          preview.complete(null);
+        } else {
+          await tester.pump(AnnouncementRepository.cardPreparationTimeout);
+        }
+        await tester.pumpAndSettle();
+        expectVisibleSourceSlot();
+        expect(_cardOpacity(tester, external), 1);
+
+        await tester.tap(find.text(external.title).hitTestable());
+        await tester.pumpAndSettle();
+        expect(openedUrl, external.url);
+        expect(repository.detailRequestCount, 0);
+        expect(repository.publicationDateRequests, isEmpty);
+        expect(find.byType(AnnouncementDetailPage), findsNothing);
+        expect(tester.takeException(), isNull);
+        if (!preview.isCompleted) {
+          preview.complete('超时后返回的摘要');
+          await tester.pumpAndSettle();
+          expect(find.text('超时后返回的摘要'), findsNothing);
+          expect(_cardOpacity(tester, external), 1);
+        }
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump();
+      });
+    }
+  }
 
   testWidgets('unparsed WeChat articles open their original link externally',
       (tester) async {

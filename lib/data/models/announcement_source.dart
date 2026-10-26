@@ -75,28 +75,14 @@ enum AnnouncementSourceGroup {
   final String label;
 }
 
-const _vsbAuthorValueSelectors = [
-  'tr[valign="middle"][height="20"] font[face=""] > span',
-];
-
 class AnnouncementSourceAdapter {
   const AnnouncementSourceAdapter({
     required this.listFormat,
-    this.authorLabelSelectors = const ['.xx span', 'p span'],
-    this.authorValueSelectors = const [
-      'span[id*="lblUser"]',
-      'span[id*="lblAuthor"]',
-      'span[id*="articleAuthor"]',
-    ],
     this.hideListColumn = false,
-    this.hideDetailDepartment = false,
   });
 
   final AnnouncementListFormat listFormat;
-  final List<String> authorLabelSelectors;
-  final List<String> authorValueSelectors;
   final bool hideListColumn;
-  final bool hideDetailDepartment;
 }
 
 class AnnouncementSource {
@@ -108,6 +94,7 @@ class AnnouncementSource {
     this.additionalListUrls = const [],
     this.columnNames = const [],
     this.group = AnnouncementSourceGroup.schoolDepartment,
+    this.hasBrowsingLimitations = false,
   });
 
   final String id;
@@ -118,6 +105,7 @@ class AnnouncementSource {
   final List<String> additionalListUrls;
   final List<String> columnNames;
   final AnnouncementSourceGroup group;
+  final bool hasBrowsingLimitations;
 
   List<String> get listUrls => [listUrl, ...additionalListUrls];
 
@@ -129,8 +117,6 @@ class AnnouncementSource {
     listUrl: 'https://www.shu.edu.cn/tzgg.htm',
     adapter: AnnouncementSourceAdapter(
       listFormat: AnnouncementListFormat.shuHome,
-      authorLabelSelectors: ['.xx span'],
-      authorValueSelectors: [],
     ),
     group: AnnouncementSourceGroup.schoolPortal,
   );
@@ -204,7 +190,6 @@ class AnnouncementSource {
       listUrl: 'https://xgb.shu.edu.cn/xgdt/tzgg.htm',
       adapter: AnnouncementSourceAdapter(
         listFormat: AnnouncementListFormat.artList,
-        authorValueSelectors: [r'a[id$="_hypFirst"]'],
       ),
     ),
     AnnouncementSource(
@@ -245,7 +230,6 @@ class AnnouncementSource {
       adapter: AnnouncementSourceAdapter(
         listFormat: AnnouncementListFormat.rightList,
         hideListColumn: true,
-        hideDetailDepartment: true,
       ),
     ),
     AnnouncementSource(
@@ -282,7 +266,6 @@ class AnnouncementSource {
       listUrl: 'https://newits.shu.edu.cn/index/tzgg.htm',
       adapter: AnnouncementSourceAdapter(
         listFormat: AnnouncementListFormat.onlyList,
-        authorValueSelectors: _vsbAuthorValueSelectors,
       ),
     ),
     AnnouncementSource(
@@ -298,7 +281,6 @@ class AnnouncementSource {
       listUrl: 'https://global.shu.edu.cn/cd/tzgg.htm',
       adapter: AnnouncementSourceAdapter(
         listFormat: AnnouncementListFormat.bareSpanList,
-        authorValueSelectors: _vsbAuthorValueSelectors,
       ),
     ),
     AnnouncementSource(
@@ -321,7 +303,6 @@ class AnnouncementSource {
       listUrl: 'https://dangan.shu.edu.cn/gqgk/xxfb/fwgg.htm',
       adapter: AnnouncementSourceAdapter(
         listFormat: AnnouncementListFormat.bareSpanList,
-        authorValueSelectors: _vsbAuthorValueSelectors,
       ),
     ),
     AnnouncementSource(
@@ -375,7 +356,6 @@ class AnnouncementSource {
       adapter: AnnouncementSourceAdapter(
         listFormat: AnnouncementListFormat.rightListUl,
         hideListColumn: true,
-        hideDetailDepartment: true,
       ),
       group: AnnouncementSourceGroup.college,
     ),
@@ -391,7 +371,6 @@ class AnnouncementSource {
       adapter: AnnouncementSourceAdapter(
         listFormat: AnnouncementListFormat.rightListUl,
         hideListColumn: true,
-        hideDetailDepartment: true,
       ),
       group: AnnouncementSourceGroup.college,
     ),
@@ -594,7 +573,6 @@ class AnnouncementSource {
       adapter: AnnouncementSourceAdapter(
         listFormat: AnnouncementListFormat.vsbNewList,
         hideListColumn: true,
-        hideDetailDepartment: true,
       ),
       group: AnnouncementSourceGroup.college,
     ),
@@ -607,7 +585,6 @@ class AnnouncementSource {
       adapter: AnnouncementSourceAdapter(
         listFormat: AnnouncementListFormat.vsbNewList,
         hideListColumn: true,
-        hideDetailDepartment: true,
       ),
       group: AnnouncementSourceGroup.college,
     ),
@@ -617,7 +594,6 @@ class AnnouncementSource {
       listUrl: 'https://xiangying.shu.edu.cn/syxgzlpzd/tzgg.htm',
       adapter: AnnouncementSourceAdapter(
         listFormat: AnnouncementListFormat.vsbNewList,
-        hideDetailDepartment: true,
       ),
       group: AnnouncementSourceGroup.college,
     ),
@@ -654,7 +630,6 @@ class AnnouncementSource {
       adapter: AnnouncementSourceAdapter(
         listFormat: AnnouncementListFormat.bareSpanList,
         hideListColumn: true,
-        hideDetailDepartment: true,
       ),
       group: AnnouncementSourceGroup.college,
     ),
@@ -682,9 +657,6 @@ class AnnouncementSource {
       columnNames: ['重要通知', '新闻动态'],
       adapter: AnnouncementSourceAdapter(
         listFormat: AnnouncementListFormat.xwLt,
-        authorLabelSelectors: ['p span'],
-        authorValueSelectors: [],
-        hideDetailDepartment: true,
       ),
       group: AnnouncementSourceGroup.college,
     ),
@@ -751,6 +723,7 @@ class AnnouncementSource {
     ),
     AnnouncementSource(
       id: 'sfa',
+      hasBrowsingLimitations: true,
       name: '上海电影学院',
       listUrl: 'https://sfa.shu.edu.cn/index/tzgg.htm',
       adapter: AnnouncementSourceAdapter(
@@ -759,6 +732,7 @@ class AnnouncementSource {
     ),
     AnnouncementSource(
       id: 'shvfs',
+      hasBrowsingLimitations: true,
       name: '上海温哥华电影学院',
       listUrl: 'https://www.shvfs.cn/site/news/4',
       additionalListUrls: ['https://www.shvfs.cn/site/news/8'],
@@ -791,8 +765,6 @@ class AnnouncementSource {
       listUrl: 'https://schim.shu.edu.cn/xwdt/tzgg.htm',
       adapter: AnnouncementSourceAdapter(
         listFormat: AnnouncementListFormat.onlyList,
-        authorLabelSelectors: ['span[id*="lblAuthor"]'],
-        authorValueSelectors: [r'a[id$="_hypUser"]'],
       ),
       group: AnnouncementSourceGroup.college,
     ),
@@ -838,6 +810,7 @@ class AnnouncementSource {
     ),
     AnnouncementSource(
       id: 'utseus',
+      hasBrowsingLimitations: true,
       name: '中欧工程技术学院',
       listUrl: 'https://utseus.shu.edu.cn/symkzj/gg.htm',
       adapter: AnnouncementSourceAdapter(
