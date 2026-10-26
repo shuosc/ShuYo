@@ -241,6 +241,28 @@ void main() {
     expect(await original.readAsBytes(), [1]);
   });
 
+  test('pending photo ownership survives equivalent directory and file paths',
+      () async {
+    SharedPreferences.setMockInitialValues({});
+    final directory = await _themeDirectory();
+    final importingService = ClientSettingsService(
+      supportDirectoryLoader: () async => Directory('${directory.path}/.'),
+    );
+    final savingService = ClientSettingsService(
+      supportDirectoryLoader: () async => directory,
+    );
+    final pending = await importingService.createCustomBackgroundPhoto([1, 2]);
+
+    await savingService.saveCustomBackground(CustomBackground.withoutPhoto(
+      ShuYoThemes.byId(ShuYoThemes.defaultId).colors,
+    ));
+    expect(await pending.readAsBytes(), [1, 2]);
+
+    final equivalent = File.fromUri(pending.absolute.uri.normalizePath());
+    await importingService.discardCustomBackgroundPhoto(equivalent);
+    expect(await pending.exists(), isFalse);
+  });
+
   test('overlapping saves across services retain the last background photo',
       () async {
     SharedPreferences.setMockInitialValues({});

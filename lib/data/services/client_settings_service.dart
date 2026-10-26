@@ -97,7 +97,7 @@ class ClientSettingsService {
     final photo = File(
       '${directory.path}/custom_background_${DateTime.now().microsecondsSinceEpoch}.png',
     );
-    _pendingBackgroundImages.add(photo.path);
+    _pendingBackgroundImages.add(_backgroundImageKey(photo));
     try {
       await photo.writeAsBytes(bytes, flush: true);
       return photo;
@@ -108,7 +108,7 @@ class ClientSettingsService {
   }
 
   Future<void> discardCustomBackgroundPhoto(File photo) async {
-    if (!_pendingBackgroundImages.remove(photo.path)) return;
+    if (!_pendingBackgroundImages.remove(_backgroundImageKey(photo))) return;
     try {
       await photo.delete();
     } on Object {
@@ -258,7 +258,9 @@ class ClientSettingsService {
       rethrow;
     }
     if (imageName != null) {
-      _pendingBackgroundImages.remove('${directory!.path}/$imageName');
+      _pendingBackgroundImages.remove(
+        _backgroundImageKey(File('${directory!.path}/$imageName')),
+      );
     }
     await _removeUnusedBackgroundImages(imageName, directory: directory);
   }
@@ -275,6 +277,13 @@ class ClientSettingsService {
     return name;
   }
 
+  static String _backgroundImageKey(File file) {
+    // File creation and directory enumeration can use different separators on
+    // Windows. Compare normalized absolute identities before releasing imports.
+    final key = file.absolute.uri.normalizePath().toString();
+    return Platform.isWindows ? key.toLowerCase() : key;
+  }
+
   Future<void> _removeUnusedBackgroundImages(
     String? retainedName, {
     Directory? directory,
@@ -286,7 +295,7 @@ class ClientSettingsService {
         final name = _storedBackgroundImageName(entry.path);
         if (name == null ||
             name == retainedName ||
-            _pendingBackgroundImages.contains(entry.path)) {
+            _pendingBackgroundImages.contains(_backgroundImageKey(entry))) {
           continue;
         }
         try {
