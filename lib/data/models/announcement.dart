@@ -243,3 +243,48 @@ class AnnouncementDetail {
 
   bool get hasContent => blocks.isNotEmpty;
 }
+
+/// The settled fields used for one card's entrance and stable layout.
+class AnnouncementCardData {
+  const AnnouncementCardData({
+    this.summary = '',
+    this.dateText = '',
+    this.publishedAt,
+  });
+
+  factory AnnouncementCardData.fromItem(AnnouncementListItem item) =>
+      AnnouncementCardData(
+          summary: item.summary,
+          dateText: item.dateText,
+          publishedAt: item.publishedAt);
+
+  final String summary;
+  final String dateText;
+  final DateTime? publishedAt;
+}
+
+/// Publication fields shared by list enrichment and article details.
+class AnnouncementMetadata {
+  const AnnouncementMetadata({
+    this.title = '',
+    this.dateText = '',
+    this.publishedAt,
+    this.author = '',
+    this.department = '',
+  });
+
+  final String title;
+  final String dateText;
+  final DateTime? publishedAt;
+  final String author;
+  final String department;
+
+  AnnouncementMetadata withFallback(AnnouncementMetadata fallback) =>
+      AnnouncementMetadata(
+        title: title.isNotEmpty ? title : fallback.title,
+        dateText: dateText.isNotEmpty ? dateText : fallback.dateText,
+        publishedAt: publishedAt ?? fallback.publishedAt,
+        author: author.isNotEmpty ? author : fallback.author,
+        department: department.isNotEmpty ? department : fallback.department,
+      );
+}
