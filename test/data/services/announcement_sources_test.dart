@@ -42,7 +42,7 @@ void main() {
     }
   });
 
-  test('Film Academy repairs cached dates for the linked admissions article',
+  test('Film Academy repairs cached dates on demand after returning its list',
       () async {
     final source = AnnouncementSource.byId('sfa');
     const recentUrl = 'https://sfa.shu.edu.cn/info/1212/recent.htm';
@@ -89,12 +89,27 @@ void main() {
 
     final items = await repository.fetchAnnouncements(source: source);
     expect(items.map((item) => item.title),
-        ['较新的本院公告', _bkzswFilmNoticeTitle, '已缓存的历史公告']);
+        [_bkzswFilmNoticeTitle, '较新的本院公告', '已缓存的历史公告']);
     final article =
         items.singleWhere((item) => item.url == _bkzswFilmNoticeUrl);
-    expect(article.dateText, '2026-03-18');
-    expect(article.publishedAt, DateTime(2026, 3, 18));
+    expect(article.dateText, isEmpty);
+    expect(article.publishedAt, isNull);
     expect(article.sourceId, 'sfa');
+    expect(requests, [source.listUrl]);
+
+    final repaired = await repository.loadPublicationDate(article);
+    final recent = items.singleWhere((item) => item.url == recentUrl);
+    final repairedRecent = await repository.loadPublicationDate(recent);
+    expect(repaired!.dateText, '2026-03-18');
+    expect(repaired.publishedAt, DateTime(2026, 3, 18));
+    expect(repaired.sourceId, 'sfa');
+    expect(repairedRecent!.dateText, '2026-04-01');
+    await Future<void>.delayed(Duration.zero);
+    final updated = await repository.loadCachedAnnouncements(source: source);
+    expect(updated.map((item) => item.title),
+        [_bkzswFilmNoticeTitle, '较新的本院公告', '已缓存的历史公告']);
+    expect(items.map((item) => item.title),
+        [_bkzswFilmNoticeTitle, '较新的本院公告', '已缓存的历史公告']);
     expect(requests,
         unorderedEquals([source.listUrl, _bkzswFilmNoticeUrl, recentUrl]));
     final prefs = await SharedPreferences.getInstance();
@@ -102,7 +117,8 @@ void main() {
 
     final restored = AnnouncementRepository(apiClient: api);
     final cached = await restored.fetchAnnouncements(source: source);
-    expect(cached.map((item) => item.title), items.map((item) => item.title));
+    expect(cached.map((item) => item.title),
+        ['较新的本院公告', _bkzswFilmNoticeTitle, '已缓存的历史公告']);
     expect(
         cached.singleWhere((item) => item.url == _bkzswFilmNoticeUrl).dateText,
         '2026-03-18');
@@ -169,12 +185,16 @@ void main() {
       final article =
           items.singleWhere((item) => item.url == _bkzswFilmNoticeUrl);
       expect(article.dateText, isEmpty);
-      expect(article.publishedAt, DateTime(2026, 12, 31));
-      expect(requests, isNot(contains(_bkzswFilmNoticeUrl)));
+      expect(article.publishedAt, isNull);
+      expect(requests, [source.listUrl]);
 
       final prefs = await SharedPreferences.getInstance();
       const lastRefresh = '2026-10-24T09:30:00.000';
       await prefs.setString('announcements.lastRefreshAt.sfa', lastRefresh);
+      final recent = items.singleWhere((item) => item.url == recentUrl);
+      expect(recent.dateText, isEmpty);
+      expect((await repository.loadPublicationDate(recent))!.dateText,
+          '2026-04-01');
       final repaired = await repository.loadPublicationDate(article);
       expect(repaired, isNotNull);
       expect(repaired!.dateText, '2026-03-18');
@@ -182,6 +202,7 @@ void main() {
       expect(repaired.sourceId, 'sfa');
       expect(requests, contains(_bkzswFilmNoticeUrl));
       expect(prefs.getString('announcements.lastRefreshAt.sfa'), lastRefresh);
+      await Future<void>.delayed(Duration.zero);
 
       final memoryCached =
           await repository.loadCachedAnnouncements(source: source);
@@ -229,9 +250,12 @@ void main() {
     api.completeDate(0, '2026-03-18');
     api.completeDate(1, '2026-03-19');
     await Future.wait(dates);
+    await Future<void>.delayed(Duration.zero);
 
     final memory = await repository.loadCachedAnnouncements(source: source);
-    expect(memory.map((item) => item.dateText), ['2026-03-19', '2026-03-18']);
+    // Completing optional metadata keeps the currently displayed order. A
+    // later disk reload applies the normal ordering to the now-known dates.
+    expect(memory.map((item) => item.dateText), ['2026-03-18', '2026-03-19']);
     final restored = AnnouncementRepository();
     addTearDown(restored.dispose);
     final persisted = await restored.loadCachedAnnouncements(source: source);
@@ -260,9 +284,10 @@ void main() {
     expect(api.pendingDates, hasLength(2));
     api.completeDate(0, '2025-01-01');
     expect(await old, isNull);
-    expect(identical(repository.loadPublicationDate(item), fresh), isTrue);
+    expect(api.pendingDates, hasLength(2));
     api.completeDate(1, '2026-03-18');
     expect((await fresh)!.dateText, '2026-03-18');
+    await Future<void>.delayed(Duration.zero);
 
     final restored = AnnouncementRepository();
     addTearDown(restored.dispose);
@@ -332,11 +357,13 @@ void main() {
     client.close();
   });
 
-  test('Film Academy article metadata completes undated list entries',
+  test('Film Academy list returns before article metadata is requested',
       () async {
     final source = AnnouncementSource.byId('sfa');
+    final requests = <String>[];
     final client = AnnouncementApiClient(
       httpClient: MockClient((request) async {
+        requests.add(request.url.toString());
         final path = request.url.path;
         final html = path.contains('/info/')
             ? '<span class="Head">${path.endsWith('/new.htm') ? '新公告' : '旧公告'}</span>'
@@ -357,13 +384,23 @@ void main() {
     );
 
     final page = await client.fetchPage(source: source);
-    expect(page.items.map((item) => item.title), ['新公告', '外链', '旧公告']);
-    expect(page.items.first.publishedAt, DateTime(2026, 10, 20));
-    expect(page.items.first.dateText, '2026-10-20');
+    expect(page.items.map((item) => item.title), ['旧公告', '新公告', '外链']);
+    expect(page.items.every((item) => item.dateText.isEmpty), isTrue);
+    expect(page.items.every((item) => item.publishedAt == null), isTrue);
+    expect(requests, [source.listUrl]);
+    final newItem = page.items.singleWhere((item) => item.title == '新公告');
+    final datedNew = await client.fetchPublicationDate(newItem);
+    expect(datedNew!.publishedAt, DateTime(2026, 10, 20));
+    expect(datedNew.dateText, '2026-10-20');
+    final oldItem = page.items.singleWhere((item) => item.title == '旧公告');
+    expect(
+        (await client.fetchPublicationDate(oldItem))!.dateText, '2026-09-10');
     final external = page.items.singleWhere((item) => item.title == '外链');
     expect(external.dateText, isEmpty);
-    expect(external.publishedAt, DateTime(2026, 10, 19));
-    final detail = await client.fetchDetail(page.items.first);
+    expect(external.publishedAt, isNull);
+    expect(await client.fetchPublicationDate(external), isNull);
+    expect(page.items.map((item) => item.title), ['旧公告', '新公告', '外链']);
+    final detail = await client.fetchDetail(newItem);
     expect(detail.dateText, '2026-10-20');
     expect(detail.author, '王超');
     expect(detail.title, '新公告');
@@ -410,19 +447,27 @@ void main() {
 
     final page = await client.fetchPage(source: source);
     expect(page.items, hasLength(articles.length));
+    expect(page.items.map((item) => item.title), orderedEquals(articles.keys));
+    expect(page.items.every((item) => item.dateText.isEmpty), isTrue);
+    expect(page.items.every((item) => item.publishedAt == null), isTrue);
+    expect(requests, [source.listUrl]);
     for (final entry
         in {'本科生院公告': 19, '计算机学院公告': 21, '温哥华电影学院公告': 22}.entries) {
       final item = page.items.singleWhere((item) => item.title == entry.key);
-      expect(item.dateText, '2026-10-${entry.value}');
-      expect(item.publishedAt, DateTime(2026, 10, entry.value));
-      expect(item.sourceId, 'sfa');
+      final dated = await client.fetchPublicationDate(item);
+      expect(dated!.dateText, '2026-10-${entry.value}');
+      expect(dated.publishedAt, DateTime(2026, 10, entry.value));
+      expect(dated.sourceId, 'sfa');
     }
-    final titles = page.items.map((item) => item.title).toList();
-    expect(titles.indexOf('计算机学院公告'), lessThan(titles.indexOf('本科生院公告')));
-    for (final title in ['已失效公告', '普通外链', '微信外链', '附件']) {
-      expect(page.items.singleWhere((item) => item.title == title).dateText,
-          isEmpty);
+    final unavailable = page.items.singleWhere((item) => item.title == '已失效公告');
+    expect(await client.fetchPublicationDate(unavailable), isNull);
+    for (final title in ['普通外链', '微信外链', '附件']) {
+      final item = page.items.singleWhere((item) => item.title == title);
+      expect(item.dateText, isEmpty);
+      expect(await client.fetchPublicationDate(item), isNull);
     }
+    expect(page.items.map((item) => item.title), orderedEquals(articles.keys));
+    expect(page.items.every((item) => item.publishedAt == null), isTrue);
     expect(
         requests,
         unorderedEquals([
@@ -461,8 +506,10 @@ void main() {
 
   test('undated Film Academy links keep their source positions', () async {
     final source = AnnouncementSource.byId('sfa');
+    final requests = <String>[];
     final client = AnnouncementApiClient(
       httpClient: MockClient((request) async {
+        requests.add(request.url.toString());
         final path = request.url.path;
         if (path.contains('/info/')) {
           final date = path.endsWith('/new.htm')
@@ -477,10 +524,10 @@ void main() {
         }
         return http.Response(
             '<div class="right">'
-            '<li class="notice-item"><a class="notice-title" href="/info/new.htm">新公告</a></li>'
+            '<li class="notice-item"><a class="notice-title" href="/info/1212/new.htm">新公告</a></li>'
             '<li class="notice-item"><a class="notice-title" href="https://example.org/a">外链甲</a></li>'
             '<li class="notice-item"><a class="notice-title" href="https://example.org/b">外链乙</a></li>'
-            '<li class="notice-item"><a class="notice-title" href="/info/old.htm">旧公告</a></li>'
+            '<li class="notice-item"><a class="notice-title" href="/info/1212/old.htm">旧公告</a></li>'
             '<li class="notice-item"><a class="notice-title" href="https://example.org/c">外链丙</a></li>'
             '</div>',
             200,
@@ -491,15 +538,16 @@ void main() {
     final page = await client.fetchPage(source: source);
     expect(page.items.map((item) => item.title),
         ['新公告', '外链甲', '外链乙', '旧公告', '外链丙']);
-    expect(
-        page.items.map((item) => item.publishedAt),
-        orderedEquals([
-          DateTime(2026, 10, 20),
-          DateTime(2026, 10, 16, 16),
-          DateTime(2026, 10, 13, 8),
-          DateTime(2026, 10, 10),
-          DateTime(2026, 10, 9),
-        ]));
+    expect(page.items.every((item) => item.publishedAt == null), isTrue);
+    expect(requests, [source.listUrl]);
+    for (final entry in {'新公告': 20, '旧公告': 10}.entries) {
+      final item = page.items.singleWhere((item) => item.title == entry.key);
+      final dated = await client.fetchPublicationDate(item);
+      expect(dated!.publishedAt, DateTime(2026, 10, entry.value));
+    }
+    expect(page.items.map((item) => item.title),
+        ['新公告', '外链甲', '外链乙', '旧公告', '外链丙']);
+    expect(page.items.every((item) => item.publishedAt == null), isTrue);
     expect(
         page.items
             .where((item) => item.title.startsWith('外链'))
@@ -650,7 +698,7 @@ void main() {
     );
   });
 
-  test('Vancouver Film School preview uses article body over list excerpt',
+  test('Vancouver previews use available list excerpts and fetch missing ones',
       () async {
     const item = AnnouncementListItem(
       title: '电影课堂新实践',
@@ -673,7 +721,13 @@ void main() {
       ),
     );
 
-    expect(await repository.loadPreview(item), '正文首段，生成列表概览。');
+    addTearDown(repository.dispose);
+    expect(await repository.loadPreview(item), item.summary);
+    expect(requests, isEmpty);
+    expect(
+        await repository.loadPreview(AnnouncementListItem(
+            title: item.title, url: item.url, sourceId: item.sourceId)),
+        '正文首段，生成列表概览。');
     expect(requests, [Uri.parse(item.url)]);
   });
 
@@ -1808,94 +1862,37 @@ void main() {
     expect(expansion.schoolDepartment, isFalse);
   });
 
-  test('detail previews are queued three at a time and reused', () async {
-    final api = _QueuedPreviewApiClient();
-    final repository = AnnouncementRepository(apiClient: api);
-    final items = List.generate(
-      5,
-      (index) => AnnouncementListItem(
-        title: '公告 $index',
-        url: 'https://bksy.shu.edu.cn/info/$index.htm',
-        sourceId: 'bksy',
-      ),
-    );
-    final futures = items.map(repository.loadPreview).toList();
-    expect(api.requested, hasLength(3));
-    final openedDetail = repository.fetchDetail(items.first);
-    expect(api.requested, hasLength(3));
-
-    api.complete(items[0].url, '第一条正文摘要');
-    expect((await openedDetail).blocks.single.value, '第一条正文摘要');
-    await futures[0];
-    await Future<void>.delayed(Duration.zero);
-    expect(api.requested, hasLength(4));
-
-    for (final item in items.skip(1)) {
-      while (!api.requested.contains(item.url)) {
-        await Future<void>.delayed(Duration.zero);
-      }
-      api.complete(item.url, '${item.title}正文');
-    }
-    await Future.wait(futures);
-    expect(await repository.loadPreview(items.first), '第一条正文摘要');
-    expect((await repository.fetchDetail(items.first)).blocks.single.value,
-        '第一条正文摘要');
-    expect(api.requested, hasLength(5));
-  });
-
-  test('a fast scroll keeps the preview request backlog bounded', () async {
-    final api = _QueuedPreviewApiClient();
-    final repository = AnnouncementRepository(apiClient: api);
-    final items = List.generate(
-      50,
-      (index) => AnnouncementListItem(
-        title: '公告 $index',
-        url: 'https://bksy.shu.edu.cn/info/1000/$index.htm',
-        sourceId: 'bksy',
-      ),
-    );
-    final requests = items.map(repository.loadPreview).toList();
-    expect(api.requested, hasLength(3));
-    expect(await requests.last, isNull);
-
-    for (final item in items.take(27)) {
-      while (!api.requested.contains(item.url)) {
-        await Future<void>.delayed(Duration.zero);
-      }
-      api.complete(item.url, item.title);
-    }
-    await Future.wait(requests);
-    expect(api.requested, hasLength(27));
-  });
-
   test('image-only and PDF announcements use type labels in the list',
       () async {
-    final api = _QueuedPreviewApiClient();
+    final requests = <String>[];
+    final api = AnnouncementApiClient(httpClient: MockClient((request) async {
+      requests.add(request.url.toString());
+      final html = request.url.host == 'cwc.shu.edu.cn'
+          ? '<div class="v_news_content"><script>'
+              'var vsb_pdf_image_data = ["/page.jpg"];'
+              'showVsbpdfIframe("/notice.pdf","100%","600");'
+              '</script></div>'
+          : '<div class="v_news_content"><img src="/image.jpg"></div>';
+      return http.Response(html, 200,
+          headers: {'content-type': 'text/html; charset=utf-8'});
+    }));
     final repository = AnnouncementRepository(apiClient: api);
+    addTearDown(repository.dispose);
     const pdf = AnnouncementListItem(
       title: 'PDF 通知',
-      url: 'https://cwc.shu.edu.cn/info/pdf.htm',
+      url: 'https://cwc.shu.edu.cn/info/1001/pdf.htm',
       sourceId: 'cwc',
     );
     const image = AnnouncementListItem(
       title: '图片通知',
-      url: 'https://bksy.shu.edu.cn/info/image.htm',
+      url: 'https://bksy.shu.edu.cn/info/1001/image.htm',
       sourceId: 'bksy',
     );
     final pdfPreview = repository.loadPreview(pdf);
     final imagePreview = repository.loadPreview(image);
-    api.completeBlocks(pdf.url, const [
-      AnnouncementContentBlock.image('https://cwc.shu.edu.cn/page.jpg'),
-      AnnouncementContentBlock.link(
-        'https://cwc.shu.edu.cn/notice.pdf',
-        label: '查看原始 PDF',
-      ),
-    ]);
-    api.completeBlocks(image.url, const [
-      AnnouncementContentBlock.image('https://bksy.shu.edu.cn/image.jpg'),
-    ]);
     expect(await pdfPreview, '[PDF文件]');
     expect(await imagePreview, '[图片]');
+    expect(requests, unorderedEquals([pdf.url, image.url]));
   });
 }
 
@@ -1932,31 +1929,6 @@ class _FakeAnnouncementApiClient extends AnnouncementApiClient {
         sourceId: source.id,
       ),
     ];
-  }
-}
-
-class _QueuedPreviewApiClient extends AnnouncementApiClient {
-  final requested = <String>[];
-  final pending = <String, Completer<AnnouncementDetail>>{};
-
-  @override
-  Future<AnnouncementDetail> fetchDetail(AnnouncementListItem item) {
-    requested.add(item.url);
-    final completer = Completer<AnnouncementDetail>();
-    pending[item.url] = completer;
-    return completer.future;
-  }
-
-  void complete(String url, String body) {
-    completeBlocks(url, [AnnouncementContentBlock.text(body)]);
-  }
-
-  void completeBlocks(String url, List<AnnouncementContentBlock> blocks) {
-    pending.remove(url)!.complete(AnnouncementDetail(
-          title: '公告',
-          url: url,
-          blocks: blocks,
-        ));
   }
 }
 

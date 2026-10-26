@@ -6,9 +6,11 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/announcement.dart';
 import '../models/announcement_source.dart';
+import '../models/announcement_target.dart';
 import '../models/common.dart';
 import '../services/announcement_api_client.dart';
 import '../services/announcement_memory_cache.dart';
+import '../services/announcement_order.dart';
 import '../services/client_settings_service.dart';
 
 class AnnouncementHomeSummary {
@@ -39,13 +41,22 @@ class AnnouncementRepository {
     Future<SharedPreferences> Function()? preferencesLoader,
     DateTime Function()? now,
     this.autoRefreshInterval = defaultAutoRefreshInterval,
+    this.cardLoadTimeout = cardPreparationTimeout,
   })  : _apiClient = apiClient ?? AnnouncementApiClient(),
         _preferencesLoader = preferencesLoader ?? SharedPreferences.getInstance,
         _now = now ?? DateTime.now;
 
-  void dispose() => _apiClient.close();
+  void dispose() {
+    if (_disposed) return;
+    _disposed = true;
+    for (final request in _pendingCards.values.toList()) {
+      _finishCard(request, cancelOptional: true);
+    }
+    _apiClient.close();
+  }
 
   static const defaultAutoRefreshInterval = Duration(hours: 12);
+  static const cardPreparationTimeout = Duration(seconds: 5);
   static const _listCacheKey = 'announcements.list.cache';
   static const _lastRefreshKey = 'announcements.lastRefreshAt';
   static const _cacheVersionKey = 'announcements.cacheVersion';
@@ -54,28 +65,19 @@ class AnnouncementRepository {
   static const _favoritesKey = 'announcements.favoriteSources';
   static const _menuExpansionKey = 'announcements.menu.expanded';
   static const _cacheVersion = 5;
-  static int _cacheVersionFor(AnnouncementSource source) => switch (source.id) {
-        'sfa' => 9,
-        'cs' => 6,
-        _ => _cacheVersion,
-      };
+  static const _sourceCacheVersions = {'sfa': 9, 'cs': 6};
+  static int _cacheVersionFor(AnnouncementSource source) =>
+      _sourceCacheVersions[source.id] ?? _cacheVersion;
 
   final AnnouncementApiClient _apiClient;
   final Future<SharedPreferences> Function() _preferencesLoader;
   final DateTime Function() _now;
   final Duration autoRefreshInterval;
+  final Duration cardLoadTimeout;
 
   final Map<String, List<AnnouncementListItem>> _memoryLists = {};
   final Map<String, List<String?>> _nextPageUrls = {};
   final Map<String, Set<String>> _visitedPageUrls = {};
-  late final _previews = AnnouncementMemoryCache<String?>(
-    maxEntries: 160,
-    maxBytes: 256 * 1024,
-    ttl: const Duration(minutes: 5),
-    sizeOf: (value) => (value?.length ?? 0) * 2,
-    now: _now,
-  );
-  final Map<String, Future<String?>> _pendingPreviews = {};
   late final _recentDetails = AnnouncementMemoryCache<AnnouncementDetail>(
     maxEntries: 12,
     maxBytes: 8 * 1024 * 1024,
@@ -84,120 +86,148 @@ class AnnouncementRepository {
     now: _now,
   );
   final Map<String, Future<AnnouncementDetail>> _pendingDetails = {};
-  late final _publicationDates = AnnouncementMemoryCache<AnnouncementListItem?>(
-    maxEntries: 160,
-    maxBytes: 256 * 1024,
-    ttl: const Duration(minutes: 5),
-    sizeOf: (item) => item == null ? 0 : 128 + item.dateText.length * 2,
-    now: _now,
-  );
-  final Map<String, Future<AnnouncementListItem?>> _pendingPublicationDates =
-      {};
   final Map<String, Future<void>> _pendingListWrites = {};
   final Map<String, int> _cacheGenerations = {};
-  final Queue<
-      ({
-        AnnouncementListItem item,
-        Completer<String?> completer,
-        int cacheGeneration,
-      })> _previewQueue = Queue();
-  int _activePreviewRequests = 0;
-  static const _maximumQueuedPreviews = 24;
+  final Map<String, int> _articleGenerations = {};
+  final Map<String, Set<String>> _sourceArticleUrls = {};
+  final Queue<_QueuedAnnouncementCard> _cardQueue = Queue();
+  final Map<String, _QueuedAnnouncementCard> _pendingCards = {};
+  int _activeCardRequests = 0;
+  bool _disposed = false;
+  static const _maximumActiveCards = 6;
+  static const _maximumQueuedCards = 24;
 
-  /// Detail requests for list previews are limited so scrolling a long list
-  /// does not open a connection for every announcement at once.
-  Future<String?> loadPreview(AnnouncementListItem item) {
-    // The Vancouver Film School list has excerpts, but its previews should
-    // use the article body like the other parsed announcements. Keep the list
-    // excerpt available to the tile if the article has no readable body.
-    if (item.summary.isNotEmpty && item.sourceId != 'shvfs') {
-      return Future.value(item.summary);
+  /// Resolves only the fields missing from a visible card. Preview and date
+  /// work run together, while a shared deadline also covers time in the queue.
+  /// An unsupported link or failed optional request is a settled card too.
+  Future<AnnouncementCardData> loadCard(AnnouncementListItem item) {
+    final key = _rememberArticle(item);
+    final target =
+        AnnouncementTarget.resolve(item.url, sourceId: item.sourceId);
+    if (_disposed ||
+        ((item.summary.isNotEmpty || !target.canPreview) &&
+            (item.dateText.isNotEmpty || !target.canLoadMetadata))) {
+      return Future.value(AnnouncementCardData.fromItem(item));
     }
-    final key = _detailKey(item);
-    final cached = _previews.lookup(key);
-    if (cached != null) return Future.value(cached.value);
-    final pending = _pendingPreviews[key];
-    if (pending != null) return pending;
-    // A fast fling should not leave hundreds of offscreen detail requests in
-    // memory. The tile can retry if it comes back on screen.
-    if (_previewQueue.length >= _maximumQueuedPreviews) {
+    final pendingKey = '${item.sourceId}|$key';
+    final pending = _pendingCards[pendingKey];
+    if (pending != null) {
+      if (item.summary.isNotEmpty) pending.summary = item.summary;
+      if (item.dateText.isNotEmpty) {
+        pending.dateText = item.dateText;
+        pending.publishedAt = item.publishedAt;
+      }
+      return pending.completer.future;
+    }
+    if (_cardQueue.length >= _maximumQueuedCards) {
+      return Future.value(AnnouncementCardData.fromItem(item));
+    }
+    final request = _QueuedAnnouncementCard(
+      item: item,
+      key: pendingKey,
+      sourceGeneration: _cacheGenerations[item.sourceId] ?? 0,
+      articleGeneration: _articleGenerations[key] ?? 0,
+    );
+    _pendingCards[pendingKey] = request;
+    request.timer = Timer(
+        cardLoadTimeout, () => _finishCard(request, cancelOptional: true));
+    _cardQueue.add(request);
+    _pumpCardQueue();
+    return request.completer.future;
+  }
+
+  /// Releases optional work when a card leaves the viewport. Another card for
+  /// the same article keeps its shared request alive, including cross-posts.
+  void cancelCard(AnnouncementListItem item) {
+    final key = '${item.sourceId}|${announcementUrlKey(item.url)}';
+    final request = _pendingCards[key];
+    if (request != null) _finishCard(request, cancelOptional: true);
+  }
+
+  void _pumpCardQueue() {
+    while (!_disposed &&
+        _activeCardRequests < _maximumActiveCards &&
+        _cardQueue.isNotEmpty) {
+      final request = _cardQueue.removeFirst();
+      if (request.completer.isCompleted) continue;
+      if (request.elapsed.elapsed >= cardLoadTimeout) {
+        _finishCard(request, pumpQueue: false, cancelOptional: true);
+        continue;
+      }
+      request.started = true;
+      _activeCardRequests++;
+      unawaited(_loadQueuedCard(request));
+    }
+  }
+
+  Future<void> _loadQueuedCard(_QueuedAnnouncementCard request) async {
+    final item = request.item;
+    final target =
+        AnnouncementTarget.resolve(item.url, sourceId: item.sourceId);
+    await Future.wait<void>([
+      if (item.summary.isEmpty && target.canPreview)
+        loadPreview(item).then((summary) {
+          if (!request.completer.isCompleted &&
+              request.summary.isEmpty &&
+              summary != null) {
+            request.summary = summary;
+          }
+        }).catchError((Object _) {}),
+      if (item.dateText.isEmpty && target.canLoadMetadata)
+        loadPublicationDate(item).then((dated) {
+          if (!request.completer.isCompleted &&
+              request.dateText.isEmpty &&
+              dated != null) {
+            request.dateText = dated.dateText;
+            request.publishedAt = dated.publishedAt;
+          }
+        }).catchError((Object _) {}),
+    ]);
+    _finishCard(request);
+  }
+
+  void _finishCard(_QueuedAnnouncementCard request,
+      {bool pumpQueue = true, bool cancelOptional = false}) {
+    if (request.completer.isCompleted) return;
+    request.timer?.cancel();
+    request.elapsed.stop();
+    if (identical(_pendingCards[request.key], request)) {
+      _pendingCards.remove(request.key);
+    }
+    _cardQueue.remove(request);
+    final current = request.sourceGeneration ==
+            (_cacheGenerations[request.item.sourceId] ?? 0) &&
+        request.articleGeneration ==
+            (_articleGenerations[announcementUrlKey(request.item.url)] ?? 0);
+    request.completer.complete(current
+        ? AnnouncementCardData(
+            summary: request.summary,
+            dateText: request.dateText,
+            publishedAt: request.publishedAt,
+          )
+        : AnnouncementCardData.fromItem(request.item));
+    if (cancelOptional) {
+      final url = announcementUrlKey(request.item.url);
+      final hasAnotherCard = _pendingCards.values
+          .any((pending) => announcementUrlKey(pending.item.url) == url);
+      if (!hasAnotherCard) _apiClient.cancelOptionalArticle(url);
+    }
+    if (request.started) _activeCardRequests--;
+    if (pumpQueue) _pumpCardQueue();
+  }
+
+  /// Preview extraction has no dependency on full article metadata or details.
+  Future<String?> loadPreview(AnnouncementListItem item) {
+    if (item.summary.isNotEmpty) return Future.value(item.summary);
+    _rememberArticle(item);
+    if (_disposed ||
+        !AnnouncementTarget.resolve(item.url, sourceId: item.sourceId)
+            .canPreview) {
       return Future.value(null);
     }
-    final completer = Completer<String?>();
-    _pendingPreviews[key] = completer.future;
-    _previewQueue.add((
-      item: item,
-      completer: completer,
-      cacheGeneration: _cacheGenerations[item.sourceId] ?? 0,
-    ));
-    _pumpPreviewQueue();
-    return completer.future;
-  }
-
-  void _pumpPreviewQueue() {
-    while (_activePreviewRequests < 3 && _previewQueue.isNotEmpty) {
-      final request = _previewQueue.removeFirst();
-      _activePreviewRequests++;
-      unawaited(_loadQueuedPreview(request));
-    }
-  }
-
-  Future<void> _loadQueuedPreview(
-    ({
-      AnnouncementListItem item,
-      Completer<String?> completer,
-      int cacheGeneration,
-    }) request,
-  ) async {
-    final item = request.item;
-    final key = _detailKey(item);
-    try {
-      final detail = await fetchDetail(item);
-      // Only the first readable paragraph is needed for a two-line preview.
-      // Joining an entire long article here needlessly allocates a large string.
-      final previewBuffer = StringBuffer();
-      for (final block in detail.blocks) {
-        if (!block.isText) continue;
-        final value = block.value.trim();
-        if (value.isEmpty || value == detail.title) continue;
-        if (previewBuffer.isNotEmpty) previewBuffer.write(' ');
-        previewBuffer
-            .write(value.length > 180 ? value.substring(0, 180) : value);
-        if (previewBuffer.length >= 180) break;
-      }
-      final text =
-          previewBuffer.toString().replaceAll(RegExp(r'\s+'), ' ').trim();
-      final preview = text.isEmpty
-          ? detail.blocks.any((block) =>
-                  block.isLink &&
-                  Uri.tryParse(block.value)
-                          ?.path
-                          .toLowerCase()
-                          .endsWith('.pdf') ==
-                      true)
-              ? '[PDF文件]'
-              : detail.blocks.any((block) => block.isImage)
-                  ? '[图片]'
-                  : detail.blocks.any((block) => block.isTable)
-                      ? '[表格]'
-                      : null
-          : text.length > 110
-              ? '${text.substring(0, 110)}…'
-              : text;
-      if (request.cacheGeneration == (_cacheGenerations[item.sourceId] ?? 0)) {
-        _previews.put(key, preview);
-      }
-      request.completer.complete(preview);
-    } on Object {
-      // A failed detail request is retried if the item is built again later.
-      request.completer.complete(null);
-    } finally {
-      if (identical(_pendingPreviews[key], request.completer.future)) {
-        _pendingPreviews.remove(key);
-      }
-      _activePreviewRequests--;
-      _pumpPreviewQueue();
-    }
+    // The API owns the single cached article state, including its summary.
+    return Future<String?>.sync(() => _apiClient.fetchPreview(item))
+        .catchError((Object _) => null);
   }
 
   Future<AnnouncementSource> defaultSource() async {
@@ -279,6 +309,7 @@ class AnnouncementRepository {
     final items = decoded
         .whereType<JsonMap>()
         .map(AnnouncementListItem.fromJson)
+        .map(_withoutUnverifiedDate)
         .toList();
     final recent = _keepActiveColumns(
       selected,
@@ -286,6 +317,20 @@ class AnnouncementRepository {
     );
     _memoryLists[selected.id] = recent;
     return recent;
+  }
+
+  static AnnouncementListItem _withoutUnverifiedDate(
+      AnnouncementListItem item) {
+    if (item.dateText.isNotEmpty || item.publishedAt == null) return item;
+    // Older caches can contain an ordering estimate without a verified date.
+    // Keep the article and let the shared metadata request resolve its date.
+    return AnnouncementListItem(
+      title: item.title,
+      url: item.url,
+      summary: item.summary,
+      sourceId: item.sourceId,
+      column: item.column,
+    );
   }
 
   List<AnnouncementListItem> _keepActiveColumns(
@@ -312,8 +357,8 @@ class AnnouncementRepository {
     bool loadNextPage = false,
   }) async {
     final selected = source ?? await defaultSource();
-    if (forceRefresh && !loadNextPage) _invalidateSourceDetails(selected);
     final cached = await loadCachedAnnouncements(source: selected);
+    if (forceRefresh && !loadNextPage) _invalidateSourceDetails(selected);
     if (loadNextPage) {
       final nextPageUrls = _nextPageUrls[selected.id];
       if (nextPageUrls == null || !nextPageUrls.any((url) => url != null)) {
@@ -351,8 +396,11 @@ class AnnouncementRepository {
         for (final next in page.nextPageUrls)
           if (next != null && !visited.contains(next)) next else null,
       ];
-      final items =
-          _mergeAnnouncements(_memoryLists[selected.id] ?? cached, page.items);
+      final items = _mergeAnnouncements(
+        _memoryLists[selected.id] ?? cached,
+        page.items,
+        preferIncomingOrder: true,
+      );
       await _saveList(selected, items);
       return items;
     } on Object {
@@ -363,71 +411,85 @@ class AnnouncementRepository {
     }
   }
 
-  /// Fills a visible historical card's missing date, including items that were
+  /// Fills a visible card's missing date, including historical items that were
   /// not returned by the latest list page. Preserve its original list source.
-  Future<AnnouncementListItem?> loadPublicationDate(AnnouncementListItem item) {
-    if (item.dateText.isNotEmpty) return Future.value(item);
-    final key = _detailKey(item);
-    final cached = _publicationDates.lookup(key);
-    if (cached != null) return Future.value(cached.value);
-    final pending = _pendingPublicationDates[key];
-    if (pending != null) return pending;
+  Future<AnnouncementListItem?> loadPublicationDate(
+      AnnouncementListItem item) async {
+    if (item.dateText.isNotEmpty) return item;
+    final key = _rememberArticle(item);
+    if (_disposed ||
+        !AnnouncementTarget.resolve(item.url, sourceId: item.sourceId)
+            .canLoadMetadata) {
+      return null;
+    }
     final generation = _cacheGenerations[item.sourceId] ?? 0;
-    late final Future<AnnouncementListItem?> task;
-    task = _loadPublicationDate(item, key, generation).whenComplete(() {
-      if (identical(_pendingPublicationDates[key], task)) {
-        _pendingPublicationDates.remove(key);
-      }
-    });
-    _pendingPublicationDates[key] = task;
-    return task;
-  }
-
-  Future<AnnouncementListItem?> _loadPublicationDate(
-    AnnouncementListItem item,
-    String key,
-    int generation,
-  ) async {
+    final articleGeneration = _articleGenerations[key] ?? 0;
     AnnouncementListItem? dated;
     try {
       dated = await _apiClient.fetchPublicationDate(item);
     } on Object {
       // Optional metadata must not prevent reading the list or its articles.
     }
-    if (generation != (_cacheGenerations[item.sourceId] ?? 0)) return null;
-    if (dated != null) {
-      final source = AnnouncementSource.byId(item.sourceId);
-      final current = await loadCachedAnnouncements(source: source);
-      if (generation != (_cacheGenerations[item.sourceId] ?? 0)) return null;
-      if (source.id == item.sourceId &&
-          current.any((entry) =>
-              _announcementUrlKey(entry.url) ==
-              _announcementUrlKey(item.url))) {
-        _memoryLists[source.id] =
-            _mergeAnnouncements(_memoryLists[source.id] ?? current, [dated]);
-        try {
-          await _persistList(source, markRefreshed: false);
-        } on Object {
-          // The card can still show the verified date if saving fails.
-        }
-      }
+    if (_disposed ||
+        generation != (_cacheGenerations[item.sourceId] ?? 0) ||
+        articleGeneration != (_articleGenerations[key] ?? 0)) {
+      return null;
     }
-    if (generation != (_cacheGenerations[item.sourceId] ?? 0)) return null;
-    _publicationDates.put(key, dated);
+    if (dated != null) {
+      // Disk writes must not delay a card's entrance. A source generation
+      // check in the patch also rejects results from an older refresh.
+      unawaited(_patchPublicationDate(dated, generation, articleGeneration));
+    }
     return dated;
   }
 
+  Future<void> _patchPublicationDate(
+      AnnouncementListItem dated, int generation, int articleGeneration) async {
+    try {
+      final source = AnnouncementSource.byId(dated.sourceId);
+      if (source.id != dated.sourceId) return;
+      final current = await loadCachedAnnouncements(source: source);
+      final key = announcementUrlKey(dated.url);
+      if (_disposed ||
+          generation != (_cacheGenerations[source.id] ?? 0) ||
+          articleGeneration != (_articleGenerations[key] ?? 0)) {
+        return;
+      }
+      // Replace in place: optional date completion cannot move a card already
+      // being read, or change an external link's position among dated items.
+      final items =
+          List<AnnouncementListItem>.of(_memoryLists[source.id] ?? current);
+      final index = items.indexWhere((entry) =>
+          announcementUrlKey(entry.url) == key && entry.dateText.isEmpty);
+      if (index < 0) return;
+      final entry = items[index];
+      items[index] = AnnouncementListItem(
+        title: entry.title,
+        url: entry.url,
+        summary: entry.summary,
+        dateText: dated.dateText,
+        publishedAt: dated.publishedAt,
+        sourceId: entry.sourceId,
+        column: entry.column,
+      );
+      _memoryLists[source.id] = items;
+      await _persistList(source, markRefreshed: false);
+    } on Object {
+      // The verified fields remain usable even if optional persistence fails.
+    }
+  }
+
   Future<AnnouncementDetail> fetchDetail(AnnouncementListItem item) {
-    final key = _detailKey(item);
+    final key = _rememberArticle(item);
     final cached = _recentDetails.lookup(key);
     if (cached != null) return Future.value(cached.value);
     final pending = _pendingDetails[key];
     if (pending != null) return pending;
-    final generation = _cacheGenerations[item.sourceId] ?? 0;
+    final generation = _articleGenerations[key] ?? 0;
     late final Future<AnnouncementDetail> task;
     task = Future<AnnouncementDetail>.sync(() => _apiClient.fetchDetail(item))
         .then((detail) {
-      if (generation == (_cacheGenerations[item.sourceId] ?? 0)) {
+      if (!_disposed && generation == (_articleGenerations[key] ?? 0)) {
         _recentDetails.put(key, detail);
       }
       return detail;
@@ -440,25 +502,33 @@ class AnnouncementRepository {
     return task;
   }
 
-  String _detailKey(AnnouncementListItem item) =>
-      '${item.sourceId}|${_announcementUrlKey(item.url)}';
+  String _rememberArticle(AnnouncementListItem item) {
+    final key = announcementUrlKey(item.url);
+    _sourceArticleUrls.putIfAbsent(item.sourceId, () => <String>{}).add(key);
+    return key;
+  }
 
   void _invalidateSourceDetails(AnnouncementSource source) {
     _cacheGenerations.update(source.id, (value) => value + 1,
         ifAbsent: () => 1);
-    final prefix = '${source.id}|';
-    _recentDetails.removeWhere((key, _) => key.startsWith(prefix));
-    _previews.removeWhere((key, _) => key.startsWith(prefix));
-    _pendingDetails.removeWhere((key, _) => key.startsWith(prefix));
-    _pendingPreviews.removeWhere((key, _) => key.startsWith(prefix));
-    _publicationDates.removeWhere((key, _) => key.startsWith(prefix));
-    _pendingPublicationDates.removeWhere((key, _) => key.startsWith(prefix));
-    _previewQueue.removeWhere((request) {
-      if (request.item.sourceId != source.id) return false;
-      request.completer.complete(null);
-      return true;
-    });
-    _apiClient.clearResponseCache();
+    final urls = <String>{
+      ...?_sourceArticleUrls[source.id],
+      for (final item in _memoryLists[source.id] ?? <AnnouncementListItem>[])
+        announcementUrlKey(item.url),
+    };
+    for (final url in urls) {
+      _articleGenerations.update(url, (value) => value + 1, ifAbsent: () => 1);
+    }
+    _recentDetails.removeWhere((key, _) => urls.contains(key));
+    _pendingDetails.removeWhere((key, _) => urls.contains(key));
+    for (final request in _pendingCards.values.toList()) {
+      if (request.item.sourceId == source.id ||
+          urls.contains(announcementUrlKey(request.item.url))) {
+        _finishCard(request, pumpQueue: false, cancelOptional: true);
+      }
+    }
+    _apiClient.invalidateArticles(urls);
+    _pumpCardQueue();
   }
 
   static int _detailCacheBytes(AnnouncementDetail detail) {
@@ -508,7 +578,7 @@ class AnnouncementRepository {
     if (lastRefresh == null) {
       return true;
     }
-    return DateTime.now().difference(lastRefresh) >= autoRefreshInterval;
+    return _now().difference(lastRefresh) >= autoRefreshInterval;
   }
 
   Future<void> _saveList(
@@ -534,7 +604,7 @@ class AnnouncementRepository {
       if (markRefreshed) {
         await prefs.setString(
           '$_lastRefreshKey.${source.id}',
-          DateTime.now().toIso8601String(),
+          _now().toIso8601String(),
         );
         await prefs.setInt(
             '$_cacheVersionKey.${source.id}', _cacheVersionFor(source));
@@ -550,11 +620,13 @@ class AnnouncementRepository {
 
   List<AnnouncementListItem> _mergeAnnouncements(
     Iterable<AnnouncementListItem> existing,
-    Iterable<AnnouncementListItem> incoming,
-  ) {
+    Iterable<AnnouncementListItem> incoming, {
+    bool preferIncomingOrder = false,
+  }) {
+    final incomingItems = incoming.toList(growable: false);
     final byUrl = <String, AnnouncementListItem>{};
     void merge(AnnouncementListItem item) {
-      final key = _announcementUrlKey(item.url);
+      final key = announcementUrlKey(item.url);
       final previous = byUrl[key];
       if (previous == null) {
         byUrl[key] = item;
@@ -574,36 +646,40 @@ class AnnouncementRepository {
     for (final item in existing) {
       merge(item);
     }
-    for (final item in incoming) {
+    for (final item in incomingItems) {
       merge(item);
     }
-    final items = byUrl.values.toList();
-    final order = {
-      for (var index = 0; index < items.length; index++)
-        _announcementUrlKey(items[index].url): index,
+    if (!preferIncomingOrder) return orderAnnouncements(byUrl.values);
+    // A refreshed source page restores its own unknown-date link positions,
+    // including links previously pushed below dated history in older caches.
+    // Pagination and metadata patches retain the order already being read.
+    final keys = <String>{
+      for (final item in incomingItems) announcementUrlKey(item.url),
+      ...byUrl.keys,
     };
-    items.sort((a, b) {
-      final left = a.publishedAt;
-      final right = b.publishedAt;
-      if (left == null) {
-        return right == null
-            ? order[_announcementUrlKey(a.url)]!
-                .compareTo(order[_announcementUrlKey(b.url)]!)
-            : 1;
-      }
-      if (right == null) return -1;
-      final byDate = right.compareTo(left);
-      return byDate != 0
-          ? byDate
-          : order[_announcementUrlKey(a.url)]!
-              .compareTo(order[_announcementUrlKey(b.url)]!);
-    });
-    return items;
+    return orderAnnouncements([for (final key in keys) byUrl[key]!]);
   }
 }
 
-String _announcementUrlKey(String url) {
-  final uri = Uri.tryParse(url.trim());
-  if (uri == null) return url.trim();
-  return uri.replace(fragment: '').toString();
+class _QueuedAnnouncementCard {
+  _QueuedAnnouncementCard({
+    required this.item,
+    required this.key,
+    required this.sourceGeneration,
+    required this.articleGeneration,
+  })  : summary = item.summary,
+        dateText = item.dateText,
+        publishedAt = item.publishedAt;
+
+  final AnnouncementListItem item;
+  final String key;
+  final int sourceGeneration;
+  final int articleGeneration;
+  final Completer<AnnouncementCardData> completer = Completer();
+  final Stopwatch elapsed = Stopwatch()..start();
+  Timer? timer;
+  bool started = false;
+  String summary;
+  String dateText;
+  DateTime? publishedAt;
 }

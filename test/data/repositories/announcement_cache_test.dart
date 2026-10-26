@@ -39,19 +39,23 @@ void main() {
     expect(api.detailCalls, 14);
   });
 
-  test('expired preview and article caches fetch an updated body', () async {
+  test(
+      'article detail expiry is independent from lightweight preview extraction',
+      () async {
     var now = DateTime(2026, 10, 25);
     final api = _CacheApi();
     final repository = AnnouncementRepository(apiClient: api, now: () => now);
     final item = _item(1);
-    expect(await repository.loadPreview(item), '正文 1');
+    expect(await repository.loadPreview(item), '预览 1');
     expect((await repository.fetchDetail(item)).blocks.single.value, '正文 1');
     now = now.add(const Duration(minutes: 5));
-    expect(await repository.loadPreview(item), '正文 2');
+    expect(await repository.loadPreview(item), '预览 2');
+    expect((await repository.fetchDetail(item)).blocks.single.value, '正文 2');
+    expect(api.previewCalls, 2);
     expect(api.detailCalls, 2);
   });
 
-  test('anchors in one article share the same preview and detail work',
+  test('anchors in one article share detail work while previews use the API',
       () async {
     final api = _CacheApi();
     final repository = AnnouncementRepository(apiClient: api);
@@ -59,8 +63,12 @@ void main() {
       repository.fetchDetail(_item(1, fragment: '#first')),
       repository.fetchDetail(_item(1, fragment: '#second')),
     ]);
-    await repository.loadPreview(_item(1, fragment: '#third'));
+    await Future.wait([
+      repository.loadPreview(_item(1, fragment: '#third')),
+      repository.loadPreview(_item(1, fragment: '#fourth')),
+    ]);
     expect(api.detailCalls, 1);
+    expect(api.previewCalls, 2);
   });
 
   test('force refresh invalidates previews and details without caching lists',
@@ -68,14 +76,17 @@ void main() {
     final api = _CacheApi();
     final repository = AnnouncementRepository(apiClient: api);
     final item = _item(1);
-    expect(await repository.loadPreview(item), '正文 1');
+    expect(await repository.loadPreview(item), '预览 1');
     await repository.fetchAnnouncements(
         source: AnnouncementSource.official, forceRefresh: true);
-    expect(await repository.loadPreview(item), '正文 2');
+    expect(await repository.loadPreview(item), '预览 2');
     await repository.fetchAnnouncements(
         source: AnnouncementSource.official, forceRefresh: true);
     expect(api.listCalls, 2);
-    expect(api.clearCalls, 2);
+    expect(api.invalidations, [
+      [item.url],
+      [item.url],
+    ]);
   });
 
   test('a stale in-flight detail cannot refill or remove newer refresh work',
@@ -97,23 +108,43 @@ void main() {
     expect(api.detailCalls, 2);
   });
 
-  test('a stale preview cannot replace the preview loaded after refresh',
+  test(
+      'same article shares caches across list sources and refresh stays scoped',
       () async {
-    final api = _CacheApi(defer: true);
+    final api = _CacheApi();
     final repository = AnnouncementRepository(apiClient: api);
-    final item = _item(1);
-    final old = repository.loadPreview(item);
-    await repository.fetchAnnouncements(
-        source: AnnouncementSource.official, forceRefresh: true);
-    final fresh = repository.loadPreview(item);
-    expect(api.pending, hasLength(2));
-    api.pending[0].complete(_detail(item, '旧正文'));
-    await old;
-    expect(identical(repository.loadPreview(item), fresh), isTrue);
-    api.pending[1].complete(_detail(item, '新正文'));
-    expect(await fresh, '新正文');
-    expect(await repository.loadPreview(item), '新正文');
+    addTearDown(repository.dispose);
+    final original = _item(1);
+    final repost = AnnouncementListItem(
+      title: original.title,
+      url: original.url,
+      sourceId: 'sfa',
+    );
+    const other = AnnouncementListItem(
+      title: '人事处另一篇文章',
+      url: 'https://rsc.shu.edu.cn/info/1/2.htm',
+      sourceId: 'rsc',
+    );
+    final first = await repository.fetchDetail(original);
+    expect(await repository.fetchDetail(repost), same(first));
+    await repository.loadPreview(original);
+    await repository.loadPreview(repost);
+    await repository.fetchDetail(other);
+    await repository.loadPreview(other);
     expect(api.detailCalls, 2);
+    expect(api.previewCalls, 3);
+
+    await repository.fetchAnnouncements(
+        source: AnnouncementSource.byId('sfa'), forceRefresh: true);
+    await repository.fetchDetail(other);
+    await repository.loadPreview(other);
+    expect(api.detailCalls, 2);
+    expect(api.previewCalls, 4);
+    await repository.fetchDetail(original);
+    await repository.loadPreview(original);
+    expect(api.detailCalls, 3);
+    expect(api.previewCalls, 5);
+    expect(api.invalidations.single, [original.url]);
   });
 }
 
@@ -122,9 +153,16 @@ class _CacheApi extends AnnouncementApiClient {
 
   final bool defer;
   int detailCalls = 0;
+  int previewCalls = 0;
   int listCalls = 0;
-  int clearCalls = 0;
   final List<Completer<AnnouncementDetail>> pending = [];
+  final List<List<String>> invalidations = [];
+
+  @override
+  Future<String?> fetchPreview(AnnouncementListItem item) {
+    previewCalls++;
+    return Future.value('预览 $previewCalls');
+  }
 
   @override
   Future<AnnouncementDetail> fetchDetail(AnnouncementListItem item) {
@@ -150,5 +188,6 @@ class _CacheApi extends AnnouncementApiClient {
   }
 
   @override
-  void clearResponseCache() => clearCalls++;
+  void invalidateArticles(Iterable<String> urls) =>
+      invalidations.add(urls.toList());
 }
