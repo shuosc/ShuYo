@@ -28,6 +28,7 @@ import '../../shared/widgets/webvpn_toggle.dart';
 import 'client_feedback_page.dart';
 import 'contributors_page.dart';
 import 'privacy_data_page.dart';
+import 'third_party_licenses_page.dart';
 import '../onboarding/startup_onboarding.dart';
 
 class ClientSettingsPage extends StatelessWidget {
@@ -730,19 +731,8 @@ class _AboutClientPageState extends State<_AboutClientPage> {
   }
 
   void _showThirdPartyLicenses() {
-    showLicensePage(
-      context: context,
-      applicationName: ClientAppInfo.appName,
-      applicationVersion:
-          '${ClientAppInfo.version}（${ClientAppInfo.buildNumber}）',
-      applicationIcon: ClipRRect(
-        borderRadius: BorderRadius.circular(12),
-        child: Image.asset(
-          'assets/images/icon_light.png',
-          width: 48,
-          height: 48,
-        ),
-      ),
+    Navigator.of(context).push<void>(
+      shuyoRoute(builder: (_) => const ThirdPartyLicensesPage()),
     );
   }
 

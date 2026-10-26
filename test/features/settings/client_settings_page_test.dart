@@ -17,12 +17,14 @@ import 'package:shuyo/data/services/academic_auth_service.dart';
 import 'package:shuyo/data/services/client_settings_service.dart';
 import 'package:shuyo/data/services/student_identity_service.dart';
 import 'package:shuyo/features/settings/client_settings_page.dart';
+import 'package:shuyo/features/settings/third_party_licenses_page.dart';
 import 'package:shuyo/features/onboarding/startup_onboarding.dart';
 import 'package:shuyo/shared/widgets/webvpn_toggle.dart';
 import 'package:shuyo/core/client_app_info.dart';
 import 'package:shuyo/core/client_build_info.dart';
 import 'package:shuyo/shared/theme/custom_background.dart';
 import 'package:shuyo/shared/theme/shuyo_theme.dart';
+import 'package:shuyo/shared/navigation/shuyo_route.dart';
 
 void main() {
   const buildInfoChannel = MethodChannel('work.shuyo.app/build_info');
@@ -604,6 +606,30 @@ void main() {
     } finally {
       debugDefaultTargetPlatformOverride = null;
     }
+  });
+
+  testWidgets('third-party licenses open with the shared child-page route',
+      (tester) async {
+    await _pumpSettings(tester);
+    await tester.tap(find.text('关于ShuYo'));
+    await tester.pumpAndSettle();
+    await tester.scrollUntilVisible(find.text('第三方开源许可'), 200);
+    await tester.tap(find.text('第三方开源许可'));
+    await tester.pumpAndSettle();
+
+    expect(find.byType(ThirdPartyLicensesPage), findsOneWidget);
+    expect(find.byType(LicensePage), findsNothing);
+    expect(
+      find.ancestor(
+        of: find.byType(ThirdPartyLicensesPage),
+        matching: find.byType(ShuYoRouteSurface),
+      ),
+      findsOneWidget,
+    );
+
+    await tester.pageBack();
+    await tester.pumpAndSettle();
+    expect(find.text('关于ShuYo'), findsOneWidget);
   });
 
   testWidgets('demo about page hides online support actions', (tester) async {
