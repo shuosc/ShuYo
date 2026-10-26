@@ -55,7 +55,7 @@ class AnnouncementRepository {
   static const _menuExpansionKey = 'announcements.menu.expanded';
   static const _cacheVersion = 5;
   static int _cacheVersionFor(AnnouncementSource source) => switch (source.id) {
-        'sfa' => 7,
+        'sfa' => 9,
         'cs' => 6,
         _ => _cacheVersion,
       };
@@ -84,6 +84,16 @@ class AnnouncementRepository {
     now: _now,
   );
   final Map<String, Future<AnnouncementDetail>> _pendingDetails = {};
+  late final _publicationDates = AnnouncementMemoryCache<AnnouncementListItem?>(
+    maxEntries: 160,
+    maxBytes: 256 * 1024,
+    ttl: const Duration(minutes: 5),
+    sizeOf: (item) => item == null ? 0 : 128 + item.dateText.length * 2,
+    now: _now,
+  );
+  final Map<String, Future<AnnouncementListItem?>> _pendingPublicationDates =
+      {};
+  final Map<String, Future<void>> _pendingListWrites = {};
   final Map<String, int> _cacheGenerations = {};
   final Queue<
       ({
@@ -322,7 +332,8 @@ class AnnouncementRepository {
           for (final next in page.nextPageUrls)
             if (next != null && !visited.contains(next)) next else null,
         ];
-        final merged = _mergeAnnouncements(cached, page.items);
+        final merged = _mergeAnnouncements(
+            _memoryLists[selected.id] ?? cached, page.items);
         await _saveList(selected, merged);
         return merged;
       } on Object {
@@ -340,7 +351,8 @@ class AnnouncementRepository {
         for (final next in page.nextPageUrls)
           if (next != null && !visited.contains(next)) next else null,
       ];
-      final items = _mergeAnnouncements(cached, page.items);
+      final items =
+          _mergeAnnouncements(_memoryLists[selected.id] ?? cached, page.items);
       await _saveList(selected, items);
       return items;
     } on Object {
@@ -349,6 +361,60 @@ class AnnouncementRepository {
       }
       rethrow;
     }
+  }
+
+  /// Fills a visible historical card's missing date, including items that were
+  /// not returned by the latest list page. Preserve its original list source.
+  Future<AnnouncementListItem?> loadPublicationDate(AnnouncementListItem item) {
+    if (item.dateText.isNotEmpty) return Future.value(item);
+    final key = _detailKey(item);
+    final cached = _publicationDates.lookup(key);
+    if (cached != null) return Future.value(cached.value);
+    final pending = _pendingPublicationDates[key];
+    if (pending != null) return pending;
+    final generation = _cacheGenerations[item.sourceId] ?? 0;
+    late final Future<AnnouncementListItem?> task;
+    task = _loadPublicationDate(item, key, generation).whenComplete(() {
+      if (identical(_pendingPublicationDates[key], task)) {
+        _pendingPublicationDates.remove(key);
+      }
+    });
+    _pendingPublicationDates[key] = task;
+    return task;
+  }
+
+  Future<AnnouncementListItem?> _loadPublicationDate(
+    AnnouncementListItem item,
+    String key,
+    int generation,
+  ) async {
+    AnnouncementListItem? dated;
+    try {
+      dated = await _apiClient.fetchPublicationDate(item);
+    } on Object {
+      // Optional metadata must not prevent reading the list or its articles.
+    }
+    if (generation != (_cacheGenerations[item.sourceId] ?? 0)) return null;
+    if (dated != null) {
+      final source = AnnouncementSource.byId(item.sourceId);
+      final current = await loadCachedAnnouncements(source: source);
+      if (generation != (_cacheGenerations[item.sourceId] ?? 0)) return null;
+      if (source.id == item.sourceId &&
+          current.any((entry) =>
+              _announcementUrlKey(entry.url) ==
+              _announcementUrlKey(item.url))) {
+        _memoryLists[source.id] =
+            _mergeAnnouncements(_memoryLists[source.id] ?? current, [dated]);
+        try {
+          await _persistList(source, markRefreshed: false);
+        } on Object {
+          // The card can still show the verified date if saving fails.
+        }
+      }
+    }
+    if (generation != (_cacheGenerations[item.sourceId] ?? 0)) return null;
+    _publicationDates.put(key, dated);
+    return dated;
   }
 
   Future<AnnouncementDetail> fetchDetail(AnnouncementListItem item) {
@@ -385,6 +451,8 @@ class AnnouncementRepository {
     _previews.removeWhere((key, _) => key.startsWith(prefix));
     _pendingDetails.removeWhere((key, _) => key.startsWith(prefix));
     _pendingPreviews.removeWhere((key, _) => key.startsWith(prefix));
+    _publicationDates.removeWhere((key, _) => key.startsWith(prefix));
+    _pendingPublicationDates.removeWhere((key, _) => key.startsWith(prefix));
     _previewQueue.removeWhere((request) {
       if (request.item.sourceId != source.id) return false;
       request.completer.complete(null);
@@ -449,17 +517,35 @@ class AnnouncementRepository {
   ) async {
     final uniqueItems = _mergeAnnouncements(const [], items);
     _memoryLists[source.id] = uniqueItems;
-    final prefs = await _preferencesLoader();
-    await prefs.setString(
-      '$_listCacheKey.${source.id}',
-      jsonEncode(uniqueItems.map((item) => item.toJson()).toList()),
-    );
-    await prefs.setString(
-      '$_lastRefreshKey.${source.id}',
-      DateTime.now().toIso8601String(),
-    );
-    await prefs.setInt(
-        '$_cacheVersionKey.${source.id}', _cacheVersionFor(source));
+    await _persistList(source);
+  }
+
+  Future<void> _persistList(AnnouncementSource source,
+      {bool markRefreshed = true}) {
+    final previous = _pendingListWrites[source.id] ?? Future<void>.value();
+    late final Future<void> task;
+    task = previous.catchError((Object _) {}).then((_) async {
+      final prefs = await _preferencesLoader();
+      final items = _memoryLists[source.id] ?? const <AnnouncementListItem>[];
+      await prefs.setString(
+        '$_listCacheKey.${source.id}',
+        jsonEncode(items.map((item) => item.toJson()).toList()),
+      );
+      if (markRefreshed) {
+        await prefs.setString(
+          '$_lastRefreshKey.${source.id}',
+          DateTime.now().toIso8601String(),
+        );
+        await prefs.setInt(
+            '$_cacheVersionKey.${source.id}', _cacheVersionFor(source));
+      }
+    }).whenComplete(() {
+      if (identical(_pendingListWrites[source.id], task)) {
+        _pendingListWrites.remove(source.id);
+      }
+    });
+    _pendingListWrites[source.id] = task;
+    return task;
   }
 
   List<AnnouncementListItem> _mergeAnnouncements(

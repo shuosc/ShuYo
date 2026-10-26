@@ -180,16 +180,41 @@ class _AnnouncementsPageState extends State<AnnouncementsPage> {
     );
   }
 
+  Widget _buildSourceInfo() {
+    final source = _source;
+    if (source == null) return const SizedBox.shrink();
+    final limitationNotice =
+        const {'sfa', 'utseus', 'shvfs'}.contains(source.id)
+            ? '\n由于网站限制，浏览有概率出现问题'
+            : '';
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
+      child: Text(
+        '通知来源：${source.name} ${Uri.parse(source.listUrl).host}$limitationNotice',
+        textAlign: TextAlign.center,
+        style: ShuYoTextStyles.meta(color: context.shuyoColors.textMuted),
+      ),
+    );
+  }
+
   Widget _buildList() {
     final loaded = _loaded;
     if (loaded == null) {
       final error = _loadError;
-      return error == null
-          ? const _AnnouncementLoadingState()
-          : _AnnouncementErrorState(
-              message: _friendlyError(error),
-              onRetry: _refresh,
-            );
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          _buildSourceInfo(),
+          Expanded(
+            child: error == null
+                ? const _AnnouncementLoadingState()
+                : _AnnouncementErrorState(
+                    message: _friendlyError(error),
+                    onRetry: _refresh,
+                  ),
+          ),
+        ],
+      );
     }
     final items = loaded.items;
     if (items.isEmpty) {
@@ -199,9 +224,10 @@ class _AnnouncementsPageState extends State<AnnouncementsPage> {
           child: ListView(
             controller: _scrollController,
             physics: const AlwaysScrollableScrollPhysics(),
-            children: const [
-              SizedBox(height: 96),
-              EmptyState(
+            children: [
+              _buildSourceInfo(),
+              const SizedBox(height: 96),
+              const EmptyState(
                 icon: Icons.campaign_outlined,
                 title: '暂无公告',
                 message: '该来源暂时没有可展示的通知公告。',
@@ -227,6 +253,7 @@ class _AnnouncementsPageState extends State<AnnouncementsPage> {
 
   List<Widget> _homeSlivers(List<Object> rows) {
     final slivers = <Widget>[
+      SliverToBoxAdapter(child: _buildSourceInfo()),
       const SliverToBoxAdapter(child: SizedBox(height: 8)),
     ];
     var position = 0;
@@ -612,46 +639,8 @@ bool _isExternalAnnouncement(AnnouncementListItem item) {
           .hasMatch(uri.path);
 }
 
-String _normalizedAnnouncementHost(String host) {
-  final normalized = host.toLowerCase();
-  return normalized.startsWith('www.') ? normalized.substring(4) : normalized;
-}
-
-final Map<String, AnnouncementSource> _announcementSourcesByHost = () {
-  final sourcesByHost = <String, AnnouncementSource>{};
-  for (final source in AnnouncementSource.all) {
-    for (final listUrl in source.listUrls) {
-      final uri = Uri.tryParse(listUrl);
-      if (uri == null || uri.host.isEmpty) continue;
-      sourcesByHost.putIfAbsent(
-        _normalizedAnnouncementHost(uri.host),
-        () => source,
-      );
-    }
-  }
-  return sourcesByHost;
-}();
-
-AnnouncementSource? _announcementSourceForUrl(AnnouncementListItem item) {
-  final uri = Uri.tryParse(item.url);
-  if (uri == null || uri.host.isEmpty) return null;
-  final host = _normalizedAnnouncementHost(uri.host);
-
-  // Prefer the source already attached to the item when it shares the link's
-  // host. This keeps different columns on a shared site using their own parser.
-  for (final source in AnnouncementSource.all) {
-    if (source.id != item.sourceId) continue;
-    if (source.listUrls.any((listUrl) {
-      final sourceUri = Uri.tryParse(listUrl);
-      return sourceUri != null &&
-          _normalizedAnnouncementHost(sourceUri.host) == host;
-    })) {
-      return source;
-    }
-    break;
-  }
-  return _announcementSourcesByHost[host];
-}
+AnnouncementSource? _announcementSourceForUrl(AnnouncementListItem item) =>
+    AnnouncementSource.forUrl(item.url, preferredSourceId: item.sourceId);
 
 AnnouncementListItem _announcementForUrlOwner(AnnouncementListItem item) {
   final source = _announcementSourceForUrl(item);
@@ -2222,6 +2211,9 @@ class _AnnouncementTileState extends State<_AnnouncementTile>
   String? _resolvedPreview;
   bool _hasPendingPreview = false;
   String? _pendingPreview;
+  int _publicationDateGeneration = 0;
+  String _resolvedDateText = '';
+  String? _pendingDateText;
 
   bool get _updatesPaused => widget.updatesPaused?.value ?? false;
 
@@ -2234,6 +2226,7 @@ class _AnnouncementTileState extends State<_AnnouncementTile>
     );
     widget.updatesPaused?.addListener(_onUpdatePauseChanged);
     _loadPreview();
+    _loadPublicationDate();
   }
 
   @override
@@ -2252,6 +2245,46 @@ class _AnnouncementTileState extends State<_AnnouncementTile>
         oldWidget.repository != widget.repository) {
       _loadPreview();
     }
+    if (oldWidget.item.url != widget.item.url ||
+        oldWidget.item.sourceId != widget.item.sourceId ||
+        oldWidget.item.dateText != widget.item.dateText ||
+        oldWidget.previewVersion != widget.previewVersion ||
+        oldWidget.external != widget.external ||
+        oldWidget.repository != widget.repository) {
+      _loadPublicationDate();
+    }
+  }
+
+  void _loadPublicationDate() {
+    final generation = ++_publicationDateGeneration;
+    _resolvedDateText = widget.item.dateText;
+    _pendingDateText = null;
+    if (widget.item.sourceId != 'sfa' ||
+        widget.item.dateText.isNotEmpty ||
+        widget.external) {
+      return;
+    }
+    // Older cached notices may no longer occur in the refreshed first page.
+    // Resolve visible dates separately from previews, including list excerpts.
+    widget.repository.loadPublicationDate(widget.item).then(
+      (resolved) {
+        if (!mounted || generation != _publicationDateGeneration) return;
+        if (resolved == null ||
+            resolved.dateText.isEmpty ||
+            resolved.publishedAt == null) {
+          return;
+        }
+        final dateText = resolved.dateText;
+        if (_updatesPaused) {
+          _pendingDateText = dateText;
+        } else if (_resolvedDateText != dateText) {
+          setState(() => _resolvedDateText = dateText);
+        }
+      },
+      onError: (Object error, StackTrace stackTrace) {
+        // An unavailable article must not prevent its list card from rendering.
+      },
+    );
   }
 
   void _loadPreview() {
@@ -2313,12 +2346,18 @@ class _AnnouncementTileState extends State<_AnnouncementTile>
         setState(() => _resolvedPreview = preview);
       }
     }
+    final dateText = _pendingDateText;
+    _pendingDateText = null;
+    if (dateText != null && _resolvedDateText != dateText) {
+      setState(() => _resolvedDateText = dateText);
+    }
     if (!_entrance.isCompleted) _startEntrance();
   }
 
   @override
   void dispose() {
     _previewGeneration++;
+    _publicationDateGeneration++;
     widget.updatesPaused?.removeListener(_onUpdatePauseChanged);
     _entranceTimer?.cancel();
     _entrance.dispose();
@@ -2351,7 +2390,7 @@ class _AnnouncementTileState extends State<_AnnouncementTile>
     final item = widget.item;
     final colors = context.shuyoColors;
     final metadata = [
-      if (item.dateText.isNotEmpty) item.dateText,
+      if (_resolvedDateText.isNotEmpty) _resolvedDateText,
     ].join(' · ');
     return InkWell(
       onTap: widget.onTap,

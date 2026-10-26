@@ -932,6 +932,42 @@ class AnnouncementSource {
     return sources;
   }
 
+  static String _normalizedHost(String host) {
+    final normalized = host.toLowerCase();
+    return normalized.startsWith('www.') ? normalized.substring(4) : normalized;
+  }
+
+  static final Map<String, AnnouncementSource> _sourcesByHost = () {
+    final sourcesByHost = <String, AnnouncementSource>{};
+    for (final source in all) {
+      for (final listUrl in source.listUrls) {
+        final uri = Uri.tryParse(listUrl);
+        if (uri == null || uri.host.isEmpty) continue;
+        sourcesByHost.putIfAbsent(_normalizedHost(uri.host), () => source);
+      }
+    }
+    return sourcesByHost;
+  }();
+
+  /// Resolves the article parser by its site's host, preserving a matching
+  /// preferred source when multiple announcement columns share the same site.
+  static AnnouncementSource? forUrl(String url, {String? preferredSourceId}) {
+    final uri = Uri.tryParse(url);
+    if (uri == null || uri.host.isEmpty) return null;
+    final host = _normalizedHost(uri.host);
+    for (final source in all) {
+      if (source.id != preferredSourceId) continue;
+      if (source.listUrls.any((listUrl) {
+        final sourceUri = Uri.tryParse(listUrl);
+        return sourceUri != null && _normalizedHost(sourceUri.host) == host;
+      })) {
+        return source;
+      }
+      break;
+    }
+    return _sourcesByHost[host];
+  }
+
   static AnnouncementSource byId(String? id) {
     for (final source in all) {
       if (source.id == id) return source;

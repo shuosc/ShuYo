@@ -10,7 +10,300 @@ import 'package:shuyo/data/models/announcement_source.dart';
 import 'package:shuyo/data/repositories/announcement_repository.dart';
 import 'package:shuyo/data/services/announcement_api_client.dart';
 
+const _bkzswFilmNoticeUrl = 'https://bkzsw.shu.edu.cn/info/1798/38490.htm';
+const _bkzswFilmNoticeTitle = '关于上海大学上海电影学院2026年戏剧影视导演专业校考三试（现场考试）工作安排的公告';
+
+// Metadata structure captured from the linked admissions article, including
+// the separate publication label/value and a view counter without an author.
+const _bkzswFilmNoticeHtml = '''
+<table><tr><td><span class="Head">$_bkzswFilmNoticeTitle</span></td></tr>
+<tr valign="middle" height="20" align="center"><td>
+<span id="HRCMS_ctr13929_CalendarDetail_Label3">发布时间：&nbsp;&nbsp;</span><span id="HRCMS_ctr13929_CalendarDetail_lblFB">2026年03月18日 12:00</span>&nbsp;<font face="">
+<font face="Times New Roman"><span id="HRCMS_ctr13929_CalendarDetail_lblTimesTitle">浏览次数：</span></font>
+<span id="HRCMS_ctr13929_CalendarDetail_lblTimes"><script>_showDynClicks("wbnews", 1364902694, 38490)</script></span>
+</font></td></tr></table>
+<div id="vsb_content"><div class="v_news_content"><p>公告正文</p></div></div>
+''';
+
 void main() {
+  test('actual bkzsw publication metadata uses the article URL owner', () {
+    for (final sourceId in ['sfa', 'bkzsw']) {
+      final detail = AnnouncementApiClient.parseAnnouncementDetail(
+        _bkzswFilmNoticeHtml,
+        url: _bkzswFilmNoticeUrl,
+        sourceId: sourceId,
+        fallbackTitle: '列表标题',
+        fallbackDateText: '1999-01-01',
+      );
+      expect(detail.title, _bkzswFilmNoticeTitle);
+      expect(detail.dateText, '2026-03-18');
+      expect(detail.publishedAt, DateTime(2026, 3, 18));
+      expect(detail.author, isEmpty);
+    }
+  });
+
+  test('Film Academy repairs cached dates for the linked admissions article',
+      () async {
+    final source = AnnouncementSource.byId('sfa');
+    const recentUrl = 'https://sfa.shu.edu.cn/info/1212/recent.htm';
+    SharedPreferences.setMockInitialValues({
+      'announcements.cacheVersion.sfa': 8,
+      'announcements.lastRefreshAt.sfa': DateTime.now().toIso8601String(),
+      'announcements.list.cache.sfa': jsonEncode([
+        AnnouncementListItem(
+          title: _bkzswFilmNoticeTitle,
+          url: _bkzswFilmNoticeUrl,
+          sourceId: 'sfa',
+          publishedAt: DateTime(2026, 12, 31),
+        ).toJson(),
+        AnnouncementListItem(
+          title: '已缓存的历史公告',
+          url: 'https://sfa.shu.edu.cn/info/1212/history.htm',
+          sourceId: 'sfa',
+          dateText: '2026-03-01',
+          publishedAt: DateTime(2026, 3, 1),
+        ).toJson(),
+      ]),
+    });
+    final requests = <String>[];
+    final api = AnnouncementApiClient(
+      httpClient: MockClient((request) async {
+        final url = request.url.toString();
+        requests.add(url);
+        final html = switch (url) {
+          _bkzswFilmNoticeUrl => _bkzswFilmNoticeHtml,
+          recentUrl => '<table><tr valign="middle"><td>'
+              '<span>创建时间：</span><span>2026-04-01</span>'
+              '</td></tr></table>',
+          _ => '<div class="right">'
+              '<li class="notice-item"><a class="notice-title" href="$_bkzswFilmNoticeUrl">$_bkzswFilmNoticeTitle</a></li>'
+              '<li class="notice-item"><a class="notice-title" href="$recentUrl">较新的本院公告</a></li>'
+              '</div>',
+        };
+        return http.Response(html, 200,
+            headers: {'content-type': 'text/html; charset=utf-8'});
+      }),
+    );
+    final repository = AnnouncementRepository(apiClient: api);
+    addTearDown(repository.dispose);
+
+    final items = await repository.fetchAnnouncements(source: source);
+    expect(items.map((item) => item.title),
+        ['较新的本院公告', _bkzswFilmNoticeTitle, '已缓存的历史公告']);
+    final article =
+        items.singleWhere((item) => item.url == _bkzswFilmNoticeUrl);
+    expect(article.dateText, '2026-03-18');
+    expect(article.publishedAt, DateTime(2026, 3, 18));
+    expect(article.sourceId, 'sfa');
+    expect(requests,
+        unorderedEquals([source.listUrl, _bkzswFilmNoticeUrl, recentUrl]));
+    final prefs = await SharedPreferences.getInstance();
+    expect(prefs.getInt('announcements.cacheVersion.sfa'), 9);
+
+    final restored = AnnouncementRepository(apiClient: api);
+    final cached = await restored.fetchAnnouncements(source: source);
+    expect(cached.map((item) => item.title), items.map((item) => item.title));
+    expect(
+        cached.singleWhere((item) => item.url == _bkzswFilmNoticeUrl).dateText,
+        '2026-03-18');
+    expect(requests, hasLength(3));
+  });
+
+  for (final scenario in [
+    (cacheVersion: 8, forceRefresh: false),
+    (cacheVersion: 9, forceRefresh: false),
+    (cacheVersion: 9, forceRefresh: true),
+  ]) {
+    test(
+        'Film Academy repairs historical dates on demand when absent from the '
+        'refreshed first page (cache ${scenario.cacheVersion}, '
+        '${scenario.forceRefresh ? 'forced' : 'automatic'} refresh)', () async {
+      final source = AnnouncementSource.byId('sfa');
+      const recentUrl = 'https://sfa.shu.edu.cn/info/1212/recent.htm';
+      SharedPreferences.setMockInitialValues({
+        'announcements.cacheVersion.sfa': scenario.cacheVersion,
+        'announcements.lastRefreshAt.sfa':
+            DateTime.now().subtract(const Duration(days: 1)).toIso8601String(),
+        'announcements.list.cache.sfa': jsonEncode([
+          AnnouncementListItem(
+            title: _bkzswFilmNoticeTitle,
+            url: _bkzswFilmNoticeUrl,
+            sourceId: 'sfa',
+            publishedAt: DateTime(2026, 12, 31),
+          ).toJson(),
+          AnnouncementListItem(
+            title: '有准确日期的历史公告',
+            url: 'https://sfa.shu.edu.cn/info/1212/history.htm',
+            sourceId: 'sfa',
+            dateText: '2026-03-01',
+            publishedAt: DateTime(2026, 3, 1),
+          ).toJson(),
+        ]),
+      });
+      final requests = <String>[];
+      final api = AnnouncementApiClient(
+        httpClient: MockClient((request) async {
+          final url = request.url.toString();
+          requests.add(url);
+          final html = switch (url) {
+            _bkzswFilmNoticeUrl => _bkzswFilmNoticeHtml,
+            recentUrl => '<table><tr valign="middle"><td>'
+                '<span>创建时间：</span><span>2026-04-01</span>'
+                '</td></tr></table>',
+            _ when url == source.listUrl => '<div class="right">'
+                '<li class="notice-item"><a class="notice-title" href="$recentUrl">较新的本院公告</a></li>'
+                '</div>',
+            _ => throw StateError('Unexpected announcement request: $url'),
+          };
+          return http.Response(html, 200,
+              headers: {'content-type': 'text/html; charset=utf-8'});
+        }),
+      );
+      final repository = AnnouncementRepository(apiClient: api);
+      addTearDown(repository.dispose);
+
+      final items = await repository.fetchAnnouncements(
+        source: source,
+        forceRefresh: scenario.forceRefresh,
+      );
+      final article =
+          items.singleWhere((item) => item.url == _bkzswFilmNoticeUrl);
+      expect(article.dateText, isEmpty);
+      expect(article.publishedAt, DateTime(2026, 12, 31));
+      expect(requests, isNot(contains(_bkzswFilmNoticeUrl)));
+
+      final prefs = await SharedPreferences.getInstance();
+      const lastRefresh = '2026-10-24T09:30:00.000';
+      await prefs.setString('announcements.lastRefreshAt.sfa', lastRefresh);
+      final repaired = await repository.loadPublicationDate(article);
+      expect(repaired, isNotNull);
+      expect(repaired!.dateText, '2026-03-18');
+      expect(repaired.publishedAt, DateTime(2026, 3, 18));
+      expect(repaired.sourceId, 'sfa');
+      expect(requests, contains(_bkzswFilmNoticeUrl));
+      expect(prefs.getString('announcements.lastRefreshAt.sfa'), lastRefresh);
+
+      final memoryCached =
+          await repository.loadCachedAnnouncements(source: source);
+      expect(
+          memoryCached
+              .singleWhere((item) => item.url == _bkzswFilmNoticeUrl)
+              .dateText,
+          '2026-03-18');
+      expect(memoryCached.map((item) => item.title),
+          ['较新的本院公告', _bkzswFilmNoticeTitle, '有准确日期的历史公告']);
+
+      final restored = AnnouncementRepository();
+      addTearDown(restored.dispose);
+      final cached = await restored.loadCachedAnnouncements(source: source);
+      final persistedArticle =
+          cached.singleWhere((item) => item.url == _bkzswFilmNoticeUrl);
+      expect(persistedArticle.dateText, '2026-03-18');
+      expect(persistedArticle.publishedAt, DateTime(2026, 3, 18));
+      expect(cached.map((item) => item.title),
+          memoryCached.map((item) => item.title));
+    });
+  }
+
+  test('concurrent publication dates retain both memory and persisted updates',
+      () async {
+    final source = AnnouncementSource.byId('sfa');
+    final items = [
+      for (var index = 0; index < 2; index++)
+        AnnouncementListItem(
+          title: '历史公告 $index',
+          url: 'https://sfa.shu.edu.cn/info/1212/history$index.htm',
+          sourceId: 'sfa',
+        ),
+    ];
+    SharedPreferences.setMockInitialValues({
+      'announcements.list.cache.sfa':
+          jsonEncode(items.map((item) => item.toJson()).toList()),
+    });
+    final api = _QueuedPublicationDateApiClient();
+    final repository = AnnouncementRepository(apiClient: api);
+    addTearDown(repository.dispose);
+    await repository.loadCachedAnnouncements(source: source);
+
+    final dates = items.map(repository.loadPublicationDate).toList();
+    api.completeDate(0, '2026-03-18');
+    api.completeDate(1, '2026-03-19');
+    await Future.wait(dates);
+
+    final memory = await repository.loadCachedAnnouncements(source: source);
+    expect(memory.map((item) => item.dateText), ['2026-03-19', '2026-03-18']);
+    final restored = AnnouncementRepository();
+    addTearDown(restored.dispose);
+    final persisted = await restored.loadCachedAnnouncements(source: source);
+    expect(
+        persisted.map((item) => item.dateText), ['2026-03-19', '2026-03-18']);
+  });
+
+  test('force refresh rejects an older in-flight publication date', () async {
+    final source = AnnouncementSource.byId('sfa');
+    const item = AnnouncementListItem(
+      title: '历史公告',
+      url: _bkzswFilmNoticeUrl,
+      sourceId: 'sfa',
+    );
+    SharedPreferences.setMockInitialValues({
+      'announcements.list.cache.sfa': jsonEncode([item.toJson()]),
+    });
+    final api = _QueuedPublicationDateApiClient();
+    final repository = AnnouncementRepository(apiClient: api);
+    addTearDown(repository.dispose);
+    await repository.loadCachedAnnouncements(source: source);
+
+    final old = repository.loadPublicationDate(item);
+    await repository.fetchAnnouncements(source: source, forceRefresh: true);
+    final fresh = repository.loadPublicationDate(item);
+    expect(api.pendingDates, hasLength(2));
+    api.completeDate(0, '2025-01-01');
+    expect(await old, isNull);
+    expect(identical(repository.loadPublicationDate(item), fresh), isTrue);
+    api.completeDate(1, '2026-03-18');
+    expect((await fresh)!.dateText, '2026-03-18');
+
+    final restored = AnnouncementRepository();
+    addTearDown(restored.dispose);
+    final cached = await restored.loadCachedAnnouncements(source: source);
+    expect(cached.single.dateText, '2026-03-18');
+  });
+
+  test('a list refresh preserves publication dates completed while it waited',
+      () async {
+    final source = AnnouncementSource.byId('sfa');
+    const item = AnnouncementListItem(
+      title: '历史公告',
+      url: _bkzswFilmNoticeUrl,
+      sourceId: 'sfa',
+    );
+    SharedPreferences.setMockInitialValues({
+      'announcements.list.cache.sfa': jsonEncode([item.toJson()]),
+    });
+    final api = _QueuedPublicationDateApiClient(deferPage: true);
+    final repository = AnnouncementRepository(apiClient: api);
+    addTearDown(repository.dispose);
+    await repository.loadCachedAnnouncements(source: source);
+
+    final refreshed =
+        repository.fetchAnnouncements(source: source, forceRefresh: true);
+    await api.pageStarted.future;
+    final date = repository.loadPublicationDate(item);
+    api.completeDate(0, '2026-03-18');
+    expect((await date)!.dateText, '2026-03-18');
+    api.page.complete(AnnouncementPageBatch(
+      items: const [],
+      nextPageUrls: List<String?>.filled(source.listUrls.length, null),
+    ));
+    expect((await refreshed).single.dateText, '2026-03-18');
+
+    final restored = AnnouncementRepository();
+    addTearDown(restored.dispose);
+    final cached = await restored.loadCachedAnnouncements(source: source);
+    expect(cached.single.dateText, '2026-03-18');
+  });
+
   test('large article tables parse outside the UI isolate', () async {
     const item = AnnouncementListItem(
       title: '大型名单',
@@ -75,6 +368,95 @@ void main() {
     expect(detail.author, '王超');
     expect(detail.title, '新公告');
     client.close();
+  });
+
+  test('Film Academy cross-site dates use the target site metadata', () async {
+    final source = AnnouncementSource.byId('sfa');
+    const articles = {
+      '本科生院公告': 'https://bksy.shu.edu.cn/info/1001/42.html',
+      '计算机学院公告': 'https://cs.shu.edu.cn/info/1001/42.hmtl',
+      '温哥华电影学院公告': 'https://www.shvfs.cn/site/newsDetail/42',
+      '已失效公告': 'https://youth.shu.edu.cn/info/1001/42.htm',
+      '普通外链': 'https://example.org/info/1001/42.htm',
+      '微信外链': 'https://mp.weixin.qq.com/s/example',
+      '附件': 'https://cs.shu.edu.cn/files/notice.pdf',
+    };
+    final requests = <String>[];
+    final client = AnnouncementApiClient(
+      maxRequestAttempts: 1,
+      httpClient: MockClient((request) async {
+        final url = request.url.toString();
+        requests.add(url);
+        final html = switch (request.url.host) {
+          'sfa.shu.edu.cn' => '<div class="right">'
+              '${articles.entries.map((entry) => '<li class="notice-item">'
+                  '<a class="notice-title" href="${entry.value}">${entry.key}</a>'
+                  '</li>').join()}'
+              '</div>',
+          'bksy.shu.edu.cn' => '<div class="nry"><div class="xx">'
+              '<span>发布时间：2026-10-19</span></div></div>',
+          // No article body: list dates only need the site's metadata parser.
+          'cs.shu.edu.cn' => '<div class="art-tit">'
+              '<p><span>发布时间：2026-10-21</span></p></div>',
+          'www.shvfs.cn' => '<header class="n-detail-title">'
+              '<p>时间：2026-10-22</p></header>',
+          _ => null,
+        };
+        return http.Response(html ?? 'not found', html == null ? 404 : 200,
+            headers: {'content-type': 'text/html; charset=utf-8'});
+      }),
+    );
+    addTearDown(client.close);
+
+    final page = await client.fetchPage(source: source);
+    expect(page.items, hasLength(articles.length));
+    for (final entry
+        in {'本科生院公告': 19, '计算机学院公告': 21, '温哥华电影学院公告': 22}.entries) {
+      final item = page.items.singleWhere((item) => item.title == entry.key);
+      expect(item.dateText, '2026-10-${entry.value}');
+      expect(item.publishedAt, DateTime(2026, 10, entry.value));
+      expect(item.sourceId, 'sfa');
+    }
+    final titles = page.items.map((item) => item.title).toList();
+    expect(titles.indexOf('计算机学院公告'), lessThan(titles.indexOf('本科生院公告')));
+    for (final title in ['已失效公告', '普通外链', '微信外链', '附件']) {
+      expect(page.items.singleWhere((item) => item.title == title).dateText,
+          isEmpty);
+    }
+    expect(
+        requests,
+        unorderedEquals([
+          source.listUrl,
+          articles['本科生院公告'],
+          articles['计算机学院公告'],
+          articles['温哥华电影学院公告'],
+          articles['已失效公告'],
+        ]));
+  });
+
+  test('article detail uses its URL owner when the list source differs',
+      () async {
+    const item = AnnouncementListItem(
+      title: '列表标题',
+      url: 'https://cs.shu.edu.cn/info/1001/42.htm',
+      sourceId: 'sfa',
+      dateText: '2026-10-01',
+    );
+    final client = AnnouncementApiClient(
+      httpClient: MockClient((request) async => http.Response(
+            '<div class="art-tit"><h3>计算机学院原文标题</h3>'
+            '<p><span>发布时间：2026-10-21</span></p></div>'
+            '<div class="v_news_content"><p>正文</p></div>',
+            200,
+            headers: {'content-type': 'text/html; charset=utf-8'},
+          )),
+    );
+    addTearDown(client.close);
+
+    final detail = await client.fetchDetail(item);
+    expect(detail.title, '计算机学院原文标题');
+    expect(detail.dateText, '2026-10-21');
+    expect(detail.publishedAt, DateTime(2026, 10, 21));
   });
 
   test('undated Film Academy links keep their source positions', () async {
@@ -1309,10 +1691,11 @@ void main() {
         '官网旧缓存');
   });
 
-  test('Film Academy refreshes caches from before date inference', () async {
+  test('Film Academy refreshes caches from before cross-site date parsing',
+      () async {
     final source = AnnouncementSource.byId('sfa');
     SharedPreferences.setMockInitialValues({
-      'announcements.cacheVersion.sfa': 6,
+      'announcements.cacheVersion.sfa': 7,
       'announcements.lastRefreshAt.sfa': DateTime.now().toIso8601String(),
       'announcements.list.cache.sfa': jsonEncode([
         const AnnouncementListItem(
@@ -1574,5 +1957,48 @@ class _QueuedPreviewApiClient extends AnnouncementApiClient {
           url: url,
           blocks: blocks,
         ));
+  }
+}
+
+class _QueuedPublicationDateApiClient extends AnnouncementApiClient {
+  _QueuedPublicationDateApiClient({this.deferPage = false});
+
+  final bool deferPage;
+  final pageStarted = Completer<void>();
+  final page = Completer<AnnouncementPageBatch>();
+  final pendingDates = <Completer<AnnouncementListItem?>>[];
+  final requestedItems = <AnnouncementListItem>[];
+
+  @override
+  Future<AnnouncementListItem?> fetchPublicationDate(
+      AnnouncementListItem item) {
+    final completer = Completer<AnnouncementListItem?>();
+    requestedItems.add(item);
+    pendingDates.add(completer);
+    return completer.future;
+  }
+
+  void completeDate(int index, String dateText) {
+    final item = requestedItems[index];
+    pendingDates[index].complete(AnnouncementListItem(
+      title: item.title,
+      url: item.url,
+      sourceId: item.sourceId,
+      dateText: dateText,
+      publishedAt: DateTime.parse(dateText),
+    ));
+  }
+
+  @override
+  Future<AnnouncementPageBatch> fetchPage({
+    AnnouncementSource source = AnnouncementSource.official,
+    List<String?>? pageUrls,
+  }) {
+    if (!pageStarted.isCompleted) pageStarted.complete();
+    if (deferPage) return page.future;
+    return Future.value(AnnouncementPageBatch(
+      items: const [],
+      nextPageUrls: List<String?>.filled(source.listUrls.length, null),
+    ));
   }
 }

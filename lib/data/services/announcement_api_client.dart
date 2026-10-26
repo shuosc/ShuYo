@@ -180,7 +180,7 @@ class AnnouncementApiClient {
             );
           }
           if (source.adapter.listFormat == AnnouncementListFormat.filmNotice) {
-            items = await _enrichFilmNotices(items, source: source);
+            items = await _enrichFilmNotices(items);
           }
           return (
             items: items,
@@ -570,11 +570,8 @@ class AnnouncementApiClient {
       );
 
   Future<List<AnnouncementListItem>> _enrichFilmNotices(
-    List<AnnouncementListItem> items, {
-    required AnnouncementSource source,
-  }) async {
+      List<AnnouncementListItem> items) async {
     final result = List<AnnouncementListItem>.of(items);
-    final host = Uri.parse(source.listUrl).host;
     for (var start = 0; start < items.length; start += 3) {
       await Future.wait([
         for (var index = start;
@@ -582,30 +579,9 @@ class AnnouncementApiClient {
             index++)
           () async {
             final item = items[index];
-            final uri = Uri.tryParse(item.url);
-            if (uri == null || uri.host != host || !uri.path.endsWith('.htm')) {
-              return;
-            }
             try {
-              final metadata = await _withHtml(
-                item.url,
-                (response) => _withParse(
-                  () =>
-                      compute(_parseFilmNoticeDateResponse, response.bodyBytes),
-                ),
-                priority: AnnouncementRequestPriority.detail,
-              );
-              final date = metadata.publishedAt;
-              if (date == null) return;
-              result[index] = AnnouncementListItem(
-                title: item.title,
-                url: item.url,
-                summary: item.summary,
-                dateText: metadata.dateText,
-                publishedAt: date,
-                sourceId: item.sourceId,
-                column: item.column,
-              );
+              final dated = await fetchPublicationDate(item);
+              if (dated != null) result[index] = dated;
             } on Object {
               // Keep the list entry when one article is unavailable.
             }
@@ -613,6 +589,74 @@ class AnnouncementApiClient {
       ]);
     }
     return inferFilmNoticeDates(result);
+  }
+
+  /// Reads article metadata without parsing its body or loading other list pages.
+  Future<AnnouncementListItem?> fetchPublicationDate(
+      AnnouncementListItem item) async {
+    if (item.dateText.isNotEmpty) return item;
+    final uri = Uri.tryParse(item.url);
+    final owner =
+        AnnouncementSource.forUrl(item.url, preferredSourceId: item.sourceId);
+    if (uri == null ||
+        owner == null ||
+        (uri.scheme != 'http' && uri.scheme != 'https')) {
+      return null;
+    }
+    final isArticle = owner.id == item.sourceId
+        ? RegExp(r'\.(?:htm|html|hmtl)$', caseSensitive: false)
+            .hasMatch(uri.path)
+        : owner.id == 'shvfs'
+            ? RegExp(r'^/site/newsDetail/\d+$', caseSensitive: false)
+                .hasMatch(uri.path)
+            : RegExp(r'^/info/[^/]+/[^/]+\.(?:htm|html|hmtl)$',
+                    caseSensitive: false)
+                .hasMatch(uri.path);
+    if (!isArticle) return null;
+    final metadata = await _withHtml(
+      item.url,
+      (response) => _withParse(
+        () => compute(_parseAnnouncementDateResponse, (
+          bytes: response.bodyBytes,
+          sourceId: owner.id,
+        )),
+      ),
+      priority: AnnouncementRequestPriority.detail,
+    );
+    final date = metadata.publishedAt;
+    if (date == null || metadata.dateText.isEmpty) return null;
+    return AnnouncementListItem(
+      title: item.title,
+      url: item.url,
+      summary: item.summary,
+      dateText: metadata.dateText,
+      publishedAt: date,
+      sourceId: item.sourceId,
+      column: item.column,
+    );
+  }
+
+  static _AnnouncementMetadata _parseDetailMetadata(
+    dom.Document document, {
+    required AnnouncementSource source,
+  }) {
+    if (source.id == 'shvfs') {
+      return _AnnouncementMetadata(
+        dateText: _cleanText(
+          document.querySelector('header.n-detail-title > p')?.text,
+        ).replaceFirst(RegExp(r'^时间\s*[:：]\s*'), ''),
+        author: '',
+        department: '',
+      );
+    }
+    return _parseVsbLegacyMetadata(document) ??
+        _parseMetadata(
+          source.id == 'cs'
+              ? document.querySelector('.art-tit p')
+              : document.querySelector('.nry .xx'),
+          document: document,
+          adapter: source.adapter,
+        );
   }
 
   static AnnouncementDetail parseAnnouncementDetail(
@@ -628,9 +672,12 @@ class AnnouncementApiClient {
     if (_isUnavailableAnnouncementPage(html, parsedDocument: document)) {
       throw const AnnouncementUnavailableException();
     }
-    final isShvfsNews = sourceId == 'shvfs';
+    final source =
+        AnnouncementSource.forUrl(url, preferredSourceId: sourceId) ??
+            AnnouncementSource.byId(sourceId);
+    final isShvfsNews = source.id == 'shvfs';
     final legacyMetadata = _parseVsbLegacyMetadata(document);
-    final isComputerDetail = sourceId == 'cs';
+    final isComputerDetail = source.id == 'cs';
     final root = document.querySelector('.nry');
     final title = _cleanText(isShvfsNews
         ? document.querySelector('header.n-detail-title > h2')?.text
@@ -640,22 +687,7 @@ class AnnouncementApiClient {
                 (legacyMetadata == null
                     ? null
                     : document.querySelector('.Head')?.text));
-    final metadata = isShvfsNews
-        ? _AnnouncementMetadata(
-            dateText: _cleanText(
-              document.querySelector('header.n-detail-title > p')?.text,
-            ).replaceFirst(RegExp(r'^时间\s*[:：]\s*'), ''),
-            author: '',
-            department: '',
-          )
-        : legacyMetadata ??
-            _parseMetadata(
-              isComputerDetail
-                  ? document.querySelector('.art-tit p')
-                  : root?.querySelector('.xx'),
-              document: document,
-              adapter: AnnouncementSource.byId(sourceId).adapter,
-            );
+    final metadata = _parseDetailMetadata(document, source: source);
     final dateText =
         metadata.dateText.isNotEmpty ? metadata.dateText : fallbackDateText;
     final contentRoot = isShvfsNews
@@ -1336,15 +1368,24 @@ class AnnouncementApiClient {
       }
       if (inArticleBody) continue;
       final label = row.querySelector('span');
-      if (!_cleanText(label?.text).startsWith('创建时间')) continue;
+      if (!RegExp(r'^(?:创建|发布)时间').hasMatch(_cleanText(label?.text))) {
+        continue;
+      }
       final date = _parseDate(_cleanText(label?.nextElementSibling?.text));
+      final author = row
+          .querySelectorAll('font[face=""] > span')
+          .where((span) =>
+              !span.id.endsWith('lblTimes') &&
+              span.querySelector('script') == null)
+          .map((span) => _cleanText(span.text))
+          .firstWhere((text) => text.isNotEmpty, orElse: () => '');
       return _AnnouncementMetadata(
         dateText: date == null
             ? ''
             : '${date.year.toString().padLeft(4, '0')}-'
                 '${date.month.toString().padLeft(2, '0')}-'
                 '${date.day.toString().padLeft(2, '0')}',
-        author: _cleanText(row.querySelector('font[face=""] > span')?.text),
+        author: author,
         department: '',
       );
     }
@@ -1448,12 +1489,19 @@ AnnouncementDetail _parseDetailResponse(
   return detail;
 }
 
-({String dateText, DateTime? publishedAt}) _parseFilmNoticeDateResponse(
-    List<int> bytes) {
-  final metadata = AnnouncementApiClient._parseVsbLegacyMetadata(
-    html_parser.parse(utf8.decode(bytes, allowMalformed: true)),
+({String dateText, DateTime? publishedAt}) _parseAnnouncementDateResponse(
+    ({List<int> bytes, String sourceId}) request) {
+  final html = utf8.decode(request.bytes, allowMalformed: true);
+  final document = AnnouncementApiClient._parseDetailDocument(html);
+  if (AnnouncementApiClient._isUnavailableAnnouncementPage(html,
+      parsedDocument: document)) {
+    throw const AnnouncementUnavailableException();
+  }
+  final metadata = AnnouncementApiClient._parseDetailMetadata(
+    document,
+    source: AnnouncementSource.byId(request.sourceId),
   );
-  final dateText = metadata?.dateText ?? '';
+  final dateText = metadata.dateText;
   return (
     dateText: dateText,
     publishedAt: AnnouncementApiClient._parseDate(dateText),

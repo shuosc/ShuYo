@@ -24,15 +24,18 @@ class _FakeAnnouncementRepository extends AnnouncementRepository {
     required this.items,
     required this.details,
     this.previewFutures = const {},
+    this.publicationDateFutures = const {},
     this.detailErrors = const {},
   });
 
   final List<AnnouncementListItem> items;
   final Map<String, AnnouncementDetail> details;
   final Map<String, Future<String?>> previewFutures;
+  final Map<String, Future<AnnouncementListItem?>> publicationDateFutures;
   final Map<String, Object> detailErrors;
   int detailRequestCount = 0;
   final previewRequests = <String>[];
+  final publicationDateRequests = <AnnouncementListItem>[];
   AnnouncementSource currentDefault = AnnouncementSource.official;
   final favoriteIds = <String>{};
   final sectionExpansion = <AnnouncementMenuSection, bool>{};
@@ -105,6 +108,13 @@ class _FakeAnnouncementRepository extends AnnouncementRepository {
       if (block.isText) return block.value;
     }
     return null;
+  }
+
+  @override
+  Future<AnnouncementListItem?> loadPublicationDate(
+      AnnouncementListItem item) async {
+    publicationDateRequests.add(item);
+    return publicationDateFutures[item.url] ?? Future.value(null);
   }
 }
 
@@ -585,6 +595,127 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('通知概览'), findsOneWidget);
     expect(find.text('2026-10-20'), findsOneWidget);
+  });
+
+  testWidgets('visible cached Film Academy excerpts resolve cross-site dates',
+      (tester) async {
+    final date = Completer<AnnouncementListItem?>();
+    const item = AnnouncementListItem(
+      title: '上海大学2026年艺术类招生简章',
+      url: 'https://bkzsw.shu.edu.cn/info/1798/38490.htm',
+      sourceId: 'sfa',
+      summary: '保留电影学院列表原有摘要',
+    );
+    final repository = _FakeAnnouncementRepository(
+      items: const [item],
+      details: const {},
+      publicationDateFutures: {item.url: date.future},
+    )..currentDefault = AnnouncementSource.byId('sfa');
+    await tester.pumpWidget(
+      MaterialApp(home: AnnouncementsPage(repository: repository)),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text(item.title), findsOneWidget);
+    expect(find.text(item.summary), findsOneWidget);
+    expect(find.text('2026-03-18'), findsNothing);
+    expect(repository.previewRequests, isEmpty);
+    expect(repository.publicationDateRequests, [same(item)]);
+    expect(repository.publicationDateRequests.single.sourceId, 'sfa');
+
+    date.complete(AnnouncementListItem(
+      title: item.title,
+      url: item.url,
+      sourceId: item.sourceId,
+      summary: item.summary,
+      dateText: '2026-03-18',
+      publishedAt: DateTime(2026, 3, 18),
+    ));
+    await tester.pumpAndSettle();
+
+    final list = find.byType(CustomScrollView);
+    expect(find.descendant(of: list, matching: find.text('2026-03-18')),
+        findsOneWidget);
+    expect(repository.detailRequestCount, 0);
+  });
+
+  testWidgets('a removed Film Academy card ignores its pending date',
+      (tester) async {
+    final date = Completer<AnnouncementListItem?>();
+    const item = AnnouncementListItem(
+      title: '离开页面前的电影学院通知',
+      url: 'https://bkzsw.shu.edu.cn/info/1798/38490.htm',
+      sourceId: 'sfa',
+      summary: '已有摘要',
+    );
+    final repository = _FakeAnnouncementRepository(
+      items: const [item],
+      details: const {},
+      publicationDateFutures: {item.url: date.future},
+    )..currentDefault = AnnouncementSource.byId('sfa');
+    await tester.pumpWidget(
+      MaterialApp(home: AnnouncementsPage(repository: repository)),
+    );
+    await tester.pumpAndSettle();
+    expect(repository.publicationDateRequests, hasLength(1));
+
+    await tester.pumpWidget(const MaterialApp(home: SizedBox.shrink()));
+    date.complete(AnnouncementListItem(
+      title: item.title,
+      url: item.url,
+      sourceId: item.sourceId,
+      dateText: '2026-03-18',
+      publishedAt: DateTime(2026, 3, 18),
+    ));
+    await tester.pumpAndSettle();
+
+    expect(tester.takeException(), isNull);
+    expect(find.text('2026-03-18'), findsNothing);
+  });
+
+  testWidgets('Film Academy date waits until the detail transition finishes',
+      (tester) async {
+    final date = Completer<AnnouncementListItem?>();
+    const item = AnnouncementListItem(
+      title: '详情期间补齐电影学院日期',
+      url: 'https://bkzsw.shu.edu.cn/info/1798/38490.htm',
+      sourceId: 'sfa',
+      summary: '已有摘要',
+    );
+    final repository = _FakeAnnouncementRepository(
+      items: const [item],
+      details: {
+        item.title: AnnouncementDetail(
+          title: item.title,
+          url: item.url,
+          blocks: const [AnnouncementContentBlock.text('公告正文')],
+        ),
+      },
+      publicationDateFutures: {item.url: date.future},
+    )..currentDefault = AnnouncementSource.byId('sfa');
+    await tester.pumpWidget(
+      MaterialApp(home: AnnouncementsPage(repository: repository)),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text(item.title));
+    await tester.pumpAndSettle();
+    date.complete(AnnouncementListItem(
+      title: item.title,
+      url: item.url,
+      sourceId: item.sourceId,
+      dateText: '2026-03-18',
+      publishedAt: DateTime(2026, 3, 18),
+    ));
+    await tester.pumpAndSettle();
+    expect(find.text('2026-03-18', skipOffstage: false), findsNothing);
+
+    Navigator.of(tester.element(find.byType(AnnouncementDetailPage))).pop();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 80));
+    expect(find.text('2026-03-18', skipOffstage: false), findsNothing);
+    await tester.pumpAndSettle();
+    expect(find.text('2026-03-18'), findsOneWidget);
+    expect(tester.takeException(), isNull);
   });
 
   testWidgets('new source details display the site date and author',
