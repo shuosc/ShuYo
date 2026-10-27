@@ -26,6 +26,133 @@ const _bkzswFilmNoticeHtml = '''
 ''';
 
 void main() {
+  test('website-group search has one explicit current owner per VSB source',
+      () {
+    final supported = AnnouncementSource.all
+        .where((source) => source.supportsSearch)
+        .toList();
+    expect(supported, hasLength(72));
+    final owners = supported.map((source) => source.searchOwner!).toList();
+    expect(owners.toSet(), hasLength(72));
+    for (final source in supported) {
+      expect(source.searchOwner, matches(r'^\d+$'), reason: source.id);
+      expect(source.searchColumnIds, isNotEmpty, reason: source.id);
+      expect(source.searchColumnIds.toSet(),
+          hasLength(source.searchColumnIds.length),
+          reason: source.id);
+      for (final columnId in source.searchColumnIds) {
+        expect(columnId, matches(r'^\d+$'), reason: source.id);
+      }
+    }
+    expect(
+      AnnouncementSource.all
+          .where((source) => !source.supportsSearch)
+          .map((source) => source.id),
+      ['shvfs'],
+    );
+    expect(AnnouncementSource.byId('shvfs').searchOwner, isNull);
+  });
+
+  test('search uses current owners omitted by the official default scope', () {
+    const currentOwners = {
+      'shu': '1864855249',
+      'gs': '1880701254',
+      'ece': '1880699954',
+      'icn': '2052219376',
+      'ihe': '2063254418',
+      'museum': '1880701068',
+      'skl4nm': '2132341510',
+      'sklar': '2132008928',
+      'sme': '1880700804',
+      'zhgy': '1997493522',
+    };
+    for (final entry in currentOwners.entries) {
+      expect(AnnouncementSource.byId(entry.key).searchOwner, entry.value,
+          reason: entry.key);
+    }
+  });
+
+  test('search columns keep the configured notification list boundaries', () {
+    expect(AnnouncementSource.official.searchColumnIds, ['1051']);
+    expect(AnnouncementSource.byId('bksy').searchColumnIds, ['1015']);
+    expect(AnnouncementSource.byId('gs').searchColumnIds,
+        ['1029', '1027', '1030', '1031']);
+    expect(AnnouncementSource.byId('sme').searchColumnIds, ['1030']);
+    expect(AnnouncementSource.byId('cwc').searchColumnIds, ['1015', '1041']);
+    expect(AnnouncementSource.byId('ac').searchOwner, '1602564467');
+    expect(AnnouncementSource.byId('ac').searchColumnIds, ['1009', '1010']);
+    expect(AnnouncementSource.byId('music').searchColumnIds, ['1024', '1175']);
+    expect(AnnouncementSource.byId('cce').searchColumnIds,
+        ['1014', '1542', '1464']);
+    expect(AnnouncementSource.byId('cs').searchColumnIds, ['1081', '1061']);
+    expect(
+      AnnouncementSource.byId('bkzsw').searchColumnIds,
+      containsAll([
+        '1810', // Autumn admissions aggregate list.
+        '7743', // 2026 autumn admissions.
+        '1812', // 2020 autumn admissions.
+        '7783', // 2026 recommended student admissions.
+        '1912', // 2016 rural special admissions plan.
+        '2173', // 2022 Hong Kong, Macao and Taiwan admissions.
+      ]),
+    );
+    expect(AnnouncementSource.byId('shvfs').searchColumnIds, isEmpty);
+  });
+
+  test('search needs both an explicitly configured owner and columns', () {
+    const source = AnnouncementSource(
+      id: 'unconfigured',
+      name: '未配置站点',
+      listUrl: 'https://example.shu.edu.cn/tzgg.htm',
+      adapter: AnnouncementSourceAdapter(
+        listFormat: AnnouncementListFormat.onlyList,
+      ),
+    );
+    const emptyOwnerSource = AnnouncementSource(
+      id: 'empty-owner',
+      name: '空配置站点',
+      listUrl: 'https://example.shu.edu.cn/tzgg.htm',
+      searchOwner: '',
+      searchColumnIds: ['1001'],
+      adapter: AnnouncementSourceAdapter(
+        listFormat: AnnouncementListFormat.onlyList,
+      ),
+    );
+    const ownerOnlySource = AnnouncementSource(
+      id: 'owner-only',
+      name: '缺少栏目站点',
+      listUrl: 'https://example.shu.edu.cn/tzgg.htm',
+      searchOwner: '1864855249',
+      adapter: AnnouncementSourceAdapter(
+        listFormat: AnnouncementListFormat.onlyList,
+      ),
+    );
+    const columnsOnlySource = AnnouncementSource(
+      id: 'columns-only',
+      name: '缺少站点所有者',
+      listUrl: 'https://example.shu.edu.cn/tzgg.htm',
+      searchColumnIds: ['1001'],
+      adapter: AnnouncementSourceAdapter(
+        listFormat: AnnouncementListFormat.onlyList,
+      ),
+    );
+    const configuredSource = AnnouncementSource(
+      id: 'configured',
+      name: '已配置站点',
+      listUrl: 'https://example.shu.edu.cn/tzgg.htm',
+      searchOwner: '1864855249',
+      searchColumnIds: ['1001'],
+      adapter: AnnouncementSourceAdapter(
+        listFormat: AnnouncementListFormat.onlyList,
+      ),
+    );
+    expect(configuredSource.supportsSearch, isTrue);
+    expect(source.supportsSearch, isFalse);
+    expect(emptyOwnerSource.supportsSearch, isFalse);
+    expect(ownerOnlySource.supportsSearch, isFalse);
+    expect(columnsOnlySource.supportsSearch, isFalse);
+  });
+
   test('actual bkzsw publication metadata uses the article URL owner', () {
     for (final sourceId in ['sfa', 'bkzsw']) {
       final detail = AnnouncementApiClient.parseAnnouncementDetail(
