@@ -211,19 +211,6 @@ class _AnnouncementsPageState extends State<AnnouncementsPage> {
     );
   }
 
-  Widget _buildSourceInfo() {
-    final source = _source;
-    if (source == null) return const SizedBox.shrink();
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
-      child: Text(
-        '通知来源：${source.name} ${Uri.parse(source.listUrl).host}',
-        textAlign: TextAlign.center,
-        style: ShuYoTextStyles.meta(color: context.shuyoColors.textMuted),
-      ),
-    );
-  }
-
   Widget _buildList() {
     final loaded = _loaded;
     if (loaded == null) {
@@ -231,7 +218,6 @@ class _AnnouncementsPageState extends State<AnnouncementsPage> {
       return Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          _buildSourceInfo(),
           Expanded(
             child: error == null
                 ? const _AnnouncementLoadingState()
@@ -252,7 +238,6 @@ class _AnnouncementsPageState extends State<AnnouncementsPage> {
             controller: _scrollController,
             physics: const AlwaysScrollableScrollPhysics(),
             children: [
-              _buildSourceInfo(),
               const SizedBox(height: 96),
               const EmptyState(
                 icon: Icons.campaign_outlined,
@@ -280,7 +265,6 @@ class _AnnouncementsPageState extends State<AnnouncementsPage> {
 
   List<Widget> _homeSlivers(List<Object> rows) {
     final slivers = <Widget>[
-      SliverToBoxAdapter(child: _buildSourceInfo()),
       const SliverToBoxAdapter(child: SizedBox(height: 8)),
     ];
     var position = 0;
