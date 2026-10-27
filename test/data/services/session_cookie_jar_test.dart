@@ -1,6 +1,31 @@
+import 'dart:async';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:shuyo/data/services/session_cookie_jar.dart';
+import 'package:shuyo/data/services/secure_app_store.dart';
+
+class _CountingStore extends SecureAppStore {
+  _CountingStore({this.value, this.pendingRead});
+
+  String? value;
+  Completer<String?>? pendingRead;
+  int reads = 0;
+
+  @override
+  Future<String?> read(String key) async {
+    reads++;
+    final pending = pendingRead;
+    if (pending != null) return pending.future;
+    return value;
+  }
+
+  @override
+  Future<void> write(String key, String value) async => this.value = value;
+}
+
+const _storedCookie = '[{"name":"session","value":"synthetic",'
+    '"domain":"vod.cc.shu.edu.cn","path":"/"}]';
 
 void main() {
   setUp(() => SharedPreferences.setMockInitialValues({}));
@@ -153,4 +178,52 @@ void main() {
       {'root', 'front', 'data'},
     );
   });
+
+  test('restores once and keeps subsequent reads and writes in memory',
+      () async {
+    final store = _CountingStore(value: _storedCookie);
+    final jar = SessionCookieJar(secureStore: store);
+    final uri = Uri.parse('https://vod.cc.shu.edu.cn/');
+    expect((await jar.getCookies(domain: uri)).single.name, 'session');
+    await jar.setCookie(const SessionCookie(
+        name: 'second', value: 'new', domain: 'vod.cc.shu.edu.cn'));
+    expect(await jar.getCookies(domain: uri), hasLength(2));
+    expect(await jar.getCookiesForDomainTree(domain: 'vod.cc.shu.edu.cn'),
+        hasLength(2));
+    expect(store.reads, 1);
+  });
+
+  test('concurrent readers share one pending restore', () async {
+    final pending = Completer<String?>();
+    final store = _CountingStore(pendingRead: pending);
+    final jar = SessionCookieJar(secureStore: store);
+    final first =
+        jar.getCookies(domain: Uri.parse('https://vod.cc.shu.edu.cn/'));
+    final second = jar.getCookiesForDomainTree(domain: 'vod.cc.shu.edu.cn');
+    expect(store.reads, 1);
+    pending.complete(_storedCookie);
+    final results = await Future.wait([first, second]);
+    expect(
+        results.every((cookies) => cookies.single.name == 'session'), isTrue);
+    await jar.getCookies(domain: Uri.parse('https://vod.cc.shu.edu.cn/'));
+    expect(store.reads, 1);
+  });
+
+  // Intentionally reuse one app-like jar across independent widget FakeAsync
+  // zones. A completed restore Future from the first zone must not be awaited
+  // by the next zone; no extra timer or pump duration should be needed.
+  final sharedStore = _CountingStore(value: _storedCookie);
+  final sharedJar = SessionCookieJar(secureStore: sharedStore);
+  for (final round in [1, 2]) {
+    testWidgets('restored jar is readable in independent widget zone $round',
+        (tester) async {
+      List<SessionCookie>? result;
+      unawaited(sharedJar
+          .getCookies(domain: Uri.parse('https://vod.cc.shu.edu.cn/'))
+          .then((cookies) => result = cookies));
+      await tester.pump();
+      expect(result?.single.name, 'session');
+      expect(sharedStore.reads, 1);
+    });
+  }
 }

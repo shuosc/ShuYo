@@ -49,6 +49,7 @@ class SessionCookieJar {
 
   final SecureAppStore _secureStore;
   final List<_StoredCookie> _cookies = [];
+  bool _restored = false;
   Future<void>? _restoring;
 
   /// Returns the cookies that would be sent to [domain], using the host and
@@ -114,7 +115,21 @@ class SessionCookieJar {
     await _persist();
   }
 
-  Future<void> _ensureRestored() => _restoring ??= _restore();
+  Future<void> _ensureRestored() {
+    if (_restored) return Future<void>.value();
+    final existing = _restoring;
+    if (existing != null) return existing;
+    late final Future<void> pending;
+    pending = _restore().then((_) {
+      _restored = true;
+    }).whenComplete(() {
+      // Retain only an in-flight restore. Keeping the completed Future also
+      // retains its originating async zone across independent widget tests.
+      if (identical(_restoring, pending)) _restoring = null;
+    });
+    _restoring = pending;
+    return pending;
+  }
 
   /// Forgets the in-memory cookies and the cached restore so the next read
   /// loads from storage again. Widget tests each run in their own fake-async
