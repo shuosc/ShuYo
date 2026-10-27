@@ -8,8 +8,83 @@ import 'package:shuyo/data/services/academic_schedule_notification_service.dart'
 import 'package:shuyo/data/services/academic_schedule_widget_service.dart';
 import 'package:shuyo/features/home/academic_schedule_page.dart';
 import 'package:shuyo/shared/theme/shuyo_theme.dart';
+import 'package:shuyo/shared/widgets/calendar_date_picker.dart';
+import 'package:shuyo/shared/widgets/date_picker_dialog.dart';
 
 void main() {
+  testWidgets('start date uses the shared calendar and preserves Monday rules',
+      (tester) async {
+    SharedPreferences.setMockInitialValues({});
+    final repository = _ScheduleRepository();
+    final firstMonday = DateTime(2026, 10, 5);
+    await repository.setFirstWeekStart(firstMonday);
+    await tester.pumpWidget(MaterialApp(
+      theme: ShuYoThemes.byId(ShuYoThemes.defaultId).themeData(),
+      home: AcademicSchedulePage(
+        repository: repository,
+        notificationService: _NoopNotifications(repository),
+        widgetService: _NoopWidget(repository),
+        onLoginRequired: () async {},
+        initialState: AcademicScheduleCacheState(
+          schedule: _schedule,
+          weekState: ScheduleWeekState(
+            currentWeek: 1,
+            anchorMonday: firstMonday,
+          ),
+        ),
+        initialDisplayState: const AcademicScheduleDisplayState(
+          settings: AcademicScheduleDisplaySettings(
+            colorful: false,
+            showTeacher: true,
+          ),
+          courseColorValues: {},
+        ),
+      ),
+    ));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('设置开学日期'));
+    await tester.pumpAndSettle();
+
+    expect(find.byType(ShuYoDatePickerDialog), findsOneWidget);
+    expect(find.text('选择开学日期'), findsOneWidget);
+    final calendar = tester.widget<ShuYoCalendarDatePicker>(
+      find.byType(ShuYoCalendarDatePicker),
+    );
+    expect(calendar.firstDate, DateTime(2000));
+    expect(calendar.lastDate, DateTime(2100, 12, 31));
+    expect(calendar.selectedDate, firstMonday);
+    expect(calendar.selectableDayPredicate!(firstMonday), isTrue);
+    expect(
+      calendar.selectableDayPredicate!(DateTime(2026, 10, 6)),
+      isFalse,
+    );
+
+    await tester.tap(find.descendant(
+      of: find.byType(ShuYoDatePickerDialog),
+      matching: find.text('12'),
+    ));
+    await tester.tap(find.text('确定'));
+    await tester.pumpAndSettle();
+    expect(
+      (await repository.loadWeekState()).firstWeekStart,
+      DateTime(2026, 10, 12),
+    );
+
+    await tester.tap(find.byTooltip('设置开学日期'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.descendant(
+      of: find.byType(ShuYoDatePickerDialog),
+      matching: find.text('19'),
+    ));
+    await tester.tap(find.text('取消'));
+    await tester.pumpAndSettle();
+    expect(
+      (await repository.loadWeekState()).firstWeekStart,
+      DateTime(2026, 10, 12),
+    );
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets(
       'update asks before replacing edits; random colors use the palette',
       (tester) async {
