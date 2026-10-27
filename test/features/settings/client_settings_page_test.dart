@@ -374,13 +374,30 @@ void main() {
     await tester.tap(find.text('默认公告'));
     await tester.pumpAndSettle();
     expect(find.byIcon(Icons.radio_button_checked), findsOneWidget);
-    await tester.scrollUntilVisible(find.text('材料科学与工程学院'), 200);
-    await tester.tap(find.text('材料科学与工程学院'));
+    final college = find.widgetWithText(ListTile, '材料科学与工程学院').hitTestable();
+    await tester.scrollUntilVisible(college, 200);
+    await tester.pumpAndSettle();
+    expect(college, findsOneWidget);
+    await tester.tap(college);
     await tester.pumpAndSettle();
     expect((await ClientSettingsService().loadDefaultAnnouncementSource()).id,
         'mat');
     expect(find.byIcon(Icons.radio_button_checked), findsOneWidget);
+    expect(
+        find.descendant(
+            of: college, matching: find.byIcon(Icons.radio_button_checked)),
+        findsOneWidget);
     expect(AnnouncementSource.byId('mat').name, '材料科学与工程学院');
+    await tester.pageBack();
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('默认公告'));
+    await tester.pumpAndSettle();
+    await tester.scrollUntilVisible(college, 200);
+    await tester.pumpAndSettle();
+    expect(
+        find.descendant(
+            of: college, matching: find.byIcon(Icons.radio_button_checked)),
+        findsOneWidget);
   });
 
   testWidgets('WebVPN settings shares the account manager state',
