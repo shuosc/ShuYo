@@ -3,6 +3,7 @@ enum HomeModule {
   campusCard('campus_card', '校园卡', 'overview'),
   announcements('announcements', '通知公告', 'overview'),
   emptyClassroom('empty_classroom', '空教室', 'overview'),
+  courseRecordings('course_recordings', '课程录播', 'overview'),
   libraryBooking('library_booking', '图书馆预约', 'overview'),
   campusMap('campus_map', '校园地图', 'overview'),
   otp('otp', '动态口令', 'services');

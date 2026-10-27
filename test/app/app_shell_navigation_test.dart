@@ -5,6 +5,8 @@ import 'package:shuyo/app/app_shell.dart';
 import 'package:shuyo/core/app_tab.dart';
 import 'package:shuyo/data/services/academic_profile_preferences.dart';
 import 'package:shuyo/data/services/client_settings_service.dart';
+import 'package:shuyo/features/course_recordings/course_recordings_page.dart';
+import 'package:shuyo/features/auth/native_login_page.dart';
 import 'package:shuyo/features/home/academic_schedule_page.dart';
 import 'package:shuyo/features/home/academic_progress_page.dart';
 import 'package:shuyo/features/home/shuyo_content_page.dart';
@@ -39,6 +41,47 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('演示模式暂不支持校园卡查询'), findsOneWidget);
     expect(find.byType(SnackBar), findsNothing);
+  });
+
+  testWidgets('home recording entry opens its own login and returns to home',
+      (tester) async {
+    final controller = StartupOnboardingController();
+    addTearDown(controller.dispose);
+    await tester.pumpWidget(MaterialApp(
+      home: AppShell(
+        initialWebVpnEnabled: false,
+        selectedThemeId: 'default',
+        followSystemTheme: false,
+        onThemeChanged: (_) async {},
+        onFollowSystemThemeChanged: (_) async {},
+        academicLoginSignal: 0,
+        initialHasAcademicSession: false,
+        initialAcademicStudentId: null,
+        onboardingController: controller,
+      ),
+    ));
+    await tester.pumpAndSettle();
+    await tester.scrollUntilVisible(find.text('课程录播'), 180);
+    await tester.tap(find.text('课程录播'));
+    await tester.pumpAndSettle();
+    expect(find.byType(CourseRecordingsPage), findsOneWidget);
+    expect(find.text('登录校园账户'), findsOneWidget);
+    expect(find.byType(BottomNavigationBar), findsNothing);
+    expect(
+        tester
+            .widget<CourseRecordingsPage>(find.byType(CourseRecordingsPage))
+            .useWebVpn,
+        isFalse);
+    await tester.tap(find.widgetWithText(FilledButton, '登录'));
+    await tester.pumpAndSettle();
+    expect(find.byType(NativeLoginPage), findsOneWidget);
+    await tester.pageBack();
+    await tester.pumpAndSettle();
+    expect(find.byType(CourseRecordingsPage), findsOneWidget);
+    await tester.pageBack();
+    await tester.pumpAndSettle();
+    expect(find.byType(BottomNavigationBar), findsOneWidget);
+    expect(find.text('课程录播'), findsOneWidget);
   });
 
   testWidgets('library booking opens with the latest account campus preference',

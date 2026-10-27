@@ -7,6 +7,7 @@ import 'package:home_widget/home_widget.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../core/classroom_url_resolver.dart';
+import '../core/vod_url_resolver.dart';
 import '../core/app_tab.dart';
 import '../core/client_app_info.dart';
 import '../core/client_update_policy.dart';
@@ -42,8 +43,10 @@ import '../data/services/student_identity_service.dart';
 import '../data/services/unified_account_service.dart';
 import '../data/services/there_booking_client.dart';
 import '../data/services/webvpn_session_store.dart';
+import '../data/services/vod_auth_service.dart';
 import '../features/auth/native_login_page.dart';
 import '../features/campus_map/campus_map_page.dart';
+import '../features/course_recordings/course_recordings_page.dart';
 import '../features/home/academic_schedule_page.dart';
 import '../features/home/academic_progress_page.dart';
 import '../features/home/announcements_page.dart';
@@ -164,6 +167,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
   bool _checkingClientBackendPrompts = false;
   bool _refreshingWebVpnStatus = false;
   bool _openingLibraryBooking = false;
+  bool _openingCourseRecordings = false;
   ThereBookingClient? _directBookingClient;
   ThereBookingClient? _webVpnBookingClient;
   ChaoxingBookingClient? _chaoxingBookingClient;
@@ -483,6 +487,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
           : () => _selectTab(AppTab.schedule),
       onOpenAnnouncements: () => unawaited(_openAnnouncements()),
       onOpenEmptyClassroom: () => unawaited(_openEmptyClassroom()),
+      onOpenCourseRecordings: () => unawaited(_openCourseRecordings()),
       onOpenLibraryBooking: () => unawaited(_openLibraryBooking()),
       onOpenCampusCard: () => unawaited(_openCampusCard()),
       onRefreshCampusCard: () => unawaited(_refreshCampusCardFromHome()),
@@ -605,6 +610,17 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
       }
       await _loadAcademicStudentId();
       if (!mounted || _academicStudentId == null) return;
+      if (previousStudentId != _academicStudentId) {
+        final vodAuth = VodAuthService();
+        try {
+          await vodAuth.clearAllSessions();
+        } on Object {
+          if (mounted) _showSnack('部分录播会话未能清理，请在账户管理中重试退出');
+        } finally {
+          vodAuth.dispose();
+        }
+        if (!mounted) return;
+      }
       final firstLogin = allowInitialSync &&
           await AcademicAccountStore().takeInitialSync(_academicStudentId!);
       if (!mounted) return;
@@ -1219,6 +1235,28 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
     );
   }
 
+  Future<void> _openCourseRecordings() async {
+    if (_openingCourseRecordings) return;
+    if (widget.isDemo) {
+      _showSnack('演示模式暂不支持课程录播');
+      return;
+    }
+    _openingCourseRecordings = true;
+    final useWebVpn = _webVpnEnabled;
+    try {
+      await Navigator.of(context).push<void>(shuyoRoute(
+        builder: (_) => CourseRecordingsPage(
+          useWebVpn: useWebVpn,
+          onWebVpnSessionRequired: () => _recoverWebVpnForFeature(),
+          onCampusSessionExpired: _markCampusAccountExpired,
+          onLoginRequested: _loginCampusAccount,
+        ),
+      ));
+    } finally {
+      _openingCourseRecordings = false;
+    }
+  }
+
   Future<void> _openLibraryBooking() async {
     if (_openingLibraryBooking) return;
     if (widget.isDemo) {
@@ -1353,6 +1391,14 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
       // Continue clearing every local credential.
     }
     var failed = false;
+    final vodAuth = VodAuthService();
+    try {
+      await vodAuth.clearAllSessions();
+    } on Object {
+      failed = true;
+    } finally {
+      vodAuth.dispose();
+    }
     final campusCard = CampusCardService();
     try {
       await campusCard.clearSession();
@@ -1538,6 +1584,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
     }
     final changed = ClassroomUrlResolver.usesWebVpn != enabled;
     ClassroomUrlResolver.configure(useWebVpn: enabled);
+    VodUrlResolver.configure(useWebVpn: enabled);
     // The token client reads this switch on every request, so a page already
     // open follows the new transport without being rebuilt.
     OtpUrlResolver.configure(useWebVpn: enabled);

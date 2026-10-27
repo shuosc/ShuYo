@@ -11,6 +11,7 @@ void main() {
       'module:campus_card',
       'module:announcements',
       'module:empty_classroom',
+      'module:course_recordings',
       'module:library_booking',
       'module:campus_map',
       'group:services',
@@ -25,6 +26,7 @@ void main() {
     expect(moved.visibleGroups.first.modules, [
       HomeModule.announcements,
       HomeModule.emptyClassroom,
+      HomeModule.courseRecordings,
       HomeModule.libraryBooking,
       HomeModule.campusMap,
     ]);
@@ -87,6 +89,7 @@ void main() {
       HomeModule.todayCourse,
       HomeModule.announcements,
       HomeModule.emptyClassroom,
+      HomeModule.courseRecordings,
       HomeModule.libraryBooking,
       HomeModule.campusMap,
     ]);
@@ -107,6 +110,7 @@ void main() {
       'divider:line',
       'module:announcements',
       'module:empty_classroom',
+      'module:course_recordings',
       'module:library_booking',
       'module:campus_map',
     ]);

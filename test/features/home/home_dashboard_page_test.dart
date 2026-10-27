@@ -102,6 +102,7 @@ void main() {
     expect(find.text('空教室'), findsOneWidget);
     expect(find.text('查看可用教室'), findsOneWidget);
     expect(find.text('图书馆预约'), findsOneWidget);
+    expect(find.text('课程录播'), findsOneWidget);
     expect(find.text('动态口令'), findsOneWidget);
     expect(find.text('课程评价'), findsNothing);
     expect(find.textContaining('论坛'), findsNothing);

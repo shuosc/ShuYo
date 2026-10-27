@@ -18,6 +18,7 @@ class HomeDashboardPage extends StatelessWidget {
     required this.onOpenAcademicSystem,
     required this.onOpenAnnouncements,
     required this.onOpenEmptyClassroom,
+    this.onOpenCourseRecordings,
     this.onOpenLibraryBooking,
     this.onOpenCampusCard,
     this.onRefreshCampusCard,
@@ -39,6 +40,7 @@ class HomeDashboardPage extends StatelessWidget {
   final VoidCallback onOpenAcademicSystem;
   final VoidCallback onOpenAnnouncements;
   final VoidCallback onOpenEmptyClassroom;
+  final VoidCallback? onOpenCourseRecordings;
   final VoidCallback? onOpenLibraryBooking;
   final VoidCallback? onOpenCampusCard;
   final VoidCallback? onRefreshCampusCard;
@@ -196,6 +198,13 @@ class HomeDashboardPage extends StatelessWidget {
           title: module.title,
           content: '查看可用教室',
           onTap: onOpenEmptyClassroom,
+        ),
+      HomeModule.courseRecordings => _HomeRow(
+          key: key,
+          icon: Icons.ondemand_video_outlined,
+          title: module.title,
+          content: '查看课程回放',
+          onTap: onOpenCourseRecordings,
         ),
       HomeModule.libraryBooking => _HomeRow(
           key: key,
