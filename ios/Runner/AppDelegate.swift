@@ -28,6 +28,19 @@ import UserNotifications
   func didInitializeImplicitFlutterEngine(_ engineBridge: FlutterImplicitEngineBridge) {
     GeneratedPluginRegistrant.register(with: engineBridge.pluginRegistry)
     FlutterMethodChannel(
+      name: "work.shuyo.app/build_info",
+      binaryMessenger: engineBridge.applicationRegistrar.messenger()
+    ).setMethodCallHandler { call, result in
+      if call.method == "getBuildInfo" {
+        result([
+          "branch": Bundle.main.object(forInfoDictionaryKey: "ShuYoGitBranch") as? String ?? "",
+          "commitHash": Bundle.main.object(forInfoDictionaryKey: "ShuYoGitCommit") as? String ?? "",
+        ])
+      } else {
+        result(FlutterMethodNotImplemented)
+      }
+    }
+    FlutterMethodChannel(
       name: "work.shuyo.app/image_saver",
       binaryMessenger: engineBridge.applicationRegistrar.messenger()
     ).setMethodCallHandler { [weak self] call, result in

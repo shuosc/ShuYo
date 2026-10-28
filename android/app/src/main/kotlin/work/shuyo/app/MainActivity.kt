@@ -22,6 +22,21 @@ class MainActivity : FlutterActivity() {
         super.configureFlutterEngine(flutterEngine)
         MethodChannel(
             flutterEngine.dartExecutor.binaryMessenger,
+            "work.shuyo.app/build_info"
+        ).setMethodCallHandler { call, result ->
+            if (call.method == "getBuildInfo") {
+                result.success(
+                    mapOf(
+                        "branch" to BuildConfig.GIT_BRANCH,
+                        "commitHash" to BuildConfig.GIT_COMMIT
+                    )
+                )
+            } else {
+                result.notImplemented()
+            }
+        }
+        MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
             "work.shuyo.app/image_saver"
         ).setMethodCallHandler { call, result ->
             if (call.method == "saveImage") {

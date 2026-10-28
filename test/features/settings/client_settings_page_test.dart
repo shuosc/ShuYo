@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
@@ -19,10 +20,25 @@ import 'package:shuyo/features/settings/client_settings_page.dart';
 import 'package:shuyo/features/onboarding/startup_onboarding.dart';
 import 'package:shuyo/shared/widgets/webvpn_toggle.dart';
 import 'package:shuyo/core/client_app_info.dart';
+import 'package:shuyo/core/client_build_info.dart';
 import 'package:shuyo/shared/theme/custom_background.dart';
 import 'package:shuyo/shared/theme/shuyo_theme.dart';
 
 void main() {
+  const buildInfoChannel = MethodChannel('work.shuyo.app/build_info');
+  setUpAll(() {
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(
+            buildInfoChannel,
+            (_) async => {
+                  'branch': 'feat/about-page',
+                  'commitHash': '0123456789abcdef0123456789abcdef01234567',
+                });
+  });
+  tearDownAll(() {
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(buildInfoChannel, null);
+  });
   setUp(() => SharedPreferences.setMockInitialValues({}));
   tearDown(() => debugDefaultTargetPlatformOverride = null);
 
@@ -500,8 +516,22 @@ void main() {
       findsOneWidget,
     );
     expect(find.text('源代码'), findsOneWidget);
+    expect(find.text('构建信息'), findsOneWidget);
+    expect(find.text('feat/about-page · 0123456'), findsOneWidget);
+    final revisionRow = tester.widget<ListTile>(
+      find.widgetWithText(ListTile, ClientBuildInfo.displayLabel),
+    );
+    expect(revisionRow.onTap, isNotNull);
+    expect(
+      find.descendant(
+        of: find.widgetWithText(ListTile, '构建信息'),
+        matching: find.byIcon(Icons.open_in_new),
+      ),
+      findsOneWidget,
+    );
     expect(find.text('GNU General Public License v3.0'), findsOneWidget);
     expect(find.text('第三方开源许可'), findsOneWidget);
+    await tester.scrollUntilVisible(find.text('贡献者'), 200);
     expect(find.text('贡献者'), findsOneWidget);
 
     await tester.scrollUntilVisible(find.text('检查更新'), 300);

@@ -9,6 +9,7 @@ import 'package:image_picker/image_picker.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../../core/client_app_info.dart';
+import '../../core/client_build_info.dart';
 import '../../core/app_tab.dart';
 import '../../core/client_update_policy.dart';
 import '../../data/models/announcement_source.dart';
@@ -554,6 +555,7 @@ class _AboutClientPageState extends State<_AboutClientPage> {
   static const _termsUrl = 'https://shuyo.work/doc/terms.html';
   static const _privacyUrl = 'https://shuyo.work/doc/privacy.html';
 
+  late final Future<void> _buildInfo = ClientBuildInfo.load();
   bool _checkingUpdate = false;
 
   @override
@@ -604,6 +606,33 @@ class _AboutClientPageState extends State<_AboutClientPage> {
                 ),
               ],
             ),
+          ),
+          const SizedBox(height: 16),
+          FutureBuilder<void>(
+            future: _buildInfo,
+            builder: (context, snapshot) {
+              if (snapshot.connectionState != ConnectionState.done) {
+                return const SizedBox(height: 72);
+              }
+              final commitUrl = ClientBuildInfo.commitUrl;
+              return _AboutRow(
+                leading: const _GitBranchIcon(),
+                title: '构建信息',
+                subtitle: ClientBuildInfo.displayLabel,
+                subtitleStyle: TextStyle(
+                  color: CustomBackgroundScope.maybeOf(context) != null
+                      ? colors.textTertiary
+                      : Color.lerp(
+                          colors.textSecondary, colors.textTertiary, 0.7),
+                ),
+                trailing: commitUrl == null
+                    ? null
+                    : const Icon(Icons.open_in_new, size: 18),
+                onTap: commitUrl == null
+                    ? null
+                    : () => _openExternalUrl(commitUrl.toString()),
+              );
+            },
           ),
           const Padding(
             padding: EdgeInsets.symmetric(vertical: 24),
@@ -801,16 +830,20 @@ class _AboutGroupTitle extends StatelessWidget {
 
 class _AboutRow extends StatelessWidget {
   const _AboutRow({
-    required this.icon,
+    this.icon,
+    this.leading,
     required this.title,
     required this.onTap,
     this.subtitle,
+    this.subtitleStyle,
     this.trailing,
-  });
+  }) : assert((icon != null) != (leading != null));
 
-  final IconData icon;
+  final IconData? icon;
+  final Widget? leading;
   final String title;
   final String? subtitle;
+  final TextStyle? subtitleStyle;
   final VoidCallback? onTap;
   final Widget? trailing;
 
@@ -818,13 +851,64 @@ class _AboutRow extends StatelessWidget {
   Widget build(BuildContext context) {
     return ListTile(
       contentPadding: const EdgeInsets.symmetric(horizontal: 4),
-      leading: Icon(icon),
+      leading: leading ?? Icon(icon),
       title: Text(title),
-      subtitle: subtitle == null ? null : Text(subtitle!),
-      trailing: trailing ?? const Icon(Icons.chevron_right),
+      subtitle: subtitle == null ? null : Text(subtitle!, style: subtitleStyle),
+      trailing:
+          trailing ?? (onTap == null ? null : const Icon(Icons.chevron_right)),
       onTap: onTap,
     );
   }
+}
+
+class _GitBranchIcon extends StatelessWidget {
+  const _GitBranchIcon();
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = IconTheme.of(context);
+    final color = theme.color ?? context.shuyoColors.textSecondary;
+    return SizedBox.square(
+      dimension: theme.size ?? 24,
+      child: CustomPaint(
+        painter: _GitBranchPainter(
+          color.withValues(alpha: color.a * (theme.opacity ?? 1)),
+        ),
+      ),
+    );
+  }
+}
+
+class _GitBranchPainter extends CustomPainter {
+  const _GitBranchPainter(this.color);
+
+  final Color color;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    canvas.scale(size.width / 24, size.height / 24);
+    final paint = Paint()
+      ..color = color
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 2
+      ..strokeCap = StrokeCap.round
+      ..strokeJoin = StrokeJoin.round;
+    canvas.drawLine(const Offset(6, 7), const Offset(6, 17), paint);
+    canvas.drawPath(
+      Path()
+        ..moveTo(6, 14)
+        ..lineTo(10, 14)
+        ..cubicTo(14.4, 14, 18, 10.4, 18, 7),
+      paint,
+    );
+    canvas.drawCircle(const Offset(6, 4.5), 2.5, paint);
+    canvas.drawCircle(const Offset(6, 19.5), 2.5, paint);
+    canvas.drawCircle(const Offset(18, 4.5), 2.5, paint);
+  }
+
+  @override
+  bool shouldRepaint(_GitBranchPainter oldDelegate) =>
+      color != oldDelegate.color;
 }
 
 class _PermissionInfoPage extends StatelessWidget {
