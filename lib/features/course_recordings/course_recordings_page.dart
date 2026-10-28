@@ -7,11 +7,14 @@ import '../../data/repositories/vod_repository.dart';
 import '../../data/services/vod_api_client.dart';
 import '../../data/services/vod_auth_service.dart';
 import '../../shared/navigation/shuyo_route.dart';
+import '../../shared/shuyo_text_styles.dart';
 import '../../shared/theme/shuyo_theme.dart';
 import '../../shared/widgets/empty_state.dart';
-import 'recording_lessons_page.dart';
+import 'recording_player_page.dart';
+import 'recording_status_icon.dart';
+import 'recording_term_menu.dart';
 
-/// The ordinary account catalog. Search never expands the permission scope.
+/// The ordinary account catalog.
 class CourseRecordingsPage extends StatefulWidget {
   const CourseRecordingsPage({
     super.key,
@@ -45,11 +48,10 @@ class _CourseRecordingsPageState extends State<CourseRecordingsPage> {
           useWebVpn: widget.useWebVpn,
         ),
       );
-  final _searchController = TextEditingController();
+  final _collapsedTermYears = <String>{};
   List<VodTerm> _terms = const [];
   List<VodCourse> _courses = const [];
   int? _selectedTermId;
-  String? _teacher;
   Object? _error;
   bool _checkingSession = true;
   bool _authenticated = false;
@@ -68,7 +70,6 @@ class _CourseRecordingsPageState extends State<CourseRecordingsPage> {
   @override
   void dispose() {
     _revision++;
-    _searchController.dispose();
     if (widget.repository == null) _repository.dispose();
     if (widget.authService == null) _auth.dispose();
     super.dispose();
@@ -143,7 +144,6 @@ class _CourseRecordingsPageState extends State<CourseRecordingsPage> {
         _terms = const [];
         _courses = const [];
         _selectedTermId = null;
-        _teacher = null;
       });
       await _load(force: true);
       return mounted && _authenticated;
@@ -199,17 +199,13 @@ class _CourseRecordingsPageState extends State<CourseRecordingsPage> {
       }
       final courses = selected == null
           ? <VodCourse>[]
-          : await _repository.loadCourses(
+          : await _repository.loadCatalog(
               termId: selected, forceRefresh: force);
       if (!mounted || revision != _revision) return;
       setState(() {
         _terms = terms;
         _selectedTermId = selected;
         _courses = courses;
-        if (_teacher != null &&
-            !courses.any((course) => course.teacherNames.contains(_teacher))) {
-          _teacher = null;
-        }
       });
     } on VodSessionExpiredException catch (error) {
       if (!mounted || revision != _revision) return;
@@ -228,7 +224,7 @@ class _CourseRecordingsPageState extends State<CourseRecordingsPage> {
     _openingCourse = true;
     try {
       await Navigator.of(context).push<void>(shuyoRoute(
-        builder: (_) => RecordingLessonsPage(
+        builder: (_) => RecordingPlayerPage(
           repository: _repository,
           course: course,
           onSessionExpired: _recoverSession,
@@ -239,6 +235,33 @@ class _CourseRecordingsPageState extends State<CourseRecordingsPage> {
     }
   }
 
+  Future<void> _chooseTerm() async {
+    final termId = await showRecordingTermMenu(
+      context,
+      terms: _terms,
+      selectedTermId: _selectedTermId,
+      collapsedYears: _collapsedTermYears,
+      onExpansionChanged: (year, expanded) {
+        if (expanded) {
+          _collapsedTermYears.remove(year);
+        } else {
+          _collapsedTermYears.add(year);
+        }
+      },
+    );
+    if (!mounted ||
+        !_authenticated ||
+        termId == null ||
+        termId == _selectedTermId) {
+      return;
+    }
+    setState(() {
+      _selectedTermId = termId;
+      _courses = const [];
+    });
+    await _load(termId: termId);
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -247,13 +270,10 @@ class _CourseRecordingsPageState extends State<CourseRecordingsPage> {
         actions: [
           if (_authenticated) ...[
             IconButton(
-              tooltip: '刷新课程',
-              onPressed: _loading ? null : () => _load(force: true),
-              icon: _loading
-                  ? const SizedBox.square(
-                      dimension: 20,
-                      child: CircularProgressIndicator(strokeWidth: 2.5))
-                  : const Icon(Icons.refresh),
+              key: const ValueKey('vod-term-filter'),
+              tooltip: '选择学期',
+              onPressed: _terms.isEmpty ? null : _chooseTerm,
+              icon: const Icon(Icons.format_list_bulleted),
             ),
           ],
         ],
@@ -300,46 +320,15 @@ class _CourseRecordingsPageState extends State<CourseRecordingsPage> {
         ),
       );
     }
-    final teachers = _courses
-        .expand((course) => course.teacherNames)
-        .toSet()
-        .toList()
-      ..sort();
-    final filtered = _repository.filterCourses(_courses,
-        keyword: _searchController.text, teacher: _teacher);
     return Column(children: [
       Padding(
         padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
-        child: Column(children: [
-          _filters(teachers),
-          const SizedBox(height: 12),
-          TextField(
-            key: const ValueKey('vod-course-search'),
-            controller: _searchController,
-            onChanged: (_) => setState(() {}),
-            decoration: InputDecoration(
-              hintText: '搜索课程、教师或课程代码',
-              prefixIcon: const Icon(Icons.search),
-              suffixIcon: _searchController.text.isEmpty
-                  ? null
-                  : IconButton(
-                      tooltip: '清空搜索',
-                      icon: const Icon(Icons.clear),
-                      onPressed: () => setState(_searchController.clear),
-                    ),
-              border: const OutlineInputBorder(),
-              isDense: true,
-            ),
-          ),
-          const SizedBox(height: 10),
-          Align(
-              alignment: Alignment.centerLeft,
-              child: Text(
-                '当前账号 · ${filtered.length} 门课程',
-                style: TextStyle(
-                    fontSize: 12, color: context.shuyoColors.textMuted),
-              )),
-        ]),
+        child: Align(
+            alignment: Alignment.centerLeft,
+            child: Text(
+              '当前账号 · ${_courses.length} 门课程',
+              style: ShuYoTextStyles.meta(color: context.shuyoColors.textMuted),
+            )),
       ),
       if (_loading) const LinearProgressIndicator(minHeight: 2),
       Expanded(
@@ -347,7 +336,7 @@ class _CourseRecordingsPageState extends State<CourseRecordingsPage> {
               ? _errorState()
               : RefreshIndicator(
                   onRefresh: () => _load(force: true),
-                  child: filtered.isEmpty
+                  child: _courses.isEmpty
                       ? LayoutBuilder(
                           builder: (context, constraints) => ListView(
                                 physics: const AlwaysScrollableScrollPhysics(),
@@ -355,119 +344,62 @@ class _CourseRecordingsPageState extends State<CourseRecordingsPage> {
                                   SizedBox(
                                       height: constraints.maxHeight,
                                       child: EmptyState(
-                                        icon: _courses.isEmpty
-                                            ? Icons.video_library_outlined
-                                            : Icons.search_off,
-                                        title: _courses.isEmpty
-                                            ? '本学期暂无可观看课程'
-                                            : '没有匹配的课程',
-                                        message: _courses.isEmpty
-                                            ? '可切换学期，或在课程回放生成后刷新。'
-                                            : '试试其他关键词，或将教师筛选改为全部教师。',
+                                        icon: Icons.video_library_outlined,
+                                        title: '本学期暂无可观看课程',
+                                        message: '可切换学期，或在课程回放生成后刷新。',
                                       )),
                                 ],
                               ))
                       : ListView.separated(
                           key: ValueKey('vod-courses:$_selectedTermId'),
                           physics: const AlwaysScrollableScrollPhysics(),
-                          padding: const EdgeInsets.fromLTRB(16, 0, 16, 24),
-                          itemCount: filtered.length,
-                          separatorBuilder: (_, __) =>
-                              const SizedBox(height: 8),
+                          padding: const EdgeInsets.only(bottom: 24),
+                          itemCount: _courses.length,
+                          separatorBuilder: (_, __) => const Divider(
+                            height: 1,
+                            indent: 72,
+                            endIndent: 16,
+                          ),
                           itemBuilder: (context, index) {
-                            final course = filtered[index];
-                            return Card(
-                              margin: EdgeInsets.zero,
-                              child: ListTile(
-                                key: ValueKey(
-                                    'vod-course:${course.teachingClassId}'),
-                                enabled: !_loading,
-                                leading: Icon(Icons.ondemand_video_outlined,
-                                    color: context.shuyoColors.accent),
-                                title: Text(course.name,
+                            final course = _courses[index];
+                            return ListTile(
+                              key: ValueKey(
+                                  'vod-course:${course.teachingClassId}'),
+                              enabled: !_loading,
+                              contentPadding: const EdgeInsets.symmetric(
+                                  horizontal: 16, vertical: 8),
+                              leading: Tooltip(
+                                message: course.isLive ? '正在直播' : '录播回放',
+                                child:
+                                    RecordingStatusIcon(isLive: course.isLive),
+                              ),
+                              title: Text(course.name,
+                                  style: ShuYoTextStyles.title(
+                                      color: context.shuyoColors.textPrimary),
+                                  maxLines: 2,
+                                  overflow: TextOverflow.ellipsis),
+                              subtitle: Padding(
+                                padding: const EdgeInsets.only(top: 6),
+                                child: Text(
+                                    [
+                                      course.teacherLabel.isEmpty
+                                          ? '教师信息暂未提供'
+                                          : course.teacherLabel,
+                                      if (course.code.isNotEmpty) course.code,
+                                    ].join(' · '),
+                                    style: ShuYoTextStyles.meta(
+                                        color:
+                                            context.shuyoColors.textSecondary),
                                     maxLines: 2,
                                     overflow: TextOverflow.ellipsis),
-                                subtitle: Padding(
-                                  padding: const EdgeInsets.only(top: 4),
-                                  child: Text([
-                                    course.teacherLabel.isEmpty
-                                        ? '教师信息暂未提供'
-                                        : course.teacherLabel,
-                                    if (course.code.isNotEmpty) course.code,
-                                  ].join(' · ')),
-                                ),
-                                trailing: const Icon(Icons.chevron_right),
-                                onTap: () => _openCourse(course),
                               ),
+                              trailing: const Icon(Icons.chevron_right),
+                              onTap: () => _openCourse(course),
                             );
                           },
                         ),
                 )),
     ]);
-  }
-
-  Widget _filters(List<String> teachers) {
-    final term = InputDecorator(
-      decoration: const InputDecoration(
-          labelText: '学期', border: OutlineInputBorder(), isDense: true),
-      child: DropdownButtonHideUnderline(
-          child: DropdownButton<int>(
-        key: const ValueKey('vod-term-filter'),
-        value: _selectedTermId,
-        isExpanded: true,
-        isDense: true,
-        items: [
-          for (final term in _terms)
-            DropdownMenuItem(
-                value: term.id,
-                child: Text(term.name, overflow: TextOverflow.ellipsis))
-        ],
-        onChanged: _loading
-            ? null
-            : (value) {
-                if (value == null || value == _selectedTermId) return;
-                setState(() {
-                  _selectedTermId = value;
-                  _teacher = null;
-                  _courses = const [];
-                });
-                unawaited(_load(termId: value));
-              },
-      )),
-    );
-    final teacher = InputDecorator(
-      decoration: const InputDecoration(
-          labelText: '教师', border: OutlineInputBorder(), isDense: true),
-      child: DropdownButtonHideUnderline(
-          child: DropdownButton<String>(
-        key: const ValueKey('vod-teacher-filter'),
-        value: _teacher ?? '',
-        isExpanded: true,
-        isDense: true,
-        items: [
-          const DropdownMenuItem(value: '', child: Text('全部教师')),
-          for (final name in teachers)
-            DropdownMenuItem(
-                value: name,
-                child: Text(name, overflow: TextOverflow.ellipsis)),
-        ],
-        onChanged: _loading
-            ? null
-            : (value) => setState(() {
-                  _teacher = value == null || value.isEmpty ? null : value;
-                }),
-      )),
-    );
-    return LayoutBuilder(builder: (_, constraints) {
-      if (constraints.maxWidth < 380) {
-        return Column(children: [term, const SizedBox(height: 12), teacher]);
-      }
-      return Row(children: [
-        Expanded(flex: 3, child: term),
-        const SizedBox(width: 12),
-        Expanded(flex: 2, child: teacher)
-      ]);
-    });
   }
 
   Widget _errorState() {
