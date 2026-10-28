@@ -26,6 +26,16 @@ class _FakeClient extends VodApiClient {
   int courseRequests = 0;
   int lessonRequests = 0;
   int playbackRequests = 0;
+  List<VodLesson> liveLessons = [];
+
+  @override
+  Future<List<VodLesson>> fetchLiveLessons(
+          {required int termId, int? teachingClassId}) async =>
+      liveLessons
+          .where((lesson) =>
+              teachingClassId == null ||
+              lesson.teachingClassId == teachingClassId)
+          .toList();
 
   @override
   Future<List<VodCourse>> fetchCourses({required int termId}) async {
@@ -62,6 +72,42 @@ class _FakeClient extends VodApiClient {
 }
 
 void main() {
+  test(
+      'unified catalog keeps live-only classes and combines live and recorded episodes',
+      () async {
+    final client = _FakeClient()
+      ..liveLessons = [
+        VodLesson(
+            id: 123,
+            teachingClassId: 42,
+            name: '程序设计',
+            isPlayable: true,
+            isLive: true,
+            beginTime: DateTime(2026, 10, 28),
+            catalogCourse: _course),
+        const VodLesson(
+            id: 900,
+            teachingClassId: 99,
+            name: '仅直播课程',
+            isPlayable: true,
+            isLive: true,
+            catalogCourse:
+                VodCourse(teachingClassId: 99, termId: 7, name: '仅直播课程')),
+      ];
+    final repository = VodRepository(apiClient: client);
+    addTearDown(repository.dispose);
+    final courses = await repository.loadCatalog(termId: 7);
+    expect(
+        courses.map((course) => course.teachingClassId), containsAll([42, 99]));
+    expect(courses.every((course) => course.isLive), isTrue);
+    expect(courses.firstWhere((course) => course.teachingClassId == 42).code,
+        'CS101');
+    final lessons = await repository.loadCourseLessons(_course);
+    expect(lessons, hasLength(1));
+    expect(lessons.single.id, 123);
+    expect(lessons.single.isLive, isTrue);
+  });
+
   test('concurrent catalog reads share one request', () async {
     final response = Completer<List<VodCourse>>();
     final client = _FakeClient(coursesFuture: response.future);

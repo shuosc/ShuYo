@@ -2,6 +2,10 @@
 <network-security-config>
     <base-config cleartextTrafficPermitted="false" />
 
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">127.0.0.1</domain>
+    </domain-config>
+
     <!-- Some SHU services still redirect through HTTP during SSO. -->
     <domain-config cleartextTrafficPermitted="true">
         <domain includeSubdomains="true">shu.edu.cn</domain>

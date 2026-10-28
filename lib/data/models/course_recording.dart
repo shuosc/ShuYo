@@ -5,6 +5,8 @@ class VodTerm {
   const VodTerm({
     required this.id,
     required this.name,
+    this.academicYear = '',
+    this.termNumber = 0,
     this.isCurrent = false,
     this.startDate,
     this.endDate,
@@ -16,6 +18,8 @@ class VodTerm {
     return VodTerm(
       id: intValue(json['id']),
       name: year.isEmpty ? '第$number学期' : '$year学年第$number学期',
+      academicYear: year,
+      termNumber: number,
       isCurrent: json['currentTerm'] == true,
       startDate: vodDateValue(json['acteBeginDate']),
       endDate: vodDateValue(json['acteEndDate']),
@@ -24,9 +28,22 @@ class VodTerm {
 
   final int id;
   final String name;
+  final String academicYear;
+  final int termNumber;
   final bool isCurrent;
   final DateTime? startDate;
   final DateTime? endDate;
+
+  String get academicYearLabel => academicYear.isEmpty
+      ? '其他学年'
+      : '${academicYear.split('-').map((year) => year.length == 4 ? year.substring(2) : year).join('-')}学年';
+
+  String get seasonLabel => switch (termNumber) {
+        1 => '秋季学期',
+        2 => '春季学期',
+        3 => '夏季学期',
+        _ => name,
+      };
 }
 
 /// One teaching class from the account's ordinary VOD catalog.
@@ -42,6 +59,7 @@ class VodCourse {
     this.teacherNames = const [],
     this.lessonCount = 0,
     this.coverUrl,
+    this.liveLesson,
   });
 
   factory VodCourse.fromJson(JsonMap json) {
@@ -72,11 +90,25 @@ class VodCourse {
   final List<String> teacherNames;
   final int lessonCount;
   final String? coverUrl;
+  final VodLesson? liveLesson;
+
+  bool get isLive => liveLesson?.isLiveAvailable ?? false;
+
+  VodCourse withLiveLesson(VodLesson lesson) => VodCourse(
+        teachingClassId: teachingClassId,
+        termId: termId,
+        name: name,
+        teachingClassName: teachingClassName,
+        code: code,
+        teacherNames: teacherNames,
+        lessonCount: lessonCount,
+        coverUrl: coverUrl,
+        liveLesson: lesson,
+      );
 
   String get teacherLabel => teacherNames.join('、');
 }
 
-/// A scheduled lesson. Only completed, enabled, undeleted recordings are shown.
 class VodLesson {
   const VodLesson({
     required this.id,
@@ -89,6 +121,12 @@ class VodLesson {
     this.sectionLabel = '',
     this.classroom = '',
     this.watchPercent,
+    this.isLive = false,
+    this.isGenerating = false,
+    this.isListed = false,
+    this.liveStartTime,
+    this.liveEndTime,
+    this.catalogCourse,
   });
 
   factory VodLesson.fromJson(JsonMap json) {
@@ -104,10 +142,38 @@ class VodLesson {
       sectionLabel: section > 0 ? '第$section节' : '',
       classroom: stringValue(json['clroName']),
       watchPercent: _optionalString(json['watchPercent']),
+      isListed: intValue(json['vodEnable'], -1) == 1 &&
+          intValue(json['vodDeleteStatus'], -1) == 0,
+      isGenerating: intValue(json['vodEnable'], -1) == 1 &&
+          intValue(json['vodDeleteStatus'], -1) == 0 &&
+          (intValue(json['vodDisplayStatus']) == 1 ||
+              intValue(json['vodStatusShow']) == 4),
       isPlayable: generated &&
           intValue(json['vodEnable'], -1) == 1 &&
           intValue(json['vodClickEnable'], -1) == 1 &&
           intValue(json['vodDeleteStatus'], -1) == 0,
+    );
+  }
+
+  factory VodLesson.fromLiveJson(JsonMap json) {
+    final section = intValue(json['letiNumber']);
+    return VodLesson(
+      id: intValue(json['id']),
+      teachingClassId: intValue(json['teclId']),
+      name: stringValue(json['subjName'], stringValue(json['teclName'])),
+      isLive: true,
+      catalogCourse: VodCourse.fromJson(json),
+      isPlayable: intValue(json['liveType'], -1) == 0 &&
+          intValue(json['liveEnable'], -1) != 0 &&
+          intValue(json['courLiveOpen'], -1) != 0 &&
+          intValue(json['livevodEnable'], -1) != 0,
+      beginTime: vodDateValue(json['courBeginTime']),
+      endTime: vodDateValue(json['courEndTime']),
+      liveStartTime: vodDateValue(json['liveStartTime']),
+      liveEndTime: vodDateValue(json['liveEndTime']),
+      weekNumber: intValue(json['weekNo'], intValue(json['weekNumber'])),
+      sectionLabel: section > 0 ? '第$section节' : '',
+      classroom: stringValue(json['clroName']),
     );
   }
 
@@ -121,6 +187,27 @@ class VodLesson {
   final String classroom;
   final String? watchPercent;
   final bool isPlayable;
+  final bool isLive;
+  final bool isGenerating;
+  final bool isListed;
+  final DateTime? liveStartTime;
+  final DateTime? liveEndTime;
+  final VodCourse? catalogCourse;
+
+  bool get isLiveAvailable =>
+      isLive &&
+      isPlayable &&
+      (liveEndTime == null || DateTime.now().isBefore(liveEndTime!));
+
+  bool get canPlay => isLive ? isLiveAvailable : isPlayable;
+
+  String get statusLabel => isLive
+      ? (isLiveAvailable ? '正在直播' : '直播已结束')
+      : isGenerating && !isPlayable
+          ? '回放生成中'
+          : isPlayable
+              ? '录播回放'
+              : '暂不可看';
 }
 
 class VodView {
@@ -128,6 +215,7 @@ class VodView {
     required this.viewNumber,
     required this.url,
     this.httpHeaders = const {},
+    this.displayLabel,
   });
 
   final int viewNumber;
@@ -137,8 +225,11 @@ class VodView {
 
   /// Headers scoped to this media target, never copied from the API request.
   final Map<String, String> httpHeaders;
+  final String? displayLabel;
 
-  String get label => switch (viewNumber) {
+  String get label =>
+      displayLabel ??
+      switch (viewNumber) {
         1 => '教师视角 1',
         2 => '教师视角 2',
         3 => '学生视角 1',
@@ -159,6 +250,8 @@ class VodPlayback {
     required this.views,
     this.lastPosition = Duration.zero,
     this.voiceChannel,
+    this.isLive = false,
+    this.description = '',
   });
 
   final int lessonId;
@@ -167,6 +260,8 @@ class VodPlayback {
   final List<VodView> views;
   final Duration lastPosition;
   final int? voiceChannel;
+  final bool isLive;
+  final String description;
 }
 
 DateTime? vodDateValue(Object? value) {

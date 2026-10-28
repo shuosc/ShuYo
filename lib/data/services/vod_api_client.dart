@@ -4,6 +4,7 @@ import 'dart:io';
 
 import 'package:http/http.dart' as http;
 import 'package:http/io_client.dart';
+import 'package:flutter/foundation.dart' show debugPrint;
 
 import '../../core/vod_url_resolver.dart';
 import '../models/common.dart';
@@ -48,6 +49,11 @@ class VodInvalidResponseException extends VodApiException {
 }
 
 typedef VodHeadersLoader = Future<Map<String, String>> Function(Uri target);
+
+class VodLiveUnavailableException extends VodApiException {
+  const VodLiveUnavailableException(super.message);
+}
+
 typedef VodUriResolver = Uri Function(
   String path,
   Map<String, String> queryParameters,
@@ -95,6 +101,13 @@ class VodApiClient {
     if (decoded is! List) throw const VodInvalidResponseException();
     final terms = decoded
         .whereType<JsonMap>()
+        .where((json) {
+          final startYear = int.tryParse(
+              stringValue(json['acyeCode']).trim().split('-').first);
+          return startYear != null &&
+              startYear >= 2025 &&
+              intValue(json['acteTerm']) >= 1;
+        })
         .map(VodTerm.fromJson)
         .where((term) => term.id > 0)
         .toList(growable: false)
@@ -147,8 +160,9 @@ class VodApiClient {
       if (lesson.id <= 0 || lesson.teachingClassId != course.teachingClassId) {
         throw const VodInvalidResponseException('录播课次与所选教学班不一致，请刷新重试');
       }
-      // No live, generating, missing, deleted, or disabled recordings.
-      if (lesson.isPlayable) lessons[lesson.id] = lesson;
+      if (lesson.isPlayable || lesson.isGenerating || lesson.isListed) {
+        lessons[lesson.id] = lesson;
+      }
     }
     final sorted = lessons.values.toList(growable: false)
       ..sort((a, b) {
@@ -159,7 +173,8 @@ class VodApiClient {
     return List.unmodifiable(sorted);
   }
 
-  Future<void> checkTeachingClassPermission(int teachingClassId) async {
+  Future<void> checkTeachingClassPermission(int teachingClassId,
+      {bool isLive = false}) async {
     final result = _dataMap(await _get(
       '/v1/course-role-permission/teaching-class/resources',
       {'teclId': '$teachingClassId'},
@@ -170,10 +185,149 @@ class VodApiClient {
         .whereType<JsonMap>()
         .map((resource) => resource['sign'])
         .toSet();
-    if (!signs.contains('p2-video-page') ||
-        !signs.contains('p2-video-playback-view')) {
+    if (isLive
+        ? !signs.contains('p2-live-page')
+        : !signs.contains('p2-video-page') ||
+            !signs.contains('p2-video-playback-view')) {
       throw const VodPermissionException();
     }
+  }
+
+  Future<List<VodLesson>> fetchLiveLessons(
+      {required int termId, int? teachingClassId}) async {
+    final records = await _readAll(
+      '/v1/vod_live/t-1',
+      {
+        'acteId': '$termId',
+        'liveType': '0',
+        if (teachingClassId != null) 'teclId': '$teachingClassId'
+      },
+      identityField: 'id',
+      orderBy: 'courBeginTime',
+      ascending: false,
+    );
+    final lessons = <VodLesson>[];
+    for (final record in records) {
+      final lesson = VodLesson.fromLiveJson(record);
+      if (intValue(record['acteId']) != termId ||
+          lesson.id <= 0 ||
+          lesson.teachingClassId <= 0 ||
+          (teachingClassId != null &&
+              lesson.teachingClassId != teachingClassId)) {
+        throw const VodInvalidResponseException('直播课次与所选学期或教学班不一致，请刷新重试');
+      }
+      if (lesson.isLiveAvailable) lessons.add(lesson);
+    }
+    return List.unmodifiable(lessons);
+  }
+
+  Future<VodPlayback> fetchLivePlayback(
+      {required VodCourse course, required VodLesson lesson}) async {
+    if (!lesson.isLiveAvailable ||
+        lesson.teachingClassId != course.teachingClassId) {
+      throw const VodPermissionException('这节课当前没有可观看的直播');
+    }
+    await checkTeachingClassPermission(course.teachingClassId, isLive: true);
+    final verified =
+        _dataMap(await _get('/v1/course/verify', {'courId': '${lesson.id}'}));
+    if (verified['verify'] != true) throw const VodPermissionException();
+    final response = await _get('/v1/course_vod_videoinfos',
+        {'courseId': '${lesson.id}', 'playType': '3'});
+    final data = _dataMap(response);
+    debugPrint(
+        'ShuYoVOD live detail: permission=${data['lvcrLiveStatus']}, views=${data['courseDeviceViewDtoList'] is List ? (data['courseDeviceViewDtoList'] as List).length : -1}, start=${data['liveStartTime'] != null}, end=${data['liveEndTime'] != null}');
+    if (intValue(data['lvcrLiveStatus'], -1) != 1) {
+      throw const VodPermissionException();
+    }
+    if (intValue(data['id']) != lesson.id ||
+        intValue(data['teclId']) != course.teachingClassId) {
+      throw const VodInvalidResponseException('直播详情与所选课次不一致，请刷新重试');
+    }
+    final now = response is JsonMap
+        ? vodDateValue(response['timestamp']) ?? DateTime.now()
+        : DateTime.now();
+    final start = vodDateValue(data['liveStartTime']);
+    final end = vodDateValue(data['liveEndTime']);
+    if (start == null ||
+        end == null ||
+        now.isBefore(start) ||
+        !now.isBefore(end)) {
+      throw const VodLiveUnavailableException('当前不在这节课的直播时间内');
+    }
+    final rawViews = data['courseDeviceViewDtoList'];
+    if (rawViews is! List) throw const VodInvalidResponseException();
+    debugPrint(
+        'ShuYoVOD live device states: ${rawViews.whereType<JsonMap>().map((device) => intValue(device['deviceStatus'], -1)).join(',')}');
+    final views = <VodView>[];
+    for (final value in rawViews.whereType<JsonMap>()) {
+      if (intValue(value['deviceStatus'], -1) != 0) continue;
+      final hls = stringValue(value['chanNameMainHlsPlayUrl']).trim();
+      final source = hls.isNotEmpty
+          ? hls
+          : stringValue(value['chanNameMainPlayUrl']).trim();
+      if (source.isEmpty) continue;
+      final token = stringValue(value['mainTokenStr']);
+      final original = Uri.tryParse(source);
+      debugPrint(
+          'ShuYoVOD live source: device=${value['deviceStatus']}, scheme=${original?.scheme}, host=${original?.host}, port=${original?.port}');
+      if (original == null || original.hasFragment) {
+        throw const VodInvalidResponseException();
+      }
+      final rawUrl = token.isEmpty ||
+              original.queryParameters.containsKey('account_token')
+          ? source
+          : '$source${original.hasQuery ? '&' : '?'}account_token=${Uri.encodeQueryComponent(token)}';
+      final Uri url;
+      try {
+        url = _providedMediaUrlResolver?.call(rawUrl) ??
+            VodUrlResolver.resolveMediaUrl(rawUrl, useWebVpn: useWebVpn);
+      } on Object {
+        throw const VodInvalidResponseException('暂不支持此直播资源地址');
+      }
+      if (!['https', 'http'].contains(url.scheme) ||
+          url.host.isEmpty ||
+          url.userInfo.isNotEmpty) {
+        throw const VodInvalidResponseException();
+      }
+      final number = intValue(value['deviViewNum'], -1);
+      views.add(VodView(
+        viewNumber: number,
+        url: url,
+        httpHeaders: await mediaHeadersFor(url),
+        displayLabel: '直播视角 ${views.length + 1}',
+      ));
+    }
+    if (views.isEmpty) {
+      final devices = rawViews.whereType<JsonMap>().toList();
+      if (devices.isNotEmpty &&
+          devices.every((device) => intValue(device['deviceStatus'], -1) > 0)) {
+        throw const VodLiveUnavailableException('直播设备当前离线，请稍后重试');
+      }
+      throw const VodLiveUnavailableException('直播设备暂未提供可播放的画面');
+    }
+    return VodPlayback(
+      lessonId: lesson.id,
+      teachingClassId: course.teachingClassId,
+      title: stringValue(data['courName'], course.name),
+      views: List.unmodifiable(views),
+      isLive: true,
+      description: stringValue(
+          data['description'], stringValue(data['teclDescription'])),
+    );
+  }
+
+  Future<Map<String, String>> mediaHeadersFor(Uri target) async {
+    final headers = Map<String, String>.of(
+        await (_providedMediaHeadersLoader?.call(target) ??
+            _authService.mediaHeadersFor(target, useWebVpn: useWebVpn)));
+    headers.removeWhere((name, _) =>
+        ['jwt-token', 'authorization'].contains(name.toLowerCase()));
+    return Map.unmodifiable(headers);
+  }
+
+  Future<void> keepLiveAlive(VodCourse course, VodLesson lesson) async {
+    await _get('/v1/live/keepAlive', const {},
+        {'courId': lesson.id, 'subjCode': course.code});
   }
 
   Future<VodPlayback> fetchPlayback({
@@ -247,6 +401,8 @@ class VodApiClient {
       lastPosition: Duration(seconds: seconds < 0 ? 0 : seconds),
       voiceChannel:
           data['voiceChannel'] == null ? null : intValue(data['voiceChannel']),
+      description: stringValue(
+          data['description'], stringValue(data['teclDescription'])),
     );
   }
 
@@ -308,13 +464,14 @@ class VodApiClient {
   Future<Object?> _get(
     String path, [
     Map<String, String> params = const {},
+    JsonMap? body,
   ]) async {
     if (_disposed) throw const VodSessionExpiredException();
     final ownsAuthentication = _providedHeadersLoader == null;
     if (ownsAuthentication) await _ensureSession();
     for (var attempt = 0; attempt < 2; attempt++) {
       try {
-        return await _getOnce(path, params);
+        return await _getOnce(path, params, body);
       } on _VodBusinessSessionExpired {
         if (!ownsAuthentication) throw const VodSessionExpiredException();
         if (attempt == 1) {
@@ -352,6 +509,7 @@ class VodApiClient {
   Future<Object?> _getOnce(
     String path,
     Map<String, String> params,
+    JsonMap? body,
   ) async {
     if (_disposed) throw const VodSessionExpiredException();
     final uri = _providedUriResolver?.call(path, params) ??
@@ -363,9 +521,13 @@ class VodApiClient {
     final headers = await _headers(uri);
     final http.Response response;
     try {
-      final request = http.Request('GET', uri)
+      final request = http.Request(body == null ? 'GET' : 'POST', uri)
         ..followRedirects = false
         ..headers.addAll({'Accept': 'application/json', ...headers});
+      if (body != null) {
+        request.headers['Content-Type'] = 'application/json';
+        request.body = jsonEncode(body);
+      }
       response = await HttpTimeout.request(
         http.Response.fromStream(await HttpTimeout.request(
           _httpClient.send(request),

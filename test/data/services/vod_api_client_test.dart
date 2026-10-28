@@ -126,7 +126,47 @@ void main() {
     final terms = await client.fetchTerms();
     expect(terms.map((term) => term.id), [7, 6]);
     expect(terms.first.name, '2026-2027学年第1学期');
+    expect(terms.first.academicYear, '2026-2027');
+    expect(terms.first.termNumber, 1);
+    expect(terms.first.academicYearLabel, '26-27学年');
+    expect(terms.first.seasonLabel, '秋季学期');
     expect(terms.first.startDate?.millisecondsSinceEpoch, 1789344000000);
+  });
+
+  test('term catalog starts at the first term of 2025-2026', () async {
+    final client = _client((request) async => http.Response(
+        jsonEncode([
+          {
+            'id': 99,
+            'acyeCode': '2024-2025',
+            'acteTerm': 3,
+            'currentTerm': true,
+          },
+          {'id': 98, 'acyeCode': '2023-2024', 'acteTerm': 1},
+          {'id': 5, 'acyeCode': '2025-2026', 'acteTerm': 1},
+          {'id': 6, 'acyeCode': '2025-2026', 'acteTerm': 2},
+          {'id': 7, 'acyeCode': '2026-2027', 'acteTerm': 1},
+          {'id': 8, 'acyeCode': '2025-2026', 'acteTerm': 0},
+          {'id': 9, 'acteTerm': 1},
+        ]),
+        200));
+    addTearDown(client.dispose);
+
+    final terms = await client.fetchTerms();
+    expect(terms.map((term) => term.id), [7, 6, 5]);
+    expect(terms.last.name, '2025-2026学年第1学期');
+  });
+
+  test('term catalog is empty when all terms predate 2025-2026', () async {
+    final client = _client((request) async => http.Response(
+        jsonEncode([
+          {'id': 4, 'acyeCode': '2024-2025', 'acteTerm': 3},
+          {'id': 3, 'acyeCode': '2024-2025', 'acteTerm': 2},
+        ]),
+        200));
+    addTearDown(client.dispose);
+
+    expect(await client.fetchTerms(), isEmpty);
   });
 
   test('ordinary class catalog follows all pages with no global flags',
@@ -214,7 +254,8 @@ void main() {
         throwsA(isA<VodInvalidResponseException>()));
   });
 
-  test('lesson list excludes live, generating, deleted and disabled entries',
+  test(
+      'lesson list retains unavailable recordings but removes deleted and disabled entries',
       () async {
     final client = _client((request) async {
       if (request.url.path.endsWith('/resources')) {
@@ -243,8 +284,10 @@ void main() {
     });
     addTearDown(client.dispose);
     final lessons = await client.fetchLessons(_course);
-    expect(lessons.map((lesson) => lesson.id), [1]);
-    expect(lessons.single.beginTime?.hour, 8);
+    expect(lessons.map((lesson) => lesson.id), [1, 3, 5, 6]);
+    expect(lessons.where((lesson) => lesson.canPlay).map((lesson) => lesson.id),
+        [1]);
+    expect(lessons.first.beginTime?.hour, 8);
   });
 
   test('viewer resource permission is required before listing lessons',
