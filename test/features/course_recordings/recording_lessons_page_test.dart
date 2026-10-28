@@ -230,7 +230,7 @@ void main() {
     final player =
         tester.widget<RecordingPlayerPage>(find.byType(RecordingPlayerPage));
     expect(player.course.teachingClassId, 42);
-    expect(player.initialLesson.id, 2);
+    expect(player.initialLesson!.id, 2);
     expect(player.lessons.map((lesson) => lesson.id), [1, 2]);
     await tester.pumpWidget(const SizedBox.shrink());
   });

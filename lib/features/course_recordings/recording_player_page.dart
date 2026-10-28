@@ -8,11 +8,18 @@ import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 
 import '../../data/models/course_recording.dart';
+import '../../data/repositories/vod_repository.dart';
 import '../../data/services/vod_api_client.dart';
+import '../../data/services/vod_live_stream_proxy.dart';
 import '../../shared/shuyo_text_styles.dart';
 import '../../shared/theme/shuyo_theme.dart';
+import 'recording_status_icon.dart';
+import 'recording_secondary_video.dart';
+import 'recording_video_controls.dart';
 
-/// A route for generated, account-authorized recordings only.
+export 'recording_video_controls.dart';
+
+/// A route for account-authorized live lessons and recordings.
 ///
 /// Sources are requested again for every lesson change and retry. Signed URLs
 /// stay in this route's memory and never become widget keys or stored history.
@@ -20,16 +27,18 @@ class RecordingPlayerPage extends StatefulWidget {
   const RecordingPlayerPage({
     super.key,
     required this.course,
-    required this.lessons,
-    required this.initialLesson,
-    required this.loadPlayback,
+    this.lessons = const [],
+    this.initialLesson,
+    this.loadPlayback,
+    this.repository,
     this.onSessionExpired,
   });
 
   final VodCourse course;
   final List<VodLesson> lessons;
-  final VodLesson initialLesson;
-  final Future<VodPlayback> Function(VodLesson) loadPlayback;
+  final VodLesson? initialLesson;
+  final Future<VodPlayback> Function(VodLesson)? loadPlayback;
+  final VodRepository? repository;
   final Future<bool> Function()? onSessionExpired;
 
   @override
@@ -38,13 +47,24 @@ class RecordingPlayerPage extends StatefulWidget {
 
 enum _PlaybackFailure { session, permission, network, unavailable, media }
 
-class _RecordingPlayerPageState extends State<RecordingPlayerPage> {
+class _RecordingPlayerPageState extends State<RecordingPlayerPage>
+    with WidgetsBindingObserver {
   final _videoKey = GlobalKey<VideoState>();
   final _controlsRevision = ValueNotifier(0);
   Player? _player;
   VideoController? _videoController;
   StreamSubscription<String>? _errorSubscription;
-  late VodLesson _lesson = widget.initialLesson;
+  late VodLesson _lesson = widget.initialLesson ??
+      const VodLesson(id: 0, teachingClassId: 0, name: '', isPlayable: false);
+  late List<VodLesson> _catalog = widget.lessons;
+  VodLiveStreamProxy? _liveProxy;
+  Timer? _heartbeatTimer;
+  Timer? _liveEndTimer;
+  bool _foreground = true;
+  bool _resumeLive = false;
+  bool _heartbeatPending = false;
+  bool _catalogLoading = false;
+  int _catalogRevision = 0;
   VodPlayback? _playback;
   int _viewIndex = 0;
   int? _loadedLessonId;
@@ -54,24 +74,174 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage> {
   bool _recovering = false;
   bool _softwareDecoding = false;
   bool _fullscreenActive = false;
+  bool _episodePanelVisible = false;
+  bool _dualEnabled = false;
+  Player? _secondaryPlayer;
+  VideoController? _secondaryController;
+  final _syncSubscriptions = <StreamSubscription<dynamic>>[];
+  StreamSubscription<String>? _secondaryErrorSubscription;
+  Future<void> _secondaryQueue = Future<void>.value();
+  int _secondaryRevision = 0;
+  bool _secondaryLoading = false;
+  bool _secondaryFailed = false;
+  bool _syncingSecondary = false;
+  String _aspect = '自动';
+  String _preferredView = '教室';
   _PlaybackFailure? _failure;
+  String? _failureMessage;
 
-  List<VodLesson> get _lessons => widget.lessons
+  List<VodLesson> get _lessons => _catalog
       .where((lesson) =>
-          lesson.isPlayable &&
+          (lesson.isPlayable ||
+              lesson.isGenerating ||
+              lesson.isLive ||
+              lesson.isListed) &&
           lesson.teachingClassId == widget.course.teachingClassId)
-      .toList(growable: false);
+      .toList(growable: false)
+    ..sort((first, second) {
+      final time = (second.beginTime?.millisecondsSinceEpoch ?? 0)
+          .compareTo(first.beginTime?.millisecondsSinceEpoch ?? 0);
+      return time == 0 ? second.id.compareTo(first.id) : time;
+    });
 
   @override
   void initState() {
     super.initState();
-    unawaited(_loadLesson(_lesson));
+    WidgetsBinding.instance.addObserver(this);
+    if (_isMobile) {
+      unawaited(SystemChrome.setPreferredOrientations(
+          [DeviceOrientation.portraitUp]));
+    }
+    unawaited(
+        widget.repository == null ? _loadLesson(_lesson) : _loadCatalog());
+  }
+
+  Future<void> _loadCatalog({bool forceRefresh = false}) async {
+    final repository = widget.repository;
+    if (repository == null || _catalogLoading) return;
+    final revision = ++_catalogRevision;
+    _publish(() => _catalogLoading = true);
+    try {
+      final lessons = await repository.loadCourseLessons(widget.course,
+          forceRefresh: forceRefresh);
+      if (!mounted || revision != _catalogRevision) return;
+      _publish(() {
+        _catalog = lessons;
+        _catalogLoading = false;
+      });
+      final ordered = _lessons;
+      final current = ordered
+          .where((lesson) =>
+              lesson.id == _lesson.id &&
+              lesson.isLive == _lesson.isLive &&
+              lesson.canPlay)
+          .firstOrNull;
+      final selected = current ??
+          ordered.where((lesson) => lesson.isLiveAvailable).firstOrNull ??
+          ordered.where((lesson) => lesson.canPlay).firstOrNull;
+      if (selected != null) {
+        if (current == null || _playback == null || _failure != null) {
+          await _loadLesson(selected);
+        }
+      } else {
+        await _player?.pause();
+        _stopLiveTimers();
+        _publish(() {
+          _loading = false;
+          _failure = null;
+          _playback = null;
+        });
+      }
+    } on Object catch (error) {
+      if (!mounted || revision != _catalogRevision) return;
+      if (_playback != null &&
+          error is! VodSessionExpiredException &&
+          error is! VodPermissionException) {
+        _publish(() => _catalogLoading = false);
+        ScaffoldMessenger.of(context)
+            .showSnackBar(const SnackBar(content: Text('选集刷新失败，请稍后下拉重试')));
+        return;
+      }
+      _stopLiveTimers();
+      await _player?.pause();
+      if (!mounted || revision != _catalogRevision) return;
+      _publish(() {
+        _catalogLoading = false;
+        _loading = false;
+        _failure = switch (error) {
+          VodSessionExpiredException() => _PlaybackFailure.session,
+          VodPermissionException() => _PlaybackFailure.permission,
+          VodNetworkException() => _PlaybackFailure.network,
+          _ => _PlaybackFailure.unavailable,
+        };
+      });
+    }
+  }
+
+  void _stopLiveTimers() {
+    _heartbeatTimer?.cancel();
+    _heartbeatTimer = null;
+    _liveEndTimer?.cancel();
+    _liveEndTimer = null;
+  }
+
+  Future<void> _heartbeat(int revision) async {
+    if (!_foreground ||
+        revision != _loadRevision ||
+        _heartbeatPending ||
+        _player?.state.playing != true) {
+      return;
+    }
+    _heartbeatPending = true;
+    try {
+      await widget.repository?.keepLiveAlive(widget.course, _lesson);
+    } on VodSessionExpiredException {
+      if (mounted && revision == _loadRevision) {
+        _stopLiveTimers();
+        await _player?.pause();
+        _publish(() => _failure = _PlaybackFailure.session);
+      }
+    } on VodPermissionException {
+      if (mounted && revision == _loadRevision) {
+        _stopLiveTimers();
+        await _player?.pause();
+        _publish(() => _failure = _PlaybackFailure.permission);
+      }
+    } on Object {
+      return;
+    } finally {
+      _heartbeatPending = false;
+    }
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    _foreground = state == AppLifecycleState.resumed;
+    if (!_foreground) {
+      _resumeLive =
+          _resumeLive || _lesson.isLive && (_player?.state.playing ?? false);
+      _stopLiveTimers();
+      unawaited(_player?.pause());
+      unawaited(_secondaryPlayer?.pause());
+    } else if (_resumeLive) {
+      _resumeLive = false;
+      unawaited(_loadLesson(_lesson));
+    }
   }
 
   @override
   void dispose() {
     _loadRevision++;
-    if (_fullscreenActive) unawaited(_exitFullscreen());
+    _catalogRevision++;
+    _secondaryRevision++;
+    WidgetsBinding.instance.removeObserver(this);
+    _stopLiveTimers();
+    unawaited(_liveProxy?.dispose());
+    unawaited(_restoreOrientation());
+    for (final subscription in _syncSubscriptions) {
+      unawaited(subscription.cancel());
+    }
+    unawaited(_releasePlayer(_secondaryPlayer, _secondaryErrorSubscription));
     // Video owns wake lock and application lifecycle handling. The route owns
     // Player and releases its native decoder, streams and network requests.
     unawaited(_releasePlayer(_player, _errorSubscription));
@@ -86,18 +256,28 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage> {
   }
 
   bool _validLesson(VodLesson lesson) =>
-      lesson.isPlayable &&
+      lesson.canPlay &&
       lesson.teachingClassId == widget.course.teachingClassId &&
-      widget.lessons.any((item) => item.id == lesson.id && item.isPlayable);
+      _catalog.any((item) =>
+          item.id == lesson.id && item.isLive == lesson.isLive && item.canPlay);
 
   Future<void> _loadLesson(VodLesson lesson, {bool resume = false}) async {
     final revision = ++_loadRevision;
+    _secondaryRevision++;
+    unawaited(_secondaryPlayer?.pause());
+    if (lesson.id != _lesson.id) _preferredView = '教室';
+    _stopLiveTimers();
+    final oldProxy = _liveProxy;
+    _liveProxy = null;
+    await oldProxy?.dispose();
+    if (!mounted || revision != _loadRevision) return;
     final oldPosition =
         resume && _loadedLessonId == lesson.id ? _player?.state.position : null;
     _publish(() {
       _lesson = lesson;
       _loading = true;
       _failure = null;
+      _failureMessage = null;
       _playback = null;
     });
     if (!_validLesson(lesson)) {
@@ -109,11 +289,14 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage> {
     }
     try {
       await _player?.pause();
-      final playback = await widget.loadPlayback(lesson);
+      final playback = await (widget.loadPlayback?.call(lesson) ??
+          widget.repository!
+              .preparePlayback(course: widget.course, lesson: lesson));
       if (!mounted || revision != _loadRevision) return;
       if (playback.lessonId != lesson.id ||
           playback.teachingClassId != widget.course.teachingClassId ||
           playback.views.isEmpty ||
+          playback.isLive != lesson.isLive ||
           playback.views.any((view) =>
               !const ['http', 'https'].contains(view.url.scheme) ||
               view.url.host.isEmpty ||
@@ -124,18 +307,50 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage> {
         });
         return;
       }
+      final classroom =
+          playback.views.where((view) => view.viewNumber == 1).firstOrNull ??
+              playback.views.where((view) => view.viewNumber != 5).firstOrNull;
+      final ppt =
+          playback.views.where((view) => view.viewNumber == 5).firstOrNull;
+      final views = <VodView>[
+        if (classroom != null)
+          VodView(
+              viewNumber: classroom.viewNumber,
+              url: classroom.url,
+              httpHeaders: classroom.httpHeaders,
+              displayLabel: '教室'),
+        if (ppt != null)
+          VodView(
+              viewNumber: ppt.viewNumber,
+              url: ppt.url,
+              httpHeaders: ppt.httpHeaders,
+              displayLabel: 'PPT'),
+      ];
+      final selected = views.indexWhere((view) => view.label == _preferredView);
       _publish(() {
-        _playback = playback;
-        _viewIndex = 0;
+        _playback = VodPlayback(
+            lessonId: playback.lessonId,
+            teachingClassId: playback.teachingClassId,
+            title: playback.title,
+            views: views,
+            lastPosition: playback.lastPosition,
+            voiceChannel: playback.voiceChannel,
+            isLive: playback.isLive,
+            description: playback.description);
+        _viewIndex = selected < 0 ? 0 : selected;
       });
       await _openView(
-        0,
+        _viewIndex,
         revision: revision,
-        position: oldPosition ?? playback.lastPosition,
+        position: lesson.isLive ? null : oldPosition ?? playback.lastPosition,
       );
     } on Object catch (error) {
       if (!mounted || revision != _loadRevision) return;
+      debugPrint(
+          'ShuYoVOD playback failure: ${error.runtimeType}, status=${error is VodApiException ? error.statusCode : null}');
       _publish(() {
+        _failureMessage =
+            error is VodLiveUnavailableException ? error.message : null;
         _loading = false;
         _failure = switch (error) {
           VodSessionExpiredException() => _PlaybackFailure.session,
@@ -170,15 +385,25 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage> {
         var player = _player;
         if (player == null) {
           player = Player(
-            configuration: const PlayerConfiguration(title: 'ShuYo 课程回放'),
+            configuration: const PlayerConfiguration(title: 'ShuYo 课程视频'),
           );
           _player = player;
           _videoController = VideoController(player);
           _errorSubscription = player.stream.error.listen((_) {
             if (mounted && !_loading) {
+              _stopLiveTimers();
+              unawaited(_secondaryPlayer?.pause());
               _publish(() => _failure = _PlaybackFailure.media);
             }
           });
+          for (final stream in <Stream<dynamic>>[
+            player.stream.position,
+            player.stream.playing,
+            player.stream.rate
+          ]) {
+            _syncSubscriptions
+                .add(stream.listen((_) => unawaited(_alignSecondary())));
+          }
           _publish(() {});
         }
         // VideoController initializes on the next frame. Publishing the Video
@@ -189,21 +414,56 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage> {
         if (!mounted || revision != _loadRevision) return;
         videoReady = true;
         final rate = player.state.rate;
-        await player.open(
-          Media(
-            view.url.toString(),
-            httpHeaders: view.httpHeaders,
-            start:
-                position != null && position > Duration.zero ? position : null,
-          ),
-          play: play,
-        );
+        var mediaUrl = view.url;
+        if (playback.isLive && widget.repository != null) {
+          _liveProxy ??= VodLiveStreamProxy(
+            useWebVpn: widget.repository!.useWebVpn,
+            headersLoader: widget.repository!.mediaHeadersFor,
+          );
+          mediaUrl = await _liveProxy!.open(view.url);
+        }
+        await player
+            .open(
+              Media(
+                mediaUrl.toString(),
+                httpHeaders: playback.isLive && _liveProxy != null
+                    ? const {}
+                    : view.httpHeaders,
+                start: position != null && position > Duration.zero
+                    ? position
+                    : null,
+              ),
+              play: play && _foreground,
+            )
+            .timeout(const Duration(seconds: 25));
         if (!mounted || revision != _loadRevision) return;
-        if (rate != 1) await player.setRate(rate);
+        if (playback.isLive || rate != 1) {
+          await player.setRate(playback.isLive ? 1 : rate);
+        }
+        if (playback.isLive && _foreground) {
+          unawaited(_heartbeat(revision));
+          _heartbeatTimer = Timer.periodic(const Duration(seconds: 60),
+              (_) => unawaited(_heartbeat(revision)));
+          final end = _lesson.liveEndTime ?? _lesson.endTime;
+          if (end != null) {
+            _liveEndTimer = Timer(
+                end.difference(DateTime.now()).isNegative
+                    ? Duration.zero
+                    : end.difference(DateTime.now()), () {
+              _stopLiveTimers();
+              unawaited(player!.pause());
+              if (mounted) {
+                _publish(() => _failure = _PlaybackFailure.unavailable);
+              }
+              unawaited(_loadCatalog(forceRefresh: true));
+            });
+          }
+        }
         _publish(() {
           _loadedLessonId = playback.lessonId;
           _loading = false;
         });
+        unawaited(_openSecondary());
       } on Object {
         if (!mounted || revision != _loadRevision) return;
         if (!videoReady) {
@@ -236,12 +496,23 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage> {
   }
 
   Future<void> _selectView(int index) async {
-    if (index == _viewIndex || _loading) return;
+    final playback = _playback;
+    if (playback == null ||
+        index < 0 ||
+        index >= playback.views.length ||
+        index == _viewIndex ||
+        _loading) {
+      return;
+    }
+    _preferredView = playback.views[index].label;
+    _secondaryRevision++;
+    unawaited(_secondaryPlayer?.pause());
+    _stopLiveTimers();
     final revision = ++_loadRevision;
     await _openView(
       index,
       revision: revision,
-      position: _player?.state.position,
+      position: _lesson.isLive ? null : _player?.state.position,
       play: _player?.state.playing ?? true,
     );
   }
@@ -262,7 +533,11 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage> {
       _publish(() => _recovering = false);
       if (!recovered) return;
     }
-    await _loadLesson(_lesson, resume: true);
+    if (widget.repository != null && (_lesson.id == 0 || _catalog.isEmpty)) {
+      await _loadCatalog(forceRefresh: true);
+    } else {
+      await _loadLesson(_lesson, resume: !_lesson.isLive);
+    }
   }
 
   Future<void> _toggleSoftwareDecoding() async {
@@ -286,96 +561,339 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage> {
   Future<void> _enterFullscreen() async {
     _fullscreenActive = true;
     await defaultEnterNativeFullscreen();
+    if (mounted) unawaited(_openSecondary());
   }
 
   Future<void> _exitFullscreen() async {
+    if (_episodePanelVisible) return;
+    await _performExitFullscreen();
+  }
+
+  Future<void> _performExitFullscreen() async {
     _fullscreenActive = false;
+    _secondaryRevision++;
+    unawaited(_secondaryPlayer?.pause());
     await defaultExitNativeFullscreen();
-    if (!kIsWeb &&
-        const [TargetPlatform.android, TargetPlatform.iOS]
-            .contains(defaultTargetPlatform)) {
-      // ShuYo does not impose an orientation lock. Restore that policy rather
-      // than forcing portrait after leaving the player.
-      await SystemChrome.setPreferredOrientations(const []);
+    if (_isMobile) {
+      await SystemChrome.setPreferredOrientations(
+          [DeviceOrientation.portraitUp]);
       await SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
     }
   }
+
+  bool get _isMobile =>
+      !kIsWeb &&
+      const [TargetPlatform.android, TargetPlatform.iOS]
+          .contains(defaultTargetPlatform);
+
+  Future<void> _restoreOrientation() async {
+    if (_fullscreenActive) await _performExitFullscreen();
+    if (_isMobile) {
+      await SystemChrome.setPreferredOrientations(
+          [DeviceOrientation.portraitUp]);
+      await SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+      await SystemChrome.setPreferredOrientations(const []);
+    }
+  }
+
+  void _changeAspect(String value) {
+    _publish(() => _aspect = value);
+    _videoKey.currentState?.update(
+      aspectRatio: switch (value) {
+        '4:3' => 4 / 3,
+        '16:9' => 16 / 9,
+        _ => _player?.state.width != null && (_player?.state.height ?? 0) > 0
+            ? _player!.state.width! / _player!.state.height!
+            : 16 / 9
+      },
+      fit: switch (value) {
+        '填充' => BoxFit.fill,
+        '裁剪' => BoxFit.cover,
+        _ => BoxFit.contain
+      },
+    );
+  }
+
+  void _setDualEnabled(bool value) {
+    _publish(() => _dualEnabled = value);
+    unawaited(_openSecondary());
+  }
+
+  Future<void> _openSecondary() async {
+    final revision = ++_secondaryRevision;
+    final playback = _playback;
+    if (!_dualEnabled ||
+        !_fullscreenActive ||
+        !_foreground ||
+        playback == null ||
+        playback.views.length < 2 ||
+        _failure != null) {
+      await _secondaryPlayer?.pause();
+      return;
+    }
+    final view = playback.views[_viewIndex == 0 ? 1 : 0];
+    _publish(() {
+      _secondaryLoading = true;
+      _secondaryFailed = false;
+    });
+    _secondaryQueue = _secondaryQueue.then((_) async {
+      if (!mounted || revision != _secondaryRevision) return;
+      try {
+        var secondary = _secondaryPlayer;
+        if (secondary == null) {
+          secondary = Player(
+              configuration: const PlayerConfiguration(title: 'ShuYo 副视角'));
+          _secondaryPlayer = secondary;
+          _secondaryController = VideoController(secondary);
+          _secondaryErrorSubscription = secondary.stream.error.listen((_) {
+            if (mounted && _dualEnabled && _fullscreenActive) {
+              _publish(() => _secondaryFailed = true);
+              unawaited(_secondaryPlayer?.pause());
+            }
+          });
+          _publish(() {});
+        }
+        await secondary.setVolume(0);
+        await _secondaryController!.platform.future
+            .timeout(const Duration(seconds: 20));
+        if (!mounted || revision != _secondaryRevision) return;
+        final url = playback.isLive && _liveProxy != null
+            ? await _liveProxy!.open(view.url)
+            : view.url;
+        await secondary
+            .open(
+                Media(url.toString(),
+                    httpHeaders: playback.isLive && _liveProxy != null
+                        ? const {}
+                        : view.httpHeaders,
+                    start: playback.isLive ? null : _player?.state.position),
+                play: false)
+            .timeout(const Duration(seconds: 25));
+        if (!mounted || revision != _secondaryRevision) {
+          await secondary.pause();
+          return;
+        }
+        _publish(() => _secondaryLoading = false);
+        await _alignSecondary();
+      } on Object {
+        if (mounted && revision == _secondaryRevision) {
+          _publish(() {
+            _secondaryLoading = false;
+            _secondaryFailed = true;
+          });
+        }
+      }
+    });
+    await _secondaryQueue;
+  }
+
+  Future<void> _alignSecondary() async {
+    final primary = _player;
+    final secondary = _secondaryPlayer;
+    final revision = _secondaryRevision;
+    if (_syncingSecondary ||
+        _secondaryLoading ||
+        _secondaryFailed ||
+        !_dualEnabled ||
+        !_fullscreenActive ||
+        !_foreground ||
+        _loading ||
+        primary == null ||
+        secondary == null) {
+      return;
+    }
+    _syncingSecondary = true;
+    bool stillCurrent() =>
+        mounted &&
+        revision == _secondaryRevision &&
+        identical(primary, _player) &&
+        identical(secondary, _secondaryPlayer) &&
+        _fullscreenActive &&
+        _dualEnabled &&
+        _foreground &&
+        !_loading;
+    try {
+      if (!_lesson.isLive &&
+          (primary.state.position - secondary.state.position)
+                  .inMilliseconds
+                  .abs() >
+              800) {
+        await secondary.seek(primary.state.position);
+        if (!stillCurrent()) return;
+      }
+      if (secondary.state.rate != primary.state.rate) {
+        await secondary.setRate(primary.state.rate);
+        if (!stillCurrent()) return;
+      }
+      if (!stillCurrent()) return;
+      if (primary.state.playing != secondary.state.playing) {
+        if (primary.state.playing) {
+          await secondary.play();
+        } else {
+          await secondary.pause();
+        }
+      }
+    } on Object {
+      if (mounted) _publish(() => _secondaryFailed = true);
+    } finally {
+      _syncingSecondary = false;
+    }
+  }
+
+  Widget _secondaryView() => ColoredBox(
+      color: Colors.black,
+      child: Stack(fit: StackFit.expand, children: [
+        if (_secondaryController != null)
+          RecordingSecondaryVideo(
+              textureId: _secondaryController!.id,
+              videoRect: _secondaryController!.rect),
+        if (_secondaryLoading)
+          const Center(child: CircularProgressIndicator(strokeWidth: 2)),
+        if (_secondaryFailed)
+          Center(
+              child: const Icon(Icons.videocam_off_outlined,
+                  color: Colors.white54)),
+      ]));
 
   @override
   Widget build(BuildContext context) {
     final colors = context.shuyoColors;
     return Scaffold(
-      appBar: AppBar(title: const Text('课程回放')),
-      body: LayoutBuilder(builder: (context, constraints) {
-        final video = ColoredBox(
-          color: Colors.black,
-          child: _videoController == null
-              ? AspectRatio(aspectRatio: 16 / 9, child: _placeholder())
-              : Video(
-                  key: _videoKey,
-                  controller: _videoController!,
-                  aspectRatio: 16 / 9,
-                  onEnterFullscreen: _enterFullscreen,
-                  onExitFullscreen: _exitFullscreen,
-                  controls: (state) => ValueListenableBuilder<int>(
-                    valueListenable: _controlsRevision,
-                    builder: (context, _, __) => RecordingVideoControls(
-                      state: state,
-                      player: _player!,
-                      title: widget.course.name,
-                      loading: _loading,
-                      failure: _failure == null ? null : _placeholder(),
-                      views: _playback?.views ?? const [],
-                      selectedView: _viewIndex,
-                      onViewSelected: (index) => unawaited(_selectView(index)),
-                      softwareDecoding: _softwareDecoding,
-                      onDecodingChanged: !kIsWeb
-                          ? () => unawaited(_toggleSoftwareDecoding())
-                          : null,
+      backgroundColor: Colors.black,
+      body: SafeArea(
+          bottom: false,
+          child: Material(
+              color: colors.surface,
+              child: LayoutBuilder(builder: (context, constraints) {
+                final video = ColoredBox(
+                  color: Colors.black,
+                  child: _videoController == null
+                      ? AspectRatio(
+                          aspectRatio: 16 / 9,
+                          child: Stack(children: [
+                            Positioned.fill(child: _placeholder()),
+                            Align(
+                                alignment: Alignment.topLeft,
+                                child: IconButton(
+                                    tooltip: '返回课程列表',
+                                    onPressed: () =>
+                                        Navigator.of(context).maybePop(),
+                                    icon: const Icon(Icons.arrow_back,
+                                        color: Colors.white))),
+                          ]))
+                      : Video(
+                          key: _videoKey,
+                          controller: _videoController!,
+                          aspectRatio: 16 / 9,
+                          onEnterFullscreen: _enterFullscreen,
+                          onExitFullscreen: _exitFullscreen,
+                          controls: (state) => ValueListenableBuilder<int>(
+                            valueListenable: _controlsRevision,
+                            builder: (context, _, __) => RecordingVideoControls(
+                              state: state,
+                              player: _player!,
+                              title: widget.course.name,
+                              onBack: () => Navigator.of(context).maybePop(),
+                              onEpisodePanelVisibilityChanged: (visible) =>
+                                  _episodePanelVisible = visible,
+                              lessons: _lessons,
+                              selectedLessonId: _lesson.id,
+                              onLessonSelected: (lesson) =>
+                                  unawaited(_loadLesson(lesson)),
+                              dualEnabled: _dualEnabled,
+                              onDualChanged: kIsWeb ? null : _setDualEnabled,
+                              secondaryView: _secondaryView(),
+                              secondaryLabel: (_playback?.views.length ?? 0) > 1
+                                  ? _playback!
+                                      .views[_viewIndex == 0 ? 1 : 0].label
+                                  : '',
+                              onSwapViews: () => unawaited(
+                                  _selectView(_viewIndex == 0 ? 1 : 0)),
+                              aspect: _aspect,
+                              onAspectChanged: _changeAspect,
+                              loading: _loading,
+                              isLive: _lesson.isLive,
+                              onReconnect: () =>
+                                  unawaited(_loadLesson(_lesson)),
+                              failure: _failure == null ? null : _placeholder(),
+                              views: _playback?.views ?? const [],
+                              selectedView: _viewIndex,
+                              onViewSelected: (index) =>
+                                  unawaited(_selectView(index)),
+                              softwareDecoding: _softwareDecoding,
+                              onDecodingChanged: !kIsWeb
+                                  ? () => unawaited(_toggleSoftwareDecoding())
+                                  : null,
+                            ),
+                          ),
+                        ),
+                );
+                final list = _lessonList(colors);
+                if (constraints.maxWidth >= 1000) {
+                  return Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Expanded(
+                        flex: 3,
+                        child:
+                            ListView(children: [video, _lessonHeading(colors)]),
+                      ),
+                      SizedBox(width: 360, child: list),
+                    ],
+                  );
+                }
+                return Column(children: [
+                  ConstrainedBox(
+                    constraints: BoxConstraints(
+                      maxHeight: math.max(100, constraints.maxHeight * .6),
                     ),
+                    child: AspectRatio(aspectRatio: 16 / 9, child: video),
                   ),
-                ),
-        );
-        final list = _lessonList(colors);
-        if (constraints.maxWidth >= 1000) {
-          return Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Expanded(
-                flex: 3,
-                child: ListView(children: [video, _lessonHeading(colors)]),
-              ),
-              SizedBox(width: 360, child: list),
-            ],
-          );
-        }
-        return Column(children: [
-          ConstrainedBox(
-            constraints: BoxConstraints(
-              maxHeight: math.max(100, constraints.maxHeight * .6),
-            ),
-            child: AspectRatio(aspectRatio: 16 / 9, child: video),
-          ),
-          Expanded(child: list),
-        ]);
-      }),
+                  Expanded(child: list),
+                ]);
+              }))),
     );
   }
 
   Widget _placeholder() {
-    if (_loading || _recovering) {
+    if (_loading || _recovering || _catalogLoading && _catalog.isEmpty) {
       return const Center(
         child: CircularProgressIndicator(color: Colors.white, strokeWidth: 3),
       );
     }
+    if (_failure == null && _playback == null) {
+      return Center(
+          child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          const Icon(Icons.ondemand_video_outlined, color: Colors.white70),
+          const SizedBox(height: 8),
+          Text(
+              _lessons.any((lesson) => lesson.isGenerating)
+                  ? '回放生成中，生成后可观看'
+                  : '暂无可观看的视频',
+              style: const TextStyle(color: Colors.white),
+              textAlign: TextAlign.center),
+          if (widget.repository != null)
+            TextButton.icon(
+              onPressed: () => unawaited(_loadCatalog(forceRefresh: true)),
+              icon: const Icon(Icons.refresh),
+              label: const Text('刷新选集'),
+              style: TextButton.styleFrom(foregroundColor: Colors.white),
+            ),
+        ]),
+      ));
+    }
     final session = _failure == _PlaybackFailure.session;
-    final message = switch (_failure) {
-      _PlaybackFailure.session => '校园账户登录已失效，请重新登录。',
-      _PlaybackFailure.permission => '当前账号没有这节录播的观看权限。',
-      _PlaybackFailure.network => '暂时无法连接录播平台，请检查网络后重试。',
-      _PlaybackFailure.media => '视频暂时无法播放，可刷新播放地址后重试。',
-      _ => '这节录播暂时无法观看，请稍后重试。',
-    };
+    final message = _failureMessage ??
+        switch (_failure) {
+          _PlaybackFailure.session => '校园账户登录已失效，请重新登录。',
+          _PlaybackFailure.permission =>
+            _lesson.isLive ? '当前账号没有这节直播的观看权限。' : '当前账号没有这节录播的观看权限。',
+          _PlaybackFailure.network => '暂时无法连接录播平台，请检查网络后重试。',
+          _PlaybackFailure.media => '视频暂时无法播放，可刷新播放地址后重试。',
+          _ => _lesson.isLive ? '直播暂时无法观看或已结束，请刷新重试。' : '这节录播暂时无法观看，请稍后重试。',
+        };
     return Center(
       child: Padding(
         padding: const EdgeInsets.all(16),
@@ -408,10 +926,22 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage> {
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 16, 16, 12),
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Text('课程介绍', style: ShuYoTextStyles.meta(color: colors.textSecondary)),
+        const SizedBox(height: 6),
         Text(widget.course.name,
             style: ShuYoTextStyles.title(color: colors.textPrimary)),
         const SizedBox(height: 6),
         Text(meta, style: ShuYoTextStyles.meta(color: colors.textSecondary)),
+        if (widget.course.code.isNotEmpty) ...[
+          const SizedBox(height: 4),
+          Text('课程代码 · ${widget.course.code}',
+              style: ShuYoTextStyles.meta(color: colors.textSecondary)),
+        ],
+        if (_playback?.description.isNotEmpty ?? false) ...[
+          const SizedBox(height: 10),
+          Text(_playback!.description,
+              style: ShuYoTextStyles.bodyCompact(color: colors.textSecondary)),
+        ],
         if ((_playback?.views.length ?? 0) > 1) ...[
           const SizedBox(height: 12),
           Wrap(spacing: 8, runSpacing: 4, children: [
@@ -429,40 +959,66 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage> {
 
   Widget _lessonList(ShuYoColors colors) {
     final lessons = _lessons;
-    return ListView(
+    final content = ListView(
+      key: const ValueKey('course-player-episodes'),
+      physics: const AlwaysScrollableScrollPhysics(),
       padding: const EdgeInsets.only(bottom: 24),
       children: [
         _lessonHeading(colors),
+        if (_catalogLoading) const LinearProgressIndicator(minHeight: 2),
         Padding(
           padding: const EdgeInsets.fromLTRB(16, 4, 16, 8),
           child: Text('选集（${lessons.length}）',
               style: ShuYoTextStyles.sectionTitle(color: colors.textPrimary)),
         ),
+        if (lessons.isEmpty && !_catalogLoading)
+          Padding(
+              padding: const EdgeInsets.all(24),
+              child: Text('暂无可观看回放',
+                  style: ShuYoTextStyles.meta(color: colors.textMuted),
+                  textAlign: TextAlign.center)),
         for (var index = 0; index < lessons.length; index++)
           ListTile(
             key: ValueKey('recording-lesson-${lessons[index].id}'),
             selected: lessons[index].id == _lesson.id,
+            enabled: lessons[index].canPlay,
             selectedTileColor:
                 Theme.of(context).colorScheme.primary.withValues(alpha: .08),
-            leading: Icon(lessons[index].id == _lesson.id
-                ? Icons.play_circle_filled_rounded
-                : Icons.play_circle_outline_rounded),
-            title: Text('第 ${index + 1} 集 · ${_lessonDate(lessons[index])}',
-                style: ShuYoTextStyles.bodyCompact()),
-            subtitle: lessons[index].classroom.isEmpty
-                ? null
-                : Text(lessons[index].classroom, style: ShuYoTextStyles.meta()),
-            trailing: lessons[index].id == _lesson.id
+            leading: RecordingStatusIcon(
+                isLive: lessons[index].isLive, enabled: lessons[index].canPlay),
+            title: Text(
+                '第 ${lessons.length - index} 集 · ${_lessonDate(lessons[index])}',
+                style: ShuYoTextStyles.bodyCompact(
+                    color: lessons[index].canPlay
+                        ? colors.textPrimary
+                        : colors.textMuted)),
+            subtitle: Text(
+                [
+                  lessons[index].statusLabel,
+                  if (lessons[index].classroom.isNotEmpty)
+                    lessons[index].classroom
+                ].join(' · '),
+                style: ShuYoTextStyles.meta(
+                    color: lessons[index].canPlay
+                        ? colors.textSecondary
+                        : colors.textMuted)),
+            trailing: lessons[index].id == _lesson.id && lessons[index].canPlay
                 ? Text('当前',
                     style: ShuYoTextStyles.meta(
                         color: Theme.of(context).colorScheme.primary))
                 : null,
-            onTap: lessons[index].id == _lesson.id
+            onTap: !lessons[index].canPlay || lessons[index].id == _lesson.id
                 ? null
                 : () => unawaited(_loadLesson(lessons[index])),
           ),
       ],
     );
+    return widget.repository == null
+        ? content
+        : RefreshIndicator(
+            onRefresh: () => _loadCatalog(forceRefresh: true),
+            child: content,
+          );
   }
 }
 
@@ -473,316 +1029,4 @@ String _lessonDate(VodLesson lesson) {
   final minute = begin.minute.toString().padLeft(2, '0');
   return '${begin.month}月${begin.day}日 $hour:$minute'
       '${lesson.sectionLabel.isEmpty ? '' : ' · ${lesson.sectionLabel}'}';
-}
-
-/// Chinese controls shared by embedded and fullscreen recording playback.
-class RecordingVideoControls extends StatefulWidget {
-  const RecordingVideoControls({
-    super.key,
-    required this.state,
-    required this.player,
-    required this.title,
-    required this.loading,
-    required this.failure,
-    required this.views,
-    required this.selectedView,
-    required this.onViewSelected,
-    required this.softwareDecoding,
-    this.onDecodingChanged,
-  });
-
-  final VideoState state;
-  final Player player;
-  final String title;
-  final bool loading;
-  final Widget? failure;
-  final List<VodView> views;
-  final int selectedView;
-  final ValueChanged<int> onViewSelected;
-  final bool softwareDecoding;
-  final VoidCallback? onDecodingChanged;
-
-  @override
-  State<RecordingVideoControls> createState() => _RecordingVideoControlsState();
-}
-
-class _RecordingVideoControlsState extends State<RecordingVideoControls> {
-  final _subscriptions = <StreamSubscription<dynamic>>[];
-  Timer? _hideTimer;
-  bool _visible = true;
-  double? _dragPosition;
-
-  @override
-  void initState() {
-    super.initState();
-    for (final stream in <Stream<dynamic>>[
-      widget.player.stream.position,
-      widget.player.stream.duration,
-      widget.player.stream.playing,
-      widget.player.stream.buffering,
-      widget.player.stream.rate,
-    ]) {
-      _subscriptions.add(stream.listen((_) {
-        if (mounted) setState(() {});
-      }));
-    }
-    _showControls();
-  }
-
-  @override
-  void dispose() {
-    _hideTimer?.cancel();
-    for (final subscription in _subscriptions) {
-      unawaited(subscription.cancel());
-    }
-    super.dispose();
-  }
-
-  void _showControls() {
-    if (!mounted) return;
-    setState(() => _visible = true);
-    _hideTimer?.cancel();
-    _hideTimer = Timer(const Duration(seconds: 4), () {
-      if (mounted && widget.player.state.playing && _dragPosition == null) {
-        setState(() => _visible = false);
-      }
-    });
-  }
-
-  Future<void> _seekBy(int seconds) async {
-    final state = widget.player.state;
-    final position = (state.position + Duration(seconds: seconds))
-        .inMilliseconds
-        .clamp(0, math.max(0, state.duration.inMilliseconds));
-    await widget.player.seek(Duration(milliseconds: position.toInt()));
-    _showControls();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final state = widget.player.state;
-    final show = _visible || !state.playing || widget.loading;
-    final fullscreen = widget.state.isFullscreen();
-    return MouseRegion(
-      onHover: (_) => _showControls(),
-      child: GestureDetector(
-        behavior: HitTestBehavior.opaque,
-        onTap: () => show ? setState(() => _visible = false) : _showControls(),
-        onDoubleTap: widget.loading || widget.failure != null
-            ? null
-            : () => unawaited(widget.player.playOrPause()),
-        child: Stack(children: [
-          if (widget.failure != null) Positioned.fill(child: widget.failure!),
-          if ((widget.loading || state.buffering) && widget.failure == null)
-            const Center(
-              child: CircularProgressIndicator(
-                  color: Colors.white, strokeWidth: 3),
-            ),
-          if (show) ...[
-            if (fullscreen)
-              Align(
-                alignment: Alignment.topCenter,
-                child: SafeArea(
-                  bottom: false,
-                  child: Container(
-                    decoration: _gradient(top: true),
-                    child: Row(children: [
-                      IconButton(
-                        tooltip: '退出全屏',
-                        onPressed: () =>
-                            unawaited(widget.state.exitFullscreen()),
-                        icon: const Icon(Icons.arrow_back, color: Colors.white),
-                      ),
-                      Expanded(
-                        child: Text(widget.title,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(color: Colors.white)),
-                      ),
-                    ]),
-                  ),
-                ),
-              ),
-            if (widget.failure == null)
-              Align(
-                alignment: Alignment.bottomCenter,
-                child: Container(
-                  decoration: _gradient(),
-                  padding: const EdgeInsets.fromLTRB(8, 14, 8, 4),
-                  child: SafeArea(
-                    top: false,
-                    bottom: fullscreen,
-                    child: _bottomControls(fullscreen),
-                  ),
-                ),
-              ),
-          ],
-        ]),
-      ),
-    );
-  }
-
-  BoxDecoration _gradient({bool top = false}) => BoxDecoration(
-        gradient: LinearGradient(
-          begin: top ? Alignment.topCenter : Alignment.bottomCenter,
-          end: top ? Alignment.bottomCenter : Alignment.topCenter,
-          colors: const [Color(0xB3000000), Colors.transparent],
-        ),
-      );
-
-  Widget _bottomControls(bool fullscreen) {
-    final state = widget.player.state;
-    final duration = state.duration.inMilliseconds.toDouble();
-    final position = (_dragPosition ?? state.position.inMilliseconds.toDouble())
-        .clamp(0.0, math.max(1.0, duration));
-    final time = Text(
-      '${_durationText(state.position)} / ${_durationText(state.duration)}',
-      maxLines: 1,
-      overflow: TextOverflow.ellipsis,
-      style: const TextStyle(color: Colors.white, fontSize: 11),
-    );
-    return LayoutBuilder(builder: (context, constraints) {
-      final compact = constraints.maxWidth < 480 ||
-          (constraints.maxWidth < 650 &&
-              MediaQuery.textScalerOf(context).scale(12) > 18);
-      return IconTheme(
-        data: const IconThemeData(color: Colors.white),
-        child: Column(mainAxisSize: MainAxisSize.min, children: [
-          SizedBox(
-            height: 24,
-            child: SliderTheme(
-              data: SliderTheme.of(context).copyWith(
-                trackHeight: 2,
-                thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 5),
-                overlayShape: const RoundSliderOverlayShape(overlayRadius: 12),
-              ),
-              child: Slider(
-                value: position.toDouble(),
-                min: 0,
-                max: math.max(1.0, duration),
-                activeColor: Colors.white,
-                inactiveColor: Colors.white38,
-                label: _durationText(Duration(milliseconds: position.round())),
-                onChanged: duration <= 0 || widget.loading
-                    ? null
-                    : (value) {
-                        _hideTimer?.cancel();
-                        setState(() => _dragPosition = value);
-                      },
-                onChangeEnd: (value) {
-                  unawaited(widget.player
-                      .seek(Duration(milliseconds: value.round())));
-                  setState(() => _dragPosition = null);
-                  _showControls();
-                },
-              ),
-            ),
-          ),
-          if (compact)
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 12),
-              child: Align(alignment: Alignment.centerLeft, child: time),
-            ),
-          Row(children: [
-            IconButton(
-              tooltip: state.playing ? '暂停' : '播放',
-              onPressed: widget.loading
-                  ? null
-                  : () {
-                      unawaited(widget.player.playOrPause());
-                      _showControls();
-                    },
-              icon: Icon(state.playing ? Icons.pause : Icons.play_arrow),
-            ),
-            if (fullscreen && !compact) ...[
-              IconButton(
-                tooltip: '后退 10 秒',
-                onPressed: () => unawaited(_seekBy(-10)),
-                icon: const Icon(Icons.replay_10),
-              ),
-              IconButton(
-                tooltip: '前进 10 秒',
-                onPressed: () => unawaited(_seekBy(10)),
-                icon: const Icon(Icons.forward_10),
-              ),
-            ],
-            if (!compact) Flexible(child: time),
-            const Spacer(),
-            PopupMenuButton<double>(
-              tooltip: '播放速度',
-              enabled: !widget.loading,
-              initialValue: state.rate,
-              onOpened: () => _hideTimer?.cancel(),
-              onCanceled: _showControls,
-              onSelected: (rate) {
-                unawaited(widget.player.setRate(rate));
-                _showControls();
-              },
-              itemBuilder: (_) => [
-                for (final rate in [.5, .75, 1.0, 1.25, 1.5, 1.75, 2.0])
-                  CheckedPopupMenuItem(
-                    value: rate,
-                    checked: state.rate == rate,
-                    child: Text('${rate == 1 ? '正常 ' : ''}${rate}x'),
-                  ),
-              ],
-              child: Padding(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 10, vertical: 12),
-                child: Text('${state.rate}x',
-                    style: const TextStyle(color: Colors.white, fontSize: 12)),
-              ),
-            ),
-            PopupMenuButton<int>(
-              tooltip: '播放设置',
-              enabled: !widget.loading,
-              icon: const Icon(Icons.more_vert, color: Colors.white),
-              onOpened: () => _hideTimer?.cancel(),
-              onCanceled: _showControls,
-              onSelected: (value) {
-                if (value == -1) {
-                  widget.onDecodingChanged?.call();
-                } else {
-                  widget.onViewSelected(value);
-                }
-                _showControls();
-              },
-              itemBuilder: (_) => [
-                for (var index = 0; index < widget.views.length; index++)
-                  CheckedPopupMenuItem(
-                    value: index,
-                    checked: index == widget.selectedView,
-                    child: Text(widget.views[index].label),
-                  ),
-                if (widget.onDecodingChanged != null) ...[
-                  const PopupMenuDivider(),
-                  CheckedPopupMenuItem(
-                    value: -1,
-                    checked: widget.softwareDecoding,
-                    child: const Text('使用软件解码'),
-                  ),
-                ],
-              ],
-            ),
-            IconButton(
-              tooltip: fullscreen ? '退出全屏' : '全屏',
-              onPressed: widget.loading
-                  ? null
-                  : () => unawaited(widget.state.toggleFullscreen()),
-              icon: Icon(fullscreen ? Icons.fullscreen_exit : Icons.fullscreen),
-            ),
-          ]),
-        ]),
-      );
-    });
-  }
-}
-
-String _durationText(Duration duration) {
-  final seconds = math.max(0, duration.inSeconds);
-  final minutes = (seconds ~/ 60 % 60).toString().padLeft(2, '0');
-  final remainder = (seconds % 60).toString().padLeft(2, '0');
-  return seconds >= 3600
-      ? '${seconds ~/ 3600}:$minutes:$remainder'
-      : '$minutes:$remainder';
 }
