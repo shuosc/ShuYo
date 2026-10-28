@@ -6,8 +6,12 @@ class VodConstants {
   static const mediaHost = 'vrmvod.cc.shu.edu.cn';
   static const casHost = 'vrm.cc.shu.edu.cn';
   static const casLoginPath = '/jy-cas-proxy/cas/login';
-  static const casCallbackPath =
-      '/jy-cas-proxy/proxy/callback/e32f2571e22e412daec4a52e7b1b4ce3';
+  static const casCallbackPathPrefix = '/jy-cas-proxy/proxy/callback/';
+  static final _casCallbackPathPattern =
+      RegExp(r'^/jy-cas-proxy/proxy/callback/[a-fA-F0-9]{32}$');
+
+  static bool isCasCallbackPath(String path) =>
+      _casCallbackPathPattern.hasMatch(path);
   static const mediaPort = 40443;
   static const apiPath = '/jy-application-resourcemanage';
   static const uiPath = '/jy-application-resourcemanage-ui';

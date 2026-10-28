@@ -55,13 +55,13 @@ void main() {
           vpn ? VodUrlResolver.webVpnHost : VodConstants.directHost;
       final casHost = vpn ? VodUrlResolver.casWebVpnHost : VodConstants.casHost;
       const state = 'opaque+state/with=padding';
+      const callbackPath =
+          '${VodConstants.casCallbackPathPrefix}387a16aceb9941e993b07aa1d918d22a';
       final identity = Uri.https('newsso.shu.edu.cn', '/oauth/authorize', {
         'state': state,
-        'redirect_uri':
-            'https://${VodConstants.casHost}${VodConstants.casCallbackPath}',
+        'redirect_uri': 'https://${VodConstants.casHost}$callbackPath',
       });
-      final callback =
-          Uri.https(VodConstants.casHost, VodConstants.casCallbackPath, {
+      final callback = Uri.https(VodConstants.casHost, callbackPath, {
         'state': state,
         'code': 'server-code',
       });
@@ -88,12 +88,24 @@ void main() {
               return _redirect(
                 'https://${VodConstants.directHost}/cloud-rbac/authorize?state=rbac-state',
                 cookie:
-                    'JSESSIONID=vod-root; Path=/; Domain=.shu.edu.cn; Secure',
+                    'JSESSIONID=vod-root; Path=/; Domain=.shu.edu.cn; Secure, '
+                    'ROUTE=server-route; Expires=Wed, 21 Oct 2099 07:28:00 GMT; Path=/, '
+                    'BUSINESS=server-session; Path=/; HttpOnly; Secure; '
+                    'SameSite=Laxjy-application-resourcemanage/; HttpOnly; '
+                    'SameSite=Lax, '
+                    'SINGLE=standalone-invalid; Path=/; HttpOnly; Secure; '
+                    'SameSite=Laxjy-application-resourcemanage/, '
+                    'httponly, secure',
               );
             case 2:
               expect(request.url.host, platformHost);
               expect(request.url.path, '/cloud-rbac/authorize');
               expect(cookie, contains('JSESSIONID=vod-root'));
+              expect(cookie, contains('ROUTE=server-route'));
+              expect(cookie, contains('BUSINESS=server-session'));
+              expect(cookie, contains('SINGLE=standalone-invalid'));
+              expect(cookie, isNot(contains('httponly')));
+              expect(cookie, isNot(contains('secure')));
               return _redirect(
                   'https://${VodConstants.casHost}${VodConstants.casLoginPath}?service=server-service');
             case 3:
@@ -109,7 +121,7 @@ void main() {
               return _redirect(callback.toString());
             case 5:
               expect(request.url.host, casHost);
-              expect(request.url.path, VodConstants.casCallbackPath);
+              expect(request.url.path, callbackPath);
               expect(request.url.queryParameters['state'], state);
               expect(request.url.queryParameters['code'], 'server-code');
               expect(cookie, contains('CASSTATE=server-state'));
@@ -162,6 +174,12 @@ void main() {
       expect(
           session.cookies.any((cookie) =>
               cookie.name == 'CASSTATE' && cookie.domain == casHost),
+          isTrue);
+      expect(
+          session.cookies.any((cookie) =>
+              cookie.name == 'SINGLE' &&
+              cookie.value == 'standalone-invalid' &&
+              cookie.domain == platformHost),
           isTrue);
       expect(session.cookies.any((cookie) => cookie.name == 'SHU_OAUTH2'),
           isFalse);
@@ -243,6 +261,31 @@ void main() {
         ));
   });
 
+  for (final malformed in [
+    'broken-cookie-without-equals',
+    'BAD NAME=value; Path=/',
+  ]) {
+    test('malformed cookie is reported as an authentication failure', () async {
+      final jar = await _identityJar();
+      final service = VodNativeSessionService(
+        cookieJar: jar,
+        client: MockClient((_) async => _redirect(
+              'https://${VodConstants.directHost}/cloud-rbac/authorize',
+              cookie: malformed,
+            )),
+      );
+      addTearDown(service.dispose);
+      await expectLater(
+        service.authorize(useWebVpn: false, expectedStudentId: '25120000'),
+        throwsA(isA<VodAuthException>().having(
+          (error) => error.message,
+          'message',
+          '录播认证会话信息不完整，请稍后重试',
+        )),
+      );
+    });
+  }
+
   test(
       'foreign redirects are rejected before credentials can leave known hosts',
       () async {
@@ -263,6 +306,45 @@ void main() {
               isNot(isA<VodCampusAuthRequiredException>())),
         ));
     expect(requests.length, 1);
+  });
+
+  test('CAS callback accepts only the server-generated 32-hex route', () async {
+    final jar = await _identityJar();
+    var requests = 0;
+    final service = VodNativeSessionService(
+      cookieJar: jar,
+      client: MockClient((request) async {
+        requests++;
+        return _redirect(
+          'https://${VodConstants.casHost}'
+          '${VodConstants.casCallbackPathPrefix}not-a-callback',
+        );
+      }),
+    );
+    addTearDown(service.dispose);
+    await expectLater(
+      service.authorize(useWebVpn: false, expectedStudentId: '25120000'),
+      throwsA(allOf(
+        isA<VodAuthException>(),
+        isNot(isA<VodCampusAuthRequiredException>()),
+      )),
+    );
+    expect(requests, 1);
+    expect(
+      VodConstants.isCasCallbackPath(
+          '${VodConstants.casCallbackPathPrefix}387a16aceb9941e993b07aa1d918d22a'),
+      isTrue,
+    );
+    expect(
+      VodConstants.isCasCallbackPath(
+          '${VodConstants.casCallbackPathPrefix}387a16aceb9941e993b07aa1d918d22'),
+      isFalse,
+    );
+    expect(
+      VodConstants.isCasCallbackPath(
+          '${VodConstants.casCallbackPathPrefix}387a16aceb9941e993b07aa1d918d22z'),
+      isFalse,
+    );
   });
 
   test('missing shared SSO fails before making any business request', () async {

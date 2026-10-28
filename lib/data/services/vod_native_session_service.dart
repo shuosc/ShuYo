@@ -200,7 +200,7 @@ class VodNativeSessionService {
     final cas = vpn ? VodUrlResolver.casWebVpnHost : VodConstants.casHost;
     if (uri.host == cas &&
         (uri.path == VodConstants.casLoginPath ||
-            uri.path == VodConstants.casCallbackPath)) {
+            VodConstants.isCasCallbackPath(uri.path))) {
       return;
     }
     if (uri.host == 'webvpn.shu.edu.cn') {
@@ -223,19 +223,50 @@ class VodNativeSessionService {
         await HttpTimeout.request(_client.send(request))));
     final setCookie = response.headers['set-cookie'];
     if (setCookie != null) {
-      for (final value in setCookie.split(RegExp(r',(?=\s*[^=;,\s]+\s*=)'))) {
+      // Some deployments send `httponly` and `secure` as separate malformed
+      // Set-Cookie headers. package:http joins all headers with commas, so
+      // separate those standalone flags as well as new name=value cookies.
+      // The lookahead keeps the comma inside an Expires date intact.
+      final separator = RegExp(
+        r',(?=\s*(?:[^=;,\s]+\s*=|(?:httponly|secure)\s*(?:,|$)))',
+        caseSensitive: false,
+      );
+      for (final value in setCookie.split(separator)) {
+        final item = value.trim();
+        if (item.toLowerCase() == 'httponly' ||
+            item.toLowerCase() == 'secure') {
+          continue;
+        }
         try {
-          final cookie = Cookie.fromSetCookieValue(value.trim());
+          final cookie = Cookie.fromSetCookieValue(_repairSameSite(item));
           // These services require no cross-host business cookies. Keep each
           // issued value on its actual response host even if Domain is broad.
           cookie.domain = uri.host;
           cookies.save(uri, [cookie]);
         } on FormatException {
           throw const VodAuthException('录播认证会话信息不完整，请稍后重试');
+        } on HttpException {
+          throw const VodAuthException('录播认证会话信息不完整，请稍后重试');
         }
       }
     }
     return response;
+  }
+
+  String _repairSameSite(String value) {
+    // The platform sometimes returns malformed SameSite attributes, including
+    // without a valid duplicate. Browsers ignore those attributes, whereas
+    // dart:io rejects the cookie. Keep valid attributes and all other fields.
+    final parts = value.split(';');
+    final valid =
+        RegExp(r'^samesite\s*=\s*(lax|strict|none)\s*$', caseSensitive: false);
+    final attribute = RegExp(r'^samesite(?:\s*=|\s*$)', caseSensitive: false);
+    return [
+      parts.first,
+      for (final part in parts.skip(1))
+        if (!attribute.hasMatch(part.trim()) || valid.hasMatch(part.trim()))
+          part,
+    ].join(';');
   }
 
   Future<Map<String, dynamic>> _jsonGet(
