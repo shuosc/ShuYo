@@ -118,27 +118,34 @@ class VodApiClient {
     return List.unmodifiable(terms);
   }
 
-  Future<List<VodCourse>> fetchCourses({required int termId}) async {
+  Future<List<VodCourse>> fetchCourses({
+    required int termId,
+    void Function(List<VodCourse>)? onProgress,
+  }) async {
     if (termId <= 0) throw const VodInvalidResponseException('请选择有效学期');
-    final records = await _readAll(
+    final courses = <int, VodCourse>{};
+    var parsed = 0;
+    await _readAll(
       '/v1/group_subject_vod_list/t-1',
       {'acteId': '$termId'},
       identityField: 'teclId',
       orderBy: 'updateTime',
       ascending: false,
+      onProgress: (records) {
+        for (final record in records.skip(parsed)) {
+          final course = VodCourse.fromJson(record);
+          if (course.teachingClassId <= 0 || course.name.isEmpty) {
+            throw const VodInvalidResponseException();
+          }
+          if (course.termId != termId) {
+            throw const VodInvalidResponseException('录播平台返回了其他学期的课程，请刷新重试');
+          }
+          courses[course.teachingClassId] = course;
+          parsed++;
+          onProgress?.call(List<VodCourse>.unmodifiable(courses.values));
+        }
+      },
     );
-    final courses = <int, VodCourse>{};
-    for (final record in records) {
-      final course = VodCourse.fromJson(record);
-      if (course.teachingClassId <= 0 || course.name.isEmpty) {
-        throw const VodInvalidResponseException();
-      }
-      // A term selector is not permission to accept mismatched server data.
-      if (course.termId != termId) {
-        throw const VodInvalidResponseException('录播平台返回了其他学期的课程，请刷新重试');
-      }
-      courses[course.teachingClassId] = course;
-    }
     return List.unmodifiable(courses.values);
   }
 
@@ -193,9 +200,15 @@ class VodApiClient {
     }
   }
 
-  Future<List<VodLesson>> fetchLiveLessons(
-      {required int termId, int? teachingClassId}) async {
-    final records = await _readAll(
+  Future<List<VodLesson>> fetchLiveLessons({
+    required int termId,
+    int? teachingClassId,
+    void Function(List<VodLesson>)? onProgress,
+  }) async {
+    if (termId <= 0) throw const VodInvalidResponseException('请选择有效学期');
+    final lessons = <VodLesson>[];
+    var parsed = 0;
+    await _readAll(
       '/v1/vod_live/t-1',
       {
         'acteId': '$termId',
@@ -205,19 +218,24 @@ class VodApiClient {
       identityField: 'id',
       orderBy: 'courBeginTime',
       ascending: false,
+      onProgress: (records) {
+        for (final record in records.skip(parsed)) {
+          final lesson = VodLesson.fromLiveJson(record);
+          if (intValue(record['acteId']) != termId ||
+              lesson.id <= 0 ||
+              lesson.teachingClassId <= 0 ||
+              (teachingClassId != null &&
+                  lesson.teachingClassId != teachingClassId)) {
+            throw const VodInvalidResponseException('直播课次与所选学期或教学班不一致，请刷新重试');
+          }
+          parsed++;
+          if (lesson.isLiveAvailable) {
+            lessons.add(lesson);
+            onProgress?.call(List<VodLesson>.unmodifiable(lessons));
+          }
+        }
+      },
     );
-    final lessons = <VodLesson>[];
-    for (final record in records) {
-      final lesson = VodLesson.fromLiveJson(record);
-      if (intValue(record['acteId']) != termId ||
-          lesson.id <= 0 ||
-          lesson.teachingClassId <= 0 ||
-          (teachingClassId != null &&
-              lesson.teachingClassId != teachingClassId)) {
-        throw const VodInvalidResponseException('直播课次与所选学期或教学班不一致，请刷新重试');
-      }
-      if (lesson.isLiveAvailable) lessons.add(lesson);
-    }
     return List.unmodifiable(lessons);
   }
 
@@ -414,6 +432,7 @@ class VodApiClient {
     required String identityField,
     required String orderBy,
     required bool ascending,
+    void Function(List<JsonMap>)? onProgress,
   }) async {
     final records = <JsonMap>[];
     final seenIds = <int>{};
@@ -450,15 +469,16 @@ class VodApiClient {
         }
         records.add(record);
       }
-      if (pages > 0 ? page >= pages : records.length >= total) {
+      final complete = pages > 0 ? page >= pages : records.length >= total;
+      if (complete) {
         if (records.length != total) {
           throw const VodInvalidResponseException('课程列表未完整加载，请刷新重试');
         }
-        return records;
-      }
-      if (values.isEmpty) {
+      } else if (values.isEmpty) {
         throw const VodInvalidResponseException('课程列表未完整加载，请刷新重试');
       }
+      onProgress?.call(List<JsonMap>.unmodifiable(records));
+      if (complete) return records;
     }
     throw const VodInvalidResponseException('课程列表分页异常，请稍后重试');
   }

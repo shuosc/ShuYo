@@ -49,6 +49,7 @@ class _CourseRecordingsPageState extends State<CourseRecordingsPage> {
         ),
       );
   final _collapsedTermYears = <String>{};
+  final _presentedCourseIds = <int>{};
   List<VodTerm> _terms = const [];
   List<VodCourse> _courses = const [];
   int? _selectedTermId;
@@ -116,13 +117,16 @@ class _CourseRecordingsPageState extends State<CourseRecordingsPage> {
 
   Future<void> _campusAuthRequired({required bool ssoExpired}) async {
     if (!mounted) return;
+    _revision++;
     _repository.clear();
     setState(() {
       _checkingSession = false;
+      _loading = false;
       _authenticated = false;
       _expired = ssoExpired;
       _courses = const [];
       _terms = const [];
+      _presentedCourseIds.clear();
       _error = null;
     });
     if (ssoExpired) await widget.onCampusSessionExpired?.call();
@@ -143,6 +147,7 @@ class _CourseRecordingsPageState extends State<CourseRecordingsPage> {
         _error = null;
         _terms = const [];
         _courses = const [];
+        _presentedCourseIds.clear();
         _selectedTermId = null;
       });
       await _load(force: true);
@@ -197,14 +202,27 @@ class _CourseRecordingsPageState extends State<CourseRecordingsPage> {
                 .firstWhere((term) => term.isCurrent, orElse: () => terms.first)
                 .id;
       }
+      setState(() {
+        if (_selectedTermId != selected) {
+          _courses = const [];
+          _presentedCourseIds.clear();
+        }
+        _terms = terms;
+        _selectedTermId = selected;
+      });
       final courses = selected == null
           ? <VodCourse>[]
           : await _repository.loadCatalog(
-              termId: selected, forceRefresh: force);
+              termId: selected,
+              forceRefresh: force,
+              onProgress: (snapshot) {
+                if (!mounted || revision != _revision) return;
+                if (snapshot.isEmpty && _courses.isNotEmpty) return;
+                setState(() => _courses = snapshot);
+              },
+            );
       if (!mounted || revision != _revision) return;
       setState(() {
-        _terms = terms;
-        _selectedTermId = selected;
         _courses = courses;
       });
     } on VodSessionExpiredException catch (error) {
@@ -220,7 +238,7 @@ class _CourseRecordingsPageState extends State<CourseRecordingsPage> {
   }
 
   Future<void> _openCourse(VodCourse course) async {
-    if (_loading || _openingCourse) return;
+    if (_openingCourse) return;
     _openingCourse = true;
     try {
       await Navigator.of(context).push<void>(shuyoRoute(
@@ -258,6 +276,7 @@ class _CourseRecordingsPageState extends State<CourseRecordingsPage> {
     setState(() {
       _selectedTermId = termId;
       _courses = const [];
+      _presentedCourseIds.clear();
     });
     await _load(termId: termId);
   }
@@ -277,6 +296,16 @@ class _CourseRecordingsPageState extends State<CourseRecordingsPage> {
             ),
           ],
         ],
+        bottom: PreferredSize(
+          preferredSize: const Size.fromHeight(2),
+          child: SizedBox(
+            height: 2,
+            child: _checkingSession || _loading
+                ? const LinearProgressIndicator(
+                    key: ValueKey('vod-loading-progress'), minHeight: 2)
+                : null,
+          ),
+        ),
       ),
       body: _body(),
     );
@@ -284,7 +313,7 @@ class _CourseRecordingsPageState extends State<CourseRecordingsPage> {
 
   Widget _body() {
     if (_checkingSession) {
-      return const Center(child: CircularProgressIndicator());
+      return const SizedBox.expand();
     }
     if (!_authenticated) {
       if (_error != null) return _errorState();
@@ -305,7 +334,7 @@ class _CourseRecordingsPageState extends State<CourseRecordingsPage> {
       );
     }
     if (_terms.isEmpty && _loading) {
-      return const Center(child: CircularProgressIndicator());
+      return const SizedBox.expand();
     }
     if (_terms.isEmpty && _error != null) return _errorState();
     if (_terms.isEmpty) {
@@ -321,20 +350,20 @@ class _CourseRecordingsPageState extends State<CourseRecordingsPage> {
       );
     }
     return Column(children: [
-      Padding(
-        padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
-        child: Align(
-            alignment: Alignment.centerLeft,
-            child: Text(
-              '当前账号 · ${_courses.length} 门课程',
-              style: ShuYoTextStyles.meta(color: context.shuyoColors.textMuted),
-            )),
-      ),
-      if (_loading) const LinearProgressIndicator(minHeight: 2),
+      if (_error != null && _courses.isNotEmpty)
+        MaterialBanner(
+          content: Text(_errorMessage()),
+          actions: [
+            TextButton(
+              onPressed: _loading ? null : () => _load(force: true),
+              child: const Text('重试'),
+            ),
+          ],
+        ),
       Expanded(
-          child: _error != null
+          child: _error != null && _courses.isEmpty
               ? _errorState()
-              : RefreshIndicator(
+              : RefreshIndicator.noSpinner(
                   onRefresh: () => _load(force: true),
                   child: _courses.isEmpty
                       ? LayoutBuilder(
@@ -343,11 +372,14 @@ class _CourseRecordingsPageState extends State<CourseRecordingsPage> {
                                 children: [
                                   SizedBox(
                                       height: constraints.maxHeight,
-                                      child: EmptyState(
-                                        icon: Icons.video_library_outlined,
-                                        title: '本学期暂无可观看课程',
-                                        message: '可切换学期，或在课程回放生成后刷新。',
-                                      )),
+                                      child: _loading
+                                          ? const SizedBox.expand()
+                                          : EmptyState(
+                                              icon:
+                                                  Icons.video_library_outlined,
+                                              title: '本学期暂无可观看课程',
+                                              message: '可切换学期，或在课程回放生成后刷新。',
+                                            )),
                                 ],
                               ))
                       : ListView.separated(
@@ -355,6 +387,11 @@ class _CourseRecordingsPageState extends State<CourseRecordingsPage> {
                           physics: const AlwaysScrollableScrollPhysics(),
                           padding: const EdgeInsets.only(bottom: 24),
                           itemCount: _courses.length,
+                          findItemIndexCallback: (key) {
+                            final index = _courses.indexWhere((course) =>
+                                ValueKey(course.teachingClassId) == key);
+                            return index < 0 ? null : index;
+                          },
                           separatorBuilder: (_, __) => const Divider(
                             height: 1,
                             indent: 72,
@@ -362,39 +399,44 @@ class _CourseRecordingsPageState extends State<CourseRecordingsPage> {
                           ),
                           itemBuilder: (context, index) {
                             final course = _courses[index];
-                            return ListTile(
-                              key: ValueKey(
-                                  'vod-course:${course.teachingClassId}'),
-                              enabled: !_loading,
-                              contentPadding: const EdgeInsets.symmetric(
-                                  horizontal: 16, vertical: 8),
-                              leading: Tooltip(
-                                message: course.isLive ? '正在直播' : '录播回放',
-                                child:
-                                    RecordingStatusIcon(isLive: course.isLive),
-                              ),
-                              title: Text(course.name,
-                                  style: ShuYoTextStyles.title(
-                                      color: context.shuyoColors.textPrimary),
-                                  maxLines: 2,
-                                  overflow: TextOverflow.ellipsis),
-                              subtitle: Padding(
-                                padding: const EdgeInsets.only(top: 6),
-                                child: Text(
-                                    [
-                                      course.teacherLabel.isEmpty
-                                          ? '教师信息暂未提供'
-                                          : course.teacherLabel,
-                                      if (course.code.isNotEmpty) course.code,
-                                    ].join(' · '),
-                                    style: ShuYoTextStyles.meta(
-                                        color:
-                                            context.shuyoColors.textSecondary),
+                            return _CourseEntrance(
+                              key: ValueKey(course.teachingClassId),
+                              index: index,
+                              animate: _presentedCourseIds
+                                  .add(course.teachingClassId),
+                              child: ListTile(
+                                key: ValueKey(
+                                    'vod-course:${course.teachingClassId}'),
+                                contentPadding: const EdgeInsets.symmetric(
+                                    horizontal: 16, vertical: 8),
+                                leading: Tooltip(
+                                  message: course.isLive ? '正在直播' : '录播回放',
+                                  child: RecordingStatusIcon(
+                                      isLive: course.isLive),
+                                ),
+                                title: Text(course.name,
+                                    style: ShuYoTextStyles.title(
+                                        color: context.shuyoColors.textPrimary),
                                     maxLines: 2,
                                     overflow: TextOverflow.ellipsis),
+                                subtitle: Padding(
+                                  padding: const EdgeInsets.only(top: 6),
+                                  child: Text(
+                                      [
+                                        course.teacherLabel.isEmpty
+                                            ? '教师信息暂未提供'
+                                            : course.teacherLabel,
+                                        if (course.code.isNotEmpty) course.code,
+                                      ].join(' · '),
+                                      style: ShuYoTextStyles.meta(
+                                          color: context
+                                              .shuyoColors.textSecondary),
+                                      maxLines: 2,
+                                      overflow: TextOverflow.ellipsis),
+                                ),
+                                trailing: const Icon(Icons.chevron_right),
+                                onTap: () => _openCourse(course),
                               ),
-                              trailing: const Icon(Icons.chevron_right),
-                              onTap: () => _openCourse(course),
                             );
                           },
                         ),
@@ -409,11 +451,7 @@ class _CourseRecordingsPageState extends State<CourseRecordingsPage> {
           ? Icons.lock_outline
           : Icons.cloud_off_outlined,
       title: error is VodPermissionException ? '暂时无法查看课程' : '课程加载失败',
-      message: error is VodApiException
-          ? error.message
-          : error is VodAuthException
-              ? error.message
-              : '暂时无法连接录播平台，请稍后重试。',
+      message: _errorMessage(),
       action: TextButton.icon(
         onPressed: _loading
             ? null
@@ -423,4 +461,73 @@ class _CourseRecordingsPageState extends State<CourseRecordingsPage> {
       ),
     );
   }
+
+  String _errorMessage() {
+    final error = _error;
+    return error is VodApiException
+        ? error.message
+        : error is VodAuthException
+            ? error.message
+            : '暂时无法连接录播平台，请稍后重试。';
+  }
+}
+
+class _CourseEntrance extends StatefulWidget {
+  const _CourseEntrance({
+    super.key,
+    required this.index,
+    required this.animate,
+    required this.child,
+  });
+
+  final int index;
+  final bool animate;
+  final Widget child;
+
+  @override
+  State<_CourseEntrance> createState() => _CourseEntranceState();
+}
+
+class _CourseEntranceState extends State<_CourseEntrance>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _entrance = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 280),
+    value: widget.animate ? 0 : 1,
+  );
+  late final Animation<Offset> _position = _entrance
+      .drive(CurveTween(curve: Curves.easeOutCubic))
+      .drive(Tween(begin: const Offset(0.12, 0), end: Offset.zero));
+  Timer? _timer;
+  bool _started = false;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (MediaQuery.disableAnimationsOf(context)) {
+      _timer?.cancel();
+      _entrance.value = 1;
+      _started = true;
+    } else if (!_started) {
+      _started = true;
+      if (widget.animate) {
+        _timer = Timer(Duration(milliseconds: (widget.index % 6) * 55), () {
+          if (mounted) _entrance.forward();
+        });
+      }
+    }
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    _entrance.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => SlideTransition(
+        position: _position,
+        child: FadeTransition(opacity: _entrance, child: widget.child),
+      );
 }

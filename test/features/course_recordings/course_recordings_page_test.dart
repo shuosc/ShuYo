@@ -49,6 +49,7 @@ const _currentCourses = [_programming, _electronics, _art];
 class _Repository extends VodRepository {
   Future<List<VodTerm>> Function(bool force)? termsLoader;
   Future<List<VodCourse>> Function(int term, bool force)? coursesLoader;
+  final progressCallbacks = <int, void Function(List<VodCourse>)>{};
   int termRequests = 0;
   int lessonRequests = 0;
   int clears = 0;
@@ -66,9 +67,11 @@ class _Repository extends VodRepository {
   Future<List<VodCourse>> loadCourses({
     required int termId,
     bool forceRefresh = false,
+    void Function(List<VodCourse>)? onProgress,
   }) async {
     courseRequests.add(termId);
     forcedCourseRequests.add(forceRefresh);
+    if (onProgress != null) progressCallbacks[termId] = onProgress;
     final loader = coursesLoader;
     return loader == null
         ? _currentCourses
@@ -76,9 +79,13 @@ class _Repository extends VodRepository {
   }
 
   @override
-  Future<List<VodCourse>> loadCatalog(
-          {required int termId, bool forceRefresh = false}) =>
-      loadCourses(termId: termId, forceRefresh: forceRefresh);
+  Future<List<VodCourse>> loadCatalog({
+    required int termId,
+    bool forceRefresh = false,
+    void Function(List<VodCourse>)? onProgress,
+  }) =>
+      loadCourses(
+          termId: termId, forceRefresh: forceRefresh, onProgress: onProgress);
 
   @override
   Future<List<VodLesson>> loadCourseLessons(VodCourse course,
@@ -111,7 +118,9 @@ Future<void> _mount(
   bool signedIn = true,
   _Auth? auth,
   Future<bool> Function()? login,
+  Future<bool> Function()? sessionLoader,
   double textScale = 1,
+  bool disableAnimations = false,
 }) async {
   final authService = auth ?? _Auth();
   addTearDown(authService.dispose);
@@ -120,13 +129,14 @@ Future<void> _mount(
     builder: (context, child) => MediaQuery(
       data: MediaQuery.of(context).copyWith(
         textScaler: TextScaler.linear(textScale),
+        disableAnimations: disableAnimations,
       ),
       child: child!,
     ),
     home: CourseRecordingsPage(
       repository: repository,
       authService: authService,
-      sessionLoader: () async => signedIn,
+      sessionLoader: sessionLoader ?? () async => signedIn,
       onLoginRequested: login ?? () async => false,
     ),
   ));
@@ -142,6 +152,186 @@ Future<void> _chooseTerm(WidgetTester tester, int termId) async {
 }
 
 void main() {
+  testWidgets('session and catalog loading use only AppBar progress',
+      (tester) async {
+    final session = Completer<bool>();
+    final courses = Completer<List<VodCourse>>();
+    final repository = _Repository()..coursesLoader = (_, __) => courses.future;
+    await _mount(tester, repository, sessionLoader: () => session.future);
+    final progress = find.byKey(const ValueKey('vod-loading-progress'));
+    expect(find.descendant(of: find.byType(AppBar), matching: progress),
+        findsOneWidget);
+    expect(find.byType(CircularProgressIndicator), findsNothing);
+    session.complete(true);
+    await tester.pump();
+    await tester.pump();
+    expect(repository.courseRequests, [7]);
+    expect(find.descendant(of: find.byType(AppBar), matching: progress),
+        findsOneWidget);
+    expect(find.byType(CircularProgressIndicator), findsNothing);
+    expect(find.text('本学期暂无可观看课程'), findsNothing);
+    expect(find.textContaining('当前账号'), findsNothing);
+    courses.complete(_currentCourses);
+    await tester.pumpAndSettle();
+    expect(progress, findsNothing);
+  });
+
+  testWidgets('partial courses open before the rest of the catalog completes',
+      (tester) async {
+    final courses = Completer<List<VodCourse>>();
+    final repository = _Repository()..coursesLoader = (_, __) => courses.future;
+    await _mount(tester, repository);
+    await tester.pump();
+    repository.progressCallbacks[7]!([_programming]);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+    final course = find.byKey(const ValueKey('vod-course:101'));
+    expect(course, findsOneWidget);
+    expect(tester.widget<ListTile>(course).enabled, isTrue);
+    expect(find.byKey(const ValueKey('vod-loading-progress')), findsOneWidget);
+    await tester.tap(course);
+    await tester.pump();
+    courses.complete(_currentCourses);
+    await tester.pumpAndSettle();
+    expect(find.byType(RecordingPlayerPage), findsOneWidget);
+    expect(repository.lessonRequests, 1);
+  });
+
+  testWidgets('stale partial snapshots cannot cross a term selection',
+      (tester) async {
+    final previous = Completer<List<VodCourse>>();
+    final current = Completer<List<VodCourse>>();
+    final repository = _Repository()
+      ..coursesLoader = (term, _) => switch (term) {
+            6 => previous.future,
+            5 => current.future,
+            _ => Future.value(_currentCourses),
+          };
+    await _mount(tester, repository);
+    await tester.pumpAndSettle();
+    await _chooseTerm(tester, 6);
+    final staleProgress = repository.progressCallbacks[6]!;
+    await _chooseTerm(tester, 5);
+    const selectedCourse =
+        VodCourse(teachingClassId: 501, termId: 5, name: '所选学期');
+    const staleCourse = VodCourse(teachingClassId: 601, termId: 6, name: '旧学期');
+    repository.progressCallbacks[5]!([selectedCourse]);
+    staleProgress([staleCourse]);
+    await tester.pump();
+    expect(find.byKey(const ValueKey('vod-course:501')), findsOneWidget);
+    expect(find.byKey(const ValueKey('vod-course:601')), findsNothing);
+    current.complete([selectedCourse]);
+    previous.complete([staleCourse]);
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('vod-course:501')), findsOneWidget);
+    expect(find.byKey(const ValueKey('vod-course:601')), findsNothing);
+  });
+
+  testWidgets(
+      'a partial catalog remains visible when the remaining source fails',
+      (tester) async {
+    final courses = Completer<List<VodCourse>>();
+    final repository = _Repository()..coursesLoader = (_, __) => courses.future;
+    await _mount(tester, repository);
+    await tester.pump();
+    repository.progressCallbacks[7]!([_programming]);
+    await tester.pump();
+    courses.completeError(const VodNetworkException());
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('vod-course:101')), findsOneWidget);
+    expect(find.byType(MaterialBanner), findsOneWidget);
+    expect(find.text('课程加载失败'), findsNothing);
+    expect(find.byKey(const ValueKey('vod-loading-progress')), findsNothing);
+  });
+
+  testWidgets('failed refresh keeps successful catalog content usable',
+      (tester) async {
+    final refresh = Completer<List<VodCourse>>();
+    final repository = _Repository()
+      ..coursesLoader =
+          (_, force) => force ? refresh.future : Future.value(_currentCourses);
+    await _mount(tester, repository);
+    await tester.pumpAndSettle();
+    final refreshing = tester
+        .widget<RefreshIndicator>(find.byType(RefreshIndicator))
+        .onRefresh();
+    await tester.pump();
+    expect(find.byKey(const ValueKey('vod-loading-progress')), findsOneWidget);
+    repository.progressCallbacks[7]!(const []);
+    await tester.pump();
+    expect(
+        tester
+            .widget<ListTile>(find.byKey(const ValueKey('vod-course:101')))
+            .enabled,
+        isTrue);
+    refresh.completeError(const VodNetworkException());
+    await refreshing;
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('vod-course:101')), findsOneWidget);
+    expect(find.byType(MaterialBanner), findsOneWidget);
+    expect(find.text('重试'), findsOneWidget);
+    expect(find.text('课程加载失败'), findsNothing);
+  });
+
+  testWidgets(
+      'course entrance matches notices and does not replay on live reorder',
+      (tester) async {
+    final courses = Completer<List<VodCourse>>();
+    final repository = _Repository()..coursesLoader = (_, __) => courses.future;
+    await _mount(tester, repository);
+    await tester.pump();
+    repository.progressCallbacks[7]!([_programming, _electronics]);
+    await tester.pump();
+    final row = find.byKey(const ValueKey('vod-course:101'));
+    final fade =
+        find.ancestor(of: row, matching: find.byType(FadeTransition)).first;
+    final slide =
+        find.ancestor(of: row, matching: find.byType(SlideTransition)).first;
+    final opacity = tester.widget<FadeTransition>(fade).opacity;
+    expect(opacity.value, 0);
+    expect(tester.widget<SlideTransition>(slide).position.value,
+        const Offset(0.12, 0));
+    await tester.pump(const Duration(milliseconds: 1));
+    await tester.pump(const Duration(milliseconds: 140));
+    expect(opacity.value, inExclusiveRange(0, 1));
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(opacity.value, 1);
+    repository.progressCallbacks[7]!([
+      _electronics.withLiveLesson(const VodLesson(
+        id: 900,
+        teachingClassId: 102,
+        name: '正在直播',
+        isPlayable: true,
+        isLive: true,
+      )),
+      _programming,
+    ]);
+    await tester.pump();
+    expect(tester.widget<FadeTransition>(fade).opacity, same(opacity));
+    expect(opacity.value, 1);
+    courses.complete(_currentCourses);
+    await tester.pumpAndSettle();
+  });
+
+  testWidgets('reduced motion renders partial courses without entrance motion',
+      (tester) async {
+    final courses = Completer<List<VodCourse>>();
+    final repository = _Repository()..coursesLoader = (_, __) => courses.future;
+    await _mount(tester, repository, disableAnimations: true);
+    await tester.pump();
+    repository.progressCallbacks[7]!([_programming]);
+    await tester.pump();
+    final row = find.byKey(const ValueKey('vod-course:101'));
+    final fade =
+        find.ancestor(of: row, matching: find.byType(FadeTransition)).first;
+    final slide =
+        find.ancestor(of: row, matching: find.byType(SlideTransition)).first;
+    expect(tester.widget<FadeTransition>(fade).opacity.value, 1);
+    expect(tester.widget<SlideTransition>(slide).position.value, Offset.zero);
+    courses.complete(_currentCourses);
+    await tester.pumpAndSettle();
+  });
+
   testWidgets('signed-out accounts do not request any catalog data',
       (tester) async {
     final repository = _Repository();
@@ -191,7 +381,7 @@ void main() {
     await tester.tapAt(const Offset(10, 200));
     await tester.pumpAndSettle();
     expect(repository.courseRequests, [7]);
-    expect(find.text('当前账号 · 3 门课程'), findsOneWidget);
+    expect(find.textContaining('当前账号'), findsNothing);
     expect(find.byKey(const ValueKey('vod-course:101')), findsOneWidget);
   });
 
@@ -206,7 +396,7 @@ void main() {
     expect(find.byKey(const ValueKey('vod-course:101')), findsOneWidget);
     expect(find.byKey(const ValueKey('vod-course:102')), findsOneWidget);
     expect(find.byKey(const ValueKey('vod-course:103')), findsOneWidget);
-    expect(find.text('当前账号 · 3 门课程'), findsOneWidget);
+    expect(find.textContaining('当前账号'), findsNothing);
     expect(repository.termRequests, 1);
     expect(repository.courseRequests, [7]);
   });
@@ -268,7 +458,7 @@ void main() {
   });
 
   testWidgets(
-      'term menu groups years newest first and orders autumn spring summer',
+      'term menu groups years newest first and orders summer spring autumn',
       (tester) async {
     final repository = _Repository()
       ..termsLoader = (_) async => [
@@ -296,9 +486,9 @@ void main() {
     expect(find.descendant(of: summer, matching: find.text('夏季学期')),
         findsOneWidget);
     expect(
-        tester.getTopLeft(autumn).dy, lessThan(tester.getTopLeft(spring).dy));
+        tester.getTopLeft(summer).dy, lessThan(tester.getTopLeft(spring).dy));
     expect(
-        tester.getTopLeft(spring).dy, lessThan(tester.getTopLeft(summer).dy));
+        tester.getTopLeft(spring).dy, lessThan(tester.getTopLeft(autumn).dy));
     await tester.tap(summer);
     await tester.pumpAndSettle();
     expect(repository.courseRequests, [7, 8]);

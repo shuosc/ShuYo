@@ -93,7 +93,7 @@ class _RecordingTermMenuState extends State<_RecordingTermMenu> {
       ..sort((first, second) => second.compareTo(first));
     for (final terms in groups.values) {
       terms.sort(
-          (first, second) => first.termNumber.compareTo(second.termNumber));
+          (first, second) => second.termNumber.compareTo(first.termNumber));
     }
     final surface = Theme.of(context).colorScheme.surface;
     return SizedBox(

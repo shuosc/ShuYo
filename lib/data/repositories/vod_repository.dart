@@ -17,6 +17,9 @@ class VodRepository {
   final _courses = <int, _Cached<List<VodCourse>>>{};
   final _lessons = <int, _Cached<List<VodLesson>>>{};
   final _catalog = <int, _Cached<List<VodCourse>>>{};
+  final _catalogPreview = <int, List<VodCourse>>{};
+  final _courseProgress = <String, List<VodCourse>>{};
+  final _courseListeners = <String, Set<void Function(List<VodCourse>)>>{};
   final _liveGrants = <int>{};
   _Cached<List<VodTerm>>? _terms;
   int _generation = 0;
@@ -46,78 +49,124 @@ class VodRepository {
   Future<List<VodCourse>> loadCourses({
     required int termId,
     bool forceRefresh = false,
+    void Function(List<VodCourse>)? onProgress,
   }) {
     final cached = _courses[termId];
     if (!forceRefresh && cached != null && _isFresh(cached)) {
+      onProgress?.call(cached.value);
       return Future.value(cached.value);
     }
     final generation = _generation;
-    return _run('courses:$termId', () async {
-      final result = await _client.fetchCourses(termId: termId);
+    return _runCourses('courses:$termId', (publish) async {
+      final result =
+          await _client.fetchCourses(termId: termId, onProgress: publish);
       _checkGeneration(generation);
       _courses[termId] = _Cached(result);
       return result;
-    });
+    }, onProgress: onProgress);
   }
 
-  Future<List<VodCourse>> loadCatalog(
-      {required int termId, bool forceRefresh = false}) {
+  Future<List<VodCourse>> loadCatalog({
+    required int termId,
+    bool forceRefresh = false,
+    void Function(List<VodCourse>)? onProgress,
+  }) {
     final cached = _catalog[termId];
     if (!forceRefresh &&
         cached != null &&
+        !_pending.containsKey('catalog:$termId') &&
         DateTime.now().difference(cached.createdAt) <
             const Duration(seconds: 30)) {
+      _catalogPreview.remove(termId);
+      onProgress?.call(cached.value);
       return Future.value(cached.value);
     }
     final generation = _generation;
-    return _run('catalog:$termId', () async {
-      final results = await Future.wait<Object>([
-        loadCourses(termId: termId, forceRefresh: forceRefresh),
-        _client.fetchLiveLessons(termId: termId),
-      ]);
-      _checkGeneration(generation);
-      final courses = {
-        for (final course in results[0] as List<VodCourse>)
-          course.teachingClassId: course
-      };
-      for (final lesson in results[1] as List<VodLesson>) {
-        final course = courses[lesson.teachingClassId] ?? lesson.catalogCourse;
-        if (course == null || course.termId != termId) {
-          throw const VodInvalidResponseException();
+    return _runCourses('catalog:$termId', (publish) async {
+      List<VodCourse> recordings = const [];
+      List<VodLesson> live = const [];
+      List<VodCourse> merge() {
+        _checkGeneration(generation);
+        final courses = {
+          for (final course in recordings) course.teachingClassId: course
+        };
+        for (final lesson in live) {
+          final course =
+              courses[lesson.teachingClassId] ?? lesson.catalogCourse;
+          if (course == null ||
+              course.termId != termId ||
+              course.teachingClassId != lesson.teachingClassId) {
+            throw const VodInvalidResponseException();
+          }
+          final existing = course.liveLesson;
+          if (existing == null ||
+              (lesson.beginTime?.millisecondsSinceEpoch ?? 0) >
+                  (existing.beginTime?.millisecondsSinceEpoch ?? 0)) {
+            courses[course.teachingClassId] = course.withLiveLesson(lesson);
+          }
         }
-        final existing = course.liveLesson;
-        if (existing == null ||
-            (lesson.beginTime?.millisecondsSinceEpoch ?? 0) >
-                (existing.beginTime?.millisecondsSinceEpoch ?? 0)) {
-          courses[course.teachingClassId] = course.withLiveLesson(lesson);
-        }
+        return List<VodCourse>.unmodifiable([
+          ...courses.values.where((course) => course.isLive),
+          ...courses.values.where((course) => !course.isLive),
+        ]);
       }
-      final ordered = [
-        ...courses.values.where((course) => course.isLive),
-        ...courses.values.where((course) => !course.isLive)
-      ];
-      final result = List<VodCourse>.unmodifiable(ordered);
+
+      void recordingsReady(List<VodCourse> snapshot) {
+        recordings = snapshot;
+        final result = merge();
+        _catalogPreview[termId] = result;
+        publish(result);
+      }
+
+      void liveReady(List<VodLesson> snapshot) {
+        live = snapshot;
+        final result = merge();
+        _catalogPreview[termId] = result;
+        publish(result);
+      }
+
+      await Future.wait([
+        loadCourses(
+          termId: termId,
+          forceRefresh: forceRefresh,
+          onProgress: recordingsReady,
+        ).then(recordingsReady),
+        _client
+            .fetchLiveLessons(termId: termId, onProgress: liveReady)
+            .then(liveReady),
+      ]);
+      final result = merge();
       _catalog[termId] = _Cached(result);
+      _catalogPreview.remove(termId);
       return result;
-    });
+    }, onProgress: onProgress);
   }
 
   Future<List<VodLesson>> loadCourseLessons(VodCourse course,
       {bool forceRefresh = false}) async {
     final generation = _generation;
     await _requireCatalogCourse(course);
-    final live = await _client.fetchLiveLessons(
-        termId: course.termId, teachingClassId: course.teachingClassId);
-    List<VodLesson> recordings;
-    try {
-      recordings = await loadLessons(course, forceRefresh: forceRefresh);
-    } on VodPermissionException {
-      if (live.isEmpty) rethrow;
-      recordings = const [];
+    VodPermissionException? recordingPermission;
+    Future<List<VodLesson>> recordings() async {
+      try {
+        return await loadLessons(course, forceRefresh: forceRefresh);
+      } on VodPermissionException catch (error) {
+        recordingPermission = error;
+        return const [];
+      }
     }
+
+    final results = await Future.wait([
+      _client.fetchLiveLessons(
+          termId: course.termId, teachingClassId: course.teachingClassId),
+      recordings(),
+    ]);
     _checkGeneration(generation);
+    final live = results[0];
+    final permission = recordingPermission;
+    if (permission != null && live.isEmpty) throw permission;
     final combined = {
-      for (final lesson in recordings) lesson.id: lesson,
+      for (final lesson in results[1]) lesson.id: lesson,
       for (final lesson in live) lesson.id: lesson
     };
     final ordered = combined.values.toList()
@@ -214,7 +263,9 @@ class VodRepository {
 
   Future<void> _requireCatalogCourse(VodCourse course) async {
     final generation = _generation;
-    final courses = _catalog[course.termId]?.value ??
+    final courses = _catalogPreview[course.termId] ??
+        _catalog[course.termId]?.value ??
+        _courseProgress['courses:${course.termId}'] ??
         await loadCourses(termId: course.termId);
     _checkGeneration(generation);
     if (!courses.any((candidate) =>
@@ -226,6 +277,36 @@ class VodRepository {
 
   bool _isFresh<T>(_Cached<T> cached) =>
       DateTime.now().difference(cached.createdAt) < cacheDuration;
+
+  Future<List<VodCourse>> _runCourses(
+    String key,
+    Future<List<VodCourse>> Function(void Function(List<VodCourse>)) loader, {
+    void Function(List<VodCourse>)? onProgress,
+  }) {
+    final listeners = _courseListeners.putIfAbsent(key, () => {});
+    if (onProgress != null) {
+      listeners.add(onProgress);
+      final snapshot = _courseProgress[key];
+      if (snapshot != null) onProgress(snapshot);
+    }
+    final generation = _generation;
+    return _run(
+        key,
+        () => loader((snapshot) {
+              _checkGeneration(generation);
+              final result = List<VodCourse>.unmodifiable(snapshot);
+              _courseProgress[key] = result;
+              for (final listener in listeners.toList(growable: false)) {
+                listener(result);
+              }
+            })).whenComplete(() {
+      if (onProgress != null) listeners.remove(onProgress);
+      if (listeners.isEmpty && identical(_courseListeners[key], listeners)) {
+        _courseListeners.remove(key);
+        _courseProgress.remove(key);
+      }
+    });
+  }
 
   Future<T> _run<T>(String key, Future<T> Function() loader) {
     if (_disposed) throw const VodSessionExpiredException();
@@ -258,6 +339,9 @@ class VodRepository {
     _terms = null;
     _courses.clear();
     _catalog.clear();
+    _catalogPreview.clear();
+    _courseProgress.clear();
+    _courseListeners.clear();
     _liveGrants.clear();
     _lessons.clear();
     _apiClient?.dispose();

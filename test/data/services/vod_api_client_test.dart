@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -103,6 +104,115 @@ VodApiClient _client(
     );
 
 void main() {
+  test('course progress publishes each parsed course before later pages finish',
+      () async {
+    final secondPage = Completer<http.Response>();
+    final secondRequested = Completer<void>();
+    final client = _client((request) async {
+      final page = int.parse(request.url.queryParameters['page.pageIndex']!);
+      if (page == 2) {
+        secondRequested.complete();
+        return secondPage.future;
+      }
+      return _response({
+        'pageIndex': 1,
+        'pageCount': 2,
+        'rowCount': 3,
+        'records': [
+          for (final id in [42, 43])
+            {'teclId': id, 'acteId': 7, 'subjName': '课程$id'},
+        ],
+      });
+    });
+    addTearDown(client.dispose);
+    final snapshots = <List<VodCourse>>[];
+    final result = client.fetchCourses(termId: 7, onProgress: snapshots.add);
+    await secondRequested.future;
+    expect(snapshots.map((snapshot) => snapshot.length), [1, 2]);
+    expect(snapshots.first.single.teachingClassId, 42);
+    expect(() => snapshots.last.add(_course), throwsUnsupportedError);
+    secondPage.complete(_response({
+      'pageIndex': 2,
+      'pageCount': 2,
+      'rowCount': 3,
+      'records': [
+        {'teclId': 44, 'acteId': 7, 'subjName': '课程44'},
+      ],
+    }));
+    expect(
+        (await result).map((course) => course.teachingClassId), [42, 43, 44]);
+    expect(snapshots.map((snapshot) => snapshot.length), [1, 2, 3]);
+  });
+
+  test('live progress publishes available lessons before later pages finish',
+      () async {
+    final secondPage = Completer<http.Response>();
+    final secondRequested = Completer<void>();
+    final client = _client((request) async {
+      expect(request.url.path, '/v1/vod_live/t-1');
+      final page = int.parse(request.url.queryParameters['page.pageIndex']!);
+      if (page == 2) {
+        secondRequested.complete();
+        return secondPage.future;
+      }
+      return _response({
+        'pageIndex': 1,
+        'pageCount': 2,
+        'rowCount': 3,
+        'records': [
+          for (final id in [123, 124])
+            {
+              'id': id,
+              'teclId': 42,
+              'acteId': 7,
+              'subjName': '课程$id',
+              'liveType': 0,
+            },
+        ],
+      });
+    });
+    addTearDown(client.dispose);
+    final snapshots = <List<VodLesson>>[];
+    final result =
+        client.fetchLiveLessons(termId: 7, onProgress: snapshots.add);
+    await secondRequested.future;
+    expect(snapshots.map((snapshot) => snapshot.length), [1, 2]);
+    expect(() => snapshots.last.add(_lesson), throwsUnsupportedError);
+    secondPage.complete(_response({
+      'pageIndex': 2,
+      'pageCount': 2,
+      'rowCount': 3,
+      'records': [
+        {
+          'id': 125,
+          'teclId': 42,
+          'acteId': 7,
+          'subjName': '未开播',
+          'liveType': 1,
+        },
+      ],
+    }));
+    expect((await result).map((lesson) => lesson.id), [123, 124]);
+    expect(snapshots.map((snapshot) => snapshot.length), [1, 2]);
+  });
+
+  test('partial course progress never accepts another term', () async {
+    final client = _client((_) async => _response({
+          'pageCount': 1,
+          'rowCount': 2,
+          'records': [
+            {'teclId': 42, 'acteId': 7, 'subjName': '正确学期'},
+            {'teclId': 43, 'acteId': 6, 'subjName': '其他学期'},
+          ],
+        }));
+    addTearDown(client.dispose);
+    final snapshots = <List<VodCourse>>[];
+    await expectLater(client.fetchCourses(termId: 7, onProgress: snapshots.add),
+        throwsA(isA<VodInvalidResponseException>()));
+    expect(snapshots, hasLength(1));
+    expect(snapshots.single.single.teachingClassId, 42);
+  });
+
   test('term API accepts bare arrays and epoch timestamps', () async {
     final client = _client((request) async => http.Response(
         jsonEncode([
