@@ -18,6 +18,7 @@ import '../../data/services/schedule_comparison.dart';
 import '../../shared/shuyo_text_styles.dart';
 import '../../shared/navigation/shuyo_route.dart';
 import '../../shared/theme/shuyo_theme.dart';
+import '../../shared/theme/course_color.dart';
 import '../../shared/widgets/empty_state.dart';
 import 'academic_schedule_editor_page.dart';
 import 'schedule_share_page.dart';
@@ -3702,12 +3703,7 @@ String _weekdayName(int weekday) {
 }
 
 Color _courseColor(BuildContext context, String seed) {
-  final colors = context.shuyoColors.schedulePalette;
-  var hash = 0;
-  for (final unit in seed.codeUnits) {
-    hash = (hash + unit) & 0x7fffffff;
-  }
-  return colors[hash % colors.length];
+  return courseColorForSeed(context, seed);
 }
 
 Color _courseColorForSession(BuildContext context, CourseSession session) {
