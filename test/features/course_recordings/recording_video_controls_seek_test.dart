@@ -49,8 +49,6 @@ Widget _controls(
           failure: null,
           views: const [],
           selectedView: 0,
-          onViewSelected: (_) {},
-          softwareDecoding: false,
           onSeek: onSeek,
           primaryView: primaryView,
         ),

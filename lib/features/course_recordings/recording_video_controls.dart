@@ -20,9 +20,7 @@ class RecordingVideoControls extends StatefulWidget {
     required this.failure,
     required this.views,
     required this.selectedView,
-    required this.onViewSelected,
-    required this.softwareDecoding,
-    this.onDecodingChanged,
+    this.fullscreen = false,
     this.isLive = false,
     this.onReconnect,
     this.lessons = const [],
@@ -49,11 +47,9 @@ class RecordingVideoControls extends StatefulWidget {
   final Widget? failure;
   final List<VodView> views;
   final int selectedView;
-  final ValueChanged<int> onViewSelected;
-  final bool softwareDecoding;
+  final bool fullscreen;
   final bool isLive;
   final VoidCallback? onReconnect;
-  final VoidCallback? onDecodingChanged;
   final List<VodLesson> lessons;
   final int? selectedLessonId;
   final ValueChanged<VodLesson>? onLessonSelected;
@@ -242,7 +238,7 @@ class _RecordingVideoControlsState extends State<RecordingVideoControls>
 
   @override
   Widget build(BuildContext context) {
-    final fullscreen = widget.state.isFullscreen();
+    final fullscreen = widget.fullscreen;
     return PopScope(
       canPop: !_episodePanelVisible,
       onPopInvokedWithResult: (didPop, _) {
@@ -280,6 +276,9 @@ class _RecordingVideoControlsState extends State<RecordingVideoControls>
                           alignment: Alignment.topCenter,
                           child: Container(
                             decoration: _gradient(top: true),
+                            padding: EdgeInsets.symmetric(
+                                horizontal: fullscreen ? 10 : 4,
+                                vertical: fullscreen ? 10 : 4),
                             child: SafeArea(
                               bottom: false,
                               top: fullscreen,
@@ -291,7 +290,13 @@ class _RecordingVideoControlsState extends State<RecordingVideoControls>
                                           widget.state.exitFullscreen())
                                       : widget.onBack,
                                   icon: const Icon(Icons.arrow_back,
-                                      color: Colors.white),
+                                      color: Colors.white, size: 24),
+                                  padding: EdgeInsets.zero,
+                                  constraints: const BoxConstraints.tightFor(
+                                      width: 40, height: 40),
+                                  style: const ButtonStyle(
+                                      tapTargetSize:
+                                          MaterialTapTargetSize.shrinkWrap),
                                 ),
                                 Expanded(
                                     child: Tooltip(
@@ -304,12 +309,7 @@ class _RecordingVideoControlsState extends State<RecordingVideoControls>
                                               style: const TextStyle(
                                                   color: Colors.white,
                                                   fontSize: 16)))
-                                      : Text(widget.title,
-                                          maxLines: 2,
-                                          overflow: TextOverflow.ellipsis,
-                                          style: const TextStyle(
-                                              color: Colors.white,
-                                              fontSize: 16)),
+                                      : const SizedBox.shrink(),
                                 )),
                               ]),
                             ),
@@ -320,7 +320,7 @@ class _RecordingVideoControlsState extends State<RecordingVideoControls>
                             alignment: Alignment.bottomCenter,
                             child: Container(
                               decoration: _gradient(),
-                              padding: const EdgeInsets.fromLTRB(8, 12, 8, 0),
+                              padding: const EdgeInsets.fromLTRB(10, 8, 10, 12),
                               child: SafeArea(
                                   top: false,
                                   bottom: fullscreen,
@@ -506,43 +506,80 @@ class _RecordingVideoControlsState extends State<RecordingVideoControls>
         .clamp(position, math.max(1.0, duration));
     final currentTime = _durationText(Duration(milliseconds: position.round()));
     final totalTime = _durationText(state.duration);
-    final time = Text('$currentTime / $totalTime',
-        maxLines: 1, style: const TextStyle(color: Colors.white, fontSize: 12));
-    final fullscreenTime = Column(
-      mainAxisSize: MainAxisSize.min,
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text(currentTime,
-            style: const TextStyle(color: Colors.white, fontSize: 12)),
-        Text(totalTime,
-            style: const TextStyle(color: Colors.white70, fontSize: 12)),
-      ],
-    );
     return LayoutBuilder(builder: (context, constraints) {
-      final compact = constraints.maxWidth < 600;
+      final narrow = constraints.maxWidth < 340;
+      final buttonWidth = fullscreen && constraints.maxWidth >= 600
+          ? 42.0
+          : narrow
+              ? 30.0
+              : 35.0;
+      final time = SizedBox(
+        width: narrow ? 64 : 76,
+        child: Column(
+          key: const ValueKey('recording-playback-time'),
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.end,
+          children: [
+            Text(currentTime,
+                maxLines: 1,
+                style:
+                    TextStyle(color: Colors.white, fontSize: narrow ? 11 : 13)),
+            Text(totalTime,
+                maxLines: 1,
+                style: TextStyle(
+                    color: Colors.white70, fontSize: narrow ? 11 : 13)),
+          ],
+        ),
+      );
+      Widget iconButton({
+        required String tooltip,
+        required IconData icon,
+        required VoidCallback? onPressed,
+        bool? selected,
+        IconData? selectedIcon,
+        double size = 22,
+      }) =>
+          IconButton(
+            tooltip: tooltip,
+            isSelected: selected,
+            onPressed: onPressed,
+            icon: Icon(icon, size: size),
+            selectedIcon: selectedIcon == null
+                ? null
+                : Icon(selectedIcon,
+                    size: size, color: Theme.of(context).colorScheme.primary),
+            padding: EdgeInsets.zero,
+            constraints:
+                BoxConstraints.tightFor(width: buttonWidth, height: 34),
+            style: IconButton.styleFrom(
+                foregroundColor: Colors.white,
+                disabledForegroundColor: Colors.white38,
+                tapTargetSize: MaterialTapTargetSize.shrinkWrap),
+          );
       final older = _adjacentLesson(1);
       final newer = _adjacentLesson(-1);
       final controls = <Widget>[
         if (fullscreen &&
             widget.views.length > 1 &&
             widget.onDualChanged != null)
-          IconButton(
+          iconButton(
             tooltip: widget.dualEnabled ? '关闭双视角' : '开启双视角',
-            isSelected: widget.dualEnabled,
+            selected: widget.dualEnabled,
             onPressed: widget.loading
                 ? null
                 : () {
                     widget.onDualChanged!(!widget.dualEnabled);
                     _showControls();
                   },
-            icon: const Icon(Icons.picture_in_picture_alt_outlined),
-            selectedIcon: Icon(Icons.picture_in_picture_alt_rounded,
-                color: Theme.of(context).colorScheme.primary),
+            icon: Icons.picture_in_picture_alt_outlined,
+            selectedIcon: Icons.picture_in_picture_alt_rounded,
           ),
-        if (fullscreen && widget.lessons.isNotEmpty)
-          TextButton(
-              onPressed: _openEpisodes,
-              child: const Text('选集', style: TextStyle(color: Colors.white))),
+        if (widget.lessons.isNotEmpty)
+          iconButton(
+            tooltip: '选集',
+            icon: Icons.list,
+            onPressed: _openEpisodes,
+          ),
         if (fullscreen && widget.onAspectChanged != null)
           PopupMenuButton<String>(
             tooltip: '画面比例',
@@ -568,9 +605,9 @@ class _RecordingVideoControlsState extends State<RecordingVideoControls>
                             const TextStyle(color: Colors.white, fontSize: 13)))
             ],
             child: Padding(
-                padding: const EdgeInsets.all(12),
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
                 child: Text(widget.aspect,
-                    style: const TextStyle(color: Colors.white, fontSize: 12))),
+                    style: const TextStyle(color: Colors.white, fontSize: 13))),
           ),
         if (!widget.isLive)
           PopupMenuButton<double>(
@@ -598,72 +635,37 @@ class _RecordingVideoControlsState extends State<RecordingVideoControls>
                             const TextStyle(color: Colors.white, fontSize: 13)))
             ],
             child: Padding(
-                padding: const EdgeInsets.all(12),
-                child: Text('${state.rate}x',
-                    style: const TextStyle(color: Colors.white, fontSize: 12))),
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+                child: Text('${state.rate}X',
+                    style: const TextStyle(color: Colors.white, fontSize: 13))),
           ),
         if (widget.isLive)
-          IconButton(
+          iconButton(
               tooltip: '回到直播',
               onPressed: widget.loading ? null : widget.onReconnect,
-              icon: const Icon(Icons.refresh)),
-        if (widget.views.length > 1 || widget.onDecodingChanged != null)
-          PopupMenuButton<int>(
-            tooltip: '播放设置',
-            color: Colors.black.withValues(alpha: .8),
-            surfaceTintColor: Colors.transparent,
-            elevation: 0,
-            requestFocus: false,
-            enabled: !widget.loading,
-            icon: const Icon(Icons.more_vert, color: Colors.white),
-            onOpened: () => _hideTimer?.cancel(),
-            onCanceled: _showControls,
-            onSelected: (value) {
-              if (value == -1) {
-                widget.onDecodingChanged?.call();
-              } else {
-                widget.onViewSelected(value);
-              }
-              _showControls();
-            },
-            itemBuilder: (_) => [
-              for (var index = 0; index < widget.views.length; index++)
-                CheckedPopupMenuItem(
-                    value: index,
-                    height: 35,
-                    checked: index == widget.selectedView,
-                    child: Text(widget.views[index].label,
-                        style: const TextStyle(
-                            color: Colors.white, fontSize: 13))),
-              if (widget.onDecodingChanged != null) ...[
-                const PopupMenuDivider(),
-                CheckedPopupMenuItem(
-                    value: -1,
-                    height: 35,
-                    checked: widget.softwareDecoding,
-                    child: const Text('使用软件解码',
-                        style: TextStyle(color: Colors.white, fontSize: 13))),
-              ],
-            ],
-          ),
-        IconButton(
+              icon: Icons.refresh),
+        iconButton(
             tooltip: fullscreen ? '退出全屏' : '全屏',
             onPressed: widget.loading
                 ? null
                 : () => unawaited(widget.state.toggleFullscreen()),
-            icon: Icon(fullscreen ? Icons.fullscreen_exit : Icons.fullscreen)),
+            icon: fullscreen ? Icons.fullscreen_exit : Icons.fullscreen,
+            size: 24),
       ];
       return IconTheme(
-          data: const IconThemeData(color: Colors.white),
+          data: const IconThemeData(color: Colors.white, size: 22),
           child: Column(mainAxisSize: MainAxisSize.min, children: [
             if (!widget.isLive)
               SizedBox(
                   height: 24,
                   child: SliderTheme(
                     data: SliderTheme.of(context).copyWith(
-                        trackHeight: 2,
-                        thumbShape:
-                            const RoundSliderThumbShape(enabledThumbRadius: 5),
+                        trackHeight: 3.5,
+                        trackShape: const RoundedRectSliderTrackShape(),
+                        thumbShape: const RoundSliderThumbShape(
+                            enabledThumbRadius: 7,
+                            elevation: 0,
+                            pressedElevation: 0),
                         overlayShape:
                             const RoundSliderOverlayShape(overlayRadius: 12)),
                     child: Slider(
@@ -671,7 +673,7 @@ class _RecordingVideoControlsState extends State<RecordingVideoControls>
                       secondaryTrackValue: buffered.toDouble(),
                       min: 0,
                       max: math.max(1.0, duration),
-                      inactiveColor: Colors.white38,
+                      inactiveColor: const Color(0x33FFFFFF),
                       secondaryActiveColor: Theme.of(context)
                           .colorScheme
                           .primary
@@ -682,33 +684,27 @@ class _RecordingVideoControlsState extends State<RecordingVideoControls>
                       onChangeEnd: (value) => unawaited(_finishSeek(value)),
                     ),
                   )),
-            if (compact && !fullscreen && !widget.isLive)
-              Align(
-                  alignment: Alignment.centerLeft,
-                  child: Padding(
-                      padding: const EdgeInsets.only(left: 12), child: time)),
-            Row(children: [
-              IconButton(
+            const SizedBox(height: 4),
+            Row(key: const ValueKey('recording-bottom-controls'), children: [
+              iconButton(
                   tooltip: state.playing ? '暂停' : '播放',
                   onPressed: widget.loading ? null : _togglePlayback,
-                  icon: Icon(state.playing ? Icons.pause : Icons.play_arrow)),
-              if (fullscreen && !widget.isLive) fullscreenTime,
-              if (!fullscreen && !compact && !widget.isLive) time,
-              if (fullscreen && widget.lessons.isNotEmpty) ...[
-                IconButton(
+                  icon: state.playing ? Icons.pause : Icons.play_arrow,
+                  size: 26),
+              if (!widget.isLive) time,
+              if (widget.lessons.isNotEmpty) ...[
+                iconButton(
                     tooltip: '上一集',
-                    visualDensity: VisualDensity.compact,
                     onPressed: widget.loading || older == null
                         ? null
                         : () => widget.onLessonSelected?.call(older),
-                    icon: const Icon(Icons.skip_previous)),
-                IconButton(
+                    icon: Icons.skip_previous),
+                iconButton(
                     tooltip: '下一集',
-                    visualDensity: VisualDensity.compact,
                     onPressed: widget.loading || newer == null
                         ? null
                         : () => widget.onLessonSelected?.call(newer),
-                    icon: const Icon(Icons.skip_next)),
+                    icon: Icons.skip_next),
               ],
               if (widget.isLive)
                 Text('● 直播',

@@ -60,6 +60,7 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
   final _videoKey = GlobalKey<VideoState>();
   final _controlsRevision = ValueNotifier(0);
   Player? _player;
+  Player? _timelinePlayer;
   VideoController? _videoController;
   VideoController? _hostVideoController;
   StreamSubscription<String>? _errorSubscription;
@@ -82,7 +83,6 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
   Future<void> _mediaQueue = Future<void>.value();
   bool _loading = true;
   bool _recovering = false;
-  bool _softwareDecoding = false;
   bool _fullscreenActive = false;
   bool _episodePanelVisible = false;
   bool _dualEnabled = false;
@@ -100,6 +100,7 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
   bool _swappingViews = false;
   bool _seekingPlayers = false;
   bool _syncingSecondary = false;
+  Completer<void>? _secondarySyncCompletion;
   bool _secondarySyncPending = false;
   String _aspect = '自动';
   String _preferredView = '教室';
@@ -442,6 +443,7 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
           for (final stream in <Stream<dynamic>>[
             player.stream.position,
             player.stream.playing,
+            player.stream.buffering,
             player.stream.rate
           ]) {
             _syncSubscriptions
@@ -473,6 +475,7 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
           mediaUrl = await _liveProxy!.open(view.url);
         }
         _openingMediaRevision = revision;
+        _timelinePlayer = player;
         await player
             .open(
               Media(
@@ -598,6 +601,20 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
     await _openSecondary();
   }
 
+  bool get _viewsAligned {
+    final primary = _player;
+    final secondary = _secondaryPlayer;
+    return primary != null &&
+        secondary != null &&
+        !primary.state.buffering &&
+        !secondary.state.buffering &&
+        (_lesson.isLive ||
+            (primary.state.position - secondary.state.position)
+                    .inMilliseconds
+                    .abs() <=
+                250);
+  }
+
   Future<void> _selectView(int index) async {
     final playback = _playback;
     if (playback == null ||
@@ -625,6 +642,12 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
     final revision = _loadRevision;
     _swappingViews = true;
     try {
+      await _alignSecondary(allowDuringSwap: true);
+      if (!mounted || revision != _loadRevision || _secondaryFailed) return;
+      if (!_viewsAligned) {
+        _pendingViewIndex = index;
+        return;
+      }
       final volume = primary.state.volume;
       await primary.setVolume(0);
       if (!mounted || revision != _loadRevision) {
@@ -652,7 +675,6 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
       }
     } finally {
       _swappingViews = false;
-      unawaited(_alignSecondary());
     }
   }
 
@@ -740,28 +762,6 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
       await _loadLesson(_lesson, resume: !_lesson.isLive);
     } else if (widget.repository != null && !_catalogLoading) {
       await _loadCatalog(forceRefresh: true);
-    }
-  }
-
-  Future<void> _toggleSoftwareDecoding() async {
-    final player = _player;
-    if (player == null || player.platform is! NativePlayer) return;
-    try {
-      final next = !_softwareDecoding;
-      // Keep GPU rendering enabled while switching only the video decoder.
-      // mpv selects a supported platform decoder in automatic mode.
-      await Future.wait([
-        for (final candidate in [player, _secondaryPlayer])
-          if (candidate?.platform is NativePlayer)
-            (candidate!.platform as NativePlayer)
-                .setProperty('hwdec', next ? 'no' : 'auto-safe'),
-      ]);
-      _publish(() => _softwareDecoding = next);
-    } on Object {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('暂时无法切换解码方式，请重试。')),
-      );
     }
   }
 
@@ -867,6 +867,7 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
           for (final stream in <Stream<dynamic>>[
             secondary.stream.position,
             secondary.stream.playing,
+            secondary.stream.buffering,
             secondary.stream.rate,
           ]) {
             _syncSubscriptions
@@ -878,9 +879,6 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
         await secondary.setVolume(0);
         await _secondaryController!.platform.future
             .timeout(const Duration(seconds: 20));
-        if (_softwareDecoding && secondary.platform is NativePlayer) {
-          await (secondary.platform as NativePlayer).setProperty('hwdec', 'no');
-        }
         if (!mounted || revision != _secondaryRevision) return;
         await configureRecordingPlayerCache(
           secondary,
@@ -929,9 +927,13 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
     await _secondaryQueue;
   }
 
-  Future<void> _alignSecondary() async {
+  Future<void> _alignSecondary({bool allowDuringSwap = false}) async {
     if (_syncingSecondary) {
       _secondarySyncPending = true;
+      await _secondarySyncCompletion?.future;
+      if (allowDuringSwap) {
+        await _alignSecondary(allowDuringSwap: true);
+      }
       return;
     }
     final primary = _player;
@@ -941,7 +943,7 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
         _secondaryFailed ||
         !_foreground ||
         _loading ||
-        _swappingViews ||
+        (_swappingViews && !allowDuringSwap) ||
         _seekingPlayers ||
         _secondaryViewIndex == null ||
         primary == null ||
@@ -949,6 +951,8 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
       return;
     }
     _syncingSecondary = true;
+    final completion = Completer<void>();
+    _secondarySyncCompletion = completion;
     bool stillCurrent() =>
         mounted &&
         revision == _secondaryRevision &&
@@ -957,12 +961,16 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
         _foreground &&
         !_loading;
     try {
+      final timeline = _timelinePlayer ?? primary;
+      final follower = identical(timeline, primary) ? secondary : primary;
       if (!_lesson.isLive &&
-          (primary.state.position - secondary.state.position)
+          !timeline.state.buffering &&
+          !follower.state.buffering &&
+          (timeline.state.position - follower.state.position)
                   .inMilliseconds
                   .abs() >
-              800) {
-        await secondary.seek(primary.state.position);
+              250) {
+        await follower.seek(timeline.state.position);
         if (!stillCurrent()) return;
       }
       if (secondary.state.rate != primary.state.rate) {
@@ -981,9 +989,15 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
       if (mounted) _publish(() => _secondaryFailed = true);
     } finally {
       _syncingSecondary = false;
+      _secondarySyncCompletion = null;
+      completion.complete();
       if (_secondarySyncPending) {
         _secondarySyncPending = false;
         unawaited(_alignSecondary());
+      }
+      final pending = _pendingViewIndex;
+      if (pending != null && !_swappingViews && _viewsAligned) {
+        unawaited(_selectView(pending));
       }
     }
   }
@@ -1037,6 +1051,9 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
                             valueListenable: _controlsRevision,
                             builder: (context, _, __) => RecordingVideoControls(
                               state: state,
+                              fullscreen:
+                                  FullscreenInheritedWidget.maybeOf(context) !=
+                                      null,
                               player: _player!,
                               onSeek: _seekPlayers,
                               primaryView:
@@ -1085,12 +1102,6 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
                               failure: _failure == null ? null : _placeholder(),
                               views: _playback?.views ?? const [],
                               selectedView: _viewIndex,
-                              onViewSelected: (index) =>
-                                  unawaited(_selectView(index)),
-                              softwareDecoding: _softwareDecoding,
-                              onDecodingChanged: !kIsWeb
-                                  ? () => unawaited(_toggleSoftwareDecoding())
-                                  : null,
                             ),
                           ),
                         ),

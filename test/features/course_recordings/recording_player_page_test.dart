@@ -27,14 +27,24 @@ class _PlatformPlayer extends PlatformPlayer {
   int plays = 0;
   int pauses = 0;
   final opened = <Playable>[];
+  final seeks = <Duration>[];
   final volumes = <double>[];
   Completer<void>? openGate;
+  Completer<void>? seekGate;
 
   void emitBuffer(Duration value) => bufferController.add(value);
 
-  void emitBuffering(bool value) => bufferingController.add(value);
+  void emitBuffering(bool value) {
+    state = state.copyWith(buffering: value);
+    bufferingController.add(value);
+  }
 
   void emitError(String value) => errorController.add(value);
+
+  void emitPosition(Duration value) {
+    state = state.copyWith(position: value);
+    positionController.add(value);
+  }
 
   @override
   Future<void> open(Playable playable, {bool play = true}) async {
@@ -81,7 +91,9 @@ class _PlatformPlayer extends PlatformPlayer {
 
   @override
   Future<void> seek(Duration position) async {
+    seeks.add(position);
     lastSeek = position;
+    await seekGate?.future;
     state = state.copyWith(position: position);
     positionController.add(position);
   }
@@ -275,6 +287,7 @@ void main() {
           home: Scaffold(
               body: RecordingVideoControls(
         state: state,
+        fullscreen: state.fullscreen,
         player: player,
         title: course.name,
         loading: loading,
@@ -291,8 +304,6 @@ void main() {
                   displayLabel: 'PPT')
             ],
         selectedView: 0,
-        onViewSelected: (_) {},
-        softwareDecoding: false,
         lessons: lessons,
         selectedLessonId: selectedId,
         onLessonSelected: onLesson,
@@ -381,7 +392,9 @@ void main() {
       expect(menu.surfaceTintColor, Colors.transparent);
       expect(menu.requestFocus, isFalse);
     }
-    expect(menus, findsNWidgets(3));
+    expect(menus, findsNWidgets(2));
+    expect(find.byTooltip('播放设置'), findsNothing);
+    expect(find.byType(PopupMenuButton<int>), findsNothing);
     await tester.tap(find.byTooltip('画面比例'));
     await tester.pump(const Duration(milliseconds: 350));
     await tester.pumpAndSettle();
@@ -395,6 +408,61 @@ void main() {
     expect(aspect, '4:3');
     await tester.pumpWidget(const SizedBox.shrink());
   });
+
+  for (final size in [
+    const Size(320, 180),
+    const Size(393, 221),
+    const Size(873, 393),
+  ]) {
+    final fullscreen = size.width >= 600;
+    testWidgets(
+        '${fullscreen ? 'fullscreen' : 'portrait'} controls at ${size.width} match the reference grouping and spacing',
+        (tester) async {
+      tester.view.physicalSize = size;
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final player = Player(platformPlayer: _PlatformPlayer());
+      addTearDown(player.dispose);
+      await tester.pumpWidget(controlPage(
+          player: player,
+          state: _VideoState(fullscreen: fullscreen),
+          lessons: [second, first],
+          selectedId: first.id,
+          onAspect: (_) {}));
+      final row = tester
+          .getRect(find.byKey(const ValueKey('recording-bottom-controls')));
+      final time =
+          tester.getRect(find.byKey(const ValueKey('recording-playback-time')));
+      final play = tester.getRect(find.byTooltip('暂停'));
+      final previous = tester.getRect(find.byTooltip('上一集'));
+      final next = tester.getRect(find.byTooltip('下一集'));
+      final episodes = tester.getRect(find.byTooltip('选集'));
+      final speed = tester.getRect(find.byTooltip('播放速度'));
+      final expand =
+          tester.getRect(find.byTooltip(fullscreen ? '退出全屏' : '全屏').last);
+      expect(play.right, lessThanOrEqualTo(time.left));
+      expect(time.right, lessThanOrEqualTo(previous.left));
+      expect(previous.right, lessThanOrEqualTo(next.left));
+      expect(next.right, lessThanOrEqualTo(episodes.left));
+      expect(episodes.right, lessThanOrEqualTo(speed.left));
+      expect(speed.right, lessThanOrEqualTo(expand.left));
+      for (final button in [play, previous, next, episodes, expand]) {
+        expect(button.height, 34);
+        expect(button.center.dy, row.center.dy);
+      }
+      expect(row.bottom, tester.view.physicalSize.height - 12);
+      expect(find.text('1:05:00'), findsOneWidget);
+      expect(find.text('1:30:00'), findsOneWidget);
+      expect(find.text('选集'), findsNothing);
+      expect(find.byTooltip('播放设置'), findsNothing);
+      expect(find.byType(PopupMenuButton<int>), findsNothing);
+      expect(
+          find.text(course.name), fullscreen ? findsOneWidget : findsNothing);
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+    });
+  }
 
   testWidgets(
       'paused video toggles both overlays and embedded back leaves the page',
@@ -451,7 +519,7 @@ void main() {
     await tester.tap(find.byTooltip('下一集'));
     await tester.pump(const Duration(milliseconds: 350));
     expect(selected?.id, second.id);
-    await tester.tap(find.text('选集'));
+    await tester.tap(find.byTooltip('选集'));
     await tester.pump(const Duration(milliseconds: 350));
     await tester.pumpAndSettle();
     final pending = find.byKey(ValueKey('fullscreen-lesson-${unavailable.id}'));
@@ -477,7 +545,7 @@ void main() {
         lessons: [first, second],
         selectedId: first.id,
         onPanelVisibilityChanged: panelStates.add));
-    await tester.tap(find.text('选集'));
+    await tester.tap(find.byTooltip('选集'));
     await tester.pump(const Duration(milliseconds: 350));
     await tester.pumpAndSettle();
     expect(panelStates, [true]);
@@ -730,7 +798,7 @@ void main() {
       expect(ppt.state.volume, 0);
       expect(ppt.state.playing, isTrue);
       expect(find.byType(ChoiceChip), findsNothing);
-      expect(find.byTooltip('播放设置'), findsOneWidget);
+      expect(find.byTooltip('播放设置'), findsNothing);
 
       await tester
           .widget<RecordingVideoControls>(find.byType(RecordingVideoControls))
@@ -746,6 +814,7 @@ void main() {
       expect(classroom.state.playing, isFalse);
       expect(ppt.state.playing, isFalse);
       final plays = [classroom.plays, ppt.plays];
+      final seeks = [classroom.seeks.length, ppt.seeks.length];
       final floating = find.byKey(const ValueKey('recording-secondary-view'));
       expect(floating, findsOneWidget);
       expect(find.descendant(of: floating, matching: find.byType(IconButton)),
@@ -762,6 +831,7 @@ void main() {
       expect(classroom.state.playing, isFalse);
       expect(ppt.state.playing, isFalse);
       expect([classroom.plays, ppt.plays], plays);
+      expect([classroom.seeks.length, ppt.seeks.length], seeks);
 
       if (!live) {
         await tester.tap(find.byTooltip('播放'));
@@ -823,6 +893,81 @@ void main() {
       await tester.pump();
     });
   }
+
+  testWidgets(
+      'swaps wait for alignment without reversing the clock or reopening',
+      (tester) async {
+    const channel = MethodChannel('com.alexmercerind/media_kit_video');
+    tester.binding.defaultBinaryMessenger
+        .setMockMethodCallHandler(channel, (_) async => null);
+    addTearDown(() => tester.binding.defaultBinaryMessenger
+        .setMockMethodCallHandler(channel, null));
+    final harness = _PlaybackHarness();
+    var loads = 0;
+    await tester.pumpWidget(page(
+        harness: harness,
+        load: (lesson) async {
+          loads++;
+          return playback(lesson);
+        }));
+    await tester.pumpAndSettle();
+    final classroom = harness.platforms[0];
+    final ppt = harness.platforms[1];
+    await classroom.pause();
+    await tester.pumpAndSettle();
+    classroom.seeks.clear();
+    ppt.seeks.clear();
+    ppt.state = ppt.state.copyWith(position: const Duration(seconds: 8));
+    final pendingSeek = Completer<void>();
+    ppt.seekGate = pendingSeek;
+    classroom.emitPosition(const Duration(seconds: 10));
+    await tester.pump();
+    expect(ppt.seeks, [const Duration(seconds: 10)]);
+    var controls = tester
+        .widget<RecordingVideoControls>(find.byType(RecordingVideoControls));
+    controls.onSwapViews!();
+    await tester.pump();
+    controls = tester
+        .widget<RecordingVideoControls>(find.byType(RecordingVideoControls));
+    expect(controls.selectedView, 0);
+    ppt.emitBuffering(true);
+    pendingSeek.complete();
+    ppt.seekGate = null;
+    await tester.pumpAndSettle();
+    controls = tester
+        .widget<RecordingVideoControls>(find.byType(RecordingVideoControls));
+    expect(controls.selectedView, 0);
+    ppt.emitBuffering(false);
+    await tester.pumpAndSettle();
+    controls = tester
+        .widget<RecordingVideoControls>(find.byType(RecordingVideoControls));
+    expect(controls.selectedView, 1);
+    expect(identical(controls.player.platform, ppt), isTrue);
+    expect(ppt.state.position, const Duration(seconds: 10));
+    expect(classroom.seeks, isEmpty);
+    classroom.emitPosition(const Duration(seconds: 11));
+    await tester.pumpAndSettle();
+    expect(classroom.state.position, const Duration(seconds: 11));
+    expect(ppt.state.position, const Duration(seconds: 11));
+    expect(classroom.seeks, isEmpty);
+    expect(
+        ppt.seeks, [const Duration(seconds: 10), const Duration(seconds: 11)]);
+    classroom.emitPosition(const Duration(milliseconds: 11400));
+    await tester.pumpAndSettle();
+    expect(ppt.state.position, const Duration(milliseconds: 11400));
+    final seeks = [classroom.seeks.length, ppt.seeks.length];
+    controls.onSwapViews!();
+    await tester.pumpAndSettle();
+    expect([classroom.seeks.length, ppt.seeks.length], seeks);
+    expect(classroom.state.playing, isFalse);
+    expect(ppt.state.playing, isFalse);
+    expect(loads, 1);
+    expect(harness.platforms, hasLength(2));
+    expect(classroom.opened, hasLength(1));
+    expect(ppt.opened, hasLength(1));
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
 
   testWidgets('secondary open and first frame never block the primary',
       (tester) async {
@@ -1141,7 +1286,6 @@ void main() {
     final platform = _PlatformPlayer();
     final player = Player(platformPlayer: platform);
     addTearDown(player.dispose);
-    var selectedView = -1;
     await tester.pumpWidget(MaterialApp(
       builder: (context, child) => MediaQuery(
         data: MediaQuery.of(context).copyWith(textScaler: TextScaler.linear(2)),
@@ -1162,14 +1306,13 @@ void main() {
               VodView(viewNumber: 5, url: Uri.https('media.example', '/ppt')),
             ],
             selectedView: 0,
-            onViewSelected: (value) => selectedView = value,
-            softwareDecoding: false,
           ),
         ),
       ),
     ));
     await tester.pump();
-    expect(find.text('1:05:00 / 1:30:00'), findsOneWidget);
+    expect(find.text('1:05:00'), findsOneWidget);
+    expect(find.text('1:30:00'), findsOneWidget);
     expect(tester.takeException(), isNull);
 
     await tester.tap(find.byTooltip('暂停'));
@@ -1185,13 +1328,8 @@ void main() {
     await tester.pumpAndSettle();
     expect(platform.lastRate, 1.5);
 
-    await tester.tap(find.byTooltip('播放设置'));
-    await tester.pump(const Duration(milliseconds: 350));
-    await tester.pumpAndSettle();
-    await tester.tap(find.byWidgetPredicate(
-        (widget) => widget is CheckedPopupMenuItem<int> && widget.value == 1));
-    await tester.pumpAndSettle();
-    expect(selectedView, 1);
+    expect(find.byTooltip('播放设置'), findsNothing);
+    expect(find.byType(PopupMenuButton<int>), findsNothing);
     expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox.shrink());
   });
@@ -1223,8 +1361,6 @@ void main() {
                 failure: null,
                 views: const [],
                 selectedView: 0,
-                onViewSelected: (_) {},
-                softwareDecoding: false,
                 isLive: true,
                 onReconnect: () => reconnects++,
               ))),
@@ -1260,14 +1396,13 @@ void main() {
           height: 180,
           child: RecordingVideoControls(
             state: _VideoState(fullscreen: true),
+            fullscreen: true,
             player: player,
             title: '电路与模拟电子技术',
             loading: false,
             failure: null,
             views: const [],
             selectedView: 0,
-            onViewSelected: (_) {},
-            softwareDecoding: false,
           ),
         ),
       ),
