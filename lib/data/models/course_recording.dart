@@ -210,12 +210,33 @@ class VodLesson {
               : '暂不可看';
 }
 
+enum VodLiveProtocol { hls, flv, webRtc }
+
+class VodWebRtcSource {
+  const VodWebRtcSource({
+    required this.signalingUri,
+    required this.deviceId,
+    required this.accountToken,
+    required this.stunServer,
+    required this.useWebVpn,
+    this.headers = const {},
+  });
+
+  final Uri signalingUri;
+  final String deviceId;
+  final String accountToken;
+  final String stunServer;
+  final bool useWebVpn;
+  final Map<String, String> headers;
+}
+
 class VodView {
   const VodView({
     required this.viewNumber,
     required this.url,
     this.httpHeaders = const {},
     this.displayLabel,
+    this.webRtcSource,
   });
 
   final int viewNumber;
@@ -226,6 +247,7 @@ class VodView {
   /// Headers scoped to this media target, never copied from the API request.
   final Map<String, String> httpHeaders;
   final String? displayLabel;
+  final VodWebRtcSource? webRtcSource;
 
   String get label =>
       displayLabel ??

@@ -77,6 +77,148 @@ Future<http.Response> _authorized(
 void main() {
   for (final vpn in [false, true]) {
     test(
+        'WebRTC gets authorized sources and STUN with ${vpn ? 'WebVPN' : 'direct'}',
+        () async {
+      final detail = _detail();
+      detail['courseDeviceViewDtoList'] = [
+        for (final view in [1, 5])
+          {
+            'deviceStatus': 1,
+            'deviViewNum': view,
+            'chanNameMainPlayUrl': 'wss://rtc.cc.shu.edu.cn:32001/signal',
+            'chanGbidMain': 'device-$view',
+            'mainTokenStr': 'synthetic-token',
+          },
+      ];
+      final paths = <String>[];
+      final client = VodApiClient(
+        httpClient: MockClient((request) async {
+          paths.add(request.url.path);
+          if (request.url.path.endsWith('/resources')) {
+            return _response({
+              'resourceList': [
+                {'sign': 'p2-live-page'}
+              ]
+            });
+          }
+          if (request.url.path.endsWith('/verify')) {
+            return _response({'verify': true});
+          }
+          if (request.url.path.endsWith('/setting/stun')) {
+            return _response({
+              'stunConfig': {'ip': 'stun.example', 'port': 3478}
+            });
+          }
+          expect(request.url.queryParameters['playType'], '1');
+          return _response(detail);
+        }),
+        useWebVpn: vpn,
+        headersLoader: (_) async => {},
+        mediaHeadersLoader: (_) async =>
+            {'Cookie': 'synthetic', 'jwt-token': 'private'},
+        uriResolver: (path, query) => Uri.https('vod.example', path, query),
+      );
+      addTearDown(client.dispose);
+      final playback = await client.fetchLivePlayback(
+          course: _course, lesson: _lesson, protocol: VodLiveProtocol.webRtc);
+      expect(paths, [
+        '/v1/course-role-permission/teaching-class/resources',
+        '/v1/course/verify',
+        '/v1/course_vod_videoinfos',
+        '/v1/setting/stun',
+      ]);
+      expect(playback.views, hasLength(2));
+      for (final view in playback.views) {
+        final source = view.webRtcSource!;
+        expect(source.signalingUri.host,
+            vpn ? VodUrlResolver.liveWebVpnHost : VodUrlResolver.liveHost);
+        expect(source.signalingUri.scheme, 'wss');
+        expect(source.deviceId, 'device-${view.viewNumber}');
+        expect(source.accountToken, 'synthetic-token');
+        expect(source.stunServer, 'stun.example:3478');
+        expect(source.useWebVpn, vpn);
+        expect(source.headers, {'Cookie': 'synthetic'});
+      }
+    });
+  }
+
+  test('WebRTC rejects untrusted signaling endpoints', () async {
+    final detail = _detail();
+    detail['courseDeviceViewDtoList'] = [
+      {
+        'deviceStatus': 1,
+        'chanNameMainPlayUrl': 'wss://untrusted.example/signal',
+        'chanGbidMain': 'device',
+        'mainTokenStr': 'synthetic-token',
+      }
+    ];
+    final client = _client((request) async {
+      if (request.url.path.endsWith('/resources')) {
+        return _response({
+          'resourceList': [
+            {'sign': 'p2-live-page'}
+          ]
+        });
+      }
+      if (request.url.path.endsWith('/verify')) {
+        return _response({'verify': true});
+      }
+      if (request.url.path.endsWith('/setting/stun')) return _response({});
+      return _response(detail);
+    });
+    addTearDown(client.dispose);
+    await expectLater(
+        client.fetchLivePlayback(
+            course: _course, lesson: _lesson, protocol: VodLiveProtocol.webRtc),
+        throwsA(isA<VodInvalidResponseException>()));
+  });
+
+  for (final vpn in [false, true]) {
+    test('FLV requests its own source with ${vpn ? 'WebVPN' : 'direct'}',
+        () async {
+      final detail = _detail();
+      detail['courseDeviceViewDtoList'] = [
+        {
+          'deviceStatus': 1,
+          'deviViewNum': 1,
+          'chanNameMainHlsPlayUrl': 'https://rtc.cc.shu.edu.cn:32001/live.m3u8',
+          'chanNameMainPlayUrl': 'https://rtc.cc.shu.edu.cn:32001/live.flv',
+          'mainTokenStr': 'opaque+token',
+        },
+      ];
+      final client = VodApiClient(
+        httpClient: MockClient((request) async {
+          if (request.url.path.endsWith('/resources')) {
+            return _response({
+              'resourceList': [
+                {'sign': 'p2-live-page'}
+              ]
+            });
+          }
+          if (request.url.path.endsWith('/verify')) {
+            return _response({'verify': true});
+          }
+          expect(request.url.queryParameters['playType'], '2');
+          return _response(detail);
+        }),
+        useWebVpn: vpn,
+        headersLoader: (_) async => {},
+        mediaHeadersLoader: (_) async => {},
+        uriResolver: (path, query) => Uri.https('vod.example', path, query),
+      );
+      addTearDown(client.dispose);
+      final playback = await client.fetchLivePlayback(
+          course: _course, lesson: _lesson, protocol: VodLiveProtocol.flv);
+      expect(playback.views.single.url.path, '/live.flv');
+      expect(playback.views.single.url.host,
+          vpn ? VodUrlResolver.liveWebVpnHost : VodUrlResolver.liveHost);
+      expect(playback.views.single.url.queryParameters['account_token'],
+          'opaque+token');
+    });
+  }
+
+  for (final vpn in [false, true]) {
+    test(
         'deployed active devices use RTC HLS with ${vpn ? 'WebVPN' : 'direct'}',
         () async {
       final detail = _detail();

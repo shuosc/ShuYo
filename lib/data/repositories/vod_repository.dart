@@ -224,6 +224,20 @@ class VodRepository {
   Future<VodPlayback> preparePlayback({
     required VodCourse course,
     required VodLesson lesson,
+  }) =>
+      _preparePlayback(course: course, lesson: lesson);
+
+  Future<VodPlayback> prepareLivePlaybackWithProtocol({
+    required VodCourse course,
+    required VodLesson lesson,
+    required VodLiveProtocol protocol,
+  }) =>
+      _preparePlayback(course: course, lesson: lesson, protocol: protocol);
+
+  Future<VodPlayback> _preparePlayback({
+    required VodCourse course,
+    required VodLesson lesson,
+    VodLiveProtocol protocol = VodLiveProtocol.hls,
   }) async {
     final generation = _generation;
     await _requireCatalogCourse(course);
@@ -240,9 +254,10 @@ class VodRepository {
     _checkGeneration(generation);
     // Coalesce a double tap, but never keep the resulting signed URLs.
     final playback = await _run(
-        'playback:${course.teachingClassId}:${lesson.id}:${lesson.isLive}',
+        'playback:${course.teachingClassId}:${lesson.id}:${lesson.isLive}:$protocol',
         () => lesson.isLive
-            ? _client.fetchLivePlayback(course: course, lesson: lesson)
+            ? _client.fetchLivePlayback(
+                course: course, lesson: lesson, protocol: protocol)
             : _client.fetchPlayback(course: course, lesson: lesson));
     _checkGeneration(generation);
     if (lesson.isLive) _liveGrants.add(lesson.id);

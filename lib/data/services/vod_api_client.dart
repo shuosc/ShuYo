@@ -240,7 +240,9 @@ class VodApiClient {
   }
 
   Future<VodPlayback> fetchLivePlayback(
-      {required VodCourse course, required VodLesson lesson}) async {
+      {required VodCourse course,
+      required VodLesson lesson,
+      VodLiveProtocol protocol = VodLiveProtocol.hls}) async {
     if (!lesson.isLiveAvailable ||
         lesson.teachingClassId != course.teachingClassId) {
       throw const VodPermissionException('这节课当前没有可观看的直播');
@@ -249,8 +251,14 @@ class VodApiClient {
     final verified =
         _dataMap(await _get('/v1/course/verify', {'courId': '${lesson.id}'}));
     if (verified['verify'] != true) throw const VodPermissionException();
-    final response = await _get('/v1/course_vod_videoinfos',
-        {'courseId': '${lesson.id}', 'playType': '3'});
+    final response = await _get('/v1/course_vod_videoinfos', {
+      'courseId': '${lesson.id}',
+      'playType': switch (protocol) {
+        VodLiveProtocol.hls => '3',
+        VodLiveProtocol.flv => '2',
+        VodLiveProtocol.webRtc => '1',
+      },
+    });
     final data = _dataMap(response);
     debugPrint(
         'ShuYoVOD live detail: permission=${data['lvcrLiveStatus']}, views=${data['courseDeviceViewDtoList'] is List ? (data['courseDeviceViewDtoList'] as List).length : -1}, start=${data['liveStartTime'] != null}, end=${data['liveEndTime'] != null}');
@@ -274,6 +282,8 @@ class VodApiClient {
     }
     final rawViews = data['courseDeviceViewDtoList'];
     if (rawViews is! List) throw const VodInvalidResponseException();
+    final stunServer =
+        protocol == VodLiveProtocol.webRtc ? await _fetchStunServer() : '';
     debugPrint(
         'ShuYoVOD live device states: ${rawViews.whereType<JsonMap>().map((device) => intValue(device['deviceStatus'], -1)).join(',')}');
     final views = <VodView>[];
@@ -281,8 +291,35 @@ class VodApiClient {
       if (!const {0, 1}.contains(intValue(value['deviceStatus'], -1))) {
         continue;
       }
+      if (protocol == VodLiveProtocol.webRtc) {
+        final source = stringValue(value['chanNameMainPlayUrl']).trim();
+        final deviceId = stringValue(value['chanGbidMain']).trim();
+        final token = stringValue(value['mainTokenStr']);
+        if (source.isEmpty || deviceId.isEmpty || token.isEmpty) continue;
+        final signalingUri = _resolveWebRtcSignalingUri(source);
+        final target = signalingUri.replace(
+          scheme: signalingUri.scheme == 'wss' ? 'https' : 'http',
+        );
+        final headers = await mediaHeadersFor(target);
+        final webRtcSource = VodWebRtcSource(
+          signalingUri: signalingUri,
+          deviceId: deviceId,
+          accountToken: token,
+          stunServer: stunServer,
+          useWebVpn: useWebVpn,
+          headers: headers,
+        );
+        views.add(VodView(
+          viewNumber: intValue(value['deviViewNum'], -1),
+          url: signalingUri,
+          httpHeaders: headers,
+          displayLabel: '直播视角 ${views.length + 1}',
+          webRtcSource: webRtcSource,
+        ));
+        continue;
+      }
       final hls = stringValue(value['chanNameMainHlsPlayUrl']).trim();
-      final source = hls.isNotEmpty
+      final source = protocol == VodLiveProtocol.hls && hls.isNotEmpty
           ? hls
           : stringValue(value['chanNameMainPlayUrl']).trim();
       if (source.isEmpty) continue;
@@ -334,6 +371,39 @@ class VodApiClient {
       description: stringValue(
           data['description'], stringValue(data['teclDescription'])),
     );
+  }
+
+  Future<String> _fetchStunServer() async {
+    final data = _dataMap(await _get('/v1/setting/stun'));
+    final nested = data['data'];
+    final config =
+        data['stunConfig'] ?? (nested is JsonMap ? nested['stunConfig'] : null);
+    if (config is! JsonMap) return '';
+    final ip = stringValue(config['ip']).trim();
+    final port = intValue(config['port']);
+    if (ip.isEmpty || port <= 0 || port > 65535) return '';
+    return '$ip:$port';
+  }
+
+  Uri _resolveWebRtcSignalingUri(String source) {
+    final uri = Uri.tryParse(source);
+    if (uri == null ||
+        !const {'ws', 'wss'}.contains(uri.scheme) ||
+        uri.host.isEmpty ||
+        uri.userInfo.isNotEmpty ||
+        uri.hasFragment) {
+      throw const VodInvalidResponseException('暂不支持此直播信令地址');
+    }
+    final target = uri.replace(scheme: 'https', port: uri.port);
+    if (!VodUrlResolver.isKnownMediaUri(target)) {
+      throw const VodInvalidResponseException('暂不支持此直播信令地址');
+    }
+    final mapped = VodUrlResolver.mapServiceUri(target, useWebVpn: useWebVpn);
+    if (useWebVpn && !VodUrlResolver.isProxiedMediaUri(mapped) ||
+        !useWebVpn && VodUrlResolver.isProxiedMediaUri(mapped)) {
+      throw const VodInvalidResponseException('直播信令地址与当前连接方式不一致');
+    }
+    return mapped.replace(scheme: useWebVpn ? 'wss' : uri.scheme);
   }
 
   Future<Map<String, String>> mediaHeadersFor(Uri target) async {
