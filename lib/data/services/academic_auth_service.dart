@@ -148,6 +148,28 @@ class AcademicAuthService {
     return status == WebVpnSessionStatus.valid;
   }
 
+  /// Restores the cached and live cookies for the selected access mode.
+  ///
+  /// Returns whether a cookie matches the academic target; it does not verify
+  /// that the remote session is still valid. An explicit sign-out always wins
+  /// over cookies left behind by a partial platform-cookie cleanup.
+  Future<bool> restoreAcademicCookies({Uri? targetUri}) async {
+    if (await _isExplicitlySignedOut()) return false;
+    final webVpn = AcademicUrlResolver.usesWebVpn;
+    final cached = await _loadCachedCookies(webVpn: webVpn);
+    final live = await _loadLiveCookies(webVpn: webVpn);
+    final merged = _mergeCookieGroups(cached, live);
+    await _persistCookies(merged, webVpn: webVpn);
+    await _restoreCookies(merged);
+    final target = targetUri ?? AcademicUrlResolver.scheduleIndexUri;
+    return (merged[_academicGroup] ?? const <SessionCookie>[]).any(
+      (cookie) =>
+          cookie.name.isNotEmpty &&
+          cookie.value.isNotEmpty &&
+          _cookieMatches(cookie, target),
+    );
+  }
+
   Future<WebVpnSessionStatus> validateDirectAcademicSession() async {
     if (await _isExplicitlySignedOut()) {
       return WebVpnSessionStatus.loginRequired;

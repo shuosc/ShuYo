@@ -257,6 +257,78 @@ void main() {
     );
   });
 
+  test('restores scoped cached and live academic cookies without validation',
+      () async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(
+      'academic.auth.cached_cookies.direct',
+      '{"academic":[{"name":"JSESSIONID","value":"cached-session","domain":"${AcademicConstants.host}","path":"/jwglxt"}]}',
+    );
+    final restored = <SessionCookie>[];
+    var validationCalls = 0;
+    final service = AcademicAuthService(
+      cookieLoader: (domain) async => domain.host == AcademicConstants.host
+          ? [
+              SessionCookie(
+                name: 'route',
+                value: 'node-a',
+                domain: AcademicConstants.host,
+                path: '/jwglxt',
+              ),
+            ]
+          : const [],
+      cookieSetter: (cookie) async => restored.add(cookie),
+      directSessionValidator: (_) async {
+        validationCalls++;
+        return WebVpnSessionStatus.valid;
+      },
+    );
+
+    expect(await service.restoreAcademicCookies(), isTrue);
+    expect(validationCalls, 0);
+    expect(
+      restored.any((cookie) =>
+          cookie.name == 'JSESSIONID' &&
+          cookie.value == 'cached-session' &&
+          cookie.domain == AcademicConstants.host &&
+          cookie.path == '/jwglxt'),
+      isTrue,
+    );
+    expect(restored.any((cookie) => cookie.name == 'route'), isTrue);
+    expect(
+      await service.restoreAcademicCookies(
+        targetUri: Uri.parse('https://unrelated.example/jwglxt/'),
+      ),
+      isFalse,
+    );
+  });
+
+  test('explicit logout prevents restoring even remaining live cookies',
+      () async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool('academic.auth.explicitly_signed_out', true);
+    final restored = <SessionCookie>[];
+    var reads = 0;
+    final service = AcademicAuthService(
+      cookieLoader: (_) async {
+        reads++;
+        return [
+          SessionCookie(
+            name: 'JSESSIONID',
+            value: 'left-behind',
+            domain: AcademicConstants.host,
+          ),
+        ];
+      },
+      cookieSetter: (cookie) async => restored.add(cookie),
+    );
+
+    expect(await service.restoreAcademicCookies(), isFalse);
+    expect(reads, 0);
+    expect(restored, isEmpty);
+    expect(prefs.getBool('academic.auth.explicitly_signed_out'), isTrue);
+  });
+
   test('explicit logout blocks cached session restoration until login',
       () async {
     final prefs = await SharedPreferences.getInstance();
