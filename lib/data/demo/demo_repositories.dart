@@ -1,6 +1,7 @@
 import '../models/academic_schedule.dart';
 import '../models/academic_progress.dart';
 import '../models/academic_ranking.dart';
+import '../models/academic_student_profile.dart';
 import '../models/announcement.dart';
 import '../models/announcement_source.dart';
 import '../models/classroom.dart';
@@ -8,6 +9,7 @@ import '../models/otp_token.dart';
 import '../repositories/academic_schedule_repository.dart';
 import '../repositories/academic_progress_repository.dart';
 import '../repositories/academic_ranking_repository.dart';
+import '../repositories/academic_student_profile_repository.dart';
 import '../repositories/announcement_repository.dart';
 import '../repositories/classroom_repository.dart';
 import '../repositories/otp_token_repository.dart';
@@ -152,6 +154,24 @@ class DemoAcademicRankingRepository extends AcademicRankingRepository {
 
   @override
   Future<AcademicRanking> refreshRanking() async => ranking;
+}
+
+class DemoAcademicStudentProfileRepository
+    extends AcademicStudentProfileRepository {
+  static const profile = AcademicStudentProfile(
+    studentId: 'DEMO0001',
+    studentName: '示例同学',
+    grade: '2025',
+    collegeName: '示例学院',
+    majorName: '示例专业',
+    academicLevel: '本科',
+  );
+
+  @override
+  Future<AcademicStudentProfile?> loadCachedProfile() async => profile;
+
+  @override
+  Future<AcademicStudentProfile> refreshProfile() async => profile;
 }
 
 class DemoAnnouncementRepository extends AnnouncementRepository {

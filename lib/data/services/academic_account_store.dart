@@ -66,6 +66,7 @@ class AcademicAccountStore {
       'academic.schedule.cache',
       'academic.progress.cache',
       'academic.ranking.cache',
+      'academic.student_profile.cache',
     ]) {
       try {
         final raw = preferences.getString(key);
