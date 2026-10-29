@@ -4,10 +4,16 @@ import 'package:flutter/material.dart';
 
 import '../../data/models/academic_progress.dart';
 import '../../data/models/academic_ranking.dart';
+import '../../data/models/academic_schedule.dart';
+import '../../data/models/academic_student_profile.dart';
 import '../../data/repositories/academic_progress_repository.dart';
 import '../../data/repositories/academic_ranking_repository.dart';
+import '../../data/repositories/academic_schedule_repository.dart';
+import '../../data/repositories/academic_student_profile_repository.dart';
 import '../../data/services/academic_progress_display_settings_service.dart';
+import '../../data/services/academic_auth_service.dart';
 import '../../data/services/academic_schedule_api_client.dart';
+import '../../shared/theme/custom_background.dart';
 import '../../shared/theme/shuyo_theme.dart';
 import '../../shared/widgets/empty_state.dart';
 
@@ -17,17 +23,28 @@ class AcademicProgressPage extends StatefulWidget {
     required this.repository,
     required this.onLoginRequired,
     this.rankingRepository,
+    this.studentProfileRepository,
+    this.scheduleRepository,
+    this.active = true,
+    this.autoRefreshEnabled = true,
+    this.restoreSession,
   });
 
   final AcademicProgressRepository repository;
   final AcademicRankingRepository? rankingRepository;
+  final AcademicStudentProfileRepository? studentProfileRepository;
+  final AcademicScheduleRepository? scheduleRepository;
+  final bool active;
+  final bool autoRefreshEnabled;
+  final Future<void> Function()? restoreSession;
   final Future<void> Function() onLoginRequired;
 
   @override
   State<AcademicProgressPage> createState() => _AcademicProgressPageState();
 }
 
-class _AcademicProgressPageState extends State<AcademicProgressPage> {
+class _AcademicProgressPageState extends State<AcademicProgressPage>
+    with SingleTickerProviderStateMixin {
   static const _rootDotX = 10.0;
   static const _nestedDotX = 25.0;
   static const _courseBadgeWidth = 40.0;
@@ -39,9 +56,14 @@ class _AcademicProgressPageState extends State<AcademicProgressPage> {
 
   AcademicProgress? _progress;
   AcademicRanking? _ranking;
+  AcademicStudentProfile? _studentProfile;
+  AcademicTerm? _scheduleTerm;
   final Set<String> _expandedNodes = {};
   bool _loading = true;
   bool _refreshing = false;
+  late final AnimationController _creditAnimationController;
+  double? _creditAnimationTarget;
+  ScaffoldFeatureController<SnackBar, SnackBarClosedReason>? _notice;
   bool _showGpa = false;
   bool _showRanking = false;
   bool _showCollegeRanking = true;
@@ -51,12 +73,85 @@ class _AcademicProgressPageState extends State<AcademicProgressPage> {
   final _displaySettingsService = AcademicProgressDisplaySettingsService();
   late final AcademicRankingRepository _rankingRepository =
       widget.rankingRepository ?? AcademicRankingRepository();
+  late final AcademicStudentProfileRepository _studentProfileRepository =
+      widget.studentProfileRepository ?? AcademicStudentProfileRepository();
+  late final AcademicScheduleRepository _scheduleRepository =
+      widget.scheduleRepository ?? AcademicScheduleRepository();
+  late final Future<void> _cacheReady;
 
   @override
   void initState() {
     super.initState();
-    unawaited(_loadCached());
-    unawaited(_loadRankingAndDisplaySettings());
+    _creditAnimationController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 800),
+    );
+    _cacheReady = Future.wait([
+      _loadCached(),
+      _loadRankingAndDisplaySettings(),
+      _loadStudentProfile(),
+      _loadScheduleIdentity(),
+    ]).then((_) {});
+    if (widget.active && widget.autoRefreshEnabled) {
+      unawaited(_refresh(automatic: true));
+    }
+  }
+
+  @override
+  void dispose() {
+    _creditAnimationController.dispose();
+    super.dispose();
+  }
+
+  @override
+  void didUpdateWidget(covariant AcademicProgressPage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.active &&
+        widget.autoRefreshEnabled &&
+        (!oldWidget.active || !oldWidget.autoRefreshEnabled)) {
+      unawaited(_refresh(automatic: true));
+    }
+  }
+
+  Future<void> _loadScheduleIdentity() async {
+    try {
+      final schedule = await _scheduleRepository.loadCachedSchedule();
+      if (mounted && schedule != null) {
+        setState(() => _scheduleTerm = schedule.term);
+      }
+    } on Object {
+      // A damaged timetable cache must not prevent academic data from loading.
+    }
+  }
+
+  Future<void> _loadStudentProfile() async {
+    AcademicStudentProfile? profile;
+    try {
+      profile = await _studentProfileRepository.loadCachedProfile();
+    } on Object {
+      // A damaged cache can be replaced by a fresh response.
+    }
+    if (!mounted) return;
+    if (profile != null) {
+      setState(() => _studentProfile = profile);
+    }
+  }
+
+  Future<_AcademicRefreshResult> _refreshStudentProfile({
+    bool Function()? canApply,
+  }) async {
+    try {
+      final profile = await _studentProfileRepository.refreshProfile();
+      if (mounted && (canApply?.call() ?? true)) {
+        setState(() => _studentProfile = profile);
+      }
+      return _AcademicRefreshResult.success;
+    } on AcademicAuthException {
+      return _AcademicRefreshResult.loginRequired;
+    } on Object {
+      // Keep the last available profile when the auxiliary request fails.
+      return _AcademicRefreshResult.failed;
+    }
   }
 
   Future<void> _loadRankingAndDisplaySettings() async {
@@ -104,72 +199,134 @@ class _AcademicProgressPageState extends State<AcademicProgressPage> {
     }
   }
 
-  Future<void> _refresh() async {
+  Future<void> _refresh({bool automatic = false}) async {
     if (_refreshing) return;
-    setState(() => _refreshing = true);
+    _notice?.close();
+    _notice = null;
+    _creditAnimationController.stop();
+    setState(() {
+      _refreshing = true;
+      _creditAnimationTarget = null;
+    });
     try {
-      // Each request updates its own data as soon as it succeeds. Waiting here
-      // only combines the final notice and handles an expired session once.
-      final results = await Future.wait([
-        _refreshProgress(),
-        _refreshRanking(),
+      await _cacheReady;
+      if (!mounted) return;
+      try {
+        final restore = widget.restoreSession;
+        if (restore != null) {
+          await restore();
+        } else if (!await AcademicAuthService().restoreAcademicCookies()) {
+          throw const AcademicAuthException('请先登录上大校园账户');
+        }
+      } on AcademicAuthException {
+        if (!mounted) return;
+        if (widget.active) _showSnack('学业信息同步失败，请重新登录校园账户');
+        if (!automatic) await widget.onLoginRequired();
+        return;
+      } on Object {
+        if (mounted && widget.active) _showSnack('学业信息同步失败，请稍后重试');
+        return;
+      }
+      if (!mounted) return;
+      // A session failure must not wait for unrelated requests to finish.
+      final loginRequired = Completer<void>();
+      var sessionFailed = false;
+      bool canApply() => !sessionFailed;
+      Future<_AcademicRefreshResult> watch(
+          Future<_AcademicRefreshResult> request) async {
+        final result = await request;
+        if (result == _AcademicRefreshResult.loginRequired && !sessionFailed) {
+          sessionFailed = true;
+          loginRequired.complete();
+        }
+        return result;
+      }
+
+      final requests = [
+        watch(_refreshProgress(canApply)),
+        watch(_refreshRanking(canApply)),
+        watch(_refreshStudentProfile(canApply: canApply)),
+      ];
+      final results = await Future.any<List<_AcademicRefreshResult>?>([
+        Future.wait(requests),
+        loginRequired.future.then((_) => null),
       ]);
       if (!mounted) return;
-      if (results.contains(_AcademicRefreshResult.loginRequired)) {
-        await widget.onLoginRequired();
+      if (results == null || sessionFailed) {
+        if (_rankingLoading) setState(() => _rankingLoading = false);
+        if (widget.active) _showSnack('学业信息同步失败，请重新登录校园账户');
+        if (!automatic) await widget.onLoginRequired();
         return; // Authentication never resumes this refresh automatically.
       }
       final progressUpdated = results[0] == _AcademicRefreshResult.success;
       final rankingUpdated = results[1] == _AcademicRefreshResult.success;
-      _showSnack(progressUpdated
-          ? rankingUpdated
-              ? '学业信息已同步'
-              : '学业信息已同步，排名获取失败'
-          : rankingUpdated
-              ? '排名已同步，学业信息获取失败'
-              : '学业信息同步失败');
+      final profileUpdated = results[2] == _AcademicRefreshResult.success;
+      if (widget.active &&
+          progressUpdated &&
+          rankingUpdated &&
+          profileUpdated) {
+        final root = _progress?.mainNode;
+        final earned = root?.earnedCredits;
+        final required = root?.requiredCredits;
+        if (earned != null && required != null && required > 0) {
+          setState(
+              () => _creditAnimationTarget = (earned / required).clamp(0, 1));
+          _creditAnimationController.forward(from: 0);
+        }
+      }
+      if (widget.active &&
+          (!progressUpdated || !rankingUpdated || !profileUpdated)) {
+        final failed = [
+          if (!progressUpdated) '学业信息',
+          if (!rankingUpdated) '排名',
+          if (!profileUpdated) '学籍信息',
+        ];
+        _showSnack('${failed.join('、')}获取失败，请稍后重试');
+      }
     } finally {
       if (mounted) setState(() => _refreshing = false);
     }
   }
 
-  Future<_AcademicRefreshResult> _refreshProgress() async {
+  Future<_AcademicRefreshResult> _refreshProgress(
+      bool Function() canApply) async {
     try {
-      await _fetchAndShow();
+      await _fetchAndShow(canApply);
       return _AcademicRefreshResult.success;
     } on AcademicAuthException {
       return _AcademicRefreshResult.loginRequired;
     } on Object catch (error) {
-      if (mounted && _progress == null) {
+      if (mounted && canApply() && _progress == null) {
         setState(() => _loadError = '学业信息同步失败：$error');
       }
       return _AcademicRefreshResult.failed;
     }
   }
 
-  Future<_AcademicRefreshResult> _refreshRanking() async {
+  Future<_AcademicRefreshResult> _refreshRanking(
+      bool Function() canApply) async {
     setState(() {
       _rankingLoading = true;
       _rankingError = null;
     });
     try {
       final ranking = await _rankingRepository.refreshRanking();
-      if (mounted) setState(() => _ranking = ranking);
+      if (mounted && canApply()) setState(() => _ranking = ranking);
       return _AcademicRefreshResult.success;
     } on AcademicAuthException {
-      if (mounted) setState(() => _rankingError = '登录已失效');
+      if (mounted && canApply()) setState(() => _rankingError = '登录已失效');
       return _AcademicRefreshResult.loginRequired;
     } on Object {
-      if (mounted) setState(() => _rankingError = '获取失败');
+      if (mounted && canApply()) setState(() => _rankingError = '获取失败');
       return _AcademicRefreshResult.failed;
     } finally {
-      if (mounted) setState(() => _rankingLoading = false);
+      if (mounted && canApply()) setState(() => _rankingLoading = false);
     }
   }
 
-  Future<void> _fetchAndShow() async {
+  Future<void> _fetchAndShow(bool Function() canApply) async {
     final progress = await widget.repository.refreshProgress();
-    if (!mounted) return;
+    if (!mounted || !canApply()) return;
     setState(() {
       _progress = progress;
       final existingIds = progress.nodes.map((node) => node.id).toSet();
@@ -184,7 +341,8 @@ class _AcademicProgressPageState extends State<AcademicProgressPage> {
   }
 
   void _showSnack(String message) {
-    ScaffoldMessenger.of(context)
+    _notice?.close();
+    _notice = ScaffoldMessenger.of(context)
         .showSnackBar(SnackBar(content: Text(message)));
   }
 
@@ -282,6 +440,18 @@ class _AcademicProgressPageState extends State<AcademicProgressPage> {
       appBar: AppBar(
         automaticallyImplyLeading: false,
         title: const Text('学业'),
+        bottom: PreferredSize(
+          preferredSize: const Size.fromHeight(2),
+          child: SizedBox(
+            height: 2,
+            child: _refreshing
+                ? const LinearProgressIndicator(
+                    key: ValueKey('academic-refresh-indicator'),
+                    minHeight: 2,
+                  )
+                : null,
+          ),
+        ),
         actions: [
           IconButton(
             tooltip: '更多',
@@ -321,6 +491,15 @@ class _AcademicProgressPageState extends State<AcademicProgressPage> {
           padding: const EdgeInsets.fromLTRB(2, 0, 2, 10),
           child: Text('修读情况', style: Theme.of(context).textTheme.titleMedium),
         ),
+        if (progress.plannedCourses != null)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(2, 0, 2, 10),
+            child: Text(
+              '计划 ${progress.plannedCourses} 门 · 已修 ${progress.passedCourses ?? '—'} 门'
+              ' · 在修 ${progress.ongoingCourses ?? '—'} 门 · 未修 ${progress.notTakenCourses ?? '—'} 门',
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
+          ),
         ..._treeRows(progress, '', 0),
       ],
     );
@@ -686,62 +865,173 @@ class _AcademicProgressPageState extends State<AcademicProgressPage> {
     final root = progress.mainNode;
     final earned = root?.earnedCredits;
     final required = root?.requiredCredits;
-    final colors = context.shuyoColors;
-    return Container(
-      decoration: BoxDecoration(
-        color: colors.surface,
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: colors.border),
-      ),
-      child: Padding(
-        padding: const EdgeInsets.all(18),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _studentBanner(progress),
+        const SizedBox(height: 22),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(2, 0, 2, 10),
+          child: Text('学业总览', style: Theme.of(context).textTheme.titleMedium),
+        ),
+        Row(
           children: [
-            Text('学业总览', style: Theme.of(context).textTheme.titleMedium),
-            const SizedBox(height: 15),
             Row(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.baseline,
+              textBaseline: TextBaseline.alphabetic,
               children: [
-                Expanded(
-                  child:
-                      _metric('已获学分', earned == null ? '—' : _number(earned)),
+                IntrinsicWidth(
+                  key: const ValueKey('academic-credit-value-box'),
+                  child: ConstrainedBox(
+                    constraints: const BoxConstraints(maxWidth: 120),
+                    child: FittedBox(
+                      fit: BoxFit.scaleDown,
+                      alignment: Alignment.centerLeft,
+                      child: Text.rich(
+                        TextSpan(children: [
+                          TextSpan(
+                            text: earned == null ? '—' : _number(earned),
+                            style: TextStyle(color: context.shuyoColors.accent),
+                          ),
+                          TextSpan(
+                              text:
+                                  '/${required == null ? '—' : _number(required)}'),
+                        ]),
+                        key: const ValueKey('academic-credit-value'),
+                        maxLines: 1,
+                        textWidthBasis: TextWidthBasis.longestLine,
+                        style: Theme.of(context).textTheme.headlineSmall,
+                      ),
+                    ),
+                  ),
                 ),
-                Expanded(
-                  child: _metric(
-                      '要求学分', required == null ? '—' : _number(required)),
-                ),
-                if (_showGpa)
-                  Expanded(
-                    child: _metric(
-                        '平均绩点', progress.gpa.isEmpty ? '—' : progress.gpa),
-                  )
-                else if (!_showRanking)
-                  const Expanded(child: SizedBox.shrink()),
-                if (_showRanking) Expanded(child: _rankingMetric()),
+                const SizedBox(width: 4),
+                Text('学分', style: Theme.of(context).textTheme.bodySmall),
               ],
             ),
             if (earned != null && required != null && required > 0) ...[
-              const SizedBox(height: 15),
-              LinearProgressIndicator(
-                value: (earned / required).clamp(0, 1),
-                minHeight: 7,
-                borderRadius: BorderRadius.circular(7),
-              ),
-            ],
-            if (progress.plannedCourses != null) ...[
-              const SizedBox(height: 12),
-              Text(
-                '计划 ${progress.plannedCourses} 门 · 已修 ${progress.passedCourses ?? '—'} 门'
-                ' · 在修 ${progress.ongoingCourses ?? '—'} 门 · 未修 ${progress.notTakenCourses ?? '—'} 门',
-                style: Theme.of(context).textTheme.bodySmall,
-              ),
-            ],
-            const SizedBox(height: 8),
-            Text(
-              '同步于 ${_dateText(progress.fetchedAt)} · 数据仅供学业修读参考',
-              style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                    color: colors.textSecondary,
+              const SizedBox(width: 10),
+              Expanded(
+                child: AnimatedBuilder(
+                  animation: _creditAnimationController,
+                  builder: (context, child) => LinearProgressIndicator(
+                    key: const ValueKey('academic-credit-progress'),
+                    value: _creditAnimationTarget == null
+                        ? (earned / required).clamp(0, 1)
+                        : _creditAnimationTarget! *
+                            Curves.easeOutCubic
+                                .transform(_creditAnimationController.value),
+                    minHeight: 7,
+                    borderRadius: BorderRadius.circular(7),
                   ),
+                ),
+              ),
+            ],
+          ],
+        ),
+        if (_showGpa || _showRanking) ...[
+          const Divider(height: 28),
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              if (_showGpa)
+                Expanded(
+                  child: _metric('平均绩点', _gpaText(progress.gpa),
+                      suffix: '/4.0',
+                      valueBoxKey: const ValueKey('academic-gpa-value-box'),
+                      valueKey: const ValueKey('academic-gpa-value')),
+                ),
+              if (_showRanking) Expanded(child: _rankingMetric()),
+            ],
+          ),
+        ],
+      ],
+    );
+  }
+
+  Widget _studentBanner(AcademicProgress progress) {
+    final profile = _studentProfile?.studentId == progress.studentId
+        ? _studentProfile
+        : null;
+    final ranking = _ranking?.studentId == progress.studentId ? _ranking : null;
+    final details = [
+      if ((profile?.majorName ?? ranking?.majorName ?? '').trim().isNotEmpty)
+        (profile?.majorName ?? ranking!.majorName).trim(),
+      if ((profile?.collegeName ?? ranking?.collegeName ?? '')
+          .trim()
+          .isNotEmpty)
+        (profile?.collegeName ?? ranking!.collegeName).trim(),
+    ];
+    final profileName = profile?.studentName.trim() ?? '';
+    final scheduleName = progress.studentId.isNotEmpty &&
+            _scheduleTerm?.studentId == progress.studentId
+        ? _scheduleTerm!.studentName.trim()
+        : '';
+    final name = profileName.isNotEmpty ? profileName : scheduleName;
+    final category = profile?.studentCategory ?? '';
+    final colors = context.shuyoColors;
+    final customBackground = CustomBackgroundScope.maybeOf(context) != null;
+    final lightCard =
+        !customBackground && colors.brightness == Brightness.light;
+    final surface = customBackground
+        ? colors.surface.withValues(alpha: 0.72)
+        : lightCard
+            ? const Color(0xFFFFFEFC)
+            : colors.surface;
+    return Card(
+      key: const ValueKey('student-info-card'),
+      margin: EdgeInsets.zero,
+      color: surface,
+      elevation: lightCard ? 0.5 : 0,
+      surfaceTintColor: Colors.transparent,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(12),
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Row(
+          children: [
+            Icon(Icons.school_outlined, size: 32, color: colors.textSecondary),
+            const SizedBox(width: 16),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  if (name.isNotEmpty || category.isNotEmpty) ...[
+                    Wrap(
+                      crossAxisAlignment: WrapCrossAlignment.center,
+                      spacing: 8,
+                      runSpacing: 4,
+                      children: [
+                        if (name.isNotEmpty)
+                          Text(name,
+                              style: Theme.of(context)
+                                  .textTheme
+                                  .headlineSmall
+                                  ?.copyWith(
+                                    fontWeight: FontWeight.w600,
+                                  )),
+                        if (category.isNotEmpty)
+                          _StudentCategoryBadge(label: category),
+                      ],
+                    ),
+                    const SizedBox(height: 4),
+                  ],
+                  Text(progress.studentId,
+                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                            color: colors.textSecondary,
+                          )),
+                  if (details.isNotEmpty) ...[
+                    const SizedBox(height: 4),
+                    Text(details.join(' · '),
+                        style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                              color: colors.textSecondary,
+                            )),
+                  ],
+                ],
+              ),
             ),
           ],
         ),
@@ -749,14 +1039,90 @@ class _AcademicProgressPageState extends State<AcademicProgressPage> {
     );
   }
 
-  Widget _metric(String label, String value) => Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(label, style: Theme.of(context).textTheme.bodySmall),
-          const SizedBox(height: 4),
-          Text(value, style: Theme.of(context).textTheme.headlineSmall),
-        ],
-      );
+  String _gpaText(String value) {
+    final number = double.tryParse(value);
+    return number != null && number.isFinite ? number.toStringAsFixed(2) : '—';
+  }
+
+  Widget _metric(String label, String value,
+      {String suffix = '',
+      Key? valueKey,
+      Key? valueBoxKey,
+      Alignment alignment = Alignment.centerLeft,
+      IconData? leadingIcon}) {
+    final style = Theme.of(context).textTheme.headlineSmall?.copyWith(
+          fontFeatures: const [FontFeature.tabularFigures()],
+        ) ??
+        const TextStyle(
+            fontSize: 24, fontFeatures: [FontFeature.tabularFigures()]);
+    final labelStyle = Theme.of(context).textTheme.bodySmall;
+    Size measure(String text, TextStyle? textStyle) {
+      final painter = TextPainter(
+        text: TextSpan(text: text, style: textStyle),
+        textDirection: Directionality.of(context),
+        textScaler: MediaQuery.textScalerOf(context),
+        maxLines: 1,
+      )..layout();
+      final size = painter.size;
+      painter.dispose();
+      return size;
+    }
+
+    // Fixed reference widths keep fitting independent of the displayed digits.
+    final numberSize = measure('88888/88888', style);
+    final labelWidth = [
+      measure('平均绩点', labelStyle).width,
+      measure('学院排名', labelStyle).width,
+      measure('专业排名', labelStyle).width,
+    ].reduce((a, b) => a > b ? a : b);
+    return SizedBox(
+      height: numberSize.height,
+      child: Align(
+        alignment: alignment,
+        child: FittedBox(
+          fit: BoxFit.scaleDown,
+          alignment: alignment,
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (leadingIcon != null) ...[
+                Icon(leadingIcon,
+                    size: 14, color: context.shuyoColors.textSecondary),
+                const SizedBox(width: 4),
+              ],
+              SizedBox(
+                width: labelWidth,
+                child: Text(label, style: labelStyle, maxLines: 1),
+              ),
+              const SizedBox(width: 8),
+              SizedBox(
+                key: valueBoxKey,
+                width: numberSize.width,
+                height: numberSize.height,
+                child: Text.rich(
+                  TextSpan(children: [
+                    TextSpan(text: value),
+                    if (suffix.isNotEmpty)
+                      TextSpan(
+                        text: suffix,
+                        style:
+                            TextStyle(color: context.shuyoColors.textSecondary),
+                      ),
+                  ]),
+                  key: valueKey,
+                  textAlign: TextAlign.left,
+                  maxLines: 1,
+                  style: style,
+                ),
+              ),
+              // Match the ranking row's icon width so both use the same scale.
+              if (leadingIcon == null) const SizedBox(width: 18),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
 
   Widget _rankingMetric() {
     final colors = context.shuyoColors;
@@ -765,14 +1131,8 @@ class _AcademicProgressPageState extends State<AcademicProgressPage> {
     final rank = college ? ranking?.collegeRank : ranking?.majorRank;
     final count = college ? ranking?.collegeCount : ranking?.majorCount;
     final label = college ? '学院排名' : '专业排名';
-    final value = rank == null
-        ? '—'
-        : count == null
-            ? '$rank'
-            : '$rank/$count';
-    final headlineStyle = Theme.of(context).textTheme.headlineSmall;
-    final valueHeight =
-        (headlineStyle?.fontSize ?? 24) * (headlineStyle?.height ?? 1.3);
+    final value = rank == null ? '—' : '$rank';
+    final suffix = rank != null && count != null ? '/$count' : '';
     final status = _rankingLoading && ranking == null
         ? '获取中'
         : _rankingError != null
@@ -787,6 +1147,7 @@ class _AcademicProgressPageState extends State<AcademicProgressPage> {
       label: '$label${rank == null ? '' : '第$rank名'}'
           '${count == null ? '' : '，共$count人'}',
       child: GestureDetector(
+        key: const ValueKey('academic-ranking-toggle'),
         behavior: HitTestBehavior.opaque,
         onTap: () {
           if (_rankingError != null && ranking == null) {
@@ -800,25 +1161,17 @@ class _AcademicProgressPageState extends State<AcademicProgressPage> {
               ? _rankingError == null
                   ? '点击切换学院和专业排名'
                   : '点击重新同步学业信息'
-              : '${ranking.academicYear} ${ranking.term} · '
-                  '同步于 ${_dateText(ranking.fetchedAt)}',
+              : '${ranking.academicYear} ${ranking.term} · 点击切换学院和专业排名',
           child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
+            crossAxisAlignment: CrossAxisAlignment.end,
+            mainAxisSize: MainAxisSize.min,
             children: [
-              Text(label,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: Theme.of(context).textTheme.bodySmall),
-              const SizedBox(height: 4),
-              SizedBox(
-                width: double.infinity,
-                height: valueHeight,
-                child: FittedBox(
-                  fit: BoxFit.scaleDown,
-                  alignment: Alignment.centerLeft,
-                  child: Text(value, style: headlineStyle),
-                ),
-              ),
+              _metric(label, value,
+                  suffix: suffix,
+                  alignment: Alignment.centerRight,
+                  leadingIcon: Icons.swap_horiz,
+                  valueBoxKey: const ValueKey('academic-ranking-value-box'),
+                  valueKey: const ValueKey('academic-ranking-value')),
               if (status.isNotEmpty)
                 Text(status,
                     maxLines: 1,
@@ -962,11 +1315,38 @@ class _AcademicProgressPageState extends State<AcademicProgressPage> {
   String _number(double value) => value == value.roundToDouble()
       ? value.toInt().toString()
       : value.toString();
+}
 
-  String _dateText(DateTime date) {
-    String two(int value) => value.toString().padLeft(2, '0');
-    return '${date.year}-${two(date.month)}-${two(date.day)} '
-        '${two(date.hour)}:${two(date.minute)}';
+class _StudentCategoryBadge extends StatelessWidget {
+  const _StudentCategoryBadge({required this.label});
+
+  final String label;
+
+  @override
+  Widget build(BuildContext context) {
+    final color = context.shuyoColors.accent;
+    final textColor =
+        ThemeData.estimateBrightnessForColor(color) == Brightness.dark
+            ? Colors.white
+            : Colors.black;
+    final style = (Theme.of(context).textTheme.labelSmall ??
+            const TextStyle(fontSize: 11))
+        .copyWith(
+            fontSize: 10,
+            height: 1.2,
+            fontWeight: FontWeight.w600,
+            color: textColor);
+    return DecoratedBox(
+      key: const ValueKey('student-category-badge'),
+      decoration: BoxDecoration(
+        color: color,
+        borderRadius: BorderRadius.circular(3),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+        child: Text(label, style: style),
+      ),
+    );
   }
 }
 

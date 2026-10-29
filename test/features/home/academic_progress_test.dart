@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
@@ -9,8 +10,11 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:shuyo/data/demo/demo_repositories.dart';
 import 'package:shuyo/data/models/academic_progress.dart';
 import 'package:shuyo/data/models/academic_ranking.dart';
+import 'package:shuyo/data/models/academic_schedule.dart';
+import 'package:shuyo/data/models/academic_student_profile.dart';
 import 'package:shuyo/data/repositories/academic_progress_repository.dart';
 import 'package:shuyo/data/repositories/academic_ranking_repository.dart';
+import 'package:shuyo/data/repositories/academic_student_profile_repository.dart';
 import 'package:shuyo/data/services/academic_account_store.dart';
 import 'package:shuyo/data/services/academic_auth_service.dart';
 import 'package:shuyo/data/services/academic_progress_api_client.dart';
@@ -18,6 +22,8 @@ import 'package:shuyo/data/services/academic_progress_display_settings_service.d
 import 'package:shuyo/data/services/academic_progress_parser.dart';
 import 'package:shuyo/data/services/academic_schedule_api_client.dart';
 import 'package:shuyo/features/home/academic_progress_page.dart';
+import 'package:shuyo/features/home/home_dashboard_page.dart';
+import 'package:shuyo/shared/theme/custom_background.dart';
 import 'package:shuyo/shared/theme/shuyo_theme.dart';
 
 class _AuthWithCookie extends AcademicAuthService {
@@ -30,6 +36,61 @@ class _AuthWithCookie extends AcademicAuthService {
   @override
   Future<String?> cookieHeader({Uri? targetUri}) async => 'JSESSIONID=test';
 }
+
+class _LongStudentProfileRepository
+    extends DemoAcademicStudentProfileRepository {
+  static const longProfile = AcademicStudentProfile(
+    studentId: 'DEMO0001',
+    studentName: '示例姓名',
+    grade: '2025',
+    academicLevel: '本科',
+    majorName: '很长的专业名称用于验证窄屏上的文本布局',
+    collegeName: '很长的学院名称用于验证窄屏上的文本布局',
+  );
+
+  @override
+  Future<AcademicStudentProfile?> loadCachedProfile() async => longProfile;
+
+  @override
+  Future<AcademicStudentProfile> refreshProfile() async => longProfile;
+}
+
+class _StudentProfileRepository extends AcademicStudentProfileRepository {
+  _StudentProfileRepository({this.cached, this.refreshed, this.error});
+
+  final AcademicStudentProfile? cached;
+  final AcademicStudentProfile? refreshed;
+  final Object? error;
+  int requests = 0;
+
+  @override
+  Future<AcademicStudentProfile?> loadCachedProfile() async => cached;
+
+  @override
+  Future<AcademicStudentProfile> refreshProfile() async {
+    requests++;
+    if (error case final error?) throw error;
+    final result = refreshed;
+    if (result == null) throw const AcademicApiException('profile offline');
+    return result;
+  }
+}
+
+DemoAcademicScheduleRepository _scheduleWithName(String id, String name) =>
+    DemoAcademicScheduleRepository(AcademicSchedule(
+      term: AcademicTerm(
+        yearCode: '',
+        termCode: '',
+        academicYearName: '',
+        termName: '',
+        studentName: name,
+        studentId: id,
+        className: '',
+      ),
+      sessions: const [],
+      untimedCourses: const [],
+      fetchedAt: DateTime(2026),
+    ));
 
 class _DeepProgressRepository extends AcademicProgressRepository {
   _DeepProgressRepository() {
@@ -135,12 +196,78 @@ class _RefreshingRankingRepository extends AcademicRankingRepository {
   }
 }
 
+Future<void> _restoreSession() async {}
+
 Future<void> _tapRefresh(WidgetTester tester) async {
   await tester.tap(find.byTooltip('更多'));
   await tester.pumpAndSettle();
   await tester.tap(find.text('刷新学业信息'));
   await tester.pump();
   await tester.pump(const Duration(milliseconds: 400));
+}
+
+void _expectInlineEdgeMetric(
+  WidgetTester tester, {
+  required String label,
+  required String valueKey,
+  required double edgeX,
+  bool rightAligned = false,
+}) {
+  final labelBounds = tester.getRect(find.text(label));
+  final valueBounds = tester.getRect(find.byKey(ValueKey(valueKey)));
+  final valueBoxBounds = tester.getRect(find.byKey(ValueKey('$valueKey-box')));
+  expect(labelBounds.right, lessThan(valueBounds.left));
+  expect(labelBounds.top, lessThan(valueBounds.bottom));
+  expect(labelBounds.bottom, greaterThan(valueBounds.top));
+  expect(rightAligned ? valueBoxBounds.right : labelBounds.left,
+      closeTo(edgeX, 1));
+  if (rightAligned) {
+    final iconBounds = tester.getRect(find.byIcon(Icons.swap_horiz));
+    expect(iconBounds.right, lessThan(labelBounds.left));
+    expect(iconBounds.top, lessThan(labelBounds.bottom));
+    expect(iconBounds.bottom, greaterThan(labelBounds.top));
+  }
+}
+
+double _metricTextGap(WidgetTester tester, String label, String valueKey) {
+  final labelFinder = find.text(label);
+  final valueFinder = find.byKey(ValueKey(valueKey));
+  final labelParagraph = tester.renderObject<RenderParagraph>(
+    find.descendant(of: labelFinder, matching: find.byType(RichText)).first,
+  );
+  final valueParagraph = tester.renderObject<RenderParagraph>(
+    find.descendant(of: valueFinder, matching: find.byType(RichText)).first,
+  );
+  final labelText = labelParagraph.text.toPlainText();
+  final labelBox = labelParagraph
+      .getBoxesForSelection(TextSelection(
+          baseOffset: labelText.length - 1, extentOffset: labelText.length))
+      .single;
+  final valueBox = valueParagraph
+      .getBoxesForSelection(const TextSelection(baseOffset: 0, extentOffset: 1))
+      .single;
+  final labelEnd = labelParagraph.localToGlobal(Offset(labelBox.right, 0)).dx;
+  final valueStart = valueParagraph.localToGlobal(Offset(valueBox.left, 0)).dx;
+  return valueStart - labelEnd;
+}
+
+void _expectSimilarMetricTextGaps(WidgetTester tester, String rankingLabel) {
+  final gpaGap = _metricTextGap(tester, '平均绩点', 'academic-gpa-value');
+  final rankingGap =
+      _metricTextGap(tester, rankingLabel, 'academic-ranking-value');
+  expect(gpaGap, inInclusiveRange(0, 10));
+  expect(rankingGap, inInclusiveRange(0, 10));
+  expect(rankingGap, closeTo(gpaGap, 3));
+
+  final gpa = find.byKey(const ValueKey('academic-gpa-value'));
+  final ranking = find.byKey(const ValueKey('academic-ranking-value'));
+  expect(tester.widget<Text>(gpa).style!.fontSize,
+      tester.widget<Text>(ranking).style!.fontSize);
+  final gpaTransform = tester.renderObject(gpa).getTransformTo(null).storage;
+  final rankingTransform =
+      tester.renderObject(ranking).getTransformTo(null).storage;
+  expect(rankingTransform[0], closeTo(gpaTransform[0], 0.001));
+  expect(rankingTransform[5], closeTo(gpaTransform[5], 0.001));
 }
 
 const _index = '''
@@ -304,6 +431,270 @@ void main() {
         throwsA(isA<AcademicAuthException>()));
   });
 
+  testWidgets('restores the session before automatic and manual refresh',
+      (tester) async {
+    final firstRestore = Completer<void>();
+    final secondRestore = Completer<void>();
+    var restores = 0;
+    final progress = _RefreshingProgressRepository(
+      cached: DemoAcademicProgressRepository().progress,
+      fetch: () async => DemoAcademicProgressRepository().progress,
+    );
+    final ranking = _RefreshingRankingRepository(
+      fetch: () async => DemoAcademicRankingRepository().ranking,
+    );
+    final profile = _StudentProfileRepository(
+      refreshed: _LongStudentProfileRepository.longProfile,
+    );
+    await tester.pumpWidget(MaterialApp(
+      home: AcademicProgressPage(
+        repository: progress,
+        rankingRepository: ranking,
+        studentProfileRepository: profile,
+        restoreSession: () =>
+            ++restores == 1 ? firstRestore.future : secondRestore.future,
+        onLoginRequired: () async {},
+      ),
+    ));
+    await tester.pump();
+
+    final indicator = find.byKey(const ValueKey('academic-refresh-indicator'));
+    expect(restores, 1);
+    expect(progress.requests, 0);
+    expect(ranking.requests, 0);
+    expect(profile.requests, 0);
+    expect(indicator, findsOneWidget);
+    expect(find.ancestor(of: indicator, matching: find.byType(AppBar)),
+        findsOneWidget);
+    expect(tester.widget<LinearProgressIndicator>(indicator).value, isNull);
+    await tester.tap(find.byTooltip('更多'));
+    await tester.pump(const Duration(milliseconds: 400));
+    final refreshTile = find.ancestor(
+      of: find.text('刷新学业信息'),
+      matching: find.byType(ListTile),
+    );
+    expect(tester.widget<ListTile>(refreshTile).enabled, isFalse);
+    expect(restores, 1);
+    tester.state<NavigatorState>(find.byType(Navigator)).pop();
+    await tester.pump(const Duration(milliseconds: 400));
+
+    firstRestore.complete();
+    await tester.pumpAndSettle();
+    expect(progress.requests, 1);
+    expect(ranking.requests, 1);
+    expect(profile.requests, 1);
+    expect(indicator, findsNothing);
+    expect(find.byType(SnackBar), findsNothing);
+
+    await _tapRefresh(tester);
+    expect(restores, 2);
+    expect(progress.requests, 1);
+    expect(ranking.requests, 1);
+    expect(profile.requests, 1);
+    expect(indicator, findsOneWidget);
+    secondRestore.complete();
+    await tester.pumpAndSettle();
+    expect(progress.requests, 2);
+    expect(ranking.requests, 2);
+    expect(profile.requests, 2);
+    expect(indicator, findsNothing);
+    expect(find.byType(SnackBar), findsNothing);
+  });
+
+  testWidgets('refresh indicator never moves the page content', (tester) async {
+    final restores = [Completer<void>(), Completer<void>()];
+    final rankings = [
+      Completer<AcademicRanking>(),
+      Completer<AcademicRanking>(),
+    ];
+    var restoreCount = 0;
+    var rankingCount = 0;
+    final progress = _RefreshingProgressRepository(
+      cached: DemoAcademicProgressRepository().progress,
+      fetch: () async => DemoAcademicProgressRepository().progress,
+    );
+    final ranking = _RefreshingRankingRepository(
+      fetch: () => rankings[rankingCount++].future,
+    );
+    final profile = DemoAcademicStudentProfileRepository();
+    Widget page(bool active) => MaterialApp(
+          home: AcademicProgressPage(
+            active: active,
+            repository: progress,
+            rankingRepository: ranking,
+            studentProfileRepository: profile,
+            restoreSession: () => restores[restoreCount++].future,
+            onLoginRequired: () async {},
+          ),
+        );
+    final indicator = find.byKey(const ValueKey('academic-refresh-indicator'));
+    final overview = find.text('学业总览');
+
+    await tester.pumpWidget(page(false));
+    await tester.pumpAndSettle();
+    final contentPosition = tester.getTopLeft(overview);
+    expect(indicator, findsNothing);
+
+    await tester.pumpWidget(page(true));
+    await tester.pump();
+    for (var cycle = 0; cycle < restores.length; cycle++) {
+      if (cycle > 0) await _tapRefresh(tester);
+
+      // Keep session restoration and the final request pending separately so
+      // both loading phases must preserve the idle page's position.
+      expect(restoreCount, cycle + 1);
+      expect(rankingCount, cycle);
+      expect(indicator, findsOneWidget);
+      expect(tester.widget<LinearProgressIndicator>(indicator).value, isNull);
+      expect(tester.getTopLeft(overview), contentPosition);
+
+      restores[cycle].complete();
+      await tester.pump();
+      await tester.pump();
+      expect(rankingCount, cycle + 1);
+      expect(indicator, findsOneWidget);
+      expect(tester.widget<LinearProgressIndicator>(indicator).value, isNull);
+      expect(tester.getTopLeft(overview), contentPosition);
+
+      rankings[cycle].complete(DemoAcademicRankingRepository().ranking);
+      await tester.pumpAndSettle();
+      expect(indicator, findsNothing);
+      expect(tester.getTopLeft(overview), contentPosition);
+    }
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('automatic refresh reports session restoration failure',
+      (tester) async {
+    final progress = _RefreshingProgressRepository(
+      cached: DemoAcademicProgressRepository().progress,
+      fetch: () async => DemoAcademicProgressRepository().progress,
+    );
+    await tester.pumpWidget(MaterialApp(
+      home: AcademicProgressPage(
+        repository: progress,
+        rankingRepository: DemoAcademicRankingRepository(),
+        studentProfileRepository: DemoAcademicStudentProfileRepository(),
+        restoreSession: () async => throw StateError('cookie unavailable'),
+        onLoginRequired: () async {},
+      ),
+    ));
+    await tester.pumpAndSettle();
+    expect(progress.requests, 0);
+    expect(find.byType(SnackBar), findsOneWidget);
+    expect(
+        find.byKey(const ValueKey('academic-refresh-indicator')), findsNothing);
+    expect(find.text('学业总览'), findsOneWidget);
+  });
+
+  testWidgets('automatic refresh reports request failures and preserves cache',
+      (tester) async {
+    final progress = _RefreshingProgressRepository(
+      cached: DemoAcademicProgressRepository().progress,
+      fetch: () async => throw const AcademicApiException('offline'),
+    );
+    await tester.pumpWidget(MaterialApp(
+      home: AcademicProgressPage(
+        repository: progress,
+        rankingRepository: DemoAcademicRankingRepository(),
+        studentProfileRepository: DemoAcademicStudentProfileRepository(),
+        restoreSession: _restoreSession,
+        onLoginRequired: () async {},
+      ),
+    ));
+    await tester.pumpAndSettle();
+    expect(progress.requests, 1);
+    expect(find.byType(SnackBar), findsOneWidget);
+    expect(find.text('学业总览'), findsOneWidget);
+    expect(
+        find.byKey(const ValueKey('academic-refresh-indicator')), findsNothing);
+  });
+
+  testWidgets('indicator stays visible until all refresh requests finish',
+      (tester) async {
+    final rankingResult = Completer<AcademicRanking>();
+    final progress = _RefreshingProgressRepository(
+      cached: DemoAcademicProgressRepository().progress,
+      fetch: () async => DemoAcademicProgressRepository().progress,
+    );
+    await tester.pumpWidget(MaterialApp(
+      home: AcademicProgressPage(
+        repository: progress,
+        rankingRepository:
+            _RefreshingRankingRepository(fetch: () => rankingResult.future),
+        studentProfileRepository: DemoAcademicStudentProfileRepository(),
+        restoreSession: _restoreSession,
+        onLoginRequired: () async {},
+      ),
+    ));
+    await tester.pump();
+    await tester.pump();
+    expect(progress.requests, 1);
+    expect(find.byKey(const ValueKey('academic-refresh-indicator')),
+        findsOneWidget);
+    rankingResult.complete(DemoAcademicRankingRepository().ranking);
+    await tester.pumpAndSettle();
+    expect(
+        find.byKey(const ValueKey('academic-refresh-indicator')), findsNothing);
+    expect(find.byType(SnackBar), findsNothing);
+  });
+
+  testWidgets('automatic authentication failure reports without opening login',
+      (tester) async {
+    var logins = 0;
+    final delayedRanking = Completer<AcademicRanking>();
+    await tester.pumpWidget(MaterialApp(
+      home: AcademicProgressPage(
+        repository: _RefreshingProgressRepository(
+          cached: DemoAcademicProgressRepository().progress,
+          fetch: () async => throw const AcademicAuthException(),
+        ),
+        rankingRepository:
+            _RefreshingRankingRepository(fetch: () => delayedRanking.future),
+        studentProfileRepository: DemoAcademicStudentProfileRepository(),
+        restoreSession: _restoreSession,
+        onLoginRequired: () async => logins++,
+      ),
+    ));
+    await tester.pumpAndSettle();
+    expect(logins, 0);
+    expect(find.text('学业信息同步失败，请重新登录校园账户'), findsOneWidget);
+    expect(
+        find.byKey(const ValueKey('academic-refresh-indicator')), findsNothing);
+    delayedRanking.complete(DemoAcademicRankingRepository().ranking);
+    await tester.pump();
+  });
+
+  testWidgets('an inactive page refreshes once on first activation',
+      (tester) async {
+    var restores = 0;
+    final progress = _RefreshingProgressRepository(
+      cached: DemoAcademicProgressRepository().progress,
+      fetch: () async => DemoAcademicProgressRepository().progress,
+    );
+    Widget page(bool active) => MaterialApp(
+          home: AcademicProgressPage(
+            active: active,
+            repository: progress,
+            rankingRepository: DemoAcademicRankingRepository(),
+            studentProfileRepository: DemoAcademicStudentProfileRepository(),
+            restoreSession: () async {
+              restores++;
+            },
+            onLoginRequired: () async {},
+          ),
+        );
+    await tester.pumpWidget(page(false));
+    await tester.pumpAndSettle();
+    expect(restores, 0);
+    expect(progress.requests, 0);
+    await tester.pumpWidget(page(true));
+    await tester.pumpAndSettle();
+    expect(restores, 1);
+    expect(progress.requests, 1);
+    expect(find.byType(SnackBar), findsNothing);
+  });
+
   testWidgets('changing ranking visibility does not fetch missing ranking',
       (tester) async {
     final ranking = _RefreshingRankingRepository(
@@ -311,6 +702,8 @@ void main() {
     );
     await tester.pumpWidget(MaterialApp(
       home: AcademicProgressPage(
+        autoRefreshEnabled: false,
+        restoreSession: _restoreSession,
         repository: DemoAcademicProgressRepository(),
         rankingRepository: ranking,
         onLoginRequired: () async {},
@@ -330,10 +723,457 @@ void main() {
     expect(find.text('暂无排名'), findsOneWidget);
   });
 
+  for (final (theme, background) in [
+    (ShuYoThemes.byId(ShuYoThemes.defaultId), null),
+    (ShuYoThemes.byId(ShuYoThemes.systemDarkId), null),
+    (
+      const CustomBackground(
+        imagePath: '',
+        opacity: 50,
+        background: Color(0xFF777777),
+        surface: Color(0xFFBBBBBB),
+        text: Colors.black,
+        accent: Colors.blue,
+      ).theme,
+      const CustomBackground(
+        imagePath: '',
+        opacity: 50,
+        background: Color(0xFF777777),
+        surface: Color(0xFFBBBBBB),
+        text: Colors.black,
+        accent: Colors.blue,
+      ),
+    ),
+  ]) {
+    testWidgets('student card matches home card for ${theme.id}',
+        (tester) async {
+      await tester.pumpWidget(MaterialApp(
+        theme: theme.themeData(),
+        builder: (_, child) => CustomBackgroundScope(
+          settings: background,
+          child: child!,
+        ),
+        home: Scaffold(
+          body: Row(children: [
+            Expanded(
+              child: HomeDashboardPage(
+                hasAcademicAccount: false,
+                isAcademicLoginCompleting: false,
+                onLogin: () {},
+                onOpenAcademicSystem: () {},
+                onOpenAnnouncements: () {},
+                onOpenEmptyClassroom: () {},
+                onOpenOtp: () {},
+                todayCourseContent: '今日无课',
+                announcementContent: '查看公告',
+              ),
+            ),
+            Expanded(
+              child: AcademicProgressPage(
+                autoRefreshEnabled: false,
+                restoreSession: _restoreSession,
+                repository: DemoAcademicProgressRepository(),
+                studentProfileRepository:
+                    DemoAcademicStudentProfileRepository(),
+                onLoginRequired: () async {},
+              ),
+            ),
+          ]),
+        ),
+      ));
+      await tester.pumpAndSettle();
+      final homeCard = tester.widget<Card>(find.descendant(
+        of: find.byKey(const ValueKey('home-card:overview')),
+        matching: find.byType(Card),
+      ));
+      final studentCard =
+          tester.widget<Card>(find.byKey(const ValueKey('student-info-card')));
+      expect(studentCard.color, homeCard.color);
+      expect(studentCard.elevation, homeCard.elevation);
+      expect(studentCard.shadowColor, homeCard.shadowColor);
+      expect(studentCard.surfaceTintColor, homeCard.surfaceTintColor);
+      expect(studentCard.shape, homeCard.shape);
+      expect(studentCard.clipBehavior, homeCard.clipBehavior);
+    });
+  }
+
+  testWidgets('shows an elevated student card before inline credit progress',
+      (tester) async {
+    await tester.pumpWidget(MaterialApp(
+      home: AcademicProgressPage(
+        autoRefreshEnabled: false,
+        restoreSession: _restoreSession,
+        repository: DemoAcademicProgressRepository(),
+        studentProfileRepository: DemoAcademicStudentProfileRepository(),
+        onLoginRequired: () async {},
+      ),
+    ));
+    await tester.pumpAndSettle();
+
+    final heading = find.text('学业总览');
+    final name = find.text('示例同学');
+    final category = find.text('本科生');
+    final studentId = find.text('DEMO0001');
+    final details = find.text('示例专业 · 示例学院');
+    final credits = find.text('学分');
+    final studentCard = find.byKey(const ValueKey('student-info-card'));
+    expect(heading, findsOneWidget);
+    expect(name, findsOneWidget);
+    expect(category, findsOneWidget);
+    expect(
+        find.byKey(const ValueKey('student-category-badge')), findsOneWidget);
+    final badge = tester.widget<DecoratedBox>(
+        find.byKey(const ValueKey('student-category-badge')));
+    final badgeColor = (badge.decoration as BoxDecoration).color!;
+    final categoryStyle = tester.widget<Text>(category).style!;
+    expect(badgeColor.a, 1);
+    expect(categoryStyle.foreground, isNull);
+    expect(categoryStyle.color!.a, 1);
+    expect(categoryStyle.color, isNot(badgeColor));
+    expect(studentId, findsOneWidget);
+    expect(details, findsOneWidget);
+    final nameStyle = tester.widget<Text>(name).style!;
+    final studentIdStyle = tester.widget<Text>(studentId).style!;
+    final detailsStyle = tester.widget<Text>(details).style!;
+    expect(nameStyle.fontSize, greaterThan(22));
+    expect(nameStyle.fontWeight, FontWeight.w600);
+    expect(studentIdStyle.fontSize, lessThan(detailsStyle.fontSize!));
+    expect(categoryStyle.fontSize, 10);
+    expect(categoryStyle.fontSize, lessThan(studentIdStyle.fontSize!));
+    expect(credits, findsOneWidget);
+    expect(find.text('已获学分'), findsNothing);
+    expect(find.text('要求学分'), findsNothing);
+    expect(find.textContaining('2025级'), findsNothing);
+    expect(studentCard, findsOneWidget);
+    expect(tester.widget<Card>(studentCard).elevation, greaterThan(0));
+    expect(find.descendant(of: studentCard, matching: name), findsOneWidget);
+    expect(
+        find.descendant(of: studentCard, matching: studentId), findsOneWidget);
+    expect(find.descendant(of: studentCard, matching: details), findsOneWidget);
+    final creditValue = tester
+        .widget<Text>(find.byKey(const ValueKey('academic-credit-value')));
+    final creditProgress =
+        find.byKey(const ValueKey('academic-credit-progress'));
+    expect(creditValue.textSpan!.toPlainText(), '62/160');
+    final creditSpans =
+        (creditValue.textSpan! as TextSpan).children!.cast<TextSpan>();
+    final accent = tester.element(credits).shuyoColors.accent;
+    expect(creditSpans.first.text, '62');
+    expect(creditSpans.first.style?.color, accent);
+    expect(
+        creditSpans.skip(1).map((span) => span.toPlainText()).join(), '/160');
+    for (final span in creditSpans.skip(1)) {
+      expect(span.style?.color ?? creditValue.style?.color, isNot(accent));
+    }
+    expect(creditProgress, findsOneWidget);
+    expect(
+      tester.getCenter(find.byKey(const ValueKey('academic-credit-value'))).dy,
+      closeTo(tester.getCenter(creditProgress).dy, 1),
+    );
+    expect(
+      tester.getTopLeft(credits).dx -
+          tester
+              .getTopRight(
+                  find.byKey(const ValueKey('academic-credit-value-box')))
+              .dx,
+      closeTo(4, 0.01),
+    );
+    expect(
+      tester.getTopLeft(creditProgress).dx - tester.getTopRight(credits).dx,
+      closeTo(10, 0.01),
+    );
+    expect(tester.getBottomLeft(studentCard).dy,
+        lessThan(tester.getTopLeft(heading).dy));
+    expect(tester.getBottomLeft(heading).dy,
+        lessThan(tester.getTopLeft(credits).dy));
+    expect(
+        tester.getCenter(name).dy, closeTo(tester.getCenter(category).dy, 2));
+    expect(
+        tester.getTopRight(name).dx, lessThan(tester.getTopLeft(category).dx));
+    expect(tester.getBottomLeft(name).dy,
+        lessThan(tester.getTopLeft(studentId).dy));
+    expect(tester.getBottomLeft(studentId).dy,
+        lessThan(tester.getTopLeft(details).dy));
+    expect(tester.getBottomLeft(details).dy,
+        lessThan(tester.getTopLeft(credits).dy));
+    expect(find.byIcon(Icons.school_outlined), findsOneWidget);
+    final banner = find.ancestor(of: name, matching: find.byType(Row)).first;
+    expect(
+      find.descendant(of: banner, matching: find.byIcon(Icons.chevron_right)),
+      findsNothing,
+    );
+    expect(find.textContaining('同步于'), findsNothing);
+    expect(find.textContaining('数据仅供学业修读参考'), findsNothing);
+    final readingHeading = find.text('修读情况');
+    final counts = find.text('计划 40 门 · 已修 16 门 · 在修 5 门 · 未修 19 门');
+    final firstNode = find.byKey(const ValueKey('progress-node-demo-main'));
+    expect(counts, findsOneWidget);
+    expect(tester.getBottomLeft(readingHeading).dy,
+        lessThan(tester.getTopLeft(counts).dy));
+    expect(tester.getBottomLeft(counts).dy,
+        lessThan(tester.getTopLeft(firstNode).dy));
+  });
+
+  testWidgets('student banner accommodates long details on a narrow screen',
+      (tester) async {
+    tester.view.physicalSize = const Size(320, 700);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    await tester.pumpWidget(MaterialApp(
+      home: AcademicProgressPage(
+        autoRefreshEnabled: false,
+        restoreSession: _restoreSession,
+        repository: DemoAcademicProgressRepository(),
+        studentProfileRepository: _LongStudentProfileRepository(),
+        onLoginRequired: () async {},
+      ),
+    ));
+    await tester.pumpAndSettle();
+
+    expect(find.text('示例姓名'), findsOneWidget);
+    expect(find.text('本科生'), findsOneWidget);
+    expect(find.text('DEMO0001'), findsOneWidget);
+    expect(
+      find.text('很长的专业名称用于验证窄屏上的文本布局 · 很长的学院名称用于验证窄屏上的文本布局'),
+      findsOneWidget,
+    );
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('shows a graduate badge from the student profile',
+      (tester) async {
+    const graduate = AcademicStudentProfile(
+      studentId: 'DEMO0001',
+      studentName: '示例姓名',
+      grade: '2025',
+      academicLevel: '硕士',
+      majorName: '示例专业',
+      collegeName: '示例学院',
+    );
+    await tester.pumpWidget(MaterialApp(
+      home: AcademicProgressPage(
+        autoRefreshEnabled: false,
+        restoreSession: _restoreSession,
+        repository: DemoAcademicProgressRepository(),
+        studentProfileRepository: _StudentProfileRepository(cached: graduate),
+        onLoginRequired: () async {},
+      ),
+    ));
+    await tester.pumpAndSettle();
+
+    expect(find.text('研究生'), findsOneWidget);
+    expect(find.text('本科生'), findsNothing);
+    expect(find.text('示例专业 · 示例学院'), findsOneWidget);
+    expect(find.textContaining('2025级'), findsNothing);
+  });
+
+  testWidgets('does not invent a category when the profile level is missing',
+      (tester) async {
+    const missingLevel = AcademicStudentProfile(
+      studentId: 'DEMO0001',
+      studentName: '示例姓名',
+      grade: '2025',
+      majorName: '示例专业',
+      collegeName: '示例学院',
+    );
+    await tester.pumpWidget(MaterialApp(
+      home: AcademicProgressPage(
+        autoRefreshEnabled: false,
+        restoreSession: _restoreSession,
+        repository: DemoAcademicProgressRepository(),
+        studentProfileRepository:
+            _StudentProfileRepository(cached: missingLevel),
+        onLoginRequired: () async {},
+      ),
+    ));
+    await tester.pumpAndSettle();
+
+    expect(find.text('示例姓名'), findsOneWidget);
+    expect(find.text('本科生'), findsNothing);
+    expect(find.text('研究生'), findsNothing);
+    expect(find.byKey(const ValueKey('student-category-badge')), findsNothing);
+  });
+
+  testWidgets('uses the matching schedule name when the profile is unavailable',
+      (tester) async {
+    final profile = _StudentProfileRepository();
+    await tester.pumpWidget(MaterialApp(
+      home: AcademicProgressPage(
+        autoRefreshEnabled: false,
+        restoreSession: _restoreSession,
+        repository: DemoAcademicProgressRepository(),
+        studentProfileRepository: profile,
+        scheduleRepository: _scheduleWithName('DEMO0001', '课表姓名'),
+        onLoginRequired: () async {},
+      ),
+    ));
+    await tester.pumpAndSettle();
+    expect(profile.requests, 0);
+    expect(find.text('课表姓名'), findsOneWidget);
+    expect(find.text('学生'), findsNothing);
+  });
+
+  testWidgets('prefers a nonempty profile name over the schedule name',
+      (tester) async {
+    await tester.pumpWidget(MaterialApp(
+      home: AcademicProgressPage(
+        autoRefreshEnabled: false,
+        restoreSession: _restoreSession,
+        repository: DemoAcademicProgressRepository(),
+        studentProfileRepository: DemoAcademicStudentProfileRepository(),
+        scheduleRepository: _scheduleWithName('DEMO0001', '课表姓名'),
+        onLoginRequired: () async {},
+      ),
+    ));
+    await tester.pumpAndSettle();
+    expect(find.text('示例同学'), findsOneWidget);
+    expect(find.text('课表姓名'), findsNothing);
+  });
+
+  testWidgets('does not display a schedule name from another account',
+      (tester) async {
+    await tester.pumpWidget(MaterialApp(
+      home: AcademicProgressPage(
+        autoRefreshEnabled: false,
+        restoreSession: _restoreSession,
+        repository: DemoAcademicProgressRepository(),
+        studentProfileRepository: _StudentProfileRepository(),
+        scheduleRepository: _scheduleWithName('OTHER', '其他人姓名'),
+        onLoginRequired: () async {},
+      ),
+    ));
+    await tester.pumpAndSettle();
+    expect(find.text('其他人姓名'), findsNothing);
+    expect(find.text('DEMO0001'), findsOneWidget);
+  });
+
+  testWidgets('refreshes a cached profile whose name is empty', (tester) async {
+    const emptyName = AcademicStudentProfile(
+      studentId: 'DEMO0001',
+      studentName: ' ',
+      grade: '2025',
+      majorName: '示例专业',
+      collegeName: '示例学院',
+    );
+    final profile = _StudentProfileRepository(
+      cached: emptyName,
+      refreshed: _LongStudentProfileRepository.longProfile,
+    );
+    await tester.pumpWidget(MaterialApp(
+      home: AcademicProgressPage(
+        restoreSession: _restoreSession,
+        repository: DemoAcademicProgressRepository(),
+        rankingRepository: DemoAcademicRankingRepository(),
+        studentProfileRepository: profile,
+        scheduleRepository: _scheduleWithName('DEMO0001', '课表姓名'),
+        onLoginRequired: () async {},
+      ),
+    ));
+    await tester.pumpAndSettle();
+    expect(profile.requests, 1);
+    expect(find.text('示例姓名'), findsOneWidget);
+    expect(find.text('课表姓名'), findsNothing);
+  });
+
+  testWidgets('refreshes a cached profile whose grade is empty',
+      (tester) async {
+    const missingGrade = AcademicStudentProfile(
+      studentId: 'DEMO0001',
+      studentName: '示例姓名',
+      grade: '',
+      academicLevel: '本科',
+      majorName: '示例专业',
+      collegeName: '示例学院',
+    );
+    final profile = _StudentProfileRepository(
+      cached: missingGrade,
+      refreshed: _LongStudentProfileRepository.longProfile,
+    );
+    await tester.pumpWidget(MaterialApp(
+      home: AcademicProgressPage(
+        restoreSession: _restoreSession,
+        repository: DemoAcademicProgressRepository(),
+        rankingRepository: DemoAcademicRankingRepository(),
+        studentProfileRepository: profile,
+        onLoginRequired: () async {},
+      ),
+    ));
+    await tester.pumpAndSettle();
+
+    expect(profile.requests, 1);
+    expect(
+      find.text('很长的专业名称用于验证窄屏上的文本布局 · 很长的学院名称用于验证窄屏上的文本布局'),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('profile refresh failure reports partial success and keeps cache',
+      (tester) async {
+    final profile = _StudentProfileRepository(
+      cached: _LongStudentProfileRepository.longProfile,
+      error: const AcademicApiException('profile offline'),
+    );
+    await tester.pumpWidget(MaterialApp(
+      home: AcademicProgressPage(
+        autoRefreshEnabled: false,
+        restoreSession: _restoreSession,
+        repository: DemoAcademicProgressRepository(),
+        rankingRepository: DemoAcademicRankingRepository(),
+        studentProfileRepository: profile,
+        onLoginRequired: () async {},
+      ),
+    ));
+    await tester.pumpAndSettle();
+    expect(profile.requests, 0);
+    await _tapRefresh(tester);
+    await tester.pumpAndSettle();
+
+    expect(profile.requests, 1);
+    expect(find.text('学籍信息获取失败，请稍后重试'), findsOneWidget);
+    expect(find.text('学业信息已同步'), findsNothing);
+    expect(find.text('示例姓名'), findsOneWidget);
+    expect(find.text('本科生'), findsOneWidget);
+    expect(
+      find.text('很长的专业名称用于验证窄屏上的文本布局 · 很长的学院名称用于验证窄屏上的文本布局'),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('profile authentication failure requests login once on refresh',
+      (tester) async {
+    var logins = 0;
+    final profile = _StudentProfileRepository(
+      cached: _LongStudentProfileRepository.longProfile,
+      error: const AcademicAuthException(),
+    );
+    await tester.pumpWidget(MaterialApp(
+      home: AcademicProgressPage(
+        autoRefreshEnabled: false,
+        restoreSession: _restoreSession,
+        repository: DemoAcademicProgressRepository(),
+        rankingRepository: DemoAcademicRankingRepository(),
+        studentProfileRepository: profile,
+        onLoginRequired: () async => logins++,
+      ),
+    ));
+    await tester.pumpAndSettle();
+    expect(profile.requests, 0);
+    await _tapRefresh(tester);
+    await tester.pumpAndSettle();
+
+    expect(profile.requests, 1);
+    expect(logins, 1);
+    expect(find.text('示例姓名'), findsOneWidget);
+    expect(find.text('学业信息已同步'), findsNothing);
+  });
+
   testWidgets('browses categories and refreshes from the More menu',
       (tester) async {
     await tester.pumpWidget(MaterialApp(
       home: AcademicProgressPage(
+        autoRefreshEnabled: false,
+        restoreSession: _restoreSession,
         repository: DemoAcademicProgressRepository(),
         onLoginRequired: () async {},
       ),
@@ -421,6 +1261,8 @@ void main() {
 
     await tester.pumpWidget(MaterialApp(
       home: AcademicProgressPage(
+        autoRefreshEnabled: false,
+        restoreSession: _restoreSession,
         repository: DemoAcademicProgressRepository(),
         onLoginRequired: () async {},
       ),
@@ -444,14 +1286,16 @@ void main() {
       (tester) async {
     await tester.pumpWidget(MaterialApp(
       home: AcademicProgressPage(
+        autoRefreshEnabled: false,
+        restoreSession: _restoreSession,
         repository: DemoAcademicProgressRepository(),
         onLoginRequired: () async {},
       ),
     ));
     await tester.pumpAndSettle();
     expect(find.text('平均绩点'), findsNothing);
-    final earnedX = tester.getTopLeft(find.text('已获学分')).dx;
-    final requiredX = tester.getTopLeft(find.text('要求学分')).dx;
+    expect(find.byType(Divider), findsNothing);
+    final creditPosition = tester.getTopLeft(find.text('学分'));
     await tester.tap(find.text('公共基础课程'));
     await tester.pumpAndSettle();
     await tester.tap(find.text('大学英语'));
@@ -481,8 +1325,18 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('平均绩点'), findsOneWidget);
-    expect(tester.getTopLeft(find.text('已获学分')).dx, earnedX);
-    expect(tester.getTopLeft(find.text('要求学分')).dx, requiredX);
+    expect(tester.getTopLeft(find.text('学分')), creditPosition);
+    expect(find.byType(Divider), findsOneWidget);
+    expect(tester.getBottomLeft(find.byType(LinearProgressIndicator)).dy,
+        lessThan(tester.getCenter(find.byType(Divider)).dy));
+    expect(tester.getCenter(find.byType(Divider)).dy,
+        lessThan(tester.getTopLeft(find.text('平均绩点')).dy));
+    _expectInlineEdgeMetric(
+      tester,
+      label: '平均绩点',
+      valueKey: 'academic-gpa-value',
+      edgeX: tester.getRect(find.byType(Divider)).left,
+    );
     expect(
         await AcademicProgressDisplaySettingsService().loadShowGpa(), isTrue);
     await tester.tap(find.text('大学英语'));
@@ -490,11 +1344,12 @@ void main() {
     expect(find.text('绩点'), findsOneWidget);
   });
 
-  testWidgets(
-      'ranking starts with college, switches to major, and uses four slots',
+  testWidgets('ranking and GPA share a separate row below credit progress',
       (tester) async {
     await tester.pumpWidget(MaterialApp(
       home: AcademicProgressPage(
+        autoRefreshEnabled: false,
+        restoreSession: _restoreSession,
         repository: DemoAcademicProgressRepository(),
         rankingRepository: DemoAcademicRankingRepository(),
         onLoginRequired: () async {},
@@ -502,8 +1357,8 @@ void main() {
     ));
     await tester.pumpAndSettle();
     expect(find.text('学院排名'), findsNothing);
-    final earnedX = tester.getTopLeft(find.text('已获学分')).dx;
-    final requiredX = tester.getTopLeft(find.text('要求学分')).dx;
+    expect(find.byType(Divider), findsNothing);
+    final creditPosition = tester.getTopLeft(find.text('学分'));
 
     await tester.tap(find.byTooltip('更多'));
     await tester.pumpAndSettle();
@@ -518,14 +1373,49 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('学院排名'), findsOneWidget);
     expect(find.text('42/260'), findsOneWidget);
+    void expectMutedDenominator(String value, String numerator, String suffix) {
+      final finder = find.text(value);
+      final text = tester.widget<Text>(finder);
+      final spans = (text.textSpan! as TextSpan).children!.cast<TextSpan>();
+      final colors = tester.element(finder).shuyoColors;
+      expect(spans.first.text, numerator);
+      expect(spans.first.style?.color ?? text.style?.color,
+          isNot(colors.textSecondary));
+      expect(spans.skip(1).map((span) => span.toPlainText()).join(), suffix);
+      for (final span in spans.skip(1)) {
+        expect(span.style?.color, colors.textSecondary);
+      }
+    }
+
+    expectMutedDenominator('42/260', '42', '/260');
     expect(find.text('共260人'), findsNothing);
-    expect(tester.getTopLeft(find.text('已获学分')).dx, earnedX);
-    expect(tester.getTopLeft(find.text('要求学分')).dx, requiredX);
-    await tester.tap(find.text('学院排名'));
+    expect(tester.getTopLeft(find.text('学分')), creditPosition);
+    expect(find.byType(Divider), findsOneWidget);
+    expect(tester.getBottomLeft(find.byType(LinearProgressIndicator)).dy,
+        lessThan(tester.getCenter(find.byType(Divider)).dy));
+    expect(tester.getCenter(find.byType(Divider)).dy,
+        lessThan(tester.getTopLeft(find.text('学院排名')).dy));
+    _expectInlineEdgeMetric(
+      tester,
+      label: '学院排名',
+      valueKey: 'academic-ranking-value',
+      edgeX: tester.getRect(find.byType(Divider)).right,
+      rightAligned: true,
+    );
+    expect(find.byIcon(Icons.swap_horiz), findsOneWidget);
+    await tester.tap(find.byIcon(Icons.swap_horiz));
     await tester.pumpAndSettle();
     expect(find.text('专业排名'), findsOneWidget);
     expect(find.text('12/80'), findsOneWidget);
+    expectMutedDenominator('12/80', '12', '/80');
     expect(find.text('共80人'), findsNothing);
+    _expectInlineEdgeMetric(
+      tester,
+      label: '专业排名',
+      valueKey: 'academic-ranking-value',
+      edgeX: tester.getRect(find.byType(Divider)).right,
+      rightAligned: true,
+    );
 
     await tester.tap(find.byTooltip('更多'));
     await tester.pumpAndSettle();
@@ -535,16 +1425,179 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.text('完成'));
     await tester.pumpAndSettle();
-    final positions = [
-      for (final label in ['已获学分', '要求学分', '平均绩点', '专业排名'])
-        tester.getTopLeft(find.text(label)).dx,
-    ];
+    final gpaPosition = tester.getTopLeft(find.text('平均绩点'));
+    final rankingPosition = tester.getTopLeft(find.text('专业排名'));
+    expect(find.text('3.65/4.0'), findsOneWidget);
+    expectMutedDenominator('3.65/4.0', '3.65', '/4.0');
+    expect(gpaPosition.dy, closeTo(rankingPosition.dy, 1));
+    expect(gpaPosition.dx, lessThan(rankingPosition.dx));
+    _expectSimilarMetricTextGaps(tester, '专业排名');
+    expect(tester.getCenter(find.byType(Divider)).dy, lessThan(gpaPosition.dy));
+    final metricBounds = tester.getRect(find.byType(Divider));
+    _expectInlineEdgeMetric(
+      tester,
+      label: '平均绩点',
+      valueKey: 'academic-gpa-value',
+      edgeX: metricBounds.left,
+    );
+    _expectInlineEdgeMetric(
+      tester,
+      label: '专业排名',
+      valueKey: 'academic-ranking-value',
+      edgeX: metricBounds.right,
+      rightAligned: true,
+    );
+    await tester.tap(find.byKey(const ValueKey('academic-ranking-value')));
+    await tester.pumpAndSettle();
+    expect(find.text('学院排名'), findsOneWidget);
+    expect(find.text('42/260'), findsOneWidget);
+    expectMutedDenominator('42/260', '42', '/260');
+    _expectSimilarMetricTextGaps(tester, '学院排名');
+    final rankingHotArea =
+        find.byKey(const ValueKey('academic-ranking-toggle'));
+    final rankingToggleBounds = tester.getRect(rankingHotArea);
+    expect(rankingToggleBounds.height, lessThan(44));
     expect(
-        positions[1] - positions[0], closeTo(positions[2] - positions[1], 1));
-    expect(
-        positions[2] - positions[1], closeTo(positions[3] - positions[2], 1));
+        rankingToggleBounds.height,
+        closeTo(
+            tester
+                .getSize(find.byKey(const ValueKey('academic-gpa-value-box')))
+                .height,
+            0.01));
+    expect(tester.widget<GestureDetector>(rankingHotArea).behavior,
+        HitTestBehavior.opaque);
+    await tester.tap(find.text('学院排名'));
+    await tester.pumpAndSettle();
+    expect(find.text('专业排名'), findsOneWidget);
+    expect(find.text('12/80'), findsOneWidget);
+    await tester.tapAt(rankingToggleBounds.topLeft + const Offset(2, 2));
+    await tester.pumpAndSettle();
+    expect(find.text('学院排名'), findsOneWidget);
+    expect(find.text('42/260'), findsOneWidget);
+    expect(tester.getTopLeft(find.text('学分')), creditPosition);
     expect(await AcademicProgressDisplaySettingsService().loadShowRanking(),
         isTrue);
+  });
+
+  testWidgets('metric geometry and font size stay fixed across values and taps',
+      (tester) async {
+    SharedPreferences.setMockInitialValues({
+      AcademicProgressDisplaySettingsService.showGpaKey: true,
+      AcademicProgressDisplaySettingsService.showRankingKey: true,
+    });
+    tester.view.physicalSize = const Size(320, 640);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    AcademicProgress progressWithGpa(String gpa) => AcademicProgress.fromJson(
+        DemoAcademicProgressRepository().progress.toJson()..['gpa'] = gpa);
+    AcademicRanking rankingWithValues(
+            int collegeRank, int collegeCount, int majorRank, int majorCount) =>
+        AcademicRanking.fromJson(
+            DemoAcademicRankingRepository().ranking.toJson()
+              ..['collegeRank'] = collegeRank
+              ..['collegeCount'] = collegeCount
+              ..['majorRank'] = majorRank
+              ..['majorCount'] = majorCount);
+    await tester.pumpWidget(MaterialApp(
+      home: AcademicProgressPage(
+        autoRefreshEnabled: false,
+        restoreSession: _restoreSession,
+        repository: _RefreshingProgressRepository(
+          cached: progressWithGpa('1.11'),
+          fetch: () async => progressWithGpa('3.88'),
+        ),
+        rankingRepository: _RefreshingRankingRepository(
+          cached: rankingWithValues(88888, 99999, 1, 9),
+          fetch: () async => rankingWithValues(2, 99, 3333, 5555),
+        ),
+        studentProfileRepository: DemoAcademicStudentProfileRepository(),
+        onLoginRequired: () async {},
+      ),
+    ));
+    await tester.pumpAndSettle();
+
+    final gpaValue = find.byKey(const ValueKey('academic-gpa-value'));
+    final rankingValue = find.byKey(const ValueKey('academic-ranking-value'));
+    final rankingHotArea =
+        find.byKey(const ValueKey('academic-ranking-toggle'));
+    Map<String, Rect> bounds() => {
+          'gpaLabel': tester.getRect(find.text('平均绩点')),
+          'rankingLabel': tester.getRect(find.text('学院排名').evaluate().isNotEmpty
+              ? find.text('学院排名')
+              : find.text('专业排名')),
+          'gpaBox': tester
+              .getRect(find.byKey(const ValueKey('academic-gpa-value-box'))),
+          'rankingBox': tester.getRect(
+              find.byKey(const ValueKey('academic-ranking-value-box'))),
+          'rankingIcon': tester.getRect(find.byIcon(Icons.swap_horiz)),
+          'rankingHotArea': tester.getRect(rankingHotArea),
+          'divider': tester.getRect(find.byType(Divider)),
+          'nextSection': tester.getRect(find.text('修读情况')),
+        };
+    final initialBounds = bounds();
+    final initialGpaFont = tester.widget<Text>(gpaValue).style!;
+    final initialRankingFont = tester.widget<Text>(rankingValue).style!;
+    final initialGpaHeight = tester.getSize(gpaValue).height;
+    final initialRankingHeight = tester.getSize(rankingValue).height;
+    List<double> scale(Finder finder) {
+      final matrix = tester.renderObject(finder).getTransformTo(null).storage;
+      return [matrix[0], matrix[5]];
+    }
+
+    final initialGpaScale = scale(gpaValue);
+    final initialRankingScale = scale(rankingValue);
+    expect(initialBounds['rankingHotArea']!.height, lessThan(44));
+    expect(initialBounds['rankingHotArea']!.height,
+        closeTo(initialGpaHeight, 0.01));
+    expect(initialGpaFont.fontFeatures?.map((feature) => feature.feature),
+        contains('tnum'));
+    expect(initialRankingFont.fontFeatures?.map((feature) => feature.feature),
+        contains('tnum'));
+    void expectStableMetrics() {
+      expect(bounds(), initialBounds);
+      expect(tester.widget<Text>(gpaValue).style!.fontSize,
+          initialGpaFont.fontSize);
+      expect(tester.widget<Text>(rankingValue).style!.fontSize,
+          initialRankingFont.fontSize);
+      expect(tester.getSize(gpaValue).height, initialGpaHeight);
+      expect(tester.getSize(rankingValue).height, initialRankingHeight);
+      expect(scale(gpaValue), initialGpaScale);
+      expect(scale(rankingValue), initialRankingScale);
+      expect(tester.takeException(), isNull);
+    }
+
+    expect(find.text('1.11/4.0'), findsOneWidget);
+    expect(find.text('88888/99999'), findsOneWidget);
+    await tester.tap(find.byIcon(Icons.swap_horiz));
+    await tester.pumpAndSettle();
+    expect(find.text('1/9'), findsOneWidget);
+    _expectSimilarMetricTextGaps(tester, '专业排名');
+    expectStableMetrics();
+    await tester.tap(find.text('专业排名'));
+    await tester.pumpAndSettle();
+    expect(find.text('88888/99999'), findsOneWidget);
+    expectStableMetrics();
+    await tester.tap(rankingValue);
+    await tester.pumpAndSettle();
+    expect(find.text('1/9'), findsOneWidget);
+    expectStableMetrics();
+    await tester
+        .tapAt(initialBounds['rankingHotArea']!.topLeft + const Offset(2, 2));
+    await tester.pumpAndSettle();
+    expect(find.text('88888/99999'), findsOneWidget);
+    expectStableMetrics();
+
+    await _tapRefresh(tester);
+    await tester.pumpAndSettle();
+    expect(find.text('3.88/4.0'), findsOneWidget);
+    expect(find.text('2/99'), findsOneWidget);
+    expectStableMetrics();
+    await tester.tap(find.byIcon(Icons.swap_horiz));
+    await tester.pumpAndSettle();
+    expect(find.text('3333/5555'), findsOneWidget);
+    expectStableMetrics();
   });
 
   testWidgets('ranking failures keep academic progress and old ranking',
@@ -555,6 +1608,8 @@ void main() {
     final ranking = DemoAcademicRankingRepository().ranking;
     await tester.pumpWidget(MaterialApp(
       home: AcademicProgressPage(
+        autoRefreshEnabled: false,
+        restoreSession: _restoreSession,
         repository: DemoAcademicProgressRepository(),
         rankingRepository: _FailingRankingRepository(cached: ranking),
         onLoginRequired: () async {},
@@ -578,6 +1633,8 @@ void main() {
     });
     await tester.pumpWidget(MaterialApp(
       home: AcademicProgressPage(
+        autoRefreshEnabled: false,
+        restoreSession: _restoreSession,
         repository: DemoAcademicProgressRepository(),
         rankingRepository: _FailingRankingRepository(),
         onLoginRequired: () async {},
@@ -607,8 +1664,11 @@ void main() {
         _RefreshingRankingRepository(fetch: () => rankingResult.future);
     await tester.pumpWidget(MaterialApp(
       home: AcademicProgressPage(
+        autoRefreshEnabled: false,
+        restoreSession: _restoreSession,
         repository: progress,
         rankingRepository: ranking,
+        studentProfileRepository: DemoAcademicStudentProfileRepository(),
         onLoginRequired: () async {},
       ),
     ));
@@ -626,7 +1686,7 @@ void main() {
     rankingResult.completeError(const AcademicApiException('ranking offline'));
     await tester.pumpAndSettle();
     expect(find.text('学业总览'), findsOneWidget);
-    expect(find.text('学业信息已同步，排名获取失败'), findsOneWidget);
+    expect(find.text('排名获取失败，请稍后重试'), findsOneWidget);
   });
 
   testWidgets('progress failure keeps its cache while new ranking is displayed',
@@ -643,8 +1703,11 @@ void main() {
     );
     await tester.pumpWidget(MaterialApp(
       home: AcademicProgressPage(
+        autoRefreshEnabled: false,
+        restoreSession: _restoreSession,
         repository: progress,
         rankingRepository: ranking,
+        studentProfileRepository: DemoAcademicStudentProfileRepository(),
         onLoginRequired: () async {},
       ),
     ));
@@ -654,7 +1717,7 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('学业总览'), findsOneWidget);
     expect(find.text('42/260'), findsOneWidget);
-    expect(find.text('排名已同步，学业信息获取失败'), findsOneWidget);
+    expect(find.text('学业信息获取失败，请稍后重试'), findsOneWidget);
   });
 
   testWidgets('both failed requests preserve cached progress and ranking',
@@ -672,8 +1735,11 @@ void main() {
     );
     await tester.pumpWidget(MaterialApp(
       home: AcademicProgressPage(
+        autoRefreshEnabled: false,
+        restoreSession: _restoreSession,
         repository: progress,
         rankingRepository: ranking,
+        studentProfileRepository: DemoAcademicStudentProfileRepository(),
         onLoginRequired: () async {},
       ),
     ));
@@ -683,7 +1749,7 @@ void main() {
     expect(find.text('学业总览'), findsOneWidget);
     expect(find.text('42/260'), findsOneWidget);
     expect(find.text('旧数据'), findsOneWidget);
-    expect(find.text('学业信息同步失败'), findsOneWidget);
+    expect(find.text('学业信息、排名获取失败，请稍后重试'), findsOneWidget);
   });
 
   for (final restoreSession in [false, true]) {
@@ -705,8 +1771,11 @@ void main() {
       });
       await tester.pumpWidget(MaterialApp(
         home: AcademicProgressPage(
+          autoRefreshEnabled: false,
+          restoreSession: _restoreSession,
           repository: progress,
           rankingRepository: ranking,
+          studentProfileRepository: DemoAcademicStudentProfileRepository(),
           onLoginRequired: () async {
             logins++;
             authenticated = restoreSession;
@@ -726,7 +1795,7 @@ void main() {
         expect(progress.requests, 2);
         expect(ranking.requests, 2);
         expect(logins, 1);
-        expect(find.text('学业信息已同步'), findsOneWidget);
+        expect(find.byType(SnackBar), findsNothing);
       }
     });
   }
@@ -742,6 +1811,8 @@ void main() {
     );
     await tester.pumpWidget(MaterialApp(
       home: AcademicProgressPage(
+        autoRefreshEnabled: false,
+        restoreSession: _restoreSession,
         repository: progress,
         rankingRepository: ranking,
         onLoginRequired: () async => logins++,
@@ -756,7 +1827,68 @@ void main() {
     expect(find.text('学业总览'), findsOneWidget);
   });
 
-  testWidgets('four overview metrics fit a narrow phone', (tester) async {
+  for (final outcome in ['success', 'partial failure', 'failure']) {
+    testWidgets('credit progress animates only after full refresh: $outcome',
+        (tester) async {
+      final sample = DemoAcademicProgressRepository().progress;
+      final result = Completer<AcademicProgress>();
+      await tester.pumpWidget(MaterialApp(
+        home: AcademicProgressPage(
+          autoRefreshEnabled: false,
+          restoreSession: _restoreSession,
+          repository: _RefreshingProgressRepository(
+            cached: sample,
+            fetch: () => result.future,
+          ),
+          rankingRepository: DemoAcademicRankingRepository(),
+          studentProfileRepository: outcome == 'partial failure'
+              ? _StudentProfileRepository(
+                  error: const AcademicApiException('profile offline'))
+              : DemoAcademicStudentProfileRepository(),
+          onLoginRequired: () async {},
+        ),
+      ));
+      await tester.pumpAndSettle();
+      final indicator = find.byKey(const ValueKey('academic-credit-progress'));
+      double value() =>
+          tester.widget<LinearProgressIndicator>(indicator).value!;
+      final target =
+          sample.mainNode!.earnedCredits! / sample.mainNode!.requiredCredits!;
+      expect(value(), closeTo(target, 0.001));
+
+      await _tapRefresh(tester);
+      expect(value(), closeTo(target, 0.001));
+      if (outcome == 'failure') {
+        result.completeError(const AcademicApiException('progress offline'));
+      } else {
+        result.complete(sample);
+      }
+      await tester.pump();
+      await tester.pump();
+      expect(find.byKey(const ValueKey('academic-refresh-indicator')),
+          findsNothing);
+
+      if (outcome == 'success') {
+        expect(value(), closeTo(0, 0.001));
+        expect(find.byType(SnackBar), findsNothing);
+        await tester.pump(const Duration(milliseconds: 400));
+        expect(value(), greaterThan(target * 0.5));
+        expect(value(), lessThan(target));
+        await tester.pump(const Duration(milliseconds: 400));
+        expect(value(), closeTo(target, 0.001));
+      } else {
+        expect(value(), closeTo(target, 0.001));
+        expect(find.byType(SnackBar), findsOneWidget);
+        await tester.pump(const Duration(milliseconds: 400));
+        expect(value(), closeTo(target, 0.001));
+      }
+      expect(tester.takeException(), isNull);
+    });
+  }
+
+  testWidgets(
+      'inline three-digit credits and optional metrics fit a narrow phone',
+      (tester) async {
     SharedPreferences.setMockInitialValues({
       AcademicProgressDisplaySettingsService.showGpaKey: true,
       AcademicProgressDisplaySettingsService.showRankingKey: true,
@@ -765,18 +1897,85 @@ void main() {
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);
-    await tester.pumpWidget(MaterialApp(
-      home: AcademicProgressPage(
-        repository: DemoAcademicProgressRepository(),
-        rankingRepository: DemoAcademicRankingRepository(),
-        onLoginRequired: () async {},
-      ),
-    ));
-    await tester.pumpAndSettle();
-    for (final label in ['已获学分', '要求学分', '平均绩点', '学院排名']) {
-      expect(find.text(label), findsOneWidget);
+    Rect? compactValueBounds;
+    Rect? compactBarBounds;
+    // Ahem's wide glyphs reach the cap for both three- and two-digit credits.
+    for (final credits in [(1, 10), (62, 160), (999, 999)]) {
+      final json = DemoAcademicProgressRepository().progress.toJson();
+      final root = (json['nodes'] as List).first as Map<String, dynamic>;
+      root['earnedCredits'] = credits.$1;
+      root['requiredCredits'] = credits.$2;
+      final progress = AcademicProgress.fromJson(json);
+      await tester.pumpWidget(MaterialApp(
+        home: AcademicProgressPage(
+          key: ValueKey(credits),
+          autoRefreshEnabled: false,
+          restoreSession: _restoreSession,
+          repository: _RefreshingProgressRepository(
+              cached: progress, fetch: () async => progress),
+          rankingRepository: DemoAcademicRankingRepository(),
+          onLoginRequired: () async {},
+        ),
+      ));
+      await tester.pumpAndSettle();
+      for (final label in ['学分', '平均绩点', '学院排名']) {
+        expect(find.text(label), findsOneWidget);
+      }
+      final value = find.byKey(const ValueKey('academic-credit-value'));
+      final valueBox = find.byKey(const ValueKey('academic-credit-value-box'));
+      final bar = find.byKey(const ValueKey('academic-credit-progress'));
+      expect(tester.widget<Text>(value).textSpan!.toPlainText(),
+          '${credits.$1}/${credits.$2}');
+      final valueBounds = tester.getRect(valueBox);
+      final barBounds = tester.getRect(bar);
+      final labelBounds = tester.getRect(find.text('学分'));
+      final textBounds = tester.getRect(value);
+      expect(valueBounds.width, closeTo(textBounds.width, 0.01));
+      expect(valueBounds.width, lessThanOrEqualTo(120));
+      expect(tester.getCenter(valueBox).dy, closeTo(barBounds.center.dy, 3));
+      expect(labelBounds.top, lessThan(valueBounds.bottom));
+      expect(labelBounds.bottom, greaterThan(valueBounds.top));
+      expect(labelBounds.left - valueBounds.right, closeTo(4, 0.01));
+      expect(barBounds.left - labelBounds.right, closeTo(10, 0.01));
+      expect(barBounds.width, greaterThan(0));
+      expect(barBounds.right, lessThanOrEqualTo(320));
+      if (compactValueBounds != null && compactBarBounds != null) {
+        expect(valueBounds.width, greaterThan(compactValueBounds.width));
+        expect(barBounds.left, greaterThan(compactBarBounds.left));
+        expect(barBounds.width, lessThan(compactBarBounds.width));
+        expect(barBounds.right, closeTo(compactBarBounds.right, 0.01));
+      }
+      compactValueBounds ??= valueBounds;
+      compactBarBounds ??= barBounds;
+      expect(barBounds.bottom,
+          lessThan(tester.getCenter(find.byType(Divider)).dy));
+      expect(tester.getCenter(find.byType(Divider)).dy,
+          lessThan(tester.getTopLeft(find.text('平均绩点')).dy));
+      final metricBounds = tester.getRect(find.byType(Divider));
+      _expectInlineEdgeMetric(
+        tester,
+        label: '平均绩点',
+        valueKey: 'academic-gpa-value',
+        edgeX: metricBounds.left,
+      );
+      _expectInlineEdgeMetric(
+        tester,
+        label: '学院排名',
+        valueKey: 'academic-ranking-value',
+        edgeX: metricBounds.right,
+        rightAligned: true,
+      );
+      final rankingIconBounds = tester.getRect(find.byIcon(Icons.swap_horiz));
+      final gpaValueBounds =
+          tester.getRect(find.byKey(const ValueKey('academic-gpa-value')));
+      expect(gpaValueBounds.right, lessThanOrEqualTo(rankingIconBounds.left));
+      expect(
+          tester
+              .getSize(find.byKey(const ValueKey('academic-ranking-toggle')))
+              .height,
+          lessThan(44));
+      expect(tester.takeException(), isNull);
     }
-    expect(tester.takeException(), isNull);
   });
 
   test('does not show another account’s cached progress', () async {
@@ -809,6 +2008,8 @@ void main() {
     addTearDown(tester.view.resetDevicePixelRatio);
     await tester.pumpWidget(MaterialApp(
       home: AcademicProgressPage(
+        autoRefreshEnabled: false,
+        restoreSession: _restoreSession,
         repository: DemoAcademicProgressRepository(),
         onLoginRequired: () async {},
       ),
@@ -827,6 +2028,8 @@ void main() {
     addTearDown(tester.view.resetDevicePixelRatio);
     await tester.pumpWidget(MaterialApp(
       home: AcademicProgressPage(
+        autoRefreshEnabled: false,
+        restoreSession: _restoreSession,
         repository: _DeepProgressRepository(),
         onLoginRequired: () async {},
       ),
@@ -859,6 +2062,8 @@ void main() {
       (tester) async {
     await tester.pumpWidget(MaterialApp(
       home: AcademicProgressPage(
+        autoRefreshEnabled: false,
+        restoreSession: _restoreSession,
         repository: DemoAcademicProgressRepository(),
         onLoginRequired: () async {},
       ),

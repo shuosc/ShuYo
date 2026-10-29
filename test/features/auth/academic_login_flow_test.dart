@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
@@ -20,6 +21,7 @@ import 'package:shuyo/data/services/academic_schedule_api_client.dart';
 import 'package:shuyo/data/services/campus_card_service.dart';
 import 'package:shuyo/data/services/unified_account_service.dart';
 import 'package:shuyo/features/auth/native_login_page.dart';
+import 'package:shuyo/features/home/academic_progress_page.dart';
 import 'package:shuyo/features/onboarding/startup_onboarding.dart';
 
 final _schedule = AcademicSchedule(
@@ -71,10 +73,12 @@ class _TrackingProgress extends AcademicProgressRepository {
 class _TrackingRanking extends AcademicRankingRepository {
   int requests = 0;
   bool expired = false;
+  Completer<AcademicRanking>? pending;
 
   @override
   Future<AcademicRanking> refreshRanking() async {
     requests++;
+    if (pending != null) return pending!.future;
     if (expired) throw const AcademicAuthException();
     final ranking = DemoAcademicRankingRepository().ranking;
     final prefs = await SharedPreferences.getInstance();
@@ -90,6 +94,9 @@ class _LocalAuth extends AcademicAuthService {
 
   @override
   Future<String?> cookieHeader({Uri? targetUri}) async => 'JSESSIONID=test';
+
+  @override
+  Future<bool> restoreAcademicCookies({Uri? targetUri}) async => true;
 }
 
 class _LocalUnifiedAccount extends UnifiedAccountService {
@@ -261,7 +268,7 @@ void main() {
   for (final tab in ['学业', '日程']) {
     for (final authenticate in [false, true]) {
       testWidgets(
-          '$tab expired refresh returns without retry, authenticate=$authenticate',
+          '$tab expired refresh handles login, authenticate=$authenticate',
           (tester) async {
         final controller = StartupOnboardingController();
         final schedule = _TrackingSchedule()..expired = true;
@@ -285,6 +292,12 @@ void main() {
         await tester.pumpAndSettle();
         await tester.tap(find.text(tab).last);
         await tester.pumpAndSettle();
+        if (tab == '学业') {
+          expect(progress.requests, 1);
+          expect(ranking.requests, 1);
+          expect(find.byType(NativeLoginPage), findsNothing);
+          expect(controller.academicLoggedIn, isTrue);
+        }
         await tester.tap(find.byTooltip('更多'));
         await tester.pumpAndSettle();
         await tester.tap(find.text(tab == '学业' ? '刷新学业信息' : '更新课表'));
@@ -298,6 +311,8 @@ void main() {
         expect(controller.academicSessionExpired, isTrue);
         expect(await account.loadStudentId(), isNull);
         expect(await account.isSessionExpired(), isTrue);
+        expect(progress.requests, tab == '学业' ? 2 : 0);
+        expect(ranking.requests, tab == '学业' ? 2 : 0);
         if (authenticate) await account.saveStudentId('DEMO0001');
         Navigator.of(tester.element(find.byType(NativeLoginPage))).pop(
           authenticate ? NativeLoginResult.authenticated : null,
@@ -305,8 +320,9 @@ void main() {
         await tester.pumpAndSettle();
         expect(find.byType(NativeLoginPage), findsNothing);
         expect(schedule.requests, tab == '日程' ? 1 : 0);
-        expect(progress.requests, tab == '学业' ? 1 : 0);
-        expect(ranking.requests, tab == '学业' ? 1 : 0);
+        final academicRequests = tab == '学业' ? (authenticate ? 3 : 2) : 0;
+        expect(progress.requests, academicRequests);
+        expect(ranking.requests, academicRequests);
         expect(controller.academicLoggedIn, authenticate);
         expect(controller.academicSessionExpired, !authenticate);
         expect(
@@ -325,4 +341,36 @@ void main() {
       });
     }
   }
+
+  testWidgets('academic authentication failure does not wait for ranking',
+      (tester) async {
+    final progress = _TrackingProgress()..expired = true;
+    final ranking = _TrackingRanking()..pending = Completer<AcademicRanking>();
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(AcademicProgressRepository.cacheKey,
+        jsonEncode(DemoAcademicProgressRepository().progress.toJson()));
+    await AcademicAccountStore().saveStudentId('DEMO0001');
+    var loginRequests = 0;
+    await tester.pumpWidget(MaterialApp(
+      home: AcademicProgressPage(
+        repository: progress,
+        rankingRepository: ranking,
+        studentProfileRepository: DemoAcademicStudentProfileRepository(),
+        autoRefreshEnabled: false,
+        restoreSession: () async {},
+        onLoginRequired: () async => loginRequests++,
+      ),
+    ));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('更多'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('刷新学业信息'));
+    await tester.pumpAndSettle();
+
+    expect(loginRequests, 1);
+    expect(ranking.pending!.isCompleted, isFalse);
+    ranking.pending!.completeError(const AcademicAuthException());
+    await tester.pumpAndSettle();
+    expect(loginRequests, 1);
+  });
 }

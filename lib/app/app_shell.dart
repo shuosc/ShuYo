@@ -382,6 +382,23 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
                             key: ValueKey(_progressDataRevision),
                             repository: _progressRepository,
                             rankingRepository: _rankingRepository,
+                            scheduleRepository: _scheduleRepository,
+                            active: _tab == AppTab.progress,
+                            autoRefreshEnabled: widget.isDemo ||
+                                (_hasAcademicSession &&
+                                    !_completingAcademicLogin),
+                            restoreSession: widget.isDemo
+                                ? () async {}
+                                : () async {
+                                    if (!await _academicAuthService
+                                        .restoreAcademicCookies()) {
+                                      throw const AcademicAuthException(
+                                          '请先登录上大校园账户');
+                                    }
+                                  },
+                            studentProfileRepository: widget.isDemo
+                                ? DemoAcademicStudentProfileRepository()
+                                : null,
                             onLoginRequired: _handleInvalidAcademicSession,
                           )
                         : const SizedBox.expand(),
@@ -618,6 +635,11 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
       } on Object {
         // A transient cookie delay can recover on a manual refresh.
       }
+      if (mounted && _progressTabInitialized) {
+        // The first rebuild may have tried loading student details before the
+        // completed login's cookies were available. Retry with the new session.
+        setState(() => _progressDataRevision++);
+      }
       await _refreshScheduleSummaryQuietly();
       try {
         await _scheduleNotificationService.syncScheduleReminders();
@@ -643,7 +665,11 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
         await _clientBackendRepository.reportPresence();
       }());
     } finally {
-      _completingAcademicLogin = false;
+      if (mounted) {
+        setState(() => _completingAcademicLogin = false);
+      } else {
+        _completingAcademicLogin = false;
+      }
     }
   }
 
