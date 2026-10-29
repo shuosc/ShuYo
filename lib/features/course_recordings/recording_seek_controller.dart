@@ -1,5 +1,11 @@
 import 'dart:async';
 
+const recordingSeekPositionTimeout = Duration(seconds: 8);
+const _seekPositionTolerance = Duration(seconds: 1);
+
+bool recordingSeekPositionMatches(Duration position, Duration target) =>
+    (position - target).abs() <= _seekPositionTolerance;
+
 class RecordingSeekController {
   RecordingSeekController({
     required Future<void> Function(Duration position) seek,

@@ -57,9 +57,12 @@ class _RecordingStatusIconState extends State<RecordingStatusIcon>
     final color = widget.enabled
         ? Theme.of(context).colorScheme.primary
         : widget.disabledColor ?? Theme.of(context).disabledColor;
-    if (!widget.isLive) return Icon(Icons.video_library_rounded, color: color);
+    if (!widget.isLive) {
+      return Icon(Icons.play_circle_outline_rounded,
+          color: color, semanticLabel: '录播回放');
+    }
     return Semantics(
-      label: '正在直播',
+      label: widget.enabled ? '正在直播' : '直播已结束',
       child: SizedBox(
         width: 24,
         height: 24,

@@ -154,6 +154,7 @@ class _RecordingLessonsPageState extends State<RecordingLessonsPage> {
           course: course,
           lessons: lessons,
           initialLesson: lesson,
+          repository: repository,
           loadPlayback: (selected) => repository.preparePlayback(
             course: course,
             lesson: selected,
