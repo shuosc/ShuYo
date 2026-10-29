@@ -155,15 +155,33 @@ class VodNativeSessionService {
   }
 
   Uri _normalize(Uri uri, bool vpn) {
-    // Identity cookies belong to newsso itself. The gateway may express this
-    // same registered endpoint with its proxy hostname or the oauth alias.
     if (const {
+          'newsso.shu.edu.cn',
           'oauth.shu.edu.cn',
           'https-newsso-shu-edu-cn-443.webvpn.shu.edu.cn',
           'https-oauth-shu-edu-cn-443.webvpn.shu.edu.cn',
         }.contains(uri.host) &&
         (uri.path.startsWith('/oauth/') || uri.path.startsWith('/oauth2/'))) {
       uri = uri.replace(scheme: 'https', host: 'newsso.shu.edu.cn');
+      if (vpn) {
+        uri = uri.replace(
+          query: uri.query.split('&').map((part) {
+            final parameter = Uri.splitQueryString(part);
+            final value = parameter['redirect_uri'];
+            if (value == null) return part;
+            final callback = Uri.tryParse(value);
+            if (callback == null ||
+                callback.scheme != 'https' ||
+                callback.userInfo.isNotEmpty ||
+                callback.host != VodUrlResolver.casWebVpnHost ||
+                callback.port != 443 ||
+                !VodConstants.isCasCallbackPath(callback.path)) {
+              return part;
+            }
+            return 'redirect_uri=${Uri.encodeQueryComponent(callback.replace(host: VodConstants.casHost).toString())}';
+          }).join('&'),
+        );
+      }
     }
     return VodUrlResolver.mapServiceUri(uri, useWebVpn: vpn);
   }
@@ -233,8 +251,9 @@ class VodNativeSessionService {
       );
       for (final value in setCookie.split(separator)) {
         final item = value.trim();
-        if (item.toLowerCase() == 'httponly' ||
-            item.toLowerCase() == 'secure') {
+        if (RegExp(r'^[,\s]*$').hasMatch(item) ||
+            RegExp(r'^(?:httponly|secure)(?:\s*,\s*)*$', caseSensitive: false)
+                .hasMatch(item)) {
           continue;
         }
         try {

@@ -1,7 +1,9 @@
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
+import 'package:http/io_client.dart';
 import 'package:http/testing.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:shuyo/core/vod_constants.dart';
@@ -45,6 +47,74 @@ void main() {
     VodUrlResolver.configure(useWebVpn: false);
   });
 
+  test('WebVPN empty headers survive real IOClient transport without aborting',
+      () async {
+    final upstream = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    addTearDown(() => upstream.close(force: true));
+    var requests = 0;
+    upstream.listen((request) async {
+      requests++;
+      request.response.headers.contentType = ContentType.json;
+      String? body;
+      switch (requests) {
+        case 1:
+          request.response.statusCode = HttpStatus.found;
+          request.response.headers.set(HttpHeaders.locationHeader,
+              'https://${VodUrlResolver.webVpnHost}/cloud-rbac/authorize');
+          request.response.headers.add(HttpHeaders.setCookieHeader,
+              'SESSION=server-session; Path=/; SameSite=Laxcloud-rbac; SameSite=Lax');
+        case 2:
+          request.response.statusCode = HttpStatus.found;
+          request.response.headers.set(HttpHeaders.locationHeader,
+              'https://${VodUrlResolver.webVpnHost}${VodConstants.uiPath}/');
+        default:
+          body = jsonEncode({
+            'status': 200,
+            'result': requests == 3
+                ? <String, String>{}
+                : {'jwt_token': 'business-jwt-from-server'},
+          });
+      }
+      request.response.headers.add(HttpHeaders.setCookieHeader, '');
+      request.response.headers.add(HttpHeaders.setCookieHeader, '');
+      if (body != null) request.response.write(body);
+      await request.response.close();
+    });
+    final transport = IOClient();
+    addTearDown(transport.close);
+    final jar = await _identityJar(gateway: true);
+    final service = VodNativeSessionService(
+      cookieJar: jar,
+      client: MockClient((request) async {
+        if (requests > 0) {
+          expect(request.headers['cookie'], contains('SESSION=server-session'));
+        }
+        final response = await http.Response.fromStream(await transport.send(
+          http.Request(
+            request.method,
+            Uri.http('127.0.0.1:${upstream.port}', request.url.path),
+          )..followRedirects = false,
+        ));
+        expect(response.headers['set-cookie'],
+            requests == 1 ? endsWith(',,') : ',');
+        if (requests > 1) {
+          expect(
+            () => Cookie.fromSetCookieValue(response.headers['set-cookie']!),
+            throwsA(isA<HttpException>()),
+          );
+        }
+        return response;
+      }),
+    );
+    addTearDown(service.dispose);
+    final session =
+        await service.authorize(useWebVpn: true, expectedStudentId: '25120000');
+    expect(requests, 4);
+    expect(session.jwtToken, 'business-jwt-from-server');
+    expect(session.cookies.single.path, '/');
+    expect(session.cookies.single.domain, VodUrlResolver.webVpnHost);
+  });
+
   for (final vpn in [false, true]) {
     test(
         'native CAS chain preserves state and cookie ownership '
@@ -57,10 +127,17 @@ void main() {
       const state = 'opaque+state/with=padding';
       const callbackPath =
           '${VodConstants.casCallbackPathPrefix}387a16aceb9941e993b07aa1d918d22a';
-      final identity = Uri.https('newsso.shu.edu.cn', '/oauth/authorize', {
-        'state': state,
-        'redirect_uri': 'https://${VodConstants.casHost}$callbackPath',
-      });
+      final identityHost = vpn
+          ? 'https-newsso-shu-edu-cn-443.webvpn.shu.edu.cn'
+          : 'newsso.shu.edu.cn';
+      final redirectUri =
+          Uri.encodeQueryComponent('https://$casHost$callbackPath');
+      final registeredRedirectUri = Uri.encodeQueryComponent(
+          'https://${VodConstants.casHost}$callbackPath');
+      const originalParameters =
+          'state=opaque%2Bstate%2Fwith%3Dpadding&scope=first%2Bvalue&scope=second%2Fvalue';
+      final identity = Uri.parse('https://$identityHost/oauth/authorize?'
+          '$originalParameters&redirect_uri=$redirectUri');
       final callback = Uri.https(VodConstants.casHost, callbackPath, {
         'state': state,
         'code': 'server-code',
@@ -95,7 +172,7 @@ void main() {
                     'SameSite=Lax, '
                     'SINGLE=standalone-invalid; Path=/; HttpOnly; Secure; '
                     'SameSite=Laxjy-application-resourcemanage/, '
-                    'httponly, secure',
+                    'httponly, secure${vpn ? ',,' : ''}',
               );
             case 2:
               expect(request.url.host, platformHost);
@@ -117,7 +194,13 @@ void main() {
                       'CASSTATE=server-state; Path=/; Domain=.shu.edu.cn; Secure');
             case 4:
               expect(request.url.host, 'newsso.shu.edu.cn');
+              expect(request.url.query,
+                  '$originalParameters&redirect_uri=$registeredRedirectUri');
               expect(request.url.queryParameters['state'], state);
+              expect(request.url.queryParametersAll['scope'],
+                  ['first+value', 'second/value']);
+              expect(request.url.queryParameters['redirect_uri'],
+                  'https://${VodConstants.casHost}$callbackPath');
               return _redirect(callback.toString());
             case 5:
               expect(request.url.host, casHost);
@@ -133,7 +216,9 @@ void main() {
               expect(cookie, contains('JSESSIONID=vod-root'));
               expect(cookie.contains('CASSTATE'), isFalse);
               return _redirect(
-                  'https://${VodConstants.directHost}${VodConstants.uiPath}/?type=cas');
+                'https://${VodConstants.directHost}${VodConstants.uiPath}/?type=cas',
+                cookie: vpn ? ',,' : null,
+              );
             case 7:
               expect(request.url.host, platformHost);
               expect(request.url.path, '${VodConstants.apiPath}/authority/me');
@@ -185,6 +270,142 @@ void main() {
           isFalse);
       expect(session.cookies.any((cookie) => cookie.name == 'webvpn-token'),
           isFalse);
+    });
+  }
+
+  for (final header in [
+    '',
+    ' ',
+    ',',
+    ', ',
+    ', , ',
+    ',,,',
+    'SESSION=server-session; Path=/; Secure; SameSite=Lax,,',
+    ' , SESSION=server-session; Path=/; Secure; SameSite=Lax, ,',
+    ',,SESSION=server-session; Path=/; SameSite=Laxcloud-rbac; '
+        'SameSite=Lax, ,HttpOnly, ,Secure, ,',
+  ]) {
+    test('WebVPN ignores empty Set-Cookie fields: ${jsonEncode(header)}',
+        () async {
+      final jar = await _identityJar(gateway: true);
+      var requests = 0;
+      final service = VodNativeSessionService(
+        cookieJar: jar,
+        client: MockClient((request) async {
+          requests++;
+          expect(request.url.host, VodUrlResolver.webVpnHost);
+          final cookie = request.headers['cookie'] ?? '';
+          expect(cookie, contains('webvpn-token=gateway-connection'));
+          expect(cookie, isNot(contains('SHU_OAUTH2')));
+          if (requests == 1) {
+            return _redirect(
+              'https://${VodUrlResolver.webVpnHost}/cloud-rbac/authorize',
+              cookie: header,
+            );
+          }
+          if (header.contains('SESSION=')) {
+            expect(cookie, contains('SESSION=server-session'));
+          }
+          if (requests == 2) {
+            return _redirect(
+              'https://${VodUrlResolver.webVpnHost}${VodConstants.uiPath}/',
+              cookie: ', ,',
+            );
+          }
+          return http.Response(
+            jsonEncode({
+              'status': 200,
+              'result': requests == 3
+                  ? <String, String>{}
+                  : {'jwt_token': 'business-jwt-from-server'},
+            }),
+            200,
+            headers: {'set-cookie': ',,'},
+          );
+        }),
+      );
+      addTearDown(service.dispose);
+      final session = await service.authorize(
+          useWebVpn: true, expectedStudentId: '25120000');
+      expect(requests, 4);
+      expect(session.jwtToken, 'business-jwt-from-server');
+      expect(session.cookies.any((cookie) => cookie.name == 'SESSION'),
+          header.contains('SESSION='));
+      expect(
+          session.cookies.any((cookie) =>
+              cookie.name == 'webvpn-token' || cookie.name == 'SHU_OAUTH2'),
+          isFalse);
+    });
+  }
+
+  const callbackPath =
+      '${VodConstants.casCallbackPathPrefix}387a16aceb9941e993b07aa1d918d22a';
+  final callbackCases = <String, String>{
+    'https://${VodUrlResolver.casWebVpnHost}$callbackPath'
+            '?opaque=first%2Bvalue&opaque=second%2Fvalue':
+        'https://${VodConstants.casHost}$callbackPath'
+            '?opaque=first%2Bvalue&opaque=second%2Fvalue',
+    'https://foreign.example$callbackPath':
+        'https://foreign.example$callbackPath',
+    'https://${VodUrlResolver.casWebVpnHost}/unregistered/callback':
+        'https://${VodUrlResolver.casWebVpnHost}/unregistered/callback',
+    'https://${VodUrlResolver.casWebVpnHost}'
+            '${VodConstants.casCallbackPathPrefix}not-a-callback':
+        'https://${VodUrlResolver.casWebVpnHost}'
+            '${VodConstants.casCallbackPathPrefix}not-a-callback',
+    'https://${VodUrlResolver.casWebVpnHost}:8443$callbackPath':
+        'https://${VodUrlResolver.casWebVpnHost}:8443$callbackPath',
+    'http://${VodUrlResolver.casWebVpnHost}$callbackPath':
+        'http://${VodUrlResolver.casWebVpnHost}$callbackPath',
+    'https://unexpected-user@${VodUrlResolver.casWebVpnHost}$callbackPath':
+        'https://unexpected-user@${VodUrlResolver.casWebVpnHost}$callbackPath',
+    'https://${VodConstants.casHost}$callbackPath':
+        'https://${VodConstants.casHost}$callbackPath',
+  };
+  for (final callbackCase in callbackCases.entries) {
+    test(
+        'WebVPN rewrites only registered CAS redirect URI: '
+        '${callbackCase.key}', () async {
+      final jar = await _identityJar(gateway: true);
+      var requests = 0;
+      final redirectUri = Uri.encodeQueryComponent(callbackCase.key);
+      final expectedRedirectUri = Uri.encodeQueryComponent(callbackCase.value);
+      const originalParameters =
+          'state=opaque%2Bstate%2Fwith%3Dpadding&scope=first%2Bvalue&scope=second%2Fvalue';
+      final service = VodNativeSessionService(
+        cookieJar: jar,
+        client: MockClient((request) async {
+          requests++;
+          switch (requests) {
+            case 1:
+              return _redirect(
+                  'https://https-newsso-shu-edu-cn-443.webvpn.shu.edu.cn'
+                  '/oauth/authorize?$originalParameters&redirect_uri=$redirectUri');
+            case 2:
+              expect(request.url.host, 'newsso.shu.edu.cn');
+              expect(request.url.query,
+                  '$originalParameters&redirect_uri=$expectedRedirectUri');
+              expect(request.headers['cookie'],
+                  'SHU_OAUTH2=shared-campus-session');
+              return _redirect(
+                  'https://${VodUrlResolver.webVpnHost}${VodConstants.uiPath}/?type=cas');
+            case 3:
+              expect(request.url.path, '${VodConstants.apiPath}/authority/me');
+              return http.Response('{"status":200,"result":{}}', 200);
+            case 4:
+              expect(request.url.path, '${VodConstants.apiPath}/oauth2/token');
+              return http.Response(
+                  '{"status":200,"result":{"jwt_token":"business-jwt"}}', 200);
+            default:
+              fail('unexpected extra authorization request');
+          }
+        }),
+      );
+      addTearDown(service.dispose);
+      final session = await service.authorize(
+          useWebVpn: true, expectedStudentId: '25120000');
+      expect(session.jwtToken, 'business-jwt');
+      expect(requests, 4);
     });
   }
 
@@ -264,6 +485,7 @@ void main() {
   for (final malformed in [
     'broken-cookie-without-equals',
     'BAD NAME=value; Path=/',
+    'SESSION=value,,',
   ]) {
     test('malformed cookie is reported as an authentication failure', () async {
       final jar = await _identityJar();
@@ -283,6 +505,42 @@ void main() {
           '录播认证会话信息不完整，请稍后重试',
         )),
       );
+    });
+  }
+
+  for (final path in ['/scope,', '/,']) {
+    test('literal Cookie Path comma is not trimmed or broadened: $path',
+        () async {
+      final jar = await _identityJar(gateway: true);
+      var requests = 0;
+      final service = VodNativeSessionService(
+        cookieJar: jar,
+        client: MockClient((request) async {
+          requests++;
+          expect(request.headers['cookie'],
+              isNot(contains('SCOPED=server-session')));
+          if (requests == 1) {
+            return _redirect(
+              'https://${VodUrlResolver.webVpnHost}${VodConstants.uiPath}/',
+              cookie: 'SCOPED=server-session; Path=$path',
+            );
+          }
+          return http.Response(
+            jsonEncode({
+              'status': 200,
+              'result': requests == 2
+                  ? <String, String>{}
+                  : {'jwt_token': 'business-jwt-from-server'},
+            }),
+            200,
+          );
+        }),
+      );
+      addTearDown(service.dispose);
+      final session = await service.authorize(
+          useWebVpn: true, expectedStudentId: '25120000');
+      expect(session.cookies.single.path, path);
+      expect(requests, 3);
     });
   }
 
