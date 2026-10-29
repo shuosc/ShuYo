@@ -84,4 +84,63 @@ void main() {
         relay.open(Uri.parse('https://unrelated.example/live.m3u8')),
         throwsFormatException);
   });
+
+  test('RTC TS segments mislabeled as HLS remain binary for both views',
+      () async {
+    final upstream = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    final segmentRequests = <String>[];
+    final payload = [0x47, 0xff, 0xfe, 0x00, 0x47, 0x80];
+    upstream.listen((request) async {
+      request.response.headers.contentType =
+          ContentType('application', 'vnd.apple.mpegurl');
+      if (request.uri.path.endsWith('.m3u8')) {
+        request.response.write(
+            '#EXTM3U\n#EXT-X-TARGETDURATION:5\n#EXTINF:5,\nsegment.ts?account_token=media%2Bgrant\n');
+      } else {
+        segmentRequests.add(request.uri.path);
+        expect(request.uri.query, 'account_token=media%2Bgrant');
+        expect(request.headers.value(HttpHeaders.rangeHeader), 'bytes=0-5');
+        request.response.statusCode = HttpStatus.partialContent;
+        request.response.headers
+            .set(HttpHeaders.contentRangeHeader, 'bytes 0-5/6');
+        request.response.add(payload);
+      }
+      await request.response.close();
+    });
+    addTearDown(() => upstream.close(force: true));
+    final relay = VodLiveStreamProxy(
+      useWebVpn: false,
+      headersLoader: (_) async => {},
+      mediaUrlResolver: (target) => target,
+    );
+    addTearDown(relay.dispose);
+    final client = HttpClient();
+    addTearDown(() => client.close(force: true));
+    await Future.wait(['classroom', 'ppt'].map((view) async {
+      final entry = await relay
+          .open(Uri.parse('http://127.0.0.1:${upstream.port}/$view/live.m3u8'));
+      final playlist = await utf8.decoder
+          .bind(await (await client.getUrl(entry)).close())
+          .join();
+      final segment = Uri.parse(
+          playlist.split('\n').firstWhere((line) => line.startsWith('http')));
+      final request = await client.getUrl(segment);
+      request.headers.set(HttpHeaders.rangeHeader, 'bytes=0-5');
+      final response = await request.close();
+      expect(response.statusCode, HttpStatus.partialContent);
+      expect(response.headers.contentType?.mimeType, 'video/mp2t');
+      expect(response.headers.value(HttpHeaders.contentRangeHeader),
+          'bytes 0-5/6');
+      expect(
+          await response
+              .fold<List<int>>([], (bytes, chunk) => bytes..addAll(chunk)),
+          payload);
+    }));
+    expect(
+        segmentRequests,
+        unorderedEquals([
+          '/classroom/segment.ts',
+          '/ppt/segment.ts',
+        ]));
+  });
 }

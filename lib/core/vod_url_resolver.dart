@@ -9,6 +9,10 @@ class VodUrlResolver {
   static const mediaWebVpnHost =
       'https-vrmvod-cc-shu-edu-cn-40443.webvpn.shu.edu.cn';
   static const casWebVpnHost = 'https-vrm-cc-shu-edu-cn-443.webvpn.shu.edu.cn';
+  static const liveHost = 'rtc.cc.shu.edu.cn';
+  static const livePort = 32001;
+  static const liveWebVpnHost =
+      'https-rtc-cc-shu-edu-cn-32001.webvpn.shu.edu.cn';
 
   static bool _usesWebVpn = false;
   static bool get usesWebVpn => _usesWebVpn;
@@ -108,6 +112,9 @@ class VodUrlResolver {
         uri.port == VodConstants.mediaPort) {
       return uri.replace(host: mediaWebVpnHost, port: 443);
     }
+    if (uri.host == liveHost && uri.port == livePort) {
+      return uri.replace(host: liveWebVpnHost, port: 443);
+    }
     return uri;
   }
 
@@ -117,7 +124,10 @@ class VodUrlResolver {
       throw const FormatException('录播媒体地址不属于已支持的平台域名');
     }
     final vpn = useWebVpn ?? usesWebVpn;
-    if (!vpn && (uri.host == webVpnHost || uri.host == mediaWebVpnHost)) {
+    if (!vpn &&
+        (uri.host == webVpnHost ||
+            uri.host == mediaWebVpnHost ||
+            uri.host == liveWebVpnHost)) {
       throw const FormatException('录播媒体地址与当前连接方式不一致');
     }
     return mapServiceUri(uri, useWebVpn: vpn);
@@ -128,11 +138,15 @@ class VodUrlResolver {
     return (uri.host == directHost && uri.port == 443) ||
         (uri.host == VodConstants.mediaHost &&
             uri.port == VodConstants.mediaPort) ||
+        (uri.host == liveHost && uri.port == livePort) ||
         (uri.host == webVpnHost && uri.port == 443) ||
-        (uri.host == mediaWebVpnHost && uri.port == 443);
+        (uri.host == mediaWebVpnHost && uri.port == 443) ||
+        (uri.host == liveWebVpnHost && uri.port == 443);
   }
 
   static bool isProxiedMediaUri(Uri uri) =>
       isKnownMediaUri(uri) &&
-      (uri.host == webVpnHost || uri.host == mediaWebVpnHost);
+      (uri.host == webVpnHost ||
+          uri.host == mediaWebVpnHost ||
+          uri.host == liveWebVpnHost);
 }

@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
+import 'package:shuyo/core/vod_url_resolver.dart';
 import 'package:shuyo/data/models/course_recording.dart';
 import 'package:shuyo/data/services/vod_api_client.dart';
 
@@ -37,7 +38,7 @@ Map<String, Object?> _detail() => {
           'mainTokenStr': 'opaque+token'
         },
         {
-          'deviceStatus': 1,
+          'deviceStatus': 2,
           'deviViewNum': 1,
           'chanNameMainPlayUrl': 'https://media.example/offline.m3u8'
         },
@@ -74,6 +75,61 @@ Future<http.Response> _authorized(
 }
 
 void main() {
+  for (final vpn in [false, true]) {
+    test(
+        'deployed active devices use RTC HLS with ${vpn ? 'WebVPN' : 'direct'}',
+        () async {
+      final detail = _detail();
+      detail['courseDeviceViewDtoList'] = [
+        for (final view in [1, 5])
+          {
+            'deviceStatus': 1,
+            'deviViewNum': view,
+            'chanNameMainHlsPlayUrl': null,
+            'chanNameMainPlayUrl':
+                'https://rtc.cc.shu.edu.cn:32001/nmserv/device:32007/hls/live/$view/session/live.m3u8?grant=one%2Btwo',
+            'mainTokenStr': 'opaque+token',
+          },
+      ];
+      final client = VodApiClient(
+        httpClient: MockClient((request) => _authorized(request, detail)),
+        useWebVpn: vpn,
+        headersLoader: (_) async => {},
+        mediaHeadersLoader: (uri) async => {
+          if (VodUrlResolver.isProxiedMediaUri(uri))
+            'Cookie': 'webvpn-token=connection',
+          'jwt-token': 'must-not-forward',
+        },
+        uriResolver: (path, query) => Uri.https('vod.example', path, query),
+      );
+      addTearDown(client.dispose);
+      final playback =
+          await client.fetchLivePlayback(course: _course, lesson: _lesson);
+      expect(playback.views.map((view) => view.viewNumber), [1, 5]);
+      for (final view in playback.views) {
+        expect(view.url.host,
+            vpn ? VodUrlResolver.liveWebVpnHost : VodUrlResolver.liveHost);
+        expect(view.url.port, vpn ? 443 : 32001);
+        expect(view.url.query, 'grant=one%2Btwo&account_token=opaque%2Btoken');
+        expect(view.httpHeaders,
+            vpn ? {'Cookie': 'webvpn-token=connection'} : isEmpty);
+      }
+    });
+  }
+
+  test('active devices without a source are not mislabeled offline', () async {
+    final detail = _detail();
+    detail['courseDeviceViewDtoList'] = [
+      {'deviceStatus': 1, 'deviViewNum': 1},
+    ];
+    final client = _client((request) => _authorized(request, detail));
+    addTearDown(client.dispose);
+    await expectLater(
+        client.fetchLivePlayback(course: _course, lesson: _lesson),
+        throwsA(isA<VodLiveUnavailableException>()
+            .having((error) => error.message, 'message', contains('暂未提供'))));
+  });
+
   test(
       'live HLS checks permissions, preserves signatures and excludes offline views',
       () async {

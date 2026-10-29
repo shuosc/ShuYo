@@ -167,6 +167,15 @@ void main() {
         useWebVpn: true);
     expect(await auth.mediaHeadersFor(media, useWebVpn: true),
         {'Cookie': 'webvpn-token=connection'});
+    final live = VodUrlResolver.resolveMediaUrl(
+        'https://rtc.cc.shu.edu.cn:32001/hls/live/stream.m3u8',
+        useWebVpn: true);
+    expect(await auth.mediaHeadersFor(live, useWebVpn: true),
+        {'Cookie': 'webvpn-token=connection'});
+    expect(
+        await auth.mediaHeadersFor(
+            Uri.parse('https://rtc.cc.shu.edu.cn:32001/hls/live/stream.m3u8')),
+        isEmpty);
     expect(
         await auth.headersFor(Uri.parse(
             'https://example.com/jy-application-resourcemanage/v1/currentuser')),

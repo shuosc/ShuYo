@@ -89,8 +89,13 @@ class VodLiveStreamProxy {
       if (upstream == null) throw const FormatException('播放资源跳转次数过多');
       request.response.statusCode = upstream.statusCode;
       final type = upstream.headers.contentType?.mimeType ?? '';
-      final playlist = current.path.toLowerCase().endsWith('.m3u8') ||
-          type.toLowerCase().contains('mpegurl');
+      final path = current.path.toLowerCase();
+      final transportStream = path.endsWith('.ts');
+      final binaryMedia = transportStream ||
+          const ['.m4s', '.mp4', '.m4a', '.aac', '.key'].any(path.endsWith);
+      final playlist = path.endsWith('.m3u8') ||
+          path.endsWith('.m3u') ||
+          (!binaryMedia && type.toLowerCase().contains('mpegurl'));
       if (playlist &&
           upstream.statusCode == HttpStatus.ok &&
           request.method != 'HEAD') {
@@ -122,6 +127,9 @@ class VodLiveStreamProxy {
         ]) {
           final value = upstream.headers.value(name);
           if (value != null) request.response.headers.set(name, value);
+        }
+        if (transportStream) {
+          request.response.headers.contentType = ContentType('video', 'mp2t');
         }
         await request.response
             .addStream(upstream.timeout(const Duration(seconds: 30)));

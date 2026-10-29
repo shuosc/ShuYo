@@ -260,7 +260,9 @@ class VodApiClient {
         'ShuYoVOD live device states: ${rawViews.whereType<JsonMap>().map((device) => intValue(device['deviceStatus'], -1)).join(',')}');
     final views = <VodView>[];
     for (final value in rawViews.whereType<JsonMap>()) {
-      if (intValue(value['deviceStatus'], -1) != 0) continue;
+      if (!const {0, 1}.contains(intValue(value['deviceStatus'], -1))) {
+        continue;
+      }
       final hls = stringValue(value['chanNameMainHlsPlayUrl']).trim();
       final source = hls.isNotEmpty
           ? hls
@@ -300,7 +302,7 @@ class VodApiClient {
     if (views.isEmpty) {
       final devices = rawViews.whereType<JsonMap>().toList();
       if (devices.isNotEmpty &&
-          devices.every((device) => intValue(device['deviceStatus'], -1) > 0)) {
+          devices.every((device) => intValue(device['deviceStatus'], -1) > 1)) {
         throw const VodLiveUnavailableException('直播设备当前离线，请稍后重试');
       }
       throw const VodLiveUnavailableException('直播设备暂未提供可播放的画面');

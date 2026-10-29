@@ -77,4 +77,34 @@ void main() {
             Uri.parse('https://newsso.shu.edu.cn.evil.example/login')),
         isFalse);
   });
+
+  test('live RTC transport preserves stream path and signed query', () {
+    const source =
+        'https://rtc.cc.shu.edu.cn:32001/nmserv/server:32007/hls/live/channel/session/live.m3u8?account_token=a%2Fb%2Bc&x=1&x=2';
+    final direct = VodUrlResolver.resolveMediaUrl(source, useWebVpn: false);
+    final proxied = VodUrlResolver.resolveMediaUrl(source, useWebVpn: true);
+    expect(direct.host, VodUrlResolver.liveHost);
+    expect(direct.port, 32001);
+    expect(proxied.host, VodUrlResolver.liveWebVpnHost);
+    expect(proxied.port, 443);
+    expect(proxied.path, direct.path);
+    expect(proxied.query, direct.query);
+    expect(VodUrlResolver.isProxiedMediaUri(proxied), isTrue);
+    expect(VodUrlResolver.isProxiedMediaUri(direct), isFalse);
+    expect(
+        () => VodUrlResolver.resolveMediaUrl(proxied.toString(),
+            useWebVpn: false),
+        throwsFormatException);
+    for (final source in [
+      'https://rtc.cc.shu.edu.cn/live.m3u8',
+      'https://rtc.cc.shu.edu.cn:32002/live.m3u8',
+      'http://rtc.cc.shu.edu.cn:32001/live.m3u8',
+      'https://rtc.cc.shu.edu.cn.evil.example:32001/live.m3u8',
+      'https://user:pass@rtc.cc.shu.edu.cn:32001/live.m3u8',
+      'https://https-rtc-cc-shu-edu-cn-32001.webvpn.shu.edu.cn:444/live.m3u8',
+    ]) {
+      expect(
+          () => VodUrlResolver.resolveMediaUrl(source), throwsFormatException);
+    }
+  });
 }
