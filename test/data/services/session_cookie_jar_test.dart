@@ -193,6 +193,18 @@ void main() {
     expect(store.reads, 1);
   });
 
+  test('test reset reloads storage instead of retaining restored state',
+      () async {
+    final store = _CountingStore(value: _storedCookie);
+    final jar = SessionCookieJar(secureStore: store);
+    final uri = Uri.parse('https://vod.cc.shu.edu.cn/');
+    expect((await jar.getCookies(domain: uri)).single.value, 'synthetic');
+    store.value = _storedCookie.replaceFirst('synthetic', 'updated');
+    jar.resetForTesting();
+    expect((await jar.getCookies(domain: uri)).single.value, 'updated');
+    expect(store.reads, 2);
+  });
+
   test('concurrent readers share one pending restore', () async {
     final pending = Completer<String?>();
     final store = _CountingStore(pendingRead: pending);

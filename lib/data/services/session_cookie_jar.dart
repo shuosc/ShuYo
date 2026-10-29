@@ -137,6 +137,7 @@ class SessionCookieJar {
   @visibleForTesting
   void resetForTesting() {
     _cookies.clear();
+    _restored = false;
     _restoring = null;
   }
 
