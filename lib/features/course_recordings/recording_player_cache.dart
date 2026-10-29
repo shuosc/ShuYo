@@ -4,6 +4,9 @@ typedef CachePropertyReader = Future<String> Function(String name);
 typedef CachePropertyWriter = Future<void> Function(String name, String value);
 
 class RecordingPlayerCache {
+  static const _readAheadSeconds = 300;
+  static const _maxForwardBytes = 128 * 1024 * 1024;
+
   RecordingPlayerCache({
     required CachePropertyReader readProperty,
     required CachePropertyWriter writeProperty,
@@ -17,12 +20,12 @@ class RecordingPlayerCache {
   int _revision = 0;
 
   Map<String, String> _recordingOptions(double rate) {
-    final seconds = 16 * (rate.isFinite && rate > 0 ? rate : 1);
+    final seconds = _readAheadSeconds * (rate.isFinite && rate > 0 ? rate : 1);
     return {
       'cache': 'yes',
       'cache-secs': seconds.toStringAsFixed(3),
       'demuxer-hysteresis-secs': (seconds / 1.5).toStringAsFixed(3),
-      'demuxer-max-bytes': '4194304',
+      'demuxer-max-bytes': _maxForwardBytes.toString(),
       'demuxer-max-back-bytes': '4194304',
     };
   }

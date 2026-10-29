@@ -25,9 +25,9 @@ void main() {
     await cache.configure(isLive: false);
     expect(properties, {
       'cache': 'yes',
-      'cache-secs': '16.000',
-      'demuxer-hysteresis-secs': '10.667',
-      'demuxer-max-bytes': '4194304',
+      'cache-secs': '300.000',
+      'demuxer-hysteresis-secs': '200.000',
+      'demuxer-max-bytes': '134217728',
       'demuxer-max-back-bytes': '4194304',
     });
 
@@ -55,7 +55,7 @@ void main() {
     expect(main, secondary);
     await secondaryCache.configure(isLive: true);
     expect(secondary.values, everyElement('secondary-default'));
-    expect(main['cache-secs'], '16.000');
+    expect(main['cache-secs'], '300.000');
     await mainCache.configure(isLive: true);
     expect(main.values, everyElement('main-default'));
   });
@@ -82,13 +82,27 @@ void main() {
     );
 
     await cache.configure(isLive: false, rate: 1.5);
-    expect(properties['cache-secs'], '24.000');
-    expect(properties['demuxer-hysteresis-secs'], '16.000');
+    expect(properties['cache-secs'], '450.000');
+    expect(properties['demuxer-hysteresis-secs'], '300.000');
     await cache.configure(isLive: false, rate: 2);
-    expect(properties['cache-secs'], '32.000');
-    expect(properties['demuxer-hysteresis-secs'], '21.333');
+    expect(properties['cache-secs'], '600.000');
+    expect(properties['demuxer-hysteresis-secs'], '400.000');
+    expect(properties['demuxer-max-bytes'], '134217728');
     await cache.configure(isLive: true);
     expect(properties.values, everyElement('original'));
+  });
+
+  test('invalid playback rates use the normal read-ahead target', () async {
+    final properties = <String, String>{};
+    final cache = RecordingPlayerCache(
+      readProperty: (name) async => properties[name] ?? 'original',
+      writeProperty: (name, value) async => properties[name] = value,
+    );
+    for (final rate in [0.0, -1.0, double.nan, double.infinity]) {
+      await cache.configure(isLive: false, rate: rate);
+      expect(properties['cache-secs'], '300.000');
+      expect(properties['demuxer-max-bytes'], '134217728');
+    }
   });
 
   test('a live switch supersedes an in-flight recording rate update', () async {
@@ -143,7 +157,7 @@ void main() {
     await cache.configure(isLive: false);
     expect(properties.values, everyElement('original'));
     await cache.configure(isLive: false);
-    expect(properties['cache-secs'], '16.000');
+    expect(properties['cache-secs'], '300.000');
     await cache.configure(isLive: true);
     expect(properties.values, everyElement('original'));
   });
