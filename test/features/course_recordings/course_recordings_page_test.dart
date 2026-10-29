@@ -9,6 +9,7 @@ import 'package:shuyo/data/services/vod_auth_service.dart';
 import 'package:shuyo/features/course_recordings/course_recordings_page.dart';
 import 'package:shuyo/features/course_recordings/recording_player_page.dart';
 import 'package:shuyo/shared/theme/shuyo_theme.dart';
+import 'package:shuyo/shared/widgets/course_color_label.dart';
 
 const _terms = [
   VodTerm(
@@ -49,6 +50,7 @@ const _currentCourses = [_programming, _electronics, _art];
 class _Repository extends VodRepository {
   Future<List<VodTerm>> Function(bool force)? termsLoader;
   Future<List<VodCourse>> Function(int term, bool force)? coursesLoader;
+  Future<List<VodLesson>> Function(VodCourse course, bool force)? lessonsLoader;
   final progressCallbacks = <int, void Function(List<VodCourse>)>{};
   int termRequests = 0;
   int lessonRequests = 0;
@@ -98,7 +100,7 @@ class _Repository extends VodRepository {
     bool forceRefresh = false,
   }) async {
     lessonRequests++;
-    return [];
+    return await lessonsLoader?.call(course, forceRefresh) ?? [];
   }
 
   @override
@@ -189,12 +191,19 @@ void main() {
     expect(course, findsOneWidget);
     expect(tester.widget<ListTile>(course).enabled, isTrue);
     expect(find.byKey(const ValueKey('vod-loading-progress')), findsOneWidget);
+    expect(
+        tester
+            .widget<Text>(find.byKey(const ValueKey('vod-course-count')))
+            .textSpan!
+            .toPlainText(),
+        '1个课程');
+    final requestsBeforeOpening = repository.lessonRequests;
     await tester.tap(course);
     await tester.pump();
     courses.complete(_currentCourses);
     await tester.pumpAndSettle();
     expect(find.byType(RecordingPlayerPage), findsOneWidget);
-    expect(repository.lessonRequests, 1);
+    expect(repository.lessonRequests, greaterThan(requestsBeforeOpening));
   });
 
   testWidgets('stale partial snapshots cannot cross a term selection',
@@ -271,6 +280,13 @@ void main() {
     expect(find.byType(MaterialBanner), findsOneWidget);
     expect(find.text('重试'), findsOneWidget);
     expect(find.text('课程加载失败'), findsNothing);
+    expect(
+        tester
+            .widget<Text>(
+                find.byKey(const ValueKey('vod-course-lesson-count:101')))
+            .textSpan!
+            .toPlainText(),
+        '0/0节');
   });
 
   testWidgets(
@@ -683,27 +699,351 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.byTooltip('刷新课程'), findsNothing);
     expect(find.byType(Card), findsNothing);
+    final separator = tester.widget<Divider>(find
+        .descendant(
+          of: find.byKey(const ValueKey('vod-courses:7')),
+          matching: find.byType(Divider),
+        )
+        .first);
+    expect(separator.indent ?? 0, 0);
+    expect(separator.endIndent, 16);
+    expect(find.text('2026-2027 学年 秋季学期'), findsOneWidget);
+    final term = tester.widget<Text>(find.text('2026-2027 学年 秋季学期'));
+    final termSpan = term.textSpan! as TextSpan;
+    expect(term.style!.fontWeight, FontWeight.w600);
+    expect(
+        termSpan.children!.last.style!.color,
+        Theme.of(tester.element(find.text('2026-2027 学年 秋季学期')))
+            .colorScheme
+            .primary);
+    final count =
+        tester.widget<Text>(find.byKey(const ValueKey('vod-course-count')));
+    final countSpan = count.textSpan! as TextSpan;
+    expect(count.style!.fontWeight, FontWeight.w600);
+    expect(countSpan.toPlainText(), '3个课程');
+    expect(
+        countSpan.children!.first.style!.color,
+        Theme.of(tester.element(find.byKey(const ValueKey('vod-course-count'))))
+            .colorScheme
+            .primary);
     final course = find.byKey(const ValueKey('vod-course:101'));
     final colors = tester.element(course).shuyoColors;
     final title = tester.widget<Text>(find.descendant(
       of: course,
       matching: find.text('程序设计'),
     ));
-    final subtitle = tester.widget<Text>(find.descendant(
-      of: course,
-      matching: find.text('教师甲 · CS101'),
-    ));
+    final label =
+        find.descendant(of: course, matching: find.byType(CourseColorLabel));
+    final metadata = tester.widget<Text>(
+        find.descendant(of: label, matching: find.text('CS101 · 教师甲')));
     expect(title.style?.color, colors.textPrimary);
-    expect(subtitle.style?.color, colors.textSecondary);
-    expect(title.style!.fontSize!, greaterThan(subtitle.style!.fontSize!));
+    expect(metadata.style?.color, colors.textSecondary);
+    expect(metadata.style!.fontSize!, lessThan(title.style!.fontSize!));
+    expect(tester.getTopLeft(find.text('CS101 · 教师甲')).dy,
+        greaterThan(tester.getTopLeft(find.text('程序设计')).dy));
     await tester.drag(
         find.byKey(const ValueKey('vod-courses:7')), const Offset(0, 350));
     await tester.pumpAndSettle();
     expect(repository.forcedCourseRequests, [false, true]);
     expect(find.text('本学期暂无可观看课程'), findsOneWidget);
+    expect(
+        tester
+            .widget<Text>(find.byKey(const ValueKey('vod-course-count')))
+            .textSpan!
+            .toPlainText(),
+        '0个课程');
     await tester.drag(find.byType(ListView), const Offset(0, 350));
     await tester.pumpAndSettle();
     expect(repository.forcedCourseRequests, [false, true, true]);
+  });
+
+  testWidgets('course counts distinguish playable recordings from all lessons',
+      (tester) async {
+    const lessons = [
+      VodLesson(id: 1, teachingClassId: 101, name: '回放一', isPlayable: true),
+      VodLesson(id: 2, teachingClassId: 101, name: '回放二', isPlayable: true),
+      VodLesson(
+          id: 3,
+          teachingClassId: 101,
+          name: '生成中',
+          isPlayable: false,
+          isGenerating: true),
+      VodLesson(
+          id: 4,
+          teachingClassId: 101,
+          name: '直播',
+          isPlayable: true,
+          isLive: true),
+      VodLesson(
+          id: 5,
+          teachingClassId: 101,
+          name: '不可播放',
+          isPlayable: false,
+          isListed: true),
+      VodLesson(id: 6, teachingClassId: 101, name: '未列出', isPlayable: false),
+      VodLesson(id: 7, teachingClassId: 999, name: '其他班', isPlayable: true),
+      VodLesson(id: 1, teachingClassId: 101, name: '重复课次', isPlayable: true),
+    ];
+    final repository = _Repository();
+    repository.coursesLoader = (_, __) async => [_programming];
+    repository.lessonsLoader = (_, __) async => lessons;
+    await _mount(tester, repository);
+    await tester.pumpAndSettle();
+    final finder = find.byKey(const ValueKey('vod-course-lesson-count:101'));
+    final span = tester.widget<Text>(finder).textSpan! as TextSpan;
+    expect(span.toPlainText(), '2/5节');
+    expect(tester.widget<Text>(finder).style!.fontWeight, FontWeight.w600);
+    expect(span.children!.first.style!.color,
+        Theme.of(tester.element(finder)).colorScheme.primary);
+    expect(tester.getTopLeft(finder).dx,
+        lessThan(tester.getTopLeft(find.byIcon(Icons.chevron_right)).dx));
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('course and its count enter together after the count loads',
+      (tester) async {
+    final pending = Completer<List<VodLesson>>();
+    final repository = _Repository();
+    repository.coursesLoader = (_, __) async => [_programming];
+    repository.lessonsLoader = (_, __) => pending.future;
+    await _mount(tester, repository);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+    final row = find.byKey(const ValueKey('vod-course:101'));
+    final finder = find.byKey(const ValueKey('vod-course-lesson-count:101'));
+    expect(row, findsNothing);
+    expect(finder, findsNothing);
+    expect(find.byKey(const ValueKey('vod-loading-progress')), findsOneWidget);
+    pending.complete(const [
+      VodLesson(id: 1, teachingClassId: 101, name: '回放', isPlayable: true),
+    ]);
+    await tester.pump();
+    await tester.pump();
+    expect(tester.widget<Text>(finder).textSpan!.toPlainText(), '1/1节');
+    final entrance = find.byKey(const ValueKey(101));
+    final slide =
+        find.descendant(of: entrance, matching: find.byType(SlideTransition));
+    expect(tester.widget<SlideTransition>(slide).position.value.dx,
+        greaterThan(0));
+    await tester.pumpAndSettle();
+    expect(tester.widget<SlideTransition>(slide).position.value, Offset.zero);
+    expect(find.byKey(const ValueKey('vod-loading-progress')), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('rows appear on success or failure while progress waits for all',
+      (tester) async {
+    final first = Completer<List<VodLesson>>();
+    final second = Completer<List<VodLesson>>();
+    final third = Completer<List<VodLesson>>();
+    final repository = _Repository();
+    repository.coursesLoader = (_, __) async => _currentCourses;
+    repository.lessonsLoader = (course, _) => switch (course.teachingClassId) {
+          101 => first.future,
+          102 => second.future,
+          _ => third.future,
+        };
+    await _mount(tester, repository);
+    await tester.pump();
+    await tester.pump();
+    final progress = find.byKey(const ValueKey('vod-loading-progress'));
+    expect(progress, findsOneWidget);
+    expect(find.byKey(const ValueKey('vod-course:101')), findsNothing);
+    expect(find.byKey(const ValueKey('vod-course:102')), findsNothing);
+    expect(find.byKey(const ValueKey('vod-course:103')), findsNothing);
+    second.completeError(StateError('offline'));
+    await tester.pump();
+    await tester.pump();
+    expect(find.byKey(const ValueKey('vod-course:102')), findsOneWidget);
+    expect(find.byTooltip('课次统计暂不可用，下拉刷新重试'), findsOneWidget);
+    expect(progress, findsOneWidget);
+    first.complete(const [
+      VodLesson(id: 1, teachingClassId: 101, name: '回放', isPlayable: true)
+    ]);
+    await tester.pump();
+    await tester.pump();
+    expect(find.byKey(const ValueKey('vod-course:101')), findsOneWidget);
+    expect(find.byKey(const ValueKey('vod-course:103')), findsNothing);
+    expect(progress, findsOneWidget);
+    third.complete([]);
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('vod-course:103')), findsOneWidget);
+    expect(progress, findsNothing);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('lesson count requests are bounded and run in the background',
+      (tester) async {
+    final courses = [
+      for (var index = 0; index < 5; index++)
+        VodCourse(teachingClassId: 301 + index, termId: 7, name: '课程$index'),
+    ];
+    final completions = {
+      for (final course in courses)
+        course.teachingClassId: Completer<List<VodLesson>>()
+    };
+    final started = <int>[];
+    final repository = _Repository();
+    repository.coursesLoader = (_, __) async => courses;
+    repository.lessonsLoader = (course, _) {
+      started.add(course.teachingClassId);
+      return completions[course.teachingClassId]!.future;
+    };
+    await _mount(tester, repository);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(started, [301, 302, 303]);
+    expect(find.byKey(const ValueKey('vod-course:301')), findsNothing);
+    completions[301]!.complete([]);
+    await tester.pump();
+    await tester.pump();
+    expect(started, [301, 302, 303, 304]);
+    expect(find.byKey(const ValueKey('vod-course:301')), findsOneWidget);
+    expect(find.byKey(const ValueKey('vod-loading-progress')), findsOneWidget);
+    for (final completion in completions.values) {
+      if (!completion.isCompleted) completion.complete([]);
+    }
+    await tester.pumpAndSettle();
+    expect(started, [301, 302, 303, 304, 305]);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('refresh waits for an older count before forcing a new request',
+      (tester) async {
+    final pending = Completer<List<VodLesson>>();
+    final forceFlags = <bool>[];
+    final repository = _Repository();
+    repository.coursesLoader = (_, __) async => [_programming];
+    repository.lessonsLoader = (_, force) {
+      forceFlags.add(force);
+      return force
+          ? Future.value(const [
+              VodLesson(
+                  id: 2, teachingClassId: 101, name: '回放', isPlayable: true),
+              VodLesson(
+                  id: 3, teachingClassId: 101, name: '回放', isPlayable: true),
+            ])
+          : pending.future;
+    };
+    await _mount(tester, repository);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+    await tester.drag(
+        find.byKey(const ValueKey('vod-courses:7')), const Offset(0, 350));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 350));
+    expect(forceFlags, [false]);
+    pending.complete(const [
+      VodLesson(id: 1, teachingClassId: 101, name: '旧回放', isPlayable: true),
+    ]);
+    await tester.pump();
+    await tester.pump();
+    await tester.pump();
+    expect(forceFlags, [false, true]);
+    final finder = find.byKey(const ValueKey('vod-course-lesson-count:101'));
+    expect(tester.widget<Text>(finder).textSpan!.toPlainText(), '2/2节');
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('late lesson counts cannot cross a term change', (tester) async {
+    const olderCourse = VodCourse(
+        teachingClassId: 101, termId: 6, name: '上一学期的课程', code: 'OLD101');
+    final pending = Completer<List<VodLesson>>();
+    final repository = _Repository();
+    repository.coursesLoader =
+        (term, _) async => term == 7 ? [_programming] : [olderCourse];
+    repository.lessonsLoader = (course, _) => course.termId == 7
+        ? pending.future
+        : Future.value(const [
+            VodLesson(
+                id: 11, teachingClassId: 101, name: '回放', isPlayable: true),
+          ]);
+    await _mount(tester, repository);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+    await _chooseTerm(tester, 6);
+    await tester.pumpAndSettle();
+    final finder = find.byKey(const ValueKey('vod-course-lesson-count:101'));
+    expect(tester.widget<Text>(finder).textSpan!.toPlainText(), '1/1节');
+    expect(find.text('2025-2026 学年 春季学期'), findsOneWidget);
+    pending.complete(const [
+      VodLesson(
+          id: 21,
+          teachingClassId: 101,
+          name: '生成',
+          isPlayable: false,
+          isGenerating: true),
+    ]);
+    await tester.pump();
+    await tester.pump();
+    expect(tester.widget<Text>(finder).textSpan!.toPlainText(), '1/1节');
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('lesson count errors show an unknown value instead of zero',
+      (tester) async {
+    final repository = _Repository();
+    repository.coursesLoader = (_, __) async => [_programming];
+    repository.lessonsLoader = (_, __) async => throw StateError('offline');
+    await _mount(tester, repository);
+    await tester.pumpAndSettle();
+    final finder = find.byKey(const ValueKey('vod-course-lesson-count:101'));
+    expect(tester.widget<Text>(finder).textSpan!.toPlainText(), '—/—节');
+    expect(find.byTooltip('课次统计暂不可用，下拉刷新重试'), findsOneWidget);
+    expect(find.byKey(const ValueKey('vod-course:101')), findsOneWidget);
+  });
+
+  testWidgets('course metadata handles missing codes and teachers',
+      (tester) async {
+    const withoutCode = VodCourse(
+      teachingClassId: 201,
+      termId: 7,
+      name: '无课程号',
+      teacherNames: ['教师甲', '教师乙'],
+    );
+    const withoutTeacher = VodCourse(
+      teachingClassId: 202,
+      termId: 7,
+      name: '无教师姓名',
+      code: 'CS202',
+    );
+    final repository = _Repository()
+      ..coursesLoader = (_, __) async => [withoutCode, withoutTeacher];
+    await _mount(tester, repository);
+    await tester.pumpAndSettle();
+    expect(find.text('教师甲、教师乙'), findsOneWidget);
+    expect(find.text('CS202 · 教师信息暂未提供'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('course list does not display classroom names', (tester) async {
+    const live = VodLesson(
+      id: 201,
+      teachingClassId: 101,
+      name: '程序设计',
+      classroom: '东区 A101',
+      isLive: true,
+      isPlayable: true,
+    );
+    final repository = _Repository()
+      ..coursesLoader = (_, __) async => [_programming.withLiveLesson(live)];
+    await _mount(tester, repository);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 350));
+    final course = find.byKey(const ValueKey('vod-course:101'));
+    expect(find.descendant(of: course, matching: find.text('CS101 · 教师甲')),
+        findsOneWidget);
+    expect(find.textContaining('东区 A101'), findsNothing);
+    expect(
+        tester
+            .widget<Text>(
+                find.byKey(const ValueKey('vod-course-lesson-count:101')))
+            .textSpan!
+            .toPlainText(),
+        '0/1节');
+    expect(repository.lessonRequests, 1);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
   });
 
   testWidgets(
@@ -712,6 +1052,7 @@ void main() {
     final repository = _Repository();
     await _mount(tester, repository);
     await tester.pumpAndSettle();
+    final requestsBeforeOpening = repository.lessonRequests;
     await tester.tap(find.byKey(const ValueKey('vod-course:101')));
     await tester.pumpAndSettle();
 
@@ -721,9 +1062,9 @@ void main() {
     );
     expect(lessonsPage.course.teachingClassId, 101);
     expect(identical(lessonsPage.repository, repository), isTrue);
-    expect(repository.lessonRequests, 1);
-    expect(find.text('课程介绍'), findsOneWidget);
-    expect(find.text('选集（0）'), findsOneWidget);
+    expect(repository.lessonRequests, greaterThan(requestsBeforeOpening));
+    expect(find.text('课程介绍'), findsNothing);
+    expect(find.text('剧集'), findsOneWidget);
     expect(find.text('暂无可观看回放'), findsOneWidget);
   });
 
