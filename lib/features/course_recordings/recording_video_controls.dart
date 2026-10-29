@@ -6,6 +6,8 @@ import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 
 import '../../data/models/course_recording.dart';
+import 'recording_playback_status.dart';
+import 'recording_seek_controller.dart';
 import 'recording_status_icon.dart';
 
 class RecordingVideoControls extends StatefulWidget {
@@ -35,6 +37,9 @@ class RecordingVideoControls extends StatefulWidget {
     this.aspect = '自动',
     this.onAspectChanged,
     this.onEpisodePanelVisibilityChanged,
+    this.onSeek,
+    this.primaryView,
+    this.onReload,
   });
 
   final VideoState state;
@@ -61,6 +66,9 @@ class RecordingVideoControls extends StatefulWidget {
   final String aspect;
   final ValueChanged<String>? onAspectChanged;
   final ValueChanged<bool>? onEpisodePanelVisibilityChanged;
+  final Future<void> Function(Duration position)? onSeek;
+  final Widget? primaryView;
+  final VoidCallback? onReload;
 
   @override
   State<RecordingVideoControls> createState() => _RecordingVideoControlsState();
@@ -70,11 +78,13 @@ class _RecordingVideoControlsState extends State<RecordingVideoControls>
     with SingleTickerProviderStateMixin {
   final _subscriptions = <StreamSubscription<dynamic>>[];
   late final AnimationController _episodeAnimation;
+  late RecordingSeekController _seekController;
   Timer? _hideTimer;
   bool _visible = true;
   bool _episodesOpen = false;
   double? _dragPosition;
   Offset? _floatingPosition;
+  int _seekRevision = 0;
 
   @override
   void initState() {
@@ -88,18 +98,43 @@ class _RecordingVideoControlsState extends State<RecordingVideoControls>
           _showControls();
         }
       });
+    _bindPlayer();
+    _showControls();
+  }
+
+  void _bindPlayer() {
+    _seekController = RecordingSeekController(
+      seek: (position) =>
+          widget.onSeek?.call(position) ?? widget.player.seek(position),
+      onPreviewError: _reportSeekError,
+    );
     for (final stream in <Stream<dynamic>>[
       widget.player.stream.position,
       widget.player.stream.duration,
       widget.player.stream.playing,
       widget.player.stream.buffering,
+      widget.player.stream.buffer,
       widget.player.stream.rate,
     ]) {
       _subscriptions.add(stream.listen((_) {
         if (mounted) setState(() {});
       }));
     }
-    _showControls();
+  }
+
+  @override
+  void didUpdateWidget(covariant RecordingVideoControls oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.player != widget.player) {
+      _seekController.dispose();
+      _seekRevision++;
+      _dragPosition = null;
+      for (final subscription in _subscriptions) {
+        unawaited(subscription.cancel());
+      }
+      _subscriptions.clear();
+      _bindPlayer();
+    }
   }
 
   @override
@@ -108,6 +143,7 @@ class _RecordingVideoControlsState extends State<RecordingVideoControls>
       widget.onEpisodePanelVisibilityChanged?.call(false);
     }
     _hideTimer?.cancel();
+    _seekController.dispose();
     _episodeAnimation.dispose();
     for (final subscription in _subscriptions) {
       unawaited(subscription.cancel());
@@ -116,6 +152,43 @@ class _RecordingVideoControlsState extends State<RecordingVideoControls>
   }
 
   bool get _episodePanelVisible => _episodesOpen || _episodeAnimation.value > 0;
+
+  void _beginSeek(double value) {
+    _seekRevision++;
+    _seekController.begin();
+    _hideTimer?.cancel();
+    setState(() => _dragPosition = value);
+  }
+
+  void _previewSeek(double value) {
+    _hideTimer?.cancel();
+    setState(() => _dragPosition = value);
+    _seekController.preview(Duration(milliseconds: value.round()));
+  }
+
+  Future<void> _finishSeek(double value) async {
+    final revision = ++_seekRevision;
+    setState(() => _dragPosition = value);
+    try {
+      await _seekController.finish(Duration(milliseconds: value.round()));
+    } catch (error, stack) {
+      _reportSeekError(error, stack);
+    } finally {
+      if (mounted && revision == _seekRevision) {
+        setState(() => _dragPosition = null);
+        _showControls();
+      }
+    }
+  }
+
+  void _reportSeekError(Object error, StackTrace stack) {
+    FlutterError.reportError(FlutterErrorDetails(
+      exception: error,
+      stack: stack,
+      library: 'course recordings',
+      context: ErrorDescription('while seeking the recording'),
+    ));
+  }
 
   void _openEpisodes() {
     _hideTimer?.cancel();
@@ -187,13 +260,9 @@ class _RecordingVideoControlsState extends State<RecordingVideoControls>
                   _visible ? setState(() => _visible = false) : _showControls(),
               onDoubleTap: _togglePlayback,
               child: Stack(children: [
-                if (widget.failure != null)
-                  Positioned.fill(child: widget.failure!),
-                if ((widget.loading || widget.player.state.buffering) &&
-                    widget.failure == null)
-                  const Center(
-                      child: CircularProgressIndicator(
-                          color: Colors.white, strokeWidth: 3)),
+                if (widget.primaryView != null)
+                  Positioned.fill(
+                      child: IgnorePointer(child: widget.primaryView!)),
                 if (fullscreen &&
                     widget.dualEnabled &&
                     widget.views.length > 1 &&
@@ -262,6 +331,17 @@ class _RecordingVideoControlsState extends State<RecordingVideoControls>
                     ),
                   ),
                 ),
+                if (widget.failure != null)
+                  Positioned.fill(child: widget.failure!),
+                if ((widget.loading ||
+                        widget.player.state.buffering &&
+                            widget.player.state.playing) &&
+                    widget.failure == null)
+                  RecordingPlaybackLoading(
+                    buffering: widget.player.state.buffering,
+                    buffered: widget.player.state.buffer,
+                    onRetry: widget.onReload,
+                  ),
                 if (_episodePanelVisible) ...[
                   Positioned.fill(
                       child: FadeTransition(
@@ -421,6 +501,9 @@ class _RecordingVideoControlsState extends State<RecordingVideoControls>
     final duration = state.duration.inMilliseconds.toDouble();
     final position = (_dragPosition ?? state.position.inMilliseconds.toDouble())
         .clamp(0.0, math.max(1.0, duration));
+    final buffered = state.buffer.inMilliseconds
+        .toDouble()
+        .clamp(position, math.max(1.0, duration));
     final currentTime = _durationText(Duration(milliseconds: position.round()));
     final totalTime = _durationText(state.duration);
     final time = Text('$currentTime / $totalTime',
@@ -463,6 +546,10 @@ class _RecordingVideoControlsState extends State<RecordingVideoControls>
         if (fullscreen && widget.onAspectChanged != null)
           PopupMenuButton<String>(
             tooltip: '画面比例',
+            color: Colors.black.withValues(alpha: .8),
+            surfaceTintColor: Colors.transparent,
+            elevation: 0,
+            requestFocus: false,
             initialValue: widget.aspect,
             onOpened: () => _hideTimer?.cancel(),
             onCanceled: _showControls,
@@ -474,8 +561,11 @@ class _RecordingVideoControlsState extends State<RecordingVideoControls>
               for (final value in ['自动', '16:9', '4:3', '填充', '裁剪'])
                 CheckedPopupMenuItem(
                     value: value,
+                    height: 35,
                     checked: widget.aspect == value,
-                    child: Text(value))
+                    child: Text(value,
+                        style:
+                            const TextStyle(color: Colors.white, fontSize: 13)))
             ],
             child: Padding(
                 padding: const EdgeInsets.all(12),
@@ -485,6 +575,10 @@ class _RecordingVideoControlsState extends State<RecordingVideoControls>
         if (!widget.isLive)
           PopupMenuButton<double>(
             tooltip: '播放速度',
+            color: Colors.black.withValues(alpha: .8),
+            surfaceTintColor: Colors.transparent,
+            elevation: 0,
+            requestFocus: false,
             enabled: !widget.loading,
             initialValue: state.rate,
             onOpened: () => _hideTimer?.cancel(),
@@ -497,8 +591,11 @@ class _RecordingVideoControlsState extends State<RecordingVideoControls>
               for (final rate in [.5, .75, 1.0, 1.25, 1.5, 1.75, 2.0])
                 CheckedPopupMenuItem(
                     value: rate,
+                    height: 35,
                     checked: state.rate == rate,
-                    child: Text('${rate == 1 ? '正常 ' : ''}${rate}x'))
+                    child: Text('${rate == 1 ? '正常 ' : ''}${rate}x',
+                        style:
+                            const TextStyle(color: Colors.white, fontSize: 13)))
             ],
             child: Padding(
                 padding: const EdgeInsets.all(12),
@@ -513,6 +610,10 @@ class _RecordingVideoControlsState extends State<RecordingVideoControls>
         if (widget.views.length > 1 || widget.onDecodingChanged != null)
           PopupMenuButton<int>(
             tooltip: '播放设置',
+            color: Colors.black.withValues(alpha: .8),
+            surfaceTintColor: Colors.transparent,
+            elevation: 0,
+            requestFocus: false,
             enabled: !widget.loading,
             icon: const Icon(Icons.more_vert, color: Colors.white),
             onOpened: () => _hideTimer?.cancel(),
@@ -529,14 +630,19 @@ class _RecordingVideoControlsState extends State<RecordingVideoControls>
               for (var index = 0; index < widget.views.length; index++)
                 CheckedPopupMenuItem(
                     value: index,
+                    height: 35,
                     checked: index == widget.selectedView,
-                    child: Text(widget.views[index].label)),
+                    child: Text(widget.views[index].label,
+                        style: const TextStyle(
+                            color: Colors.white, fontSize: 13))),
               if (widget.onDecodingChanged != null) ...[
                 const PopupMenuDivider(),
                 CheckedPopupMenuItem(
                     value: -1,
+                    height: 35,
                     checked: widget.softwareDecoding,
-                    child: const Text('使用软件解码')),
+                    child: const Text('使用软件解码',
+                        style: TextStyle(color: Colors.white, fontSize: 13))),
               ],
             ],
           ),
@@ -562,21 +668,18 @@ class _RecordingVideoControlsState extends State<RecordingVideoControls>
                             const RoundSliderOverlayShape(overlayRadius: 12)),
                     child: Slider(
                       value: position.toDouble(),
+                      secondaryTrackValue: buffered.toDouble(),
                       min: 0,
                       max: math.max(1.0, duration),
                       inactiveColor: Colors.white38,
-                      onChanged: duration <= 0 || widget.loading
-                          ? null
-                          : (value) {
-                              _hideTimer?.cancel();
-                              setState(() => _dragPosition = value);
-                            },
-                      onChangeEnd: (value) {
-                        unawaited(widget.player
-                            .seek(Duration(milliseconds: value.round())));
-                        setState(() => _dragPosition = null);
-                        _showControls();
-                      },
+                      secondaryActiveColor: Theme.of(context)
+                          .colorScheme
+                          .primary
+                          .withValues(alpha: .4),
+                      onChangeStart: _beginSeek,
+                      onChanged:
+                          duration <= 0 || widget.loading ? null : _previewSeek,
+                      onChangeEnd: (value) => unawaited(_finishSeek(value)),
                     ),
                   )),
             if (compact && !fullscreen && !widget.isLive)

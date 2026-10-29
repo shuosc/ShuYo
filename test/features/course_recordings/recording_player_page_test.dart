@@ -1,12 +1,14 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 import 'package:shuyo/data/models/course_recording.dart';
 import 'package:shuyo/data/repositories/vod_repository.dart';
 import 'package:shuyo/data/services/vod_api_client.dart';
+import 'package:shuyo/features/course_recordings/recording_playback_status.dart';
 import 'package:shuyo/features/course_recordings/recording_player_page.dart';
 import 'package:shuyo/features/course_recordings/recording_status_icon.dart';
 import 'package:shuyo/shared/theme/shuyo_theme.dart';
@@ -22,6 +24,53 @@ class _PlatformPlayer extends PlatformPlayer {
   Duration? lastSeek;
   double? lastRate;
   int toggles = 0;
+  int plays = 0;
+  int pauses = 0;
+  final opened = <Playable>[];
+  final volumes = <double>[];
+  Completer<void>? openGate;
+
+  void emitBuffer(Duration value) => bufferController.add(value);
+
+  void emitBuffering(bool value) => bufferingController.add(value);
+
+  void emitError(String value) => errorController.add(value);
+
+  @override
+  Future<void> open(Playable playable, {bool play = true}) async {
+    opened.add(playable);
+    await openGate?.future;
+    state = state.copyWith(
+      playing: play,
+      width: 1280,
+      height: 720,
+      position: playable is Media ? playable.start : null,
+    );
+    widthController.add(1280);
+    heightController.add(720);
+    playingController.add(play);
+  }
+
+  @override
+  Future<void> play() async {
+    plays++;
+    state = state.copyWith(playing: true);
+    playingController.add(true);
+  }
+
+  @override
+  Future<void> pause() async {
+    pauses++;
+    state = state.copyWith(playing: false);
+    playingController.add(false);
+  }
+
+  @override
+  Future<void> setVolume(double volume) async {
+    volumes.add(volume);
+    state = state.copyWith(volume: volume);
+    volumeController.add(volume);
+  }
 
   @override
   Future<void> playOrPause() async {
@@ -42,6 +91,98 @@ class _PlatformPlayer extends PlatformPlayer {
     lastRate = rate;
     state = state.copyWith(rate: rate);
     rateController.add(rate);
+  }
+}
+
+class _VideoOutput extends PlatformVideoController {
+  _VideoOutput(Player player, int texture, {Completer<void>? firstFrame})
+      : super(player, const VideoControllerConfiguration()) {
+    id.value = texture;
+    rect.value = const Rect.fromLTWH(0, 0, 1280, 720);
+    if (firstFrame == null) {
+      waitUntilFirstFrameRenderedCompleter.complete();
+    } else {
+      firstFrame.future.then((_) {
+        waitUntilFirstFrameRenderedCompleter.complete();
+      });
+    }
+  }
+
+  @override
+  Future<void> setSize({int? width, int? height}) async {}
+}
+
+class _VideoController implements VideoController {
+  _VideoController(this.player, int texture, {Completer<void>? firstFrame}) {
+    final output = _VideoOutput(player, texture, firstFrame: firstFrame);
+    platform.complete(output);
+    notifier.value = output;
+    id = output.id;
+    rect = output.rect;
+    player.platform!.release.add(() async {
+      notifier.dispose();
+      output.dispose();
+    });
+  }
+
+  @override
+  final Player player;
+  @override
+  final platform = Completer<PlatformVideoController>();
+  @override
+  final notifier = ValueNotifier<PlatformVideoController?>(null);
+  @override
+  late final ValueNotifier<int?> id;
+  @override
+  late final ValueNotifier<Rect?> rect;
+  @override
+  Future<void> get waitUntilFirstFrameRendered async =>
+      (await platform.future).waitUntilFirstFrameRendered;
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+class _PlaybackHarness {
+  _PlaybackHarness({this.primaryOpen, this.secondaryOpen, this.secondaryFrame});
+
+  final Completer<void>? primaryOpen;
+  final Completer<void>? secondaryOpen;
+  final Completer<void>? secondaryFrame;
+  final platforms = <_PlatformPlayer>[];
+  final controllers = <_VideoController>[];
+
+  Player createPlayer() {
+    final platform = _PlatformPlayer();
+    if (platforms.isEmpty) platform.openGate = primaryOpen;
+    if (platforms.length == 1) platform.openGate = secondaryOpen;
+    platforms.add(platform);
+    return Player(platformPlayer: platform);
+  }
+
+  VideoController createController(Player player) {
+    final controller = _VideoController(player, controllers.length + 1,
+        firstFrame: controllers.length == 1 ? secondaryFrame : null);
+    controllers.add(controller);
+    return controller;
+  }
+}
+
+class _PendingCatalogRepository extends VodRepository {
+  final catalog = Completer<List<VodLesson>>();
+  final playback = Completer<VodPlayback>();
+  final requested = <VodLesson>[];
+
+  @override
+  Future<List<VodLesson>> loadCourseLessons(VodCourse course,
+          {bool forceRefresh = false}) =>
+      catalog.future;
+
+  @override
+  Future<VodPlayback> preparePlayback(
+      {required VodCourse course, required VodLesson lesson}) {
+    requested.add(lesson);
+    return playback.future;
   }
 }
 
@@ -126,6 +267,9 @@ void main() {
     ValueChanged<String>? onAspect,
     List<VodView>? views,
     ValueChanged<bool>? onPanelVisibilityChanged,
+    bool loading = false,
+    Widget? failure,
+    VoidCallback? onReload,
   }) =>
       MaterialApp(
           home: Scaffold(
@@ -133,8 +277,8 @@ void main() {
         state: state,
         player: player,
         title: course.name,
-        loading: false,
-        failure: null,
+        loading: loading,
+        failure: failure,
         views: views ??
             [
               VodView(
@@ -160,7 +304,97 @@ void main() {
         onSwapViews: onSwap,
         onAspectChanged: onAspect,
         onEpisodePanelVisibilityChanged: onPanelVisibilityChanged,
+        onReload: onReload,
       )));
+
+  testWidgets('buffering indicator and track follow the current player',
+      (tester) async {
+    final primary = _PlatformPlayer();
+    primary.state = primary.state.copyWith(
+      position: const Duration(seconds: 10),
+      buffer: const Duration(seconds: 30),
+      buffering: true,
+    );
+    final secondary = _PlatformPlayer();
+    secondary.state = secondary.state.copyWith(buffering: false);
+    final firstPlayer = Player(platformPlayer: primary);
+    final secondPlayer = Player(platformPlayer: secondary);
+    addTearDown(firstPlayer.dispose);
+    addTearDown(secondPlayer.dispose);
+    var reloads = 0;
+    await tester.pumpWidget(controlPage(
+      player: firstPlayer,
+      state: _VideoState(),
+      onReload: () => reloads++,
+    ));
+    expect(find.byType(RecordingPlaybackLoading), findsOneWidget);
+    expect(find.text('00:30'), findsOneWidget);
+    expect(
+        tester.widget<Slider>(find.byType(Slider)).secondaryTrackValue, 30000);
+    await tester.tap(find.byKey(const ValueKey('recording-loading-indicator')));
+    await tester.pump(const Duration(milliseconds: 350));
+    expect(reloads, 1);
+    primary.state = primary.state.copyWith(buffer: const Duration(seconds: 42));
+    primary.emitBuffer(const Duration(seconds: 42));
+    await tester.pump();
+    await tester.pump();
+    expect(find.text('00:42'), findsOneWidget);
+    expect(
+        tester.widget<Slider>(find.byType(Slider)).secondaryTrackValue, 42000);
+
+    await tester
+        .pumpWidget(controlPage(player: secondPlayer, state: _VideoState()));
+    await tester.pump();
+    expect(find.byType(RecordingPlaybackLoading), findsNothing);
+    primary.emitBuffering(true);
+    await tester.pump();
+    expect(find.byType(RecordingPlaybackLoading), findsNothing);
+    secondary.state =
+        secondary.state.copyWith(buffering: true, buffer: Duration.zero);
+    secondary.emitBuffering(true);
+    await tester.pump();
+    await tester.pump();
+    expect(find.text('加载中...'), findsOneWidget);
+    await tester.pumpWidget(controlPage(
+      player: secondPlayer,
+      state: _VideoState(),
+      failure: const Text('播放失败'),
+    ));
+    expect(find.text('播放失败'), findsOneWidget);
+    expect(find.byType(RecordingPlaybackLoading), findsNothing);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('player option menus use translucent readable backgrounds',
+      (tester) async {
+    final player = Player(platformPlayer: _PlatformPlayer());
+    addTearDown(player.dispose);
+    String? aspect;
+    await tester.pumpWidget(controlPage(
+      player: player,
+      state: _VideoState(fullscreen: true),
+      onAspect: (value) => aspect = value,
+    ));
+    final menus = find.byWidgetPredicate((widget) => widget is PopupMenuButton);
+    for (final menu in tester.widgetList<PopupMenuButton>(menus)) {
+      expect(menu.color, Colors.black.withValues(alpha: .8));
+      expect(menu.surfaceTintColor, Colors.transparent);
+      expect(menu.requestFocus, isFalse);
+    }
+    expect(menus, findsNWidgets(3));
+    await tester.tap(find.byTooltip('画面比例'));
+    await tester.pump(const Duration(milliseconds: 350));
+    await tester.pumpAndSettle();
+    final choice = find.byWidgetPredicate((widget) =>
+        widget is CheckedPopupMenuItem<String> && widget.value == '4:3');
+    final label = tester
+        .widget<Text>(find.descendant(of: choice, matching: find.text('4:3')));
+    expect(label.style?.color, Colors.white);
+    await tester.tap(choice);
+    await tester.pumpAndSettle();
+    expect(aspect, '4:3');
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
 
   testWidgets(
       'paused video toggles both overlays and embedded back leaves the page',
@@ -388,17 +622,327 @@ void main() {
     required Future<VodPlayback> Function(VodLesson) load,
     Future<bool> Function()? login,
     VodLesson? initial,
+    _PlaybackHarness? harness,
   }) =>
       MaterialApp(
         theme: ShuYoThemes.all.first.themeData(),
+        builder: (context, child) => MediaQuery(
+            data: MediaQuery.of(context).copyWith(disableAnimations: true),
+            child: child!),
         home: RecordingPlayerPage(
           course: course,
           lessons: [first, second, unavailable, unrelated],
           initialLesson: initial ?? first,
           loadPlayback: load,
           onSessionExpired: login,
+          playerFactory: harness?.createPlayer,
+          videoControllerFactory: harness?.createController,
         ),
       );
+
+  VodPlayback playback(VodLesson lesson) => VodPlayback(
+        lessonId: lesson.id,
+        teachingClassId: course.teachingClassId,
+        title: course.name,
+        isLive: lesson.isLive,
+        views: [
+          VodView(viewNumber: 1, url: Uri.https('media.example', '/classroom')),
+          VodView(viewNumber: 5, url: Uri.https('media.example', '/ppt')),
+          VodView(viewNumber: 3, url: Uri.https('media.example', '/students')),
+        ],
+      );
+
+  testWidgets('player errors during opening replace loading and can retry',
+      (tester) async {
+    final pendingOpen = Completer<void>();
+    final harness = _PlaybackHarness(primaryOpen: pendingOpen);
+    var loads = 0;
+    await tester.pumpWidget(page(
+      harness: harness,
+      load: (lesson) async {
+        loads++;
+        return playback(lesson);
+      },
+    ));
+    for (var attempt = 0; attempt < 10; attempt++) {
+      await tester.pump();
+      if (harness.platforms.isNotEmpty &&
+          harness.platforms.first.opened.isNotEmpty) {
+        break;
+      }
+    }
+    expect(harness.platforms, hasLength(1));
+    expect(harness.platforms.first.opened, hasLength(1));
+    expect(find.byType(RecordingPlaybackLoading), findsOneWidget);
+    harness.platforms.first.emitError('sensitive media URL');
+    await tester.pump();
+    expect(find.text('视频暂时无法播放，可刷新播放地址后重试。'), findsOneWidget);
+    expect(find.textContaining('sensitive media URL'), findsNothing);
+    expect(find.byType(RecordingPlaybackLoading), findsNothing);
+    pendingOpen.complete();
+    await tester.pumpAndSettle();
+    expect(find.text('视频暂时无法播放，可刷新播放地址后重试。'), findsOneWidget);
+    await tester.tap(find.text('重试'));
+    await tester.pump(const Duration(milliseconds: 350));
+    await tester.pumpAndSettle();
+    expect(loads, 2);
+    expect(harness.platforms.first.opened, hasLength(2));
+    expect(find.text('视频暂时无法播放，可刷新播放地址后重试。'), findsNothing);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  for (final live in [false, true]) {
+    testWidgets(
+        '${live ? 'live' : 'recording'} reuses both decoders across PIP swaps and fullscreen',
+        (tester) async {
+      const channel = MethodChannel('com.alexmercerind/media_kit_video');
+      tester.binding.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, (_) async => null);
+      addTearDown(() => tester.binding.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, null));
+      final harness = _PlaybackHarness();
+      final lesson = live
+          ? VodLesson(
+              id: 106,
+              teachingClassId: 10,
+              name: course.name,
+              isPlayable: true,
+              isLive: true)
+          : first;
+      var loads = 0;
+      await tester.pumpWidget(page(
+          initial: lesson,
+          harness: harness,
+          load: (lesson) async {
+            loads++;
+            return playback(lesson);
+          }));
+      await tester.pumpAndSettle();
+      expect(harness.platforms, hasLength(2));
+      final classroom = harness.platforms[0];
+      final ppt = harness.platforms[1];
+      expect(classroom.opened, hasLength(1));
+      expect(ppt.opened, hasLength(1));
+      expect((classroom.opened.single as Media).uri,
+          'https://media.example/classroom');
+      expect((ppt.opened.single as Media).uri, 'https://media.example/ppt');
+      expect(classroom.state.volume, 100);
+      expect(ppt.state.volume, 0);
+      expect(ppt.state.playing, isTrue);
+      expect(find.byType(ChoiceChip), findsNothing);
+      expect(find.byTooltip('播放设置'), findsOneWidget);
+
+      await tester
+          .widget<RecordingVideoControls>(find.byType(RecordingVideoControls))
+          .state
+          .enterFullscreen();
+      await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('开启双视角'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('暂停'));
+      await tester.pumpAndSettle();
+      await classroom.setVolume(37);
+      await tester.pump();
+      expect(classroom.state.playing, isFalse);
+      expect(ppt.state.playing, isFalse);
+      final plays = [classroom.plays, ppt.plays];
+      final floating = find.byKey(const ValueKey('recording-secondary-view'));
+      expect(floating, findsOneWidget);
+      expect(find.descendant(of: floating, matching: find.byType(IconButton)),
+          findsNothing);
+      await tester.tap(floating);
+      await tester.pump(const Duration(milliseconds: 350));
+      await tester.pumpAndSettle();
+      var controls = tester
+          .widget<RecordingVideoControls>(find.byType(RecordingVideoControls));
+      expect(identical(controls.player.platform, ppt), isTrue);
+      expect(controls.selectedView, 1);
+      expect(classroom.state.volume, 0);
+      expect(ppt.state.volume, 37);
+      expect(classroom.state.playing, isFalse);
+      expect(ppt.state.playing, isFalse);
+      expect([classroom.plays, ppt.plays], plays);
+
+      if (!live) {
+        await tester.tap(find.byTooltip('播放'));
+        await tester.pump(const Duration(milliseconds: 350));
+        expect([classroom.toggles, ppt.toggles], [1, 1]);
+        expect(classroom.state.playing, isTrue);
+        expect(ppt.state.playing, isTrue);
+        await tester.tap(find.byTooltip('暂停'));
+        await tester.pump(const Duration(milliseconds: 350));
+        expect([classroom.toggles, ppt.toggles], [1, 2]);
+        expect(classroom.state.playing, isFalse);
+        expect(ppt.state.playing, isFalse);
+        await tester.tap(find.byTooltip('播放速度'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.byWidgetPredicate((widget) =>
+            widget is CheckedPopupMenuItem<double> && widget.value == 1.5));
+        await tester.pumpAndSettle();
+        expect(ppt.lastRate, 1.5);
+        expect(classroom.lastRate, 1.5);
+        await controls.onSeek!(const Duration(minutes: 10));
+        await tester.pump();
+        expect(ppt.lastSeek, const Duration(minutes: 10));
+        expect(classroom.lastSeek, const Duration(minutes: 10));
+        expect(ppt.state.playing, isFalse);
+        expect(classroom.state.playing, isFalse);
+      }
+      final pauses = [classroom.pauses, ppt.pauses];
+      await controls.state.exitFullscreen();
+      await tester.pumpAndSettle();
+      expect([classroom.pauses, ppt.pauses], pauses);
+      controls = tester
+          .widget<RecordingVideoControls>(find.byType(RecordingVideoControls));
+      expect(controls.selectedView, 1);
+      expect(identical(controls.player.platform, ppt), isTrue);
+      expect(
+          identical(tester.widget<Video>(find.byType(Video)).controller,
+              harness.controllers.first),
+          isTrue);
+      await controls.state.enterFullscreen();
+      await tester.pumpAndSettle();
+      expect([classroom.pauses, ppt.pauses], pauses);
+      expect(find.byKey(const ValueKey('recording-secondary-view')),
+          findsOneWidget);
+      await tester.tap(find.byKey(const ValueKey('recording-secondary-view')));
+      await tester.pump(const Duration(milliseconds: 350));
+      await tester.pumpAndSettle();
+      controls = tester
+          .widget<RecordingVideoControls>(find.byType(RecordingVideoControls));
+      expect(controls.selectedView, 0);
+      expect(classroom.state.volume, 37);
+      expect(ppt.state.volume, 0);
+      expect(loads, 1);
+      expect(classroom.opened, hasLength(1));
+      expect(ppt.opened, hasLength(1));
+      expect(tester.takeException(), isNull);
+      await controls.state.exitFullscreen();
+      await tester.pumpAndSettle();
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pump();
+    });
+  }
+
+  testWidgets('secondary open and first frame never block the primary',
+      (tester) async {
+    final secondaryOpen = Completer<void>();
+    final secondaryFrame = Completer<void>();
+    final harness = _PlaybackHarness(
+        secondaryOpen: secondaryOpen, secondaryFrame: secondaryFrame);
+    var loads = 0;
+    await tester.pumpWidget(page(
+        harness: harness,
+        load: (lesson) async {
+          loads++;
+          return playback(lesson);
+        }));
+    await tester.pump();
+    await tester.pump();
+    expect(harness.platforms, hasLength(2));
+    var controls = tester
+        .widget<RecordingVideoControls>(find.byType(RecordingVideoControls));
+    expect(controls.loading, isFalse);
+    expect(harness.platforms.first.state.playing, isTrue);
+    expect(harness.platforms.last.opened, hasLength(1));
+    controls.onSwapViews!();
+    await tester.pump();
+    expect(
+        tester
+            .widget<RecordingVideoControls>(find.byType(RecordingVideoControls))
+            .selectedView,
+        0);
+
+    secondaryOpen.complete();
+    await tester.pump();
+    controls = tester
+        .widget<RecordingVideoControls>(find.byType(RecordingVideoControls));
+    controls.onSwapViews!();
+    await tester.pump();
+    expect(
+        tester
+            .widget<RecordingVideoControls>(find.byType(RecordingVideoControls))
+            .selectedView,
+        0);
+    secondaryFrame.complete();
+    await tester.pumpAndSettle();
+    expect(
+        tester
+            .widget<RecordingVideoControls>(find.byType(RecordingVideoControls))
+            .selectedView,
+        1);
+    expect(loads, 1);
+    expect(harness.platforms.map((platform) => platform.opened.length), [1, 1]);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pump();
+  });
+
+  testWidgets(
+      'dual view retries only a failed secondary and reuses it when ready',
+      (tester) async {
+    final secondaryOpen = Completer<void>();
+    final harness = _PlaybackHarness(secondaryOpen: secondaryOpen);
+    var loads = 0;
+    await tester.pumpWidget(page(
+        harness: harness,
+        load: (lesson) async {
+          loads++;
+          return playback(lesson);
+        }));
+    await tester.pump();
+    await tester.pump();
+    secondaryOpen.completeError(StateError('secondary unavailable'));
+    await tester.pumpAndSettle();
+    var controls = tester
+        .widget<RecordingVideoControls>(find.byType(RecordingVideoControls));
+    expect(controls.failure, isNull);
+    expect(harness.platforms.first.state.playing, isTrue);
+    harness.platforms.last.openGate = null;
+    controls.onDualChanged!(true);
+    await tester.pumpAndSettle();
+    expect(harness.platforms.map((platform) => platform.opened.length), [1, 2]);
+    controls = tester
+        .widget<RecordingVideoControls>(find.byType(RecordingVideoControls));
+    controls.onDualChanged!(false);
+    await tester.pump();
+    controls = tester
+        .widget<RecordingVideoControls>(find.byType(RecordingVideoControls));
+    controls.onDualChanged!(true);
+    await tester.pumpAndSettle();
+    expect(harness.platforms.map((platform) => platform.opened.length), [1, 2]);
+    expect(loads, 1);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pump();
+  });
+
+  testWidgets('live seed prepares playback while its catalog is pending',
+      (tester) async {
+    const live = VodLesson(
+        id: 106,
+        teachingClassId: 10,
+        name: '直播',
+        isPlayable: true,
+        isLive: true);
+    final repository = _PendingCatalogRepository();
+    addTearDown(repository.dispose);
+    await tester.pumpWidget(MaterialApp(
+      theme: ShuYoThemes.all.first.themeData(),
+      home: RecordingPlayerPage(
+          course: course.withLiveLesson(live), repository: repository),
+    ));
+    await tester.pump();
+    expect(repository.catalog.isCompleted, isFalse);
+    expect(repository.requested.map((lesson) => lesson.id), [106]);
+    repository.catalog.complete([live, first]);
+    await tester.pump();
+    expect(repository.requested, hasLength(1));
+    await tester.pumpWidget(const SizedBox.shrink());
+    repository.playback.completeError(const VodNetworkException());
+    await tester.pump();
+    expect(tester.takeException(), isNull);
+  });
 
   testWidgets(
       'direct course page prioritizes live and keeps newest generating episode disabled',

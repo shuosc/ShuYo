@@ -54,3 +54,5 @@ flutter test
 ```
 
 开发约定：[LLM 使用政策](LLM_POLICY.md)
+
+播放器缓冲动画来自 [PiliPlus](https://github.com/bggRGjQaUbCoE/PiliPlus/blob/628290b5c760facfdd910195f679362ec0ad9fc7/assets/images/loading.webp)，遵循 GPL-3.0 协议。
