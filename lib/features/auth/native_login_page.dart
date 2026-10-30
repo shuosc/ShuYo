@@ -288,7 +288,6 @@ class _NativeLoginPageState extends State<NativeLoginPage> {
                                 enabled: !_busy,
                                 keyboardType: TextInputType.text,
                                 autocorrect: false,
-                                enableSuggestions: false,
                                 autofillHints: const [AutofillHints.username],
                                 textInputAction: TextInputAction.next,
                                 onTapOutside: (_) =>
