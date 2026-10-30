@@ -246,6 +246,51 @@ class VodWebRtcSession {
     await _applyPlaybackState();
   }
 
+  Future<Map<String, String>> playbackInformation() async {
+    final peer = _peer;
+    if (_disposed || peer == null) return const {};
+    try {
+      final reports = await peer.getStats().timeout(const Duration(seconds: 2));
+      if (_disposed || _peer != peer) return const {};
+      final codecs = {
+        for (final report in reports.where((report) => report.type == 'codec'))
+          report.id: report.values
+      };
+      final result = <String, String>{};
+      for (final report in reports) {
+        if (report.type != 'inbound-rtp' || report.values['isRemote'] == true) {
+          continue;
+        }
+        final kind = report.values['kind'] ?? report.values['mediaType'];
+        final codec = codecs[report.values['codecId']];
+        if (codec?['mimeType'] == 'video/rtx') continue;
+        if (kind == 'video') {
+          result['VideoParams'] = [
+            codec?['mimeType'],
+            if (report.values['frameWidth'] != null &&
+                report.values['frameHeight'] != null)
+              '${report.values['frameWidth']}x${report.values['frameHeight']}',
+            if (report.values['framesPerSecond'] != null)
+              '${report.values['framesPerSecond']} fps',
+          ].whereType<String>().join(' · ');
+          result['VideoTrack'] =
+              (report.values['trackIdentifier'] ?? report.id).toString();
+        } else if (kind == 'audio') {
+          result['AudioParams'] = [
+            codec?['mimeType'],
+            if (codec?['clockRate'] != null) '${codec!['clockRate']} Hz',
+            if (codec?['channels'] != null) '${codec!['channels']} channels',
+          ].whereType<String>().join(' · ');
+          result['AudioTrack'] =
+              (report.values['trackIdentifier'] ?? report.id).toString();
+        }
+      }
+      return result;
+    } on Object {
+      return const {};
+    }
+  }
+
   Future<void> _applyPlaybackState() async {
     final stream = _stream;
     if (stream == null || _disposed) return;
