@@ -15,7 +15,11 @@ import '../../data/services/vod_webrtc_session.dart';
 import '../../shared/shuyo_text_styles.dart';
 import '../../shared/theme/shuyo_theme.dart';
 import 'recording_course_title.dart';
+import 'recording_course_overview.dart';
 import 'recording_classroom_filter.dart';
+import 'recording_playback_info.dart';
+import 'recording_player_preferences.dart';
+import 'recording_player_menu.dart';
 import 'recording_episode_tile.dart';
 import 'recording_episode_sort_icon.dart';
 import 'recording_playback_status.dart';
@@ -64,13 +68,13 @@ enum _PlaybackFailure { session, permission, network, unavailable, media }
 
 class _RecordingPlayerPageState extends State<RecordingPlayerPage>
     with WidgetsBindingObserver {
-  static const _playingSyncTolerance = Duration(seconds: 1);
-  static const _pausedSyncTolerance = Duration(milliseconds: 250);
-  static const _syncDelay = Duration(milliseconds: 800);
-  static const _syncCooldown = Duration(seconds: 3);
-
   final _videoKey = GlobalKey<VideoState>();
   final _controlsRevision = ValueNotifier(0);
+  RecordingPlayerPreferences _playerPreferences =
+      const RecordingPlayerPreferences();
+  Future<void> _preferencesQueue = Future<void>.value();
+  int _preferencesRevision = 0;
+  bool _collapsedMenuOpen = false;
   final _systemUi = RecordingPlayerSystemUi();
   Player? _player;
   Player? _timelinePlayer;
@@ -87,6 +91,7 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
   bool _resumeLive = false;
   bool _heartbeatPending = false;
   bool _catalogLoading = false;
+  bool _catalogPullRefreshing = false;
   bool _episodesNewestFirst = true;
   final _excludedClassrooms = <String>{};
   final _episodeKeys = <int, GlobalKey>{};
@@ -101,7 +106,7 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
   bool _recovering = false;
   bool _fullscreenActive = false;
   bool _episodePanelVisible = false;
-  bool _dualEnabled = false;
+  bool get _dualEnabled => _playerPreferences.secondaryView;
   Player? _secondaryPlayer;
   VideoController? _secondaryController;
   final _syncSubscriptions = <StreamSubscription<dynamic>>[];
@@ -113,7 +118,11 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
   bool _secondaryFailed = false;
   int? _secondaryViewIndex;
   int? _pendingViewIndex;
-  bool _swappingViews = false;
+  bool _routingViewAudio = false;
+  int _viewAudioRevision = 0;
+  double _viewVolume = 100;
+  bool _viewVolumeInitialized = false;
+  Future<void> _viewAudioQueue = Future<void>.value();
   bool _seekingPlayers = false;
   bool _seekCommandsRunning = false;
   int _seekSyncRevision = 0;
@@ -121,8 +130,6 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
   Duration? _seekSyncTarget;
   final _seekAwaitingPosition = <Player>{};
   bool _syncingSecondary = false;
-  Timer? _driftTimer;
-  Timer? _driftCooldownTimer;
   Completer<void>? _secondarySyncCompletion;
   bool _secondarySyncPending = false;
   String _aspect = '自动';
@@ -135,6 +142,71 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
   bool get _rtcPlaying =>
       _viewIndex < _rtcSessions.length &&
       _rtcSessions[_viewIndex].state.value == VodWebRtcState.playing;
+
+  Future<List<RecordingPlaybackInfoEntry>> _readPlaybackInformation() async {
+    final view = _playback?.views.elementAtOrNull(_viewIndex);
+    if (_isWebRtc && _viewIndex < _rtcSessions.length) {
+      final session = _rtcSessions[_viewIndex];
+      final details = await session.playbackInformation();
+      return [
+        (
+          title: 'Resolution',
+          value:
+              '${session.renderer.videoWidth}x${session.renderer.videoHeight}'
+        ),
+        (title: 'VideoParams', value: details['VideoParams'] ?? '不可用'),
+        (title: 'AudioParams', value: details['AudioParams'] ?? '不可用'),
+        (title: 'Media', value: view?.url.toString() ?? '不可用'),
+        (title: 'AudioTrack', value: details['AudioTrack'] ?? '不可用'),
+        (title: 'VideoTrack', value: details['VideoTrack'] ?? '不可用'),
+        (title: 'rate', value: '1.0'),
+        (title: 'Volume', value: _player?.state.volume.toString() ?? '不可用'),
+        (title: 'hwdec', value: '不可用'),
+      ];
+    }
+    final player = _player;
+    if (player == null) {
+      return const [(title: '状态', value: '播放器尚未就绪')];
+    }
+    return readRecordingPlaybackInfo(player, view: view);
+  }
+
+  Future<void> _openCollapsedMenu() async {
+    if (_collapsedMenuOpen) return;
+    _collapsedMenuOpen = true;
+    try {
+      await showRecordingPlayerMenu(
+        context: context,
+        fullscreen: false,
+        preferences: _playerPreferences,
+        onPreferencesChanged: _setPlayerPreferences,
+        secondaryAvailable: (_playback?.views.length ?? 0) > 1 && !kIsWeb,
+        views: _playback?.views ?? const [],
+        informationLoader: _readPlaybackInformation,
+      );
+    } finally {
+      _collapsedMenuOpen = false;
+    }
+  }
+
+  Future<void> _loadPlayerPreferences() async {
+    final revision = _preferencesRevision;
+    final preferences = await RecordingPlayerPreferences.load();
+    if (!mounted || revision != _preferencesRevision) return;
+    _publish(() => _playerPreferences = preferences);
+    if (preferences.secondaryView) _warmSecondaryWhenEnabled(true);
+  }
+
+  void _setPlayerPreferences(RecordingPlayerPreferences preferences) {
+    final changed = preferences.secondaryView != _dualEnabled;
+    _preferencesRevision++;
+    _publish(() => _playerPreferences = preferences);
+    _preferencesQueue = _preferencesQueue
+        .then((_) => preferences.save())
+        .catchError((Object _) {});
+    if (changed) _warmSecondaryWhenEnabled(preferences.secondaryView);
+  }
+
   String _preferredView = '教室';
   _PlaybackFailure? _failure;
   String? _failureMessage;
@@ -189,6 +261,7 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    unawaited(_loadPlayerPreferences());
     if (_isMobile) _systemUi.lockPortrait();
     final initial = widget.initialLesson ?? widget.course.liveLesson;
     if (initial != null &&
@@ -207,11 +280,15 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
     }
   }
 
-  Future<void> _loadCatalog({bool forceRefresh = false}) async {
+  Future<void> _loadCatalog(
+      {bool forceRefresh = false, bool fromPull = false}) async {
     final repository = widget.repository;
-    if (repository == null || _catalogLoading) return;
+    if (repository == null || _catalogLoading || _catalogPullRefreshing) return;
     final revision = ++_catalogRevision;
-    _publish(() => _catalogLoading = true);
+    _publish(() {
+      _catalogLoading = true;
+      _catalogPullRefreshing = fromPull;
+    });
     try {
       final lessons = await repository.loadCourseLessons(widget.course,
           forceRefresh: forceRefresh);
@@ -277,6 +354,10 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
           _ => _PlaybackFailure.unavailable,
         };
       });
+    } finally {
+      if (mounted && revision == _catalogRevision && _catalogPullRefreshing) {
+        _publish(() => _catalogPullRefreshing = false);
+      }
     }
   }
 
@@ -338,7 +419,6 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
   @override
   void dispose() {
     _loadRevision++;
-    _clearDriftTimers();
     _resetSeekSynchronization();
     _catalogRevision++;
     _secondaryRevision++;
@@ -373,7 +453,7 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
 
   Future<void> _loadLesson(VodLesson lesson, {bool resume = false}) async {
     final revision = ++_loadRevision;
-    _clearDriftTimers();
+    _viewAudioRevision++;
     _resetSeekSynchronization();
     _openingMediaRevision = null;
     _secondaryRevision++;
@@ -390,8 +470,9 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
     _liveProxy = null;
     await oldProxy?.dispose();
     if (!mounted || revision != _loadRevision) return;
-    final oldPosition =
-        resume && _loadedLessonId == lesson.id ? _player?.state.position : null;
+    final oldPosition = resume && _loadedLessonId == lesson.id
+        ? (_timelinePlayer ?? _player)?.state.position
+        : null;
     _publish(() {
       _lesson = lesson;
       _loading = true;
@@ -569,6 +650,10 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
         }
         _openingMediaRevision = revision;
         _timelinePlayer = player;
+        await _viewAudioQueue;
+        if (!mounted || revision != _loadRevision) return;
+        if (_viewVolumeInitialized) await player.setVolume(_viewVolume);
+        if (!mounted || revision != _loadRevision) return;
         await player
             .open(
               Media(
@@ -873,6 +958,49 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
     await _openSecondary();
   }
 
+  Future<void> _alignSecondaryStart(Player secondary, int revision) async {
+    var active = true;
+    Completer<void>? pendingPosition;
+    StreamSubscription<Duration>? subscription;
+    bool current() => active && mounted && revision == _secondaryRevision;
+    bool matches(Duration position, Duration target) =>
+        (position - target).abs() <= const Duration(milliseconds: 250);
+    try {
+      await (() async {
+        while (current()) {
+          final seekRevision = _seekSyncRevision;
+          final target =
+              _seekSyncTarget ?? (_timelinePlayer ?? _player!).state.position;
+          if (matches(secondary.state.position, target)) return;
+          final completion = Completer<void>();
+          pendingPosition = completion;
+          subscription = secondary.stream.position.listen((position) {
+            if (current() &&
+                !completion.isCompleted &&
+                matches(position, target)) {
+              completion.complete();
+            }
+          });
+          await secondary.seek(target);
+          if (!current()) return;
+          if (!completion.isCompleted &&
+              matches(secondary.state.position, target)) {
+            completion.complete();
+          }
+          await completion.future;
+          unawaited(subscription!.cancel());
+          subscription = null;
+          if (seekRevision != _seekSyncRevision) continue;
+        }
+      })()
+          .timeout(recordingSeekPositionTimeout);
+    } finally {
+      active = false;
+      if (pendingPosition?.isCompleted == false) pendingPosition!.complete();
+      if (subscription != null) unawaited(subscription!.cancel());
+    }
+  }
+
   void _requestSwap() {
     if (_isWebRtc) {
       _requestRtcSwap();
@@ -882,7 +1010,7 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
     final current = _pendingViewIndex ?? _viewIndex;
     final next = current == 0 ? 1 : 0;
     _pendingViewIndex = next;
-    if (!_swappingViews) unawaited(_selectView(next));
+    unawaited(_selectView(next));
   }
 
   Future<void> _selectView(int index) async {
@@ -890,8 +1018,7 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
     if (playback == null ||
         index < 0 ||
         index >= playback.views.length ||
-        _loading ||
-        _swappingViews) {
+        _loading) {
       return;
     }
     if (index == _viewIndex) {
@@ -907,84 +1034,64 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
       _pendingViewIndex = index;
       return;
     }
-    final primary = _player!;
-    final secondary = _secondaryPlayer!;
-    final revision = _loadRevision;
-    final volume = primary.state.volume;
-    var audioTransitionStarted = false;
-    _swappingViews = true;
-    try {
-      _driftTimer?.cancel();
-      _driftTimer = null;
-      audioTransitionStarted = true;
-      await primary.setVolume(0);
-      if (!mounted ||
-          revision != _loadRevision ||
-          _pendingViewIndex != null && _pendingViewIndex != index) {
-        if (mounted && identical(primary, _player)) {
-          await primary.setVolume(volume);
-        }
-        return;
-      }
-      await secondary.setVolume(volume);
-      if (!mounted ||
-          revision != _loadRevision ||
-          _pendingViewIndex != null && _pendingViewIndex != index) {
-        if (mounted && revision == _loadRevision) await secondary.setVolume(0);
-        if (mounted && identical(primary, _player)) {
-          await primary.setVolume(volume);
-        }
-        return;
-      }
-      _publish(() {
-        final controller = _videoController;
-        final errorSubscription = _errorSubscription;
-        _player = secondary;
-        _secondaryPlayer = primary;
-        _videoController = _secondaryController;
-        _secondaryController = controller;
-        _errorSubscription = _secondaryErrorSubscription;
-        _secondaryErrorSubscription = errorSubscription;
-        _secondaryViewIndex = _viewIndex;
-        _viewIndex = index;
-        _preferredView = playback.views[index].label;
-        _pendingViewIndex = null;
-      });
-    } on Object {
-      if (mounted && revision == _loadRevision) {
-        if (audioTransitionStarted) {
-          await _restoreSwapVolume(secondary, 0);
-          await _restoreSwapVolume(primary, volume);
-        }
-        if (_pendingViewIndex == index) _pendingViewIndex = null;
-        if (mounted && revision == _loadRevision) {
-          ScaffoldMessenger.maybeOf(context)
-              ?.showSnackBar(const SnackBar(content: Text('切换视角失败，请重试')));
-        }
-      }
-    } finally {
-      _swappingViews = false;
-      final pending = _pendingViewIndex;
-      if (pending == _viewIndex) {
-        _pendingViewIndex = null;
-      } else if (pending != null &&
-          mounted &&
-          revision == _loadRevision &&
-          !_secondaryFailed &&
-          !_secondaryLoading &&
-          !_secondaryWaitingForMain &&
-          _secondaryViewIndex == pending) {
-        unawaited(_selectView(pending));
-      }
+    if (!_viewVolumeInitialized) {
+      _viewVolume = _player!.state.volume;
+      _viewVolumeInitialized = true;
     }
+    _publish(() {
+      final primary = _player;
+      final controller = _videoController;
+      final errorSubscription = _errorSubscription;
+      _player = _secondaryPlayer;
+      _secondaryPlayer = primary;
+      _videoController = _secondaryController;
+      _secondaryController = controller;
+      _errorSubscription = _secondaryErrorSubscription;
+      _secondaryErrorSubscription = errorSubscription;
+      _secondaryViewIndex = _viewIndex;
+      _viewIndex = index;
+      _preferredView = playback.views[index].label;
+      _pendingViewIndex = null;
+    });
+    _routeViewAudio();
   }
 
-  Future<void> _restoreSwapVolume(Player player, double volume) async {
-    try {
-      await player.setVolume(volume);
-    } on Object {
-      return;
-    }
+  void _routeViewAudio() {
+    _viewAudioRevision++;
+    if (_routingViewAudio) return;
+    _routingViewAudio = true;
+    _viewAudioQueue = () async {
+      var retried = false;
+      try {
+        while (mounted) {
+          final primary = _player;
+          final secondary = _secondaryPlayer;
+          if (primary == null || secondary == null) return;
+          final revision = _viewAudioRevision;
+          try {
+            await secondary.setVolume(0);
+            if (!mounted || revision != _viewAudioRevision) continue;
+            await primary.setVolume(_viewVolume);
+          } on Object {
+            if (revision != _viewAudioRevision) continue;
+            if (!retried) {
+              retried = true;
+              continue;
+            }
+            if (mounted) {
+              ScaffoldMessenger.maybeOf(context)
+                  ?.showSnackBar(const SnackBar(content: Text('切换视角音量失败，请重试')));
+            }
+            return;
+          }
+          if (revision == _viewAudioRevision) return;
+          retried = false;
+        }
+      } finally {
+        _routingViewAudio = false;
+      }
+    }();
+    unawaited(_viewAudioQueue);
   }
 
   void _onPlayerError(Player source) {
@@ -1001,7 +1108,10 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
         _failure = _PlaybackFailure.media;
       });
     } else if (identical(source, _secondaryPlayer)) {
-      _publish(() => _secondaryFailed = true);
+      _publish(() {
+        _secondaryFailed = true;
+        if (identical(source, _timelinePlayer)) _timelinePlayer = _player;
+      });
       unawaited(source.pause());
     }
   }
@@ -1040,7 +1150,7 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
         timeline != null &&
         !_seekAwaitingPosition.contains(primary) &&
         _seekAwaitingPosition.contains(timeline)) {
-      _timelinePlayer = primary;
+      _publish(() => _timelinePlayer = primary);
     }
     _resetSeekSynchronization();
     if (mounted) unawaited(_alignSecondary());
@@ -1186,7 +1296,12 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
   }
 
   void _setDualEnabled(bool value) {
-    _publish(() => _dualEnabled = value);
+    final unchanged = value == _dualEnabled;
+    _setPlayerPreferences(_playerPreferences.copyWith(secondaryView: value));
+    if (unchanged) _warmSecondaryWhenEnabled(value);
+  }
+
+  void _warmSecondaryWhenEnabled(bool value) {
     if (_isWebRtc) {
       if (value && _secondaryFailed && _rtcSessions.length > 1) {
         final secondary = _rtcSessions[_viewIndex == 0 ? 1 : 0];
@@ -1283,6 +1398,10 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
           await secondary.pause();
           return;
         }
+        if (!playback.isLive) {
+          await _alignSecondaryStart(secondary, revision);
+          if (!mounted || revision != _secondaryRevision) return;
+        }
         _publish(() {
           _secondaryViewIndex = index;
           _secondaryLoading = false;
@@ -1304,21 +1423,11 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
     await _secondaryQueue;
   }
 
-  void _clearDriftTimers() {
-    _driftTimer?.cancel();
-    _driftTimer = null;
-    _driftCooldownTimer?.cancel();
-    _driftCooldownTimer = null;
-  }
-
-  Future<void> _alignSecondary({bool correctDrift = false}) async {
+  Future<void> _alignSecondary() async {
     if (_isWebRtc) return;
     if (_syncingSecondary) {
       _secondarySyncPending = true;
       await _secondarySyncCompletion?.future;
-      if (correctDrift) {
-        await _alignSecondary(correctDrift: correctDrift);
-      }
       return;
     }
     final primary = _player;
@@ -1328,7 +1437,6 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
         _secondaryFailed ||
         !_foreground ||
         _loading ||
-        _swappingViews ||
         _seekingPlayers ||
         _secondaryViewIndex == null ||
         primary == null ||
@@ -1346,50 +1454,22 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
         _foreground &&
         !_loading;
     try {
-      final timeline = _timelinePlayer ?? primary;
+      final timeline = _lesson.isLive ? primary : _timelinePlayer ?? primary;
       final follower = identical(timeline, primary) ? secondary : primary;
-      final playing = timeline.state.playing && follower.state.playing;
-      final tolerance = playing ? _playingSyncTolerance : _pausedSyncTolerance;
-      final drift = (timeline.state.position - follower.state.position).abs();
-      if (!_lesson.isLive &&
-          !timeline.state.buffering &&
-          !follower.state.buffering &&
-          drift > tolerance) {
-        if (!playing || correctDrift && _driftCooldownTimer == null) {
-          _driftTimer?.cancel();
-          _driftTimer = null;
-          await follower.seek(timeline.state.position);
-          if (!stillCurrent()) return;
-          if (playing) {
-            _driftCooldownTimer = Timer(_syncCooldown, () {
-              _driftCooldownTimer = null;
-              if (mounted) unawaited(_alignSecondary());
-            });
-          }
-        } else if (_driftTimer == null && _driftCooldownTimer == null) {
-          _driftTimer = Timer(_syncDelay, () {
-            _driftTimer = null;
-            if (mounted) unawaited(_alignSecondary(correctDrift: true));
-          });
-        }
-      } else {
-        _driftTimer?.cancel();
-        _driftTimer = null;
-      }
-      if (secondary.state.rate != primary.state.rate) {
-        await secondary.setRate(primary.state.rate);
+      if (follower.state.rate != timeline.state.rate) {
+        await follower.setRate(timeline.state.rate);
         if (!stillCurrent()) return;
       }
       if (!stillCurrent()) return;
-      if (primary.state.playing != secondary.state.playing) {
-        if (primary.state.playing) {
-          await secondary.play();
+      if (timeline.state.playing != follower.state.playing) {
+        if (timeline.state.playing) {
+          await follower.play();
         } else {
-          await secondary.pause();
+          await follower.pause();
         }
       }
     } on Object {
-      if (mounted) _publish(() => _secondaryFailed = true);
+      if (stillCurrent()) _publish(() => _secondaryFailed = true);
     } finally {
       _syncingSecondary = false;
       _secondarySyncCompletion = null;
@@ -1399,19 +1479,19 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
         unawaited(_alignSecondary());
       }
       final pending = _pendingViewIndex;
-      if (pending != null && !_swappingViews) {
+      if (pending != null) {
         unawaited(_selectView(pending));
       }
     }
   }
 
-  Widget _secondaryView() => ColoredBox(
-      color: Colors.black,
+  Widget _secondaryView({bool renderVideo = true}) => ColoredBox(
+      color: renderVideo ? Colors.black : Colors.transparent,
       child: Stack(fit: StackFit.expand, children: [
         if (_isWebRtc && _rtcSessions.length > 1)
           RTCVideoView(_rtcSessions[_viewIndex == 0 ? 1 : 0].renderer,
               objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitContain)
-        else if (!_isWebRtc && _secondaryController != null)
+        else if (renderVideo && !_isWebRtc && _secondaryController != null)
           RecordingSecondaryVideo(controller: _secondaryController!),
         if (_secondaryLoading || _secondaryWaitingForMain)
           const RecordingPlaybackLoading(compact: true),
@@ -1461,6 +1541,19 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
                                   FullscreenInheritedWidget.maybeOf(context) !=
                                       null,
                               player: _player!,
+                              timelinePlayer:
+                                  _lesson.isLive ? null : _timelinePlayer,
+                              viewControllers: kIsWeb || _isWebRtc
+                                  ? const []
+                                  : [
+                                      _hostVideoController!,
+                                      if (_secondaryController != null)
+                                        identical(_videoController,
+                                                _hostVideoController)
+                                            ? _secondaryController!
+                                            : _videoController!,
+                                    ],
+                              primaryController: _videoController,
                               onSeek: _seekPlayers,
                               onTemporaryRate: _setTemporaryRate,
                               primaryView: _isWebRtc && _rtcSessions.isNotEmpty
@@ -1505,7 +1598,8 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
                                   unawaited(_loadLesson(lesson)),
                               dualEnabled: _dualEnabled,
                               onDualChanged: kIsWeb ? null : _setDualEnabled,
-                              secondaryView: _secondaryView(),
+                              secondaryView: _secondaryView(
+                                  renderVideo: kIsWeb || _isWebRtc),
                               secondaryLabel: (_playback?.views.length ?? 0) > 1
                                   ? _playback!
                                       .views[_viewIndex == 0 ? 1 : 0].label
@@ -1515,6 +1609,9 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
                               onAspectChanged: _changeAspect,
                               loading: _loading,
                               isLive: _lesson.isLive,
+                              preferences: _playerPreferences,
+                              onPreferencesChanged: _setPlayerPreferences,
+                              informationLoader: _readPlaybackInformation,
                               livePlaying: _isWebRtc ? _rtcPlaying : null,
                               onLiveTogglePlayback: _isWebRtc
                                   ? () => unawaited(_toggleRtcPlayback())
@@ -1570,7 +1667,8 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
                     body: list,
                     expandedHeight: videoHeight,
                     topInset: topInset,
-                    player: _player,
+                    player:
+                        _lesson.isLive ? _player : _timelinePlayer ?? _player,
                     playingOverride: _isWebRtc ? _rtcPlaying : null,
                     canResume:
                         !_loading && _failure == null && _playback != null,
@@ -1579,12 +1677,15 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
                         await _playRtc();
                         return;
                       }
-                      if (_player?.state.completed ?? false) {
+                      final player =
+                          _lesson.isLive ? _player : _timelinePlayer ?? _player;
+                      if (player?.state.completed ?? false) {
                         await _seekPlayers(Duration.zero);
                       }
-                      await _player?.play();
+                      await player?.play();
                     },
                     onBack: () => Navigator.of(context).maybePop(),
+                    onMore: () => unawaited(_openCollapsedMenu()),
                   );
                 }
                 return Padding(
@@ -1657,11 +1758,18 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
   }
 
   Widget _lessonHeading(ShuYoColors colors) {
+    final days = recordingCourseDays(_lessons);
     return Padding(
       key: const ValueKey('recording-course-banner'),
-      padding: const EdgeInsets.fromLTRB(16, 20, 16, 18),
+      padding: const EdgeInsets.fromLTRB(16, 20, 16, 8),
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
         RecordingCourseTitle(course: widget.course, large: true),
+        if (days.isNotEmpty) ...[
+          const Padding(
+              padding: EdgeInsets.symmetric(vertical: 12), child: Divider()),
+          RecordingCourseOverview(days: days),
+          const Padding(padding: EdgeInsets.only(top: 12), child: Divider()),
+        ],
         if (_playback?.description.isNotEmpty ?? false) ...[
           const SizedBox(height: 10),
           Text(_playback!.description,
@@ -1690,10 +1798,11 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
               builder: (context, constraints) => SliverOverlapInjector(
                   handle: NestedScrollView.sliverOverlapAbsorberHandleFor(
                       context))),
-        SliverToBoxAdapter(child: _lessonHeading(colors)),
-        if (_catalogLoading)
+        if (_catalogLoading && !_catalogPullRefreshing)
           const SliverToBoxAdapter(
-              child: LinearProgressIndicator(minHeight: 2)),
+              child: LinearProgressIndicator(
+                  key: ValueKey('recording-catalog-progress'), minHeight: 2)),
+        SliverToBoxAdapter(child: _lessonHeading(colors)),
         SliverPersistentHeader(
           pinned: true,
           delegate: _EpisodeHeader(
@@ -1718,7 +1827,7 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
                       textAlign: TextAlign.center))),
         SliverToBoxAdapter(
             child: Column(children: [
-          for (final lesson in lessons)
+          for (final lesson in lessons) ...[
             KeyedSubtree(
                 key: _episodeKeys.putIfAbsent(lesson.id, GlobalKey.new),
                 child: RecordingEpisodeTile(
@@ -1730,6 +1839,9 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
                       ? null
                       : () => unawaited(_loadLesson(lesson)),
                 )),
+            if (lesson.id != lessons.last.id)
+              const Divider(indent: 16, endIndent: 16),
+          ],
           SizedBox(height: 24 + MediaQuery.viewPaddingOf(context).bottom),
         ])),
       ],
@@ -1737,7 +1849,10 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
     return widget.repository == null
         ? content
         : RefreshIndicator(
-            onRefresh: () => _loadCatalog(forceRefresh: true),
+            notificationPredicate: (notification) =>
+                (!_catalogLoading || _catalogPullRefreshing) &&
+                defaultScrollNotificationPredicate(notification),
+            onRefresh: () => _loadCatalog(forceRefresh: true, fromPull: true),
             child: content,
           );
   }
@@ -1816,8 +1931,9 @@ class _EpisodeHeader extends SliverPersistentHeaderDelegate {
               height: 45,
               child: Row(children: [
                 const SizedBox(width: 14),
-                Text('剧集',
-                    style: TextStyle(fontSize: 16, color: colors.textPrimary)),
+                Text('选集',
+                    style: ShuYoTextStyles.sectionTitle(
+                        color: colors.textPrimary)),
                 _button(
                     tooltip: '跳至顶部',
                     icon: const Icon(Icons.vertical_align_top),

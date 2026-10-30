@@ -86,7 +86,7 @@ void main() {
     const EdgeInsets.fromLTRB(44, 12, 44, 24),
   ]) {
     testWidgets(
-        'fullscreen controls respect viewPadding $insets with zero padding',
+        'fullscreen controls respect cutouts without lifting over the bottom inset $insets',
         (tester) async {
       const size = Size(873, 393);
       tester.view.physicalSize = size;
@@ -105,8 +105,7 @@ void main() {
       expect(back.top, greaterThanOrEqualTo(insets.top + 10));
       expect(bottom.left, greaterThanOrEqualTo(insets.left + 10));
       expect(bottom.right, lessThanOrEqualTo(size.width - insets.right - 10));
-      expect(
-          bottom.bottom, lessThanOrEqualTo(size.height - insets.bottom - 12));
+      expect(bottom.bottom, size.height - 12);
       expect(
           tester
               .getRect(find.byKey(const ValueKey('safe-area-primary-picture'))),
@@ -136,7 +135,7 @@ void main() {
     final back = tester.getRect(find.byTooltip('返回课程列表'));
     final bottom =
         tester.getRect(find.byKey(const ValueKey('recording-bottom-controls')));
-    expect(back.top, 4);
+    expect(back.top, 12);
     expect(bottom.bottom, size.height - 12);
     expect(tester.takeException(), isNull);
 

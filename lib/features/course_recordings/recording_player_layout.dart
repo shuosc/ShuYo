@@ -16,6 +16,7 @@ class RecordingPlayerLayout extends StatefulWidget {
     required this.canResume,
     required this.onResume,
     required this.onBack,
+    this.onMore,
     this.playingOverride,
   });
 
@@ -27,6 +28,7 @@ class RecordingPlayerLayout extends StatefulWidget {
   final bool canResume;
   final Future<void> Function() onResume;
   final VoidCallback onBack;
+  final VoidCallback? onMore;
   final bool? playingOverride;
 
   @override
@@ -206,6 +208,7 @@ class _RecordingPlayerLayoutState extends State<RecordingPlayerLayout> {
                           completed: widget.player?.state.completed ?? false,
                           onResume: () => unawaited(_resume()),
                           onBack: widget.onBack,
+                          onMore: widget.onMore,
                         ),
                       )),
                 ],
@@ -227,6 +230,7 @@ class _RecordingVideoHeader extends SliverPersistentHeaderDelegate {
     required this.completed,
     required this.onResume,
     required this.onBack,
+    required this.onMore,
   });
 
   @override
@@ -239,6 +243,7 @@ class _RecordingVideoHeader extends SliverPersistentHeaderDelegate {
   final bool completed;
   final VoidCallback onResume;
   final VoidCallback onBack;
+  final VoidCallback? onMore;
 
   @override
   Widget build(
@@ -296,7 +301,15 @@ class _RecordingVideoHeader extends SliverPersistentHeaderDelegate {
                               : '展开播放器'),
                         ),
                       ),
-                      const SizedBox(width: 48),
+                      if (onMore != null)
+                        IconButton(
+                          key: const ValueKey('recording-collapsed-more'),
+                          tooltip: '更多设置',
+                          onPressed: onMore,
+                          icon: const Icon(Icons.more_vert_outlined),
+                        )
+                      else
+                        const SizedBox(width: 48),
                     ]),
                   ),
                 ),
@@ -317,5 +330,6 @@ class _RecordingVideoHeader extends SliverPersistentHeaderDelegate {
       canResume != oldDelegate.canResume ||
       completed != oldDelegate.completed ||
       onResume != oldDelegate.onResume ||
-      onBack != oldDelegate.onBack;
+      onBack != oldDelegate.onBack ||
+      onMore != oldDelegate.onMore;
 }

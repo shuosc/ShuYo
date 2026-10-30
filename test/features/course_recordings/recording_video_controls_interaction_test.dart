@@ -55,6 +55,7 @@ Widget _controls(
   bool? livePlaying,
   VoidCallback? onLiveTogglePlayback,
   EdgeInsets safeInsets = EdgeInsets.zero,
+  VodLesson? selectedLesson,
 }) =>
     MaterialApp(
       home: Scaffold(
@@ -82,6 +83,7 @@ Widget _controls(
             livePlaying: livePlaying,
             onLiveTogglePlayback: onLiveTogglePlayback,
             onLiveProtocolChanged: onLiveProtocolChanged,
+            selectedLesson: selectedLesson,
             dualEnabled: dualEnabled,
             secondaryView:
                 dualEnabled ? const ColoredBox(color: Colors.blue) : null,
@@ -107,6 +109,101 @@ Future<void> _setSize(WidgetTester tester, Size size) async {
 }
 
 void main() {
+  testWidgets('control bar uses the upstream progress and button dimensions',
+      (tester) async {
+    await _setSize(tester, const Size(873, 393));
+    final player = Player(platformPlayer: _InteractionPlayer());
+    addTearDown(player.dispose);
+    await tester.pumpWidget(_controls(player, fullscreen: true));
+    final track =
+        tester.getRect(find.byKey(const ValueKey('recording-seek-track')));
+    final row =
+        tester.getRect(find.byKey(const ValueKey('recording-bottom-controls')));
+    expect(track.height, 14);
+    expect(row.top - track.bottom, 7);
+    expect(row.height, 34);
+    expect(tester.getSize(find.byTooltip('播放')), const Size(42, 34));
+    expect(tester.getSize(find.byTooltip('退出全屏').last).height, 30);
+    expect(tester.getSize(find.byTooltip('更多设置')), const Size(42, 34));
+    await tester.pumpWidget(_controls(player));
+    await tester.tap(find.byTooltip('更多设置'));
+    await tester.pumpAndSettle();
+    expect(find.text('播放设置'), findsOneWidget);
+    expect(find.text('播放信息'), findsOneWidget);
+    expect(find.text('播放链接'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('fullscreen status appears for recordings and live streams',
+      (tester) async {
+    await _setSize(tester, const Size(873, 393));
+    final player = Player(platformPlayer: _InteractionPlayer());
+    addTearDown(player.dispose);
+    for (final live in [false, true]) {
+      await tester
+          .pumpWidget(_controls(player, fullscreen: true, isLive: live));
+      await tester.pump();
+      expect(find.byKey(const ValueKey('recording-fullscreen-bandwidth')),
+          findsNothing);
+      expect(find.byKey(const ValueKey('recording-fullscreen-clock')),
+          findsOneWidget);
+      expect(tester.takeException(), isNull);
+    }
+    await tester.pumpWidget(_controls(player));
+    expect(
+        find.byKey(const ValueKey('recording-fullscreen-clock')), findsNothing);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets(
+      'quality label is noninteractive and only shown for fullscreen recordings',
+      (tester) async {
+    await _setSize(tester, const Size(873, 393));
+    final player = Player(platformPlayer: _InteractionPlayer());
+    addTearDown(player.dispose);
+    await tester.pumpWidget(_controls(player, fullscreen: true));
+    final label = find.byKey(const ValueKey('recording-quality-label'));
+    expect(find.text('1080P'), findsOneWidget);
+    expect(
+        find.ancestor(
+            of: label, matching: find.byType(PopupMenuButton<double>)),
+        findsNothing);
+    expect(find.ancestor(of: label, matching: find.byType(IconButton)),
+        findsNothing);
+    expect(tester.getCenter(label).dx,
+        greaterThan(tester.getCenter(find.byTooltip('播放速度')).dx));
+    expect(tester.getCenter(label).dx,
+        lessThan(tester.getCenter(find.byTooltip('退出全屏').last).dx));
+
+    await tester.pumpWidget(_controls(player));
+    expect(label, findsNothing);
+    await tester.pumpWidget(_controls(player, fullscreen: true, isLive: true));
+    expect(label, findsNothing);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('fullscreen episode heading matches title color', (tester) async {
+    await _setSize(tester, const Size(873, 393));
+    final player = Player(platformPlayer: _InteractionPlayer());
+    addTearDown(player.dispose);
+    await tester.pumpWidget(_controls(player,
+        fullscreen: true,
+        selectedLesson: VodLesson(
+            id: 1,
+            teachingClassId: 2,
+            name: '课程',
+            isPlayable: true,
+            beginTime: DateTime(2026, 10, 29, 13),
+            weekNumber: 7)));
+    final title = tester
+        .widget<Text>(find.byKey(const ValueKey('recording-fullscreen-title')));
+    final heading = tester.widget<Text>(
+        find.byKey(const ValueKey('recording-fullscreen-episode-heading')));
+    expect(heading.style!.color, title.style!.color);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
   testWidgets('live protocol menu selects FLV and WebRTC', (tester) async {
     await _setSize(tester, const Size(393, 221));
     final player = Player(platformPlayer: _InteractionPlayer());

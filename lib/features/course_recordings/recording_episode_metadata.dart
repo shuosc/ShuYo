@@ -31,23 +31,27 @@ String recordingEpisodeTime(VodLesson lesson) {
           : format(begin);
 }
 
-String recordingEpisodeDetails(VodLesson lesson) {
+String recordingEpisodeDateTime(VodLesson lesson) {
   final date = lesson.beginTime;
   final time = recordingEpisodeTime(lesson);
-  final dateAndTime = [
+  return [
     if (date != null)
       '${date.month.toString().padLeft(2, '0')}-${date.day.toString().padLeft(2, '0')}',
     if (time.isNotEmpty) time,
   ].join(' ');
+}
+
+String recordingEpisodeDetails(VodLesson lesson) {
+  final dateAndTime = recordingEpisodeDateTime(lesson);
   return [
-    if (dateAndTime.isNotEmpty) dateAndTime,
     if (lesson.classroom.trim().isNotEmpty) lesson.classroom.trim(),
+    if (dateAndTime.isNotEmpty) dateAndTime,
   ].join(' · ');
 }
 
 String recordingFullscreenEpisodeHeading(VodLesson lesson) {
   final heading = recordingEpisodeHeading(lesson);
   final time = recordingEpisodeTime(lesson);
-  return [if (heading.isNotEmpty) heading, if (time.isNotEmpty) time]
-      .join(' · ');
+  return [if (heading.isNotEmpty) heading, if (time.isNotEmpty) '($time)']
+      .join(' ');
 }

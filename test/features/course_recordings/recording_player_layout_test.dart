@@ -106,6 +106,7 @@ Future<void> _pumpLayout(
   bool canResume = true,
   Future<void> Function()? onResume,
   VoidCallback? onBack,
+  VoidCallback? onMore,
   _VideoLifecycle? lifecycle,
   Brightness brightness = Brightness.light,
   bool disableAnimations = false,
@@ -141,6 +142,7 @@ Future<void> _pumpLayout(
                 await player?.play();
               },
           onBack: onBack ?? () {},
+          onMore: onMore,
         ),
       ),
     ),
@@ -154,6 +156,32 @@ Future<void> _collapse(WidgetTester tester) async {
 }
 
 void main() {
+  testWidgets('more action follows the back button throughout collapse',
+      (tester) async {
+    final platform = _LayoutPlatformPlayer();
+    final player = Player(platformPlayer: platform);
+    addTearDown(player.dispose);
+    var moreActions = 0;
+    await _pumpLayout(tester, player: player, onMore: () => moreActions++);
+    _outerController(tester).jumpTo(82);
+    await tester.pump();
+    expect(_toolbarOpacity(tester), closeTo(.5, .001));
+    final more = find.byKey(const ValueKey('recording-collapsed-more'));
+    expect(tester.getCenter(more).dy,
+        tester.getCenter(find.byTooltip('返回课程列表')).dy);
+    await tester.tap(more);
+    expect(moreActions, 1);
+    expect(_headerHeight(tester), 138);
+    await _collapse(tester);
+    expect(_toolbarOpacity(tester), 1);
+    await tester.tap(more);
+    expect(moreActions, 2);
+    expect(_headerHeight(tester), kToolbarHeight);
+    expect(platform.opens, 0);
+    expect(platform.plays, 0);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
   testWidgets('playing pins the full player while the lesson list scrolls',
       (tester) async {
     final platform = _LayoutPlatformPlayer(playing: true);

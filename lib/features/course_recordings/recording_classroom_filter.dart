@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 
+import '../../shared/shuyo_text_styles.dart';
+
 class RecordingClassroomFilter extends StatelessWidget {
   const RecordingClassroomFilter({
     super.key,
@@ -23,7 +25,8 @@ class RecordingClassroomFilter extends StatelessWidget {
         height: 50,
         child: Row(children: [
           const SizedBox(width: 14),
-          Text('教室', style: TextStyle(fontSize: 16, color: colors.onSurface)),
+          Text('教室',
+              style: ShuYoTextStyles.sectionTitle(color: colors.onSurface)),
           const SizedBox(width: 10),
           Expanded(
             child: ListView.separated(

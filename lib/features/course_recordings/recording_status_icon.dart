@@ -58,7 +58,7 @@ class _RecordingStatusIconState extends State<RecordingStatusIcon>
         ? Theme.of(context).colorScheme.primary
         : widget.disabledColor ?? Theme.of(context).disabledColor;
     if (!widget.isLive) {
-      return Icon(Icons.play_circle_outline_rounded,
+      return Icon(Icons.smart_display_rounded,
           color: color, semanticLabel: '录播回放');
     }
     return Semantics(

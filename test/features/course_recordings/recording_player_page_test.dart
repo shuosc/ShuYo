@@ -9,8 +9,10 @@ import 'package:shuyo/data/models/course_recording.dart';
 import 'package:shuyo/data/repositories/vod_repository.dart';
 import 'package:shuyo/data/services/vod_api_client.dart';
 import 'package:shuyo/features/course_recordings/recording_episode_sort_icon.dart';
+import 'package:shuyo/features/course_recordings/recording_course_overview.dart';
 import 'package:shuyo/features/course_recordings/recording_playback_status.dart';
 import 'package:shuyo/features/course_recordings/recording_player_page.dart';
+import 'package:shuyo/features/course_recordings/recording_secondary_video.dart';
 import 'package:shuyo/features/course_recordings/recording_status_icon.dart';
 import 'package:shuyo/shared/theme/shuyo_theme.dart';
 import 'package:shuyo/shared/widgets/course_color_label.dart';
@@ -31,11 +33,15 @@ class _PlatformPlayer extends PlatformPlayer {
   final opened = <Playable>[];
   final seeks = <Duration>[];
   final volumes = <double>[];
+  final audioTracks = <AudioTrack>[];
   Completer<void>? openGate;
   Completer<void>? seekGate;
   Completer<void>? volumeGate;
   bool failNextVolume = false;
   bool publishSeekPosition = true;
+  bool publishVolumeState = true;
+  double appliedVolume = 100;
+  VoidCallback? onVolumeApplied;
 
   void emitBuffer(Duration value) => bufferController.add(value);
 
@@ -88,8 +94,18 @@ class _PlatformPlayer extends PlatformPlayer {
       failNextVolume = false;
       throw StateError('volume unavailable');
     }
-    state = state.copyWith(volume: volume);
-    volumeController.add(volume);
+    appliedVolume = volume;
+    if (publishVolumeState) {
+      state = state.copyWith(volume: volume);
+      volumeController.add(volume);
+    }
+    onVolumeApplied?.call();
+  }
+
+  @override
+  Future<void> setAudioTrack(AudioTrack track) async {
+    audioTracks.add(track);
+    throw UnsupportedError('Audio track selection is unavailable');
   }
 
   @override
@@ -192,6 +208,7 @@ class _PlaybackHarness {
 class _PendingCatalogRepository extends VodRepository {
   int catalogRequests = 0;
   final catalog = Completer<List<VodLesson>>();
+  Future<List<VodLesson>>? refreshCatalog;
   final playback = Completer<VodPlayback>();
   final requested = <VodLesson>[];
 
@@ -199,7 +216,7 @@ class _PendingCatalogRepository extends VodRepository {
   Future<List<VodLesson>> loadCourseLessons(VodCourse course,
       {bool forceRefresh = false}) {
     catalogRequests++;
-    return catalog.future;
+    return forceRefresh ? refreshCatalog ?? catalog.future : catalog.future;
   }
 
   @override
@@ -357,13 +374,13 @@ void main() {
         .widget<Text>(find.byKey(const ValueKey('recording-fullscreen-title')));
     expect(title.data, course.name);
     expect(title.style!.fontWeight, FontWeight.w600);
-    expect(find.text('第6周 周四 · 第5节 · 13:00-13:45'), findsOneWidget);
+    expect(find.text('第6周 周四 · 第5节 (13:00-13:45)'), findsOneWidget);
     await tester.pumpWidget(controlPage(
         player: player,
         state: _VideoState(fullscreen: true),
         lessons: [lesson, first],
         selectedId: first.id));
-    expect(find.text('周一 · 08:00'), findsOneWidget);
+    expect(find.text('周一 (08:00)'), findsOneWidget);
     expect(find.textContaining('第6周'), findsNothing);
     expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox.shrink());
@@ -492,8 +509,8 @@ void main() {
       final expand =
           tester.getRect(find.byTooltip(fullscreen ? '退出全屏' : '全屏').last);
       expect(play.right, lessThanOrEqualTo(time.left));
-      expect(time.left - play.right, 4);
-      expect(previous.left - time.right, 4);
+      expect(time.left - play.right, 0);
+      expect(previous.left - time.right, 0);
       expect(time.right, lessThanOrEqualTo(previous.left));
       expect(previous.right, lessThanOrEqualTo(next.left));
       final episodes = fullscreen ? tester.getRect(find.byTooltip('选集')) : null;
@@ -512,7 +529,7 @@ void main() {
         if (episodes != null) episodes,
         expand
       ]) {
-        expect(button.height, 34);
+        expect(button.height, button == play ? 34 : 30);
         expect(button.center.dy, row.center.dy);
       }
       expect(row.bottom, tester.view.physicalSize.height - 12);
@@ -738,8 +755,14 @@ void main() {
           find.byKey(const ValueKey('recording-fullscreen-episode-panel'));
       final colors = tester.element(panel).shuyoColors;
       expect(tester.widget<Material>(panel).color, colors.surface);
-      final heading = find.descendant(of: panel, matching: find.text('剧集'));
+      final separator = tester.widget<Divider>(
+          find.descendant(of: panel, matching: find.byType(Divider)));
+      expect(separator.indent, 16);
+      expect(separator.endIndent, 16);
+      final heading = find.descendant(of: panel, matching: find.text('选集'));
       expect(tester.widget<Text>(heading).style!.color, colors.textPrimary);
+      expect(tester.widget<Text>(heading).style!.fontWeight, FontWeight.w600);
+      expect(find.text('剧集'), findsNothing);
       final glyph = find.descendant(
           of: panel, matching: find.byType(RecordingEpisodeSortIcon));
       final glyphText = tester.widgetList<Text>(
@@ -991,6 +1014,13 @@ void main() {
       final videoState = tester.state(find.byType(Video));
       final host = tester.widget<Video>(find.byType(Video)).controller;
       final platforms = harness.platforms;
+      tester
+          .widget<RecordingVideoControls>(find.byType(RecordingVideoControls))
+          .onSwapViews!();
+      await tester.pumpAndSettle();
+      final swappedControls = tester
+          .widget<RecordingVideoControls>(find.byType(RecordingVideoControls));
+      expect(swappedControls.selectedView, 1);
       final pauses = platforms.map((player) => player.pauses).toList();
       final header = find.byKey(const ValueKey('recording-player-header'));
       final list = find.byKey(const ValueKey('course-player-episodes'));
@@ -1000,7 +1030,7 @@ void main() {
       await tester.pumpAndSettle();
       expect(tester.getSize(header).height, closeTo(393 * 9 / 16, .01));
       expect(platforms.map((player) => player.pauses), pauses);
-      await platforms.first.pause();
+      await (swappedControls.timelinePlayer ?? swappedControls.player).pause();
       await tester.pumpAndSettle();
       await tester.drag(list, const Offset(0, -300));
       await tester.pumpAndSettle();
@@ -1109,7 +1139,16 @@ void main() {
     await tester.pumpAndSettle();
     final list = find.byKey(const ValueKey('course-player-episodes'));
     final toolbar = find.byKey(const ValueKey('recording-episode-header'));
-    expect(find.text('剧集'), findsOneWidget);
+    expect(find.text('选集'), findsOneWidget);
+    final separators = tester
+        .widgetList<Divider>(
+            find.descendant(of: list, matching: find.byType(Divider)))
+        .toList();
+    expect(separators, hasLength(lessons.length - 1));
+    for (final separator in separators) {
+      expect(separator.indent, 16);
+      expect(separator.endIndent, 16);
+    }
     expect(
         find.descendant(
             of: find.byKey(const ValueKey('recording-lesson-229')),
@@ -1333,6 +1372,8 @@ void main() {
     final repository = _PendingCatalogRepository();
     repository.catalog.complete([first, second]);
     repository.playback.complete(playback(first));
+    final refresh = Completer<List<VodLesson>>();
+    repository.refreshCatalog = refresh.future;
     final harness = _PlaybackHarness();
     await tester.pumpWidget(MaterialApp(
       home: RecordingPlayerPage(
@@ -1347,8 +1388,22 @@ void main() {
     expect(repository.catalogRequests, 1);
     await tester.drag(find.byKey(const ValueKey('course-player-episodes')),
         const Offset(0, 400));
-    await tester.pumpAndSettle();
+    for (var frame = 0; frame < 20 && repository.catalogRequests < 2; frame++) {
+      await tester.pump(const Duration(milliseconds: 100));
+    }
+    await tester.pump();
     expect(repository.catalogRequests, 2);
+    final progress = find.byKey(const ValueKey('recording-catalog-progress'));
+    expect(progress, findsNothing);
+    expect(find.byType(RefreshProgressIndicator), findsOneWidget);
+    await tester
+        .widget<RefreshIndicator>(find.byType(RefreshIndicator))
+        .onRefresh();
+    expect(repository.catalogRequests, 2);
+    refresh.complete([first, second]);
+    await tester.pumpAndSettle();
+    expect(progress, findsNothing);
+    expect(find.byType(RefreshProgressIndicator), findsNothing);
     expect(repository.requested, hasLength(1));
     expect(
         harness.platforms.every((player) => player.opened.length == 1), isTrue);
@@ -1453,6 +1508,12 @@ void main() {
       final seeks = [classroom.seeks.length, ppt.seeks.length];
       final floating = find.byKey(const ValueKey('recording-secondary-view'));
       expect(floating, findsOneWidget);
+      expect(
+          tester
+              .widget<ColoredBox>(find.descendant(
+                  of: floating, matching: find.byType(ColoredBox)))
+              .color,
+          Colors.transparent);
       expect(find.descendant(of: floating, matching: find.byType(IconButton)),
           findsNothing);
       await tester.tap(floating);
@@ -1472,12 +1533,12 @@ void main() {
       if (!live) {
         await tester.tap(find.byTooltip('播放'));
         await tester.pump(const Duration(milliseconds: 350));
-        expect([classroom.toggles, ppt.toggles], [1, 1]);
+        expect([classroom.toggles, ppt.toggles], [2, 0]);
         expect(classroom.state.playing, isTrue);
         expect(ppt.state.playing, isTrue);
         await tester.tap(find.byTooltip('暂停'));
         await tester.pump(const Duration(milliseconds: 350));
-        expect([classroom.toggles, ppt.toggles], [1, 2]);
+        expect([classroom.toggles, ppt.toggles], [3, 0]);
         expect(classroom.state.playing, isFalse);
         expect(ppt.state.playing, isFalse);
         await tester.tap(find.byTooltip('播放速度'));
@@ -1571,7 +1632,7 @@ void main() {
           .map((texture) => texture.textureId)
           .toList()
         ..sort();
-      expect(textures, [1, 2]);
+      expect(textures, [1, 1, 2]);
       var controls = tester
           .widget<RecordingVideoControls>(find.byType(RecordingVideoControls));
       classroom.state =
@@ -1684,7 +1745,7 @@ void main() {
     await tester.pumpWidget(const SizedBox.shrink());
   });
 
-  testWidgets('sustained drift is corrected once with a cooldown',
+  testWidgets('sustained drift never starts an automatic seek on either stream',
       (tester) async {
     final harness = _PlaybackHarness();
     await tester.pumpWidget(
@@ -1703,22 +1764,23 @@ void main() {
     expect(ppt.seeks, isEmpty);
     await tester.pump(const Duration(milliseconds: 1));
     await tester.pump();
-    expect(ppt.seeks, [const Duration(seconds: 10)]);
+    expect(ppt.seeks, isEmpty);
     classroom.emitPosition(const Duration(seconds: 20));
     await tester.pump();
     await tester.pump(const Duration(seconds: 2));
-    expect(ppt.seeks, [const Duration(seconds: 10)]);
+    expect(ppt.seeks, isEmpty);
     await tester.pump(const Duration(seconds: 1));
     await tester.pump(const Duration(milliseconds: 800));
     await tester.pump();
-    expect(
-        ppt.seeks, [const Duration(seconds: 10), const Duration(seconds: 20)]);
+    expect(ppt.seeks, isEmpty);
+    expect(classroom.seeks, isEmpty);
     expect(classroom.state.playing, isTrue);
     expect(ppt.state.playing, isTrue);
     await tester.pumpWidget(const SizedBox.shrink());
   });
 
-  testWidgets('volume failure keeps the original view and audio',
+  testWidgets(
+      'a transient volume failure retries audio without undoing the view',
       (tester) async {
     final harness = _PlaybackHarness();
     await tester.pumpWidget(
@@ -1734,9 +1796,9 @@ void main() {
     await tester.pump();
     final updated = tester
         .widget<RecordingVideoControls>(find.byType(RecordingVideoControls));
-    expect(updated.selectedView, 0);
-    expect(classroom.state.volume, 100);
-    expect(ppt.state.volume, 0);
+    expect(updated.selectedView, 1);
+    expect(classroom.state.volume, 0);
+    expect(ppt.state.volume, 100);
     expect(classroom.state.playing, isTrue);
     expect(ppt.state.playing, isTrue);
     expect(find.text('视频暂时无法播放，可刷新播放地址后重试。'), findsNothing);
@@ -1784,7 +1846,6 @@ void main() {
     await tester.pump();
     expect(ppt.seeks, [const Duration(seconds: 50)]);
     expect(classroom.seeks, [const Duration(seconds: 50)]);
-
     await controls.onSeek!(const Duration(seconds: 70));
     classroom.emitPosition(const Duration(seconds: 50));
     ppt.emitPosition(const Duration(seconds: 50));
@@ -1807,7 +1868,6 @@ void main() {
     expect(ppt.seeks, [
       const Duration(seconds: 50),
       const Duration(seconds: 70),
-      const Duration(seconds: 72),
     ]);
     expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox.shrink());
@@ -1853,21 +1913,93 @@ void main() {
     await tester.pump(const Duration(milliseconds: 800));
     await tester.pump();
     expect(ppt.seeks, [const Duration(seconds: 50)]);
-    expect(classroom.seeks,
-        [const Duration(seconds: 50), const Duration(seconds: 50)]);
+    expect(classroom.seeks, [const Duration(seconds: 50)]);
+    expect(
+        identical(
+            tester
+                .widget<RecordingVideoControls>(
+                    find.byType(RecordingVideoControls))
+                .timelinePlayer!
+                .platform,
+            ppt),
+        isTrue);
     expect(classroom.opened, hasLength(1));
     expect(ppt.opened, hasLength(1));
     expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox.shrink());
   });
 
-  testWidgets('swaps do not wait for an in-flight alignment or reopen streams',
+  testWidgets('a failed muted timeline falls back to the healthy main player',
       (tester) async {
-    const channel = MethodChannel('com.alexmercerind/media_kit_video');
-    tester.binding.defaultBinaryMessenger
-        .setMockMethodCallHandler(channel, (_) async => null);
-    addTearDown(() => tester.binding.defaultBinaryMessenger
-        .setMockMethodCallHandler(channel, null));
+    final harness = _PlaybackHarness();
+    await tester.pumpWidget(
+        page(harness: harness, load: (lesson) async => playback(lesson)));
+    await tester.pumpAndSettle();
+    final classroom = harness.platforms[0];
+    final ppt = harness.platforms[1];
+    var controls = tester
+        .widget<RecordingVideoControls>(find.byType(RecordingVideoControls));
+    controls.onSwapViews!();
+    await tester.pumpAndSettle();
+    classroom.emitError('old timeline failed');
+    await tester.pumpAndSettle();
+
+    controls = tester
+        .widget<RecordingVideoControls>(find.byType(RecordingVideoControls));
+    expect(controls.selectedView, 1);
+    expect(identical(controls.timelinePlayer!.platform, ppt), isTrue);
+    ppt.emitPosition(const Duration(seconds: 40));
+    await tester.pump();
+    await tester.pump();
+    expect(tester.widget<Slider>(find.byType(Slider)).value, 40000);
+    await tester.tap(find.byTooltip('暂停'));
+    await tester.pumpAndSettle();
+    expect(ppt.state.playing, isFalse);
+    expect(classroom.opened, hasLength(1));
+    expect(ppt.opened, hasLength(1));
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('unsupported audio selection does not block opening or view swaps',
+      (tester) async {
+    final harness = _PlaybackHarness();
+    var loads = 0;
+    await tester.pumpWidget(page(
+        harness: harness,
+        load: (lesson) async {
+          loads++;
+          return playback(lesson);
+        }));
+    await tester.pumpAndSettle();
+
+    expect(harness.platforms, hasLength(2));
+    expect(harness.platforms.map((player) => player.audioTracks),
+        everyElement(isEmpty));
+    expect(harness.platforms.map((player) => player.state.track.audio.id),
+        ['auto', 'auto']);
+    expect(harness.platforms.every((player) => player.state.playing), isTrue);
+    var controls = tester.widget<RecordingVideoControls>(
+        find.byType(RecordingVideoControls));
+    for (var index = 0; index < 3; index++) {
+      controls.onSwapViews!();
+      await tester.pumpAndSettle();
+      controls = tester.widget<RecordingVideoControls>(
+          find.byType(RecordingVideoControls));
+      expect(controls.selectedView, (index + 1) % 2);
+    }
+
+    expect(harness.platforms.map((player) => player.opened.length), [1, 1]);
+    expect(harness.platforms.map((player) => player.audioTracks),
+        everyElement(isEmpty));
+    expect(harness.platforms.map((player) => player.appliedVolume), [0, 100]);
+    expect(loads, 1);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('100 immediate swaps preserve transport and delayed commands',
+      (tester) async {
     final harness = _PlaybackHarness();
     var loads = 0;
     await tester.pumpWidget(page(
@@ -1879,16 +2011,302 @@ void main() {
     await tester.pumpAndSettle();
     final classroom = harness.platforms[0];
     final ppt = harness.platforms[1];
-    await classroom.pause();
-    await tester.pumpAndSettle();
+    classroom.emitPosition(const Duration(seconds: 30));
+    ppt.emitPosition(const Duration(seconds: 20));
+    await classroom.setVolume(37);
+    await tester.pump();
+    final plays = harness.platforms.map((player) => player.plays).toList();
+    final pauses = harness.platforms.map((player) => player.pauses).toList();
     classroom.seeks.clear();
     ppt.seeks.clear();
-    ppt.state = ppt.state.copyWith(position: const Duration(seconds: 8));
-    final pendingSeek = Completer<void>();
-    ppt.seekGate = pendingSeek;
-    classroom.emitPosition(const Duration(seconds: 10));
+    final surfaceElements = <VideoController, Element>{
+      for (final controller in harness.controllers)
+        controller: tester.element(find.byWidgetPredicate((widget) =>
+            widget is RecordingSecondaryVideo &&
+            identical(widget.controller, controller))),
+    };
+    final audibleCounts = <int>[];
+    void checkExclusiveAudio() {
+      audibleCounts.add(
+          harness.platforms.where((player) => player.appliedVolume > 0).length);
+    }
+
+    classroom.onVolumeApplied = checkExclusiveAudio;
+    ppt.onVolumeApplied = checkExclusiveAudio;
+    checkExclusiveAudio();
+    final volumeGate = Completer<void>();
+    final seekGate = Completer<void>();
+    classroom.volumeGate = volumeGate;
+    ppt.volumeGate = volumeGate;
+    classroom.seekGate = seekGate;
+    ppt.seekGate = seekGate;
+    var controls = tester
+        .widget<RecordingVideoControls>(find.byType(RecordingVideoControls));
+    final pendingSeek = controls.onSeek!(const Duration(seconds: 60));
+
+    for (var index = 0; index < 100; index++) {
+      controls.onSwapViews!();
+      await tester.pump();
+      controls = tester
+          .widget<RecordingVideoControls>(find.byType(RecordingVideoControls));
+      expect(controls.selectedView, (index + 1) % 2);
+      expect(identical(controls.timelinePlayer!.platform, classroom), isTrue);
+      expect(tester.widget<Slider>(find.byType(Slider)).value, 30000);
+      for (final controller in harness.controllers) {
+        expect(
+            tester.element(find.byWidgetPredicate((widget) =>
+                widget is RecordingSecondaryVideo &&
+                identical(widget.controller, controller))),
+            same(surfaceElements[controller]));
+      }
+    }
+    expect(classroom.seeks, [const Duration(seconds: 60)]);
+    expect(ppt.seeks, [const Duration(seconds: 60)]);
+    expect(harness.platforms.map((player) => player.plays), plays);
+    expect(harness.platforms.map((player) => player.pauses), pauses);
+    expect(harness.platforms.map((player) => player.opened.length), [1, 1]);
+    expect(harness.platforms.map((player) => player.audioTracks),
+        everyElement(isEmpty));
+    expect(loads, 1);
+
+    volumeGate.complete();
+    classroom.volumeGate = null;
+    ppt.volumeGate = null;
     await tester.pump();
-    expect(ppt.seeks, [const Duration(seconds: 10)]);
+    await tester.pump();
+    seekGate.complete();
+    classroom.seekGate = null;
+    ppt.seekGate = null;
+    await pendingSeek;
+    await tester.pumpAndSettle();
+
+    expect(classroom.appliedVolume, 37);
+    expect(ppt.appliedVolume, 0);
+    expect(tester.widget<Slider>(find.byType(Slider)).value, 60000);
+    expect(audibleCounts, everyElement(lessThanOrEqualTo(1)));
+    expect(harness.platforms.map((player) => player.plays), plays);
+    expect(harness.platforms.map((player) => player.pauses), pauses);
+    expect(harness.platforms.map((player) => player.opened.length), [1, 1]);
+    expect(classroom.seeks, [const Duration(seconds: 60)]);
+    expect(ppt.seeks, [const Duration(seconds: 60)]);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('stale unmute and stale volume state cannot reclaim audio roles',
+      (tester) async {
+    final harness = _PlaybackHarness();
+    await tester.pumpWidget(
+        page(harness: harness, load: (lesson) async => playback(lesson)));
+    await tester.pumpAndSettle();
+    final classroom = harness.platforms[0];
+    final ppt = harness.platforms[1];
+    await classroom.setVolume(37);
+    classroom.publishVolumeState = false;
+    ppt.publishVolumeState = false;
+    final audibleCounts = <int>[];
+    void checkExclusiveAudio() {
+      audibleCounts.add(
+          harness.platforms.where((player) => player.appliedVolume > 0).length);
+    }
+
+    classroom.onVolumeApplied = checkExclusiveAudio;
+    ppt.onVolumeApplied = checkExclusiveAudio;
+    checkExclusiveAudio();
+    final gate = Completer<void>();
+    ppt.volumeGate = gate;
+    var controls = tester
+        .widget<RecordingVideoControls>(find.byType(RecordingVideoControls));
+    controls.onSwapViews!();
+    await tester.pump();
+    expect(ppt.volumes.last, 37);
+
+    for (var index = 0; index < 99; index++) {
+      controls.onSwapViews!();
+      await tester.pump();
+      controls = tester
+          .widget<RecordingVideoControls>(find.byType(RecordingVideoControls));
+    }
+    expect(controls.selectedView, 0);
+    gate.complete();
+    ppt.volumeGate = null;
+    await tester.pumpAndSettle();
+    expect(classroom.appliedVolume, 37);
+    expect(ppt.appliedVolume, 0);
+
+    controls.onSwapViews!();
+    await tester.pumpAndSettle();
+    controls = tester
+        .widget<RecordingVideoControls>(find.byType(RecordingVideoControls));
+    expect(controls.selectedView, 1);
+    expect(ppt.state.volume, 0);
+    expect(ppt.appliedVolume, 37);
+    controls.onSwapViews!();
+    await tester.pumpAndSettle();
+    expect(classroom.appliedVolume, 37);
+    expect(ppt.appliedVolume, 0);
+    expect(audibleCounts, everyElement(lessThanOrEqualTo(1)));
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets(
+      'initial warm alignment settles before a pending view is promoted',
+      (tester) async {
+    final secondaryOpen = Completer<void>();
+    final secondaryFrame = Completer<void>();
+    final harness = _PlaybackHarness(
+        secondaryOpen: secondaryOpen, secondaryFrame: secondaryFrame);
+    await tester.pumpWidget(
+        page(harness: harness, load: (lesson) async => playback(lesson)));
+    await tester.pump();
+    await tester.pump();
+    final classroom = harness.platforms[0];
+    final ppt = harness.platforms[1];
+    classroom.emitPosition(const Duration(seconds: 3));
+    final seekGate = Completer<void>();
+    ppt.seekGate = seekGate;
+    ppt.publishSeekPosition = false;
+    var controls = tester
+        .widget<RecordingVideoControls>(find.byType(RecordingVideoControls));
+    controls.onSwapViews!();
+    secondaryOpen.complete();
+    await tester.pump();
+    await tester.pump();
+    classroom.emitPosition(const Duration(seconds: 6));
+    secondaryFrame.complete();
+    await tester.pump();
+    await tester.pump();
+
+    controls = tester
+        .widget<RecordingVideoControls>(find.byType(RecordingVideoControls));
+    expect(controls.selectedView, 0);
+    expect(ppt.seeks, [const Duration(seconds: 6)]);
+    expect(ppt.appliedVolume, 0);
+    seekGate.complete();
+    ppt.seekGate = null;
+    await tester.pump();
+    await tester.pump();
+    expect(
+        tester
+            .widget<RecordingVideoControls>(find.byType(RecordingVideoControls))
+            .selectedView,
+        0);
+
+    ppt.emitPosition(const Duration(seconds: 6));
+    await tester.pump();
+    await tester.pump();
+    await tester.pumpAndSettle();
+    controls = tester
+        .widget<RecordingVideoControls>(find.byType(RecordingVideoControls));
+    expect(controls.selectedView, 1);
+    expect(ppt.appliedVolume, 100);
+    expect(classroom.appliedVolume, 0);
+    expect(ppt.state.position, classroom.state.position);
+    classroom.emitPosition(const Duration(seconds: 10));
+    await tester.pump(const Duration(seconds: 3));
+    await tester.pump();
+    expect(ppt.seeks, [const Duration(seconds: 6)]);
+    expect(classroom.seeks, isEmpty);
+    expect(classroom.opened, hasLength(1));
+    expect(ppt.opened, hasLength(1));
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('a manual seek during warming cannot promote its obsolete target',
+      (tester) async {
+    final frame = Completer<void>();
+    final harness = _PlaybackHarness(secondaryFrame: frame);
+    await tester.pumpWidget(
+        page(harness: harness, load: (lesson) async => playback(lesson)));
+    await tester.pump();
+    await tester.pump();
+    final classroom = harness.platforms[0];
+    final ppt = harness.platforms[1];
+    ppt.publishSeekPosition = false;
+    classroom.emitPosition(const Duration(seconds: 6));
+    var controls = tester
+        .widget<RecordingVideoControls>(find.byType(RecordingVideoControls));
+    controls.onSwapViews!();
+    frame.complete();
+    await tester.pump();
+    await tester.pump();
+    expect(ppt.seeks, [const Duration(seconds: 6)]);
+
+    await controls.onSeek!(const Duration(seconds: 60));
+    ppt.emitPosition(const Duration(seconds: 6));
+    await tester.pump();
+    await tester.pump();
+    expect(
+        ppt.seeks, [const Duration(seconds: 6), const Duration(seconds: 60)]);
+    expect(
+        tester
+            .widget<RecordingVideoControls>(find.byType(RecordingVideoControls))
+            .selectedView,
+        0);
+    expect(ppt.appliedVolume, 0);
+
+    ppt.emitPosition(const Duration(seconds: 60));
+    await tester.pump();
+    await tester.pumpAndSettle();
+    controls = tester
+        .widget<RecordingVideoControls>(find.byType(RecordingVideoControls));
+    expect(controls.selectedView, 1);
+    expect(ppt.state.position, classroom.state.position);
+    expect(tester.widget<Slider>(find.byType(Slider)).value, 60000);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('warm alignment times out without promoting an unconfirmed view',
+      (tester) async {
+    final frame = Completer<void>();
+    final harness = _PlaybackHarness(secondaryFrame: frame);
+    await tester.pumpWidget(
+        page(harness: harness, load: (lesson) async => playback(lesson)));
+    await tester.pump();
+    await tester.pump();
+    final classroom = harness.platforms[0];
+    final ppt = harness.platforms[1];
+    ppt.publishSeekPosition = false;
+    classroom.emitPosition(const Duration(seconds: 6));
+    tester
+        .widget<RecordingVideoControls>(find.byType(RecordingVideoControls))
+        .onSwapViews!();
+    frame.complete();
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 8));
+    await tester.pumpAndSettle();
+
+    expect(
+        tester
+            .widget<RecordingVideoControls>(find.byType(RecordingVideoControls))
+            .selectedView,
+        0);
+    expect(ppt.appliedVolume, 0);
+    expect(ppt.seeks, [const Duration(seconds: 6)]);
+    expect(classroom.state.playing, isTrue);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('changing lessons during a delayed mute restores desired audio',
+      (tester) async {
+    final harness = _PlaybackHarness();
+    var loads = 0;
+    await tester.pumpWidget(page(
+        harness: harness,
+        load: (lesson) async {
+          loads++;
+          return playback(lesson);
+        }));
+    await tester.pumpAndSettle();
+    final classroom = harness.platforms[0];
+    final ppt = harness.platforms[1];
+    await classroom.setVolume(37);
+    final mute = Completer<void>();
+    classroom.volumeGate = mute;
     var controls = tester
         .widget<RecordingVideoControls>(find.byType(RecordingVideoControls));
     controls.onSwapViews!();
@@ -1896,41 +2314,25 @@ void main() {
     controls = tester
         .widget<RecordingVideoControls>(find.byType(RecordingVideoControls));
     expect(controls.selectedView, 1);
-    ppt.emitBuffering(true);
-    pendingSeek.complete();
-    ppt.seekGate = null;
+    controls.onLessonSelected!(second);
+    await tester.pump();
+    await tester.pump();
+    mute.complete();
+    classroom.volumeGate = null;
     await tester.pumpAndSettle();
+
     controls = tester
         .widget<RecordingVideoControls>(find.byType(RecordingVideoControls));
-    expect(controls.selectedView, 1);
-    ppt.emitBuffering(false);
-    await tester.pumpAndSettle();
-    controls = tester
-        .widget<RecordingVideoControls>(find.byType(RecordingVideoControls));
-    expect(controls.selectedView, 1);
-    expect(identical(controls.player.platform, ppt), isTrue);
-    expect(ppt.state.position, const Duration(seconds: 10));
-    expect(classroom.seeks, isEmpty);
-    classroom.emitPosition(const Duration(seconds: 11));
-    await tester.pumpAndSettle();
-    expect(classroom.state.position, const Duration(seconds: 11));
-    expect(ppt.state.position, const Duration(seconds: 11));
-    expect(classroom.seeks, isEmpty);
+    expect(controls.selectedLessonId, second.id);
+    expect(controls.player.state.volume, 37);
     expect(
-        ppt.seeks, [const Duration(seconds: 10), const Duration(seconds: 11)]);
-    classroom.emitPosition(const Duration(milliseconds: 11400));
-    await tester.pumpAndSettle();
-    expect(ppt.state.position, const Duration(milliseconds: 11400));
-    final seeks = [classroom.seeks.length, ppt.seeks.length];
-    controls.onSwapViews!();
-    await tester.pumpAndSettle();
-    expect([classroom.seeks.length, ppt.seeks.length], seeks);
-    expect(classroom.state.playing, isFalse);
-    expect(ppt.state.playing, isFalse);
-    expect(loads, 1);
+        harness.platforms.map((player) => player.appliedVolume).toList()
+          ..sort(),
+        [0, 37]);
     expect(harness.platforms, hasLength(2));
-    expect(classroom.opened, hasLength(1));
-    expect(ppt.opened, hasLength(1));
+    expect(classroom.opened, hasLength(2));
+    expect(ppt.opened, hasLength(2));
+    expect(loads, 2);
     expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox.shrink());
   });
@@ -2048,8 +2450,25 @@ void main() {
     await tester.pump();
     expect(repository.catalog.isCompleted, isFalse);
     expect(repository.requested.map((lesson) => lesson.id), [106]);
+    final progress = find.byKey(const ValueKey('recording-catalog-progress'));
+    final banner = find.byKey(const ValueKey('recording-course-banner'));
+    expect(progress, findsOneWidget);
+    expect(tester.getBottomLeft(progress).dy,
+        lessThanOrEqualTo(tester.getTopLeft(banner).dy));
+    await tester.drag(find.byKey(const ValueKey('course-player-episodes')),
+        const Offset(0, 400));
+    await tester.pump(const Duration(milliseconds: 400));
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(repository.catalogRequests, 1);
+    expect(progress, findsOneWidget);
+    expect(find.byType(RefreshProgressIndicator), findsNothing);
+    await tester
+        .widget<RefreshIndicator>(find.byType(RefreshIndicator))
+        .onRefresh();
+    expect(repository.catalogRequests, 1);
     repository.catalog.complete([live, first]);
     await tester.pump();
+    expect(progress, findsNothing);
     expect(repository.requested, hasLength(1));
     await tester.pumpWidget(const SizedBox.shrink());
     repository.playback.completeError(const VodNetworkException());
@@ -2059,19 +2478,23 @@ void main() {
 
   testWidgets('course heading enlarges title and omits classroom metadata',
       (tester) async {
-    const classroomOne = VodLesson(
+    final classroomOne = VodLesson(
       id: 201,
       teachingClassId: 10,
       name: '第一节',
       isPlayable: true,
       classroom: ' A101 ',
+      beginTime: DateTime(2026, 10, 27),
+      sectionLabel: '第1节',
     );
-    const classroomTwo = VodLesson(
+    final classroomTwo = VodLesson(
       id: 202,
       teachingClassId: 10,
       name: '第二节',
       isPlayable: true,
       classroom: 'B202',
+      beginTime: DateTime(2026, 10, 29),
+      sectionLabel: '第3节',
     );
     const repeatedClassroom = VodLesson(
       id: 203,
@@ -2114,6 +2537,43 @@ void main() {
     expect(tester.widget<Text>(code).style!.fontSize, 14);
     expect(find.text('A101/B202'), findsNothing);
     final banner = find.byKey(const ValueKey('recording-course-banner'));
+    final overview = find.descendant(
+        of: banner, matching: find.byType(RecordingCourseOverview));
+    expect(overview, findsOneWidget);
+    final overviewTitle = tester
+        .widget<Text>(find.descendant(of: overview, matching: find.text('概览')));
+    final classroomTitle = tester.widget<Text>(find.descendant(
+        of: find.byKey(const ValueKey('recording-classroom-filter')),
+        matching: find.text('教室')));
+    final episodeTitle = tester.widget<Text>(find.descendant(
+        of: find.byKey(const ValueKey('recording-episode-header')),
+        matching: find.text('选集')));
+    for (final heading in [overviewTitle, classroomTitle, episodeTitle]) {
+      expect(heading.style!.fontWeight, FontWeight.w600);
+      expect(heading.style!.fontSize, overviewTitle.style!.fontSize);
+    }
+    expect(find.text('剧集'), findsNothing);
+    expect(
+        tester
+            .widget<RecordingCourseOverview>(overview)
+            .days
+            .map((day) => day.weekday),
+        [2, 4]);
+    expect(
+        find.ancestor(
+            of: overview, matching: find.byType(SliverPersistentHeader)),
+        findsNothing);
+    final separators =
+        find.descendant(of: banner, matching: find.byType(Divider));
+    expect(separators, findsNWidgets(2));
+    expect(tester.getBottomLeft(separators.first).dy,
+        lessThanOrEqualTo(tester.getTopLeft(overview).dy));
+    expect(tester.getTopLeft(separators.last).dy,
+        greaterThanOrEqualTo(tester.getBottomLeft(overview).dy));
+    expect(
+        tester.getBottomLeft(banner).dy -
+            tester.getBottomLeft(separators.last).dy,
+        8);
     expect(find.descendant(of: banner, matching: find.textContaining('A101')),
         findsNothing);
     expect(find.textContaining('C303'), findsNothing);
@@ -2179,7 +2639,7 @@ void main() {
     await tester.pumpAndSettle();
     expect(repository.requested, isEmpty);
     expect(find.text('回放生成中，生成后可观看'), findsOneWidget);
-    expect(find.text('剧集'), findsOneWidget);
+    expect(find.text('选集'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 
@@ -2197,7 +2657,7 @@ void main() {
     expect(calls, 1);
     expect(find.text('当前账号没有这节录播的观看权限。'), findsOneWidget);
     expect(find.textContaining('private-value'), findsNothing);
-    expect(find.text('剧集'), findsOneWidget);
+    expect(find.text('选集'), findsOneWidget);
     await tester.scrollUntilVisible(
         find.byKey(const ValueKey('recording-lesson-103')), 100,
         scrollable: find.byType(Scrollable).last);

@@ -91,7 +91,7 @@ void main() {
       final unbuffered =
           find.byKey(const ValueKey('recording-compact-unbuffered'));
       expect(tester.getSize(track), Size(size.width, 3.5));
-      expect(tester.getRect(track).bottom, size.height - insets.bottom);
+      expect(tester.getRect(track).bottom, size.height);
       expect(tester.getSize(played).width, closeTo(size.width * .25, .01));
       expect(tester.getSize(buffered).width, closeTo(size.width * .75, .01));
       expect(tester.widget<ColoredBox>(played).color, primary);
