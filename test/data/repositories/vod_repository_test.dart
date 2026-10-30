@@ -25,12 +25,15 @@ class _FakeClient extends VodApiClient {
   Future<List<VodCourse>>? coursesFuture;
   Future<List<VodLesson>>? liveFuture;
   Future<List<VodLesson>>? lessonsFuture;
+  Future<VodPlayback>? playbackFuture;
   void Function(List<VodCourse>)? publishCourses;
   void Function(List<VodLesson>)? publishLive;
   int courseRequests = 0;
   int lessonRequests = 0;
   int liveRequests = 0;
   int playbackRequests = 0;
+  int livePlaybackRequests = 0;
+  VodLiveProtocol? lastLiveProtocol;
   List<VodLesson> liveLessons = [];
 
   @override
@@ -72,6 +75,8 @@ class _FakeClient extends VodApiClient {
     required VodLesson lesson,
   }) async {
     playbackRequests++;
+    final pending = playbackFuture;
+    if (pending != null) return await pending;
     return VodPlayback(
       lessonId: lesson.id,
       teachingClassId: course.teachingClassId,
@@ -81,6 +86,28 @@ class _FakeClient extends VodApiClient {
           viewNumber: 7,
           url: Uri.https(
               'media.example', '/clip.mp4', {'grant': '$playbackRequests'}),
+        ),
+      ],
+    );
+  }
+
+  @override
+  Future<VodPlayback> fetchLivePlayback({
+    required VodCourse course,
+    required VodLesson lesson,
+    VodLiveProtocol protocol = VodLiveProtocol.hls,
+  }) async {
+    livePlaybackRequests++;
+    lastLiveProtocol = protocol;
+    return VodPlayback(
+      lessonId: lesson.id,
+      teachingClassId: course.teachingClassId,
+      title: course.name,
+      isLive: true,
+      views: [
+        VodView(
+          viewNumber: 1,
+          url: Uri.https('media.example', '/live', {'protocol': protocol.name}),
         ),
       ],
     );
@@ -417,7 +444,82 @@ void main() {
     expect(client.lessonRequests, 0);
   });
 
-  test('arbitrary lesson IDs never reach the playback details endpoint',
+  test('playback uses the selected lesson without catalog permission preflight',
+      () async {
+    final client = _FakeClient(coursesFuture: Future.value([]))
+      ..lessonsFuture = Future.value([]);
+    final repository = VodRepository(apiClient: client);
+    addTearDown(repository.dispose);
+    final playback = await repository.preparePlayback(
+      course: _course,
+      lesson: const VodLesson(
+        id: 999,
+        teachingClassId: 42,
+        name: '所选课次',
+        isPlayable: true,
+      ),
+    );
+    expect(playback.lessonId, 999);
+    expect(client.playbackRequests, 1);
+    expect(client.courseRequests, 0);
+    expect(client.lessonRequests, 0);
+    expect(client.liveRequests, 0);
+  });
+
+  test(
+      'live playback uses its selected ID and protocol without a catalog reload',
+      () async {
+    final client = _FakeClient(coursesFuture: Future.value([]));
+    final repository = VodRepository(apiClient: client);
+    addTearDown(repository.dispose);
+    const lesson = VodLesson(
+      id: 999,
+      teachingClassId: 42,
+      name: '所选直播',
+      isPlayable: true,
+      isLive: true,
+    );
+    final playback = await repository.prepareLivePlaybackWithProtocol(
+      course: _course,
+      lesson: lesson,
+      protocol: VodLiveProtocol.flv,
+    );
+    expect(playback.lessonId, 999);
+    expect(playback.isLive, isTrue);
+    expect(client.livePlaybackRequests, 1);
+    expect(client.lastLiveProtocol, VodLiveProtocol.flv);
+    expect(client.courseRequests, 0);
+    expect(client.lessonRequests, 0);
+    expect(client.liveRequests, 0);
+  });
+
+  test('invalid course and lesson identities never reach the playback endpoint',
+      () async {
+    final client = _FakeClient();
+    final repository = VodRepository(apiClient: client);
+    addTearDown(repository.dispose);
+    for (final lesson in [
+      const VodLesson(
+          id: 0, teachingClassId: 42, name: '无效课次', isPlayable: true),
+      const VodLesson(
+          id: 123, teachingClassId: 999, name: '其他教学班', isPlayable: true),
+    ]) {
+      await expectLater(
+          repository.preparePlayback(course: _course, lesson: lesson),
+          throwsA(isA<VodInvalidResponseException>()));
+    }
+    await expectLater(
+      repository.preparePlayback(
+        course: const VodCourse(teachingClassId: 42, termId: 0, name: '无效学期'),
+        lesson: _lesson,
+      ),
+      throwsA(isA<VodInvalidResponseException>()),
+    );
+    expect(client.playbackRequests, 0);
+    expect(client.courseRequests, 0);
+  });
+
+  test('ungenerated lessons remain unavailable without requesting media',
       () async {
     final client = _FakeClient();
     final repository = VodRepository(apiClient: client);
@@ -426,18 +528,99 @@ void main() {
       repository.preparePlayback(
         course: _course,
         lesson: const VodLesson(
-          id: 999,
+          id: 123,
           teachingClassId: 42,
-          name: '其他课次',
-          isPlayable: true,
+          name: '回放生成中',
+          isPlayable: false,
+          isGenerating: true,
         ),
       ),
-      throwsA(isA<VodPermissionException>()),
+      throwsA(isA<VodApiException>()),
     );
     expect(client.playbackRequests, 0);
   });
 
-  test('subsequent playback requests obtain fresh permission and signed URLs',
+  test('a real playback rejection is not replaced by a local permission result',
+      () async {
+    final response = Completer<VodPlayback>();
+    final client = _FakeClient()..playbackFuture = response.future;
+    final repository = VodRepository(apiClient: client);
+    addTearDown(repository.dispose);
+    final pending =
+        repository.preparePlayback(course: _course, lesson: _lesson);
+    final rejected =
+        expectLater(pending, throwsA(isA<VodPermissionException>()));
+    response.completeError(const VodPermissionException());
+    await rejected;
+    expect(client.playbackRequests, 1);
+    expect(client.courseRequests, 0);
+    expect(client.lessonRequests, 0);
+  });
+
+  test('clearing the session rejects pending direct playback results',
+      () async {
+    final response = Completer<VodPlayback>();
+    final client = _FakeClient()..playbackFuture = response.future;
+    final repository = VodRepository(apiClient: client);
+    addTearDown(repository.dispose);
+    final pending =
+        repository.preparePlayback(course: _course, lesson: _lesson);
+    final rejected =
+        expectLater(pending, throwsA(isA<VodSessionExpiredException>()));
+    repository.clear();
+    response.complete(VodPlayback(
+      lessonId: _lesson.id,
+      teachingClassId: _course.teachingClassId,
+      title: _course.name,
+      views: [VodView(viewNumber: 1, url: Uri.https('media.example', '/clip'))],
+    ));
+    await rejected;
+    expect(client.playbackRequests, 1);
+  });
+
+  test('late old playback cannot remove a new same-lesson request after clear',
+      () async {
+    final oldResponse = Completer<VodPlayback>();
+    final newResponse = Completer<VodPlayback>();
+    final oldClient = _FakeClient()..playbackFuture = oldResponse.future;
+    final newClient = _FakeClient()..playbackFuture = newResponse.future;
+    final repository = VodRepository(
+      apiClient: oldClient,
+      clientFactory: () => newClient,
+    );
+    addTearDown(repository.dispose);
+    final oldPending =
+        repository.preparePlayback(course: _course, lesson: _lesson);
+    final rejected =
+        expectLater(oldPending, throwsA(isA<VodSessionExpiredException>()));
+    repository.clear();
+    final newPending =
+        repository.preparePlayback(course: _course, lesson: _lesson);
+    oldResponse.complete(VodPlayback(
+      lessonId: _lesson.id,
+      teachingClassId: _course.teachingClassId,
+      title: _course.name,
+      views: [VodView(viewNumber: 1, url: Uri.https('media.example', '/old'))],
+    ));
+    await rejected;
+    final joinedPending =
+        repository.preparePlayback(course: _course, lesson: _lesson);
+    expect(newClient.playbackRequests, 1);
+    final playback = VodPlayback(
+      lessonId: _lesson.id,
+      teachingClassId: _course.teachingClassId,
+      title: _course.name,
+      views: [VodView(viewNumber: 1, url: Uri.https('media.example', '/new'))],
+    );
+    newResponse.complete(playback);
+    expect(await newPending, same(playback));
+    expect(await joinedPending, same(playback));
+    expect(oldClient.playbackRequests, 1);
+    expect(newClient.playbackRequests, 1);
+  });
+
+  test(
+      'subsequent playback requests obtain fresh signed URLs without catalog gates',
       () async {
     final client = _FakeClient();
     final repository = VodRepository(apiClient: client);
@@ -448,7 +631,7 @@ void main() {
         await repository.preparePlayback(course: _course, lesson: _lesson);
     expect(first.views.single.url, isNot(second.views.single.url));
     expect(client.playbackRequests, 2);
-    expect(client.courseRequests, 1);
-    expect(client.lessonRequests, 1);
+    expect(client.courseRequests, 0);
+    expect(client.lessonRequests, 0);
   });
 }

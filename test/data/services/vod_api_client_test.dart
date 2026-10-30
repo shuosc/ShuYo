@@ -56,13 +56,6 @@ http.Response _response(Object? data) => http.Response(
       headers: {'content-type': 'application/json; charset=utf-8'},
     );
 
-Map<String, Object?> _permission() => {
-      'resourceList': [
-        {'sign': 'p2-video-page'},
-        {'sign': 'p2-video-playback-view'},
-      ],
-    };
-
 Map<String, Object?> _detail({
   int courseId = 123,
   int teachingClassId = 42,
@@ -243,40 +236,90 @@ void main() {
     expect(terms.first.startDate?.millisecondsSinceEpoch, 1789344000000);
   });
 
-  test('term catalog starts at the first term of 2025-2026', () async {
+  test('term catalog retains historical terms and its current-first ordering',
+      () async {
     final client = _client((request) async => http.Response(
         jsonEncode([
           {
-            'id': 99,
+            'id': 4,
             'acyeCode': '2024-2025',
             'acteTerm': 3,
             'currentTerm': true,
           },
           {'id': 98, 'acyeCode': '2023-2024', 'acteTerm': 1},
+          {'id': 97, 'acyeCode': '2024-2025', 'acteTerm': 4},
           {'id': 5, 'acyeCode': '2025-2026', 'acteTerm': 1},
           {'id': 6, 'acyeCode': '2025-2026', 'acteTerm': 2},
           {'id': 7, 'acyeCode': '2026-2027', 'acteTerm': 1},
           {'id': 8, 'acyeCode': '2025-2026', 'acteTerm': 0},
           {'id': 9, 'acteTerm': 1},
+          {'id': 10, 'acyeCode': 'unknown', 'acteTerm': 1},
+          {'id': 11, 'acyeCode': '2024-2025', 'acteTerm': -1},
+          {'id': 0, 'acyeCode': '2024-2025', 'acteTerm': 1},
+          {'id': -1, 'acyeCode': '2024-2025', 'acteTerm': 1},
         ]),
         200));
     addTearDown(client.dispose);
 
     final terms = await client.fetchTerms();
-    expect(terms.map((term) => term.id), [7, 6, 5]);
-    expect(terms.last.name, '2025-2026学年第1学期');
+    expect(terms.map((term) => term.id), [4, 98, 97, 7, 6, 5]);
+    expect(terms.first.name, '2024-2025学年第3学期');
+    expect(terms.first.isCurrent, isTrue);
+    expect(terms.singleWhere((term) => term.id == 97).termNumber, 4);
   });
 
-  test('term catalog is empty when all terms predate 2025-2026', () async {
+  test('a historical-only term catalog remains selectable including term four',
+      () async {
     final client = _client((request) async => http.Response(
         jsonEncode([
-          {'id': 4, 'acyeCode': '2024-2025', 'acteTerm': 3},
+          {'id': 4, 'acyeCode': '2024-2025', 'acteTerm': 4},
           {'id': 3, 'acyeCode': '2024-2025', 'acteTerm': 2},
         ]),
         200));
     addTearDown(client.dispose);
 
-    expect(await client.fetchTerms(), isEmpty);
+    final terms = await client.fetchTerms();
+    expect(terms.map((term) => term.id), [4, 3]);
+    expect(terms.map((term) => term.termNumber), [4, 2]);
+  });
+
+  test('historical courses use the selected server term ID on the ordinary API',
+      () async {
+    final requests = <Uri>[];
+    final client = _client((request) async {
+      requests.add(request.url);
+      expect(request.headers['jwt-token'], 'test-business-token');
+      if (request.url.path == '/v1/list/termYear') {
+        return http.Response(
+            jsonEncode([
+              {'id': 74, 'acyeCode': '2024-2025', 'acteTerm': 4},
+            ]),
+            200);
+      }
+      expect(request.url.path, '/v1/group_subject_vod_list/t-1');
+      final query = request.url.queryParameters;
+      expect(query['acteId'], '74');
+      expect(query.containsKey('isAdmin'), isFalse);
+      expect(query.containsKey('showAllVodCourse'), isFalse);
+      return _response({
+        'pageIndex': 1,
+        'pageCount': 1,
+        'rowCount': 1,
+        'records': [
+          {'teclId': 42, 'acteId': 74, 'subjName': '历史课程'},
+        ],
+      });
+    });
+    addTearDown(client.dispose);
+
+    final term = (await client.fetchTerms()).single;
+    final courses = await client.fetchCourses(termId: term.id);
+    expect(requests.map((uri) => uri.path),
+        ['/v1/list/termYear', '/v1/group_subject_vod_list/t-1']);
+    expect(term.termNumber, 4);
+    expect(courses.single.teachingClassId, 42);
+    expect(courses.single.termId, 74);
+    expect(courses.single.name, '历史课程');
   });
 
   test('ordinary class catalog follows all pages with no global flags',
@@ -368,9 +411,6 @@ void main() {
       'lesson list retains unavailable recordings but removes deleted and disabled entries',
       () async {
     final client = _client((request) async {
-      if (request.url.path.endsWith('/resources')) {
-        return _response(_permission());
-      }
       expect(request.url.path, '/v1/subject_vod_list_new');
       expect(request.url.queryParameters['teclIds'], '42');
       expect(request.url.queryParameters['schoolOpenStatusFlag'], 'false');
@@ -396,43 +436,84 @@ void main() {
     final lessons = await client.fetchLessons(_course);
     expect(lessons.map((lesson) => lesson.id), [1, 3, 5, 6]);
     expect(lessons.where((lesson) => lesson.canPlay).map((lesson) => lesson.id),
-        [1]);
+        [1, 3]);
     expect(lessons.first.beginTime?.hour, 8);
   });
 
-  test('viewer resource permission is required before listing lessons',
+  test(
+      'lesson listing requests the ordinary endpoint without permission preflight',
       () async {
     final requests = <String>[];
     final client = _client((request) async {
       requests.add(request.url.path);
-      return _response({'resourceList': []});
+      expect(request.url.path, '/v1/subject_vod_list_new');
+      expect(request.headers['jwt-token'], 'test-business-token');
+      return _response({'rowCount': 0, 'pageCount': 1, 'records': []});
     });
     addTearDown(client.dispose);
-    await expectLater(
-        client.fetchLessons(_course), throwsA(isA<VodPermissionException>()));
-    expect(requests, ['/v1/course-role-permission/teaching-class/resources']);
+    expect(await client.fetchLessons(_course), isEmpty);
+    expect(requests, ['/v1/subject_vod_list_new']);
   });
 
-  test('verify false stops before obtaining any media URL', () async {
+  test('playback directly accepts usable views despite a zero metadata ACL',
+      () async {
+    final requests = <http.Request>[];
+    final client = _client((request) async {
+      requests.add(request);
+      expect(request.url.path, '/v1/course_vod_urls_new');
+      expect(request.url.queryParameters, {'courseId': '123'});
+      expect(request.headers['jwt-token'], 'test-business-token');
+      return _response(_detail(permission: 0));
+    });
+    addTearDown(client.dispose);
+    final playback =
+        await client.fetchPlayback(course: _course, lesson: _lesson);
+    expect(playback.lessonId, 123);
+    expect(playback.views.single.url.host, 'media.example');
+    expect(requests.map((request) => request.url.path),
+        ['/v1/course_vod_urls_new']);
+  });
+
+  for (final refusal in ['http', 'status', 'code']) {
+    test('playback preserves a real $refusal 403 refusal', () async {
+      final requests = <String>[];
+      final client = _client((request) async {
+        requests.add(request.url.path);
+        expect(request.url.queryParameters, {'courseId': '123'});
+        return refusal == 'http'
+            ? http.Response('', 403)
+            : http.Response(jsonEncode({refusal: 403}), 200);
+      });
+      addTearDown(client.dispose);
+      await expectLater(
+        client.fetchPlayback(course: _course, lesson: _lesson),
+        throwsA(isA<VodPermissionException>()),
+      );
+      expect(requests, ['/v1/course_vod_urls_new']);
+    });
+  }
+
+  test('an unready recording does not request a playback URL', () async {
     final requests = <String>[];
     final client = _client((request) async {
       requests.add(request.url.path);
-      if (request.url.path.endsWith('/resources')) {
-        return _response(_permission());
-      }
-      expect(request.url.path, '/v1/course/verify');
-      expect(request.url.queryParameters['courId'], '123');
-      return _response({'verify': false});
+      return _response(_detail());
     });
     addTearDown(client.dispose);
     await expectLater(
-      client.fetchPlayback(course: _course, lesson: _lesson),
+      client.fetchPlayback(
+        course: _course,
+        lesson: const VodLesson(
+          id: 123,
+          teachingClassId: 42,
+          name: '回放生成中',
+          isPlayable: false,
+          isGenerating: true,
+        ),
+      ),
       throwsA(isA<VodPermissionException>()),
     );
-    expect(requests, [
-      '/v1/course-role-permission/teaching-class/resources',
-      '/v1/course/verify',
-    ]);
+    expect(requests, isEmpty);
   });
 
   test(
@@ -440,12 +521,7 @@ void main() {
       () async {
     final mediaTargets = <Uri>[];
     final client = _client((request) async {
-      if (request.url.path.endsWith('/resources')) {
-        return _response(_permission());
-      }
-      if (request.url.path.endsWith('/verify')) {
-        return _response({'verify': true});
-      }
+      expect(request.url.path, '/v1/course_vod_urls_new');
       expect(request.url.queryParameters['courseId'], '123');
       return _response(_detail());
     }, mediaHeadersLoader: (target) async {
@@ -468,29 +544,21 @@ void main() {
         {'Cookie': 'webvpn-token=test-gateway'});
   });
 
-  for (final mismatch in ['course', 'class', 'view', 'permission']) {
+  for (final mismatch in ['course', 'class', 'view']) {
     test('playback refuses $mismatch mismatch despite a returned URL',
         () async {
       final client = _client((request) async {
-        if (request.url.path.endsWith('/resources')) {
-          return _response(_permission());
-        }
-        if (request.url.path.endsWith('/verify')) {
-          return _response({'verify': true});
-        }
+        expect(request.url.path, '/v1/course_vod_urls_new');
         return _response(_detail(
           courseId: mismatch == 'course' ? 456 : 123,
           teachingClassId: mismatch == 'class' ? 43 : 42,
           viewCourseId: mismatch == 'view' ? 456 : 123,
-          permission: mismatch == 'permission' ? 0 : 1,
         ));
       });
       addTearDown(client.dispose);
       await expectLater(
         client.fetchPlayback(course: _course, lesson: _lesson),
-        throwsA(mismatch == 'permission'
-            ? isA<VodPermissionException>()
-            : isA<VodInvalidResponseException>()),
+        throwsA(isA<VodInvalidResponseException>()),
       );
     });
   }

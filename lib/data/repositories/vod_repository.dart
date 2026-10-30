@@ -240,16 +240,14 @@ class VodRepository {
     VodLiveProtocol protocol = VodLiveProtocol.hls,
   }) async {
     final generation = _generation;
-    await _requireCatalogCourse(course);
-    final lessons = lesson.isLive
-        ? await loadCourseLessons(course, forceRefresh: true)
-        : await loadLessons(course);
-    if (!lessons.any((candidate) =>
-        candidate.id == lesson.id &&
-        candidate.teachingClassId == course.teachingClassId &&
-        candidate.canPlay &&
-        candidate.isLive == lesson.isLive)) {
-      throw const VodPermissionException('这节课不在当前账号的可观看录播列表中');
+    if (course.teachingClassId <= 0 ||
+        course.termId <= 0 ||
+        lesson.id <= 0 ||
+        lesson.teachingClassId != course.teachingClassId) {
+      throw const VodInvalidResponseException('课次与所选教学班不一致，请刷新重试');
+    }
+    if (!lesson.canPlay) {
+      throw const VodApiException('这节课当前暂无可用的播放资源');
     }
     _checkGeneration(generation);
     // Coalesce a double tap, but never keep the resulting signed URLs.

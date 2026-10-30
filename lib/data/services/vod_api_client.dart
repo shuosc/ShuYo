@@ -104,9 +104,7 @@ class VodApiClient {
         .where((json) {
           final startYear = int.tryParse(
               stringValue(json['acyeCode']).trim().split('-').first);
-          return startYear != null &&
-              startYear >= 2025 &&
-              intValue(json['acteTerm']) >= 1;
+          return startYear != null && intValue(json['acteTerm']) >= 1;
         })
         .map(VodTerm.fromJson)
         .where((term) => term.id > 0)
@@ -150,7 +148,6 @@ class VodApiClient {
   }
 
   Future<List<VodLesson>> fetchLessons(VodCourse course) async {
-    await checkTeachingClassPermission(course.teachingClassId);
     final records = await _readAll(
       '/v1/subject_vod_list_new',
       {
@@ -178,26 +175,6 @@ class VodApiClient {
         return time == 0 ? a.id.compareTo(b.id) : time;
       });
     return List.unmodifiable(sorted);
-  }
-
-  Future<void> checkTeachingClassPermission(int teachingClassId,
-      {bool isLive = false}) async {
-    final result = _dataMap(await _get(
-      '/v1/course-role-permission/teaching-class/resources',
-      {'teclId': '$teachingClassId'},
-    ));
-    final resources = result['resourceList'];
-    if (resources is! List) throw const VodInvalidResponseException();
-    final signs = resources
-        .whereType<JsonMap>()
-        .map((resource) => resource['sign'])
-        .toSet();
-    if (isLive
-        ? !signs.contains('p2-live-page')
-        : !signs.contains('p2-video-page') ||
-            !signs.contains('p2-video-playback-view')) {
-      throw const VodPermissionException();
-    }
   }
 
   Future<List<VodLesson>> fetchLiveLessons({
@@ -247,10 +224,6 @@ class VodApiClient {
         lesson.teachingClassId != course.teachingClassId) {
       throw const VodPermissionException('这节课当前没有可观看的直播');
     }
-    await checkTeachingClassPermission(course.teachingClassId, isLive: true);
-    final verified =
-        _dataMap(await _get('/v1/course/verify', {'courId': '${lesson.id}'}));
-    if (verified['verify'] != true) throw const VodPermissionException();
     final response = await _get('/v1/course_vod_videoinfos', {
       'courseId': '${lesson.id}',
       'playType': switch (protocol) {
@@ -262,9 +235,6 @@ class VodApiClient {
     final data = _dataMap(response);
     debugPrint(
         'ShuYoVOD live detail: permission=${data['lvcrLiveStatus']}, views=${data['courseDeviceViewDtoList'] is List ? (data['courseDeviceViewDtoList'] as List).length : -1}, start=${data['liveStartTime'] != null}, end=${data['liveEndTime'] != null}');
-    if (intValue(data['lvcrLiveStatus'], -1) != 1) {
-      throw const VodPermissionException();
-    }
     if (intValue(data['id']) != lesson.id ||
         intValue(data['teclId']) != course.teachingClassId) {
       throw const VodInvalidResponseException('直播详情与所选课次不一致，请刷新重试');
@@ -429,19 +399,10 @@ class VodApiClient {
         lesson.teachingClassId != course.teachingClassId) {
       throw const VodPermissionException('这节课尚无可观看的录播');
     }
-    await checkTeachingClassPermission(course.teachingClassId);
-    final verified = _dataMap(await _get(
-      '/v1/course/verify',
-      {'courId': '${lesson.id}'},
-    ));
-    if (verified['verify'] != true) throw const VodPermissionException();
     final data = _dataMap(await _get(
       '/v1/course_vod_urls_new',
       {'courseId': '${lesson.id}'},
     ));
-    if (intValue(data['lvcrVodStatus'], -1) != 1) {
-      throw const VodPermissionException();
-    }
     if (intValue(data['id']) != lesson.id ||
         intValue(data['teclId']) != course.teachingClassId) {
       throw const VodInvalidResponseException('录播详情与所选课次不一致，请刷新重试');

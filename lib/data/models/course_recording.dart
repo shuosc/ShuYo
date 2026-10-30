@@ -38,12 +38,45 @@ class VodTerm {
       ? '其他学年'
       : '${academicYear.split('-').map((year) => year.length == 4 ? year.substring(2) : year).join('-')}学年';
 
-  String get seasonLabel => switch (termNumber) {
+  String get seasonLabel {
+    if (_usesHistoricalTerms) {
+      return switch (termNumber) {
         1 => '秋季学期',
-        2 => '春季学期',
-        3 => '夏季学期',
+        2 => '冬季学期',
+        3 => '春季学期',
+        4 => '夏季学期',
         _ => name,
       };
+    }
+    return switch (termNumber) {
+      1 => '秋季学期',
+      2 => '春季学期',
+      3 => '夏季学期',
+      _ => name,
+    };
+  }
+
+  int? get teachingWeekCount {
+    if (_academicYearStart == null) return null;
+    if (_usesHistoricalTerms) {
+      return switch (termNumber) {
+        1 || 2 || 3 => 10,
+        _ => null,
+      };
+    }
+    return switch (termNumber) {
+      1 || 2 => 16,
+      _ => null,
+    };
+  }
+
+  int? get _academicYearStart =>
+      int.tryParse(academicYear.trim().split('-').first);
+
+  bool get _usesHistoricalTerms {
+    final startYear = _academicYearStart;
+    return startYear != null && startYear < 2025;
+  }
 }
 
 /// One teaching class from the account's ordinary VOD catalog.
@@ -150,7 +183,6 @@ class VodLesson {
               intValue(json['vodStatusShow']) == 4),
       isPlayable: generated &&
           intValue(json['vodEnable'], -1) == 1 &&
-          intValue(json['vodClickEnable'], -1) == 1 &&
           intValue(json['vodDeleteStatus'], -1) == 0,
     );
   }

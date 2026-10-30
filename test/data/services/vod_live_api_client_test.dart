@@ -61,14 +61,6 @@ VodApiClient _client(Future<http.Response> Function(http.Request) handler) =>
 
 Future<http.Response> _authorized(
     http.Request request, Map<String, Object?> detail) async {
-  if (request.url.path.endsWith('/resources')) {
-    return _response({
-      'resourceList': [
-        {'sign': 'p2-live-page'}
-      ]
-    });
-  }
-  if (request.url.path.endsWith('/verify')) return _response({'verify': true});
   expect(request.url.path, '/v1/course_vod_videoinfos');
   expect(request.url.queryParameters, {'courseId': '123', 'playType': '3'});
   return _response(detail);
@@ -94,16 +86,6 @@ void main() {
       final client = VodApiClient(
         httpClient: MockClient((request) async {
           paths.add(request.url.path);
-          if (request.url.path.endsWith('/resources')) {
-            return _response({
-              'resourceList': [
-                {'sign': 'p2-live-page'}
-              ]
-            });
-          }
-          if (request.url.path.endsWith('/verify')) {
-            return _response({'verify': true});
-          }
           if (request.url.path.endsWith('/setting/stun')) {
             return _response({
               'stunConfig': {'ip': 'stun.example', 'port': 3478}
@@ -122,8 +104,6 @@ void main() {
       final playback = await client.fetchLivePlayback(
           course: _course, lesson: _lesson, protocol: VodLiveProtocol.webRtc);
       expect(paths, [
-        '/v1/course-role-permission/teaching-class/resources',
-        '/v1/course/verify',
         '/v1/course_vod_videoinfos',
         '/v1/setting/stun',
       ]);
@@ -153,17 +133,8 @@ void main() {
       }
     ];
     final client = _client((request) async {
-      if (request.url.path.endsWith('/resources')) {
-        return _response({
-          'resourceList': [
-            {'sign': 'p2-live-page'}
-          ]
-        });
-      }
-      if (request.url.path.endsWith('/verify')) {
-        return _response({'verify': true});
-      }
       if (request.url.path.endsWith('/setting/stun')) return _response({});
+      expect(request.url.path, '/v1/course_vod_videoinfos');
       return _response(detail);
     });
     addTearDown(client.dispose);
@@ -188,16 +159,7 @@ void main() {
       ];
       final client = VodApiClient(
         httpClient: MockClient((request) async {
-          if (request.url.path.endsWith('/resources')) {
-            return _response({
-              'resourceList': [
-                {'sign': 'p2-live-page'}
-              ]
-            });
-          }
-          if (request.url.path.endsWith('/verify')) {
-            return _response({'verify': true});
-          }
+          expect(request.url.path, '/v1/course_vod_videoinfos');
           expect(request.url.queryParameters['playType'], '2');
           return _response(detail);
         }),
@@ -272,8 +234,7 @@ void main() {
             .having((error) => error.message, 'message', contains('暂未提供'))));
   });
 
-  test(
-      'live HLS checks permissions, preserves signatures and excludes offline views',
+  test('live HLS directly preserves signatures and excludes offline views',
       () async {
     final paths = <String>[];
     final client = _client((request) {
@@ -283,11 +244,7 @@ void main() {
     addTearDown(client.dispose);
     final playback =
         await client.fetchLivePlayback(course: _course, lesson: _lesson);
-    expect(paths, [
-      '/v1/course-role-permission/teaching-class/resources',
-      '/v1/course/verify',
-      '/v1/course_vod_videoinfos'
-    ]);
+    expect(paths, ['/v1/course_vod_videoinfos']);
     expect(playback.isLive, isTrue);
     expect(playback.lastPosition, Duration.zero);
     expect(playback.views, hasLength(1));
@@ -298,36 +255,45 @@ void main() {
     expect(playback.views.single.label, '直播视角 1');
   });
 
-  test('a recording grant does not authorize live playback', () async {
+  test('live playback accepts usable views despite a zero metadata ACL',
+      () async {
     final paths = <String>[];
+    final detail = _detail()..['lvcrLiveStatus'] = 0;
     final client = _client((request) async {
       paths.add(request.url.path);
-      return _response({
-        'resourceList': [
-          {'sign': 'p2-video-page'},
-          {'sign': 'p2-video-playback-view'}
-        ]
-      });
+      expect(request.headers['jwt-token'], 'business-token');
+      return _authorized(request, detail);
     });
     addTearDown(client.dispose);
-    await expectLater(
-        client.fetchLivePlayback(course: _course, lesson: _lesson),
-        throwsA(isA<VodPermissionException>()));
-    expect(paths, ['/v1/course-role-permission/teaching-class/resources']);
+    final playback =
+        await client.fetchLivePlayback(course: _course, lesson: _lesson);
+    expect(playback.views, hasLength(1));
+    expect(paths, ['/v1/course_vod_videoinfos']);
   });
 
-  for (final scenario in [
-    'permission',
-    'mismatch',
-    'ended',
-    'notStarted',
-    'noDevices'
-  ]) {
+  for (final refusal in ['http', 'status', 'code']) {
+    test('live playback preserves a real $refusal 403 refusal', () async {
+      final paths = <String>[];
+      final client = _client((request) async {
+        paths.add(request.url.path);
+        expect(
+            request.url.queryParameters, {'courseId': '123', 'playType': '3'});
+        return refusal == 'http'
+            ? http.Response('', 403)
+            : http.Response(jsonEncode({refusal: 403}), 200);
+      });
+      addTearDown(client.dispose);
+      await expectLater(
+          client.fetchLivePlayback(course: _course, lesson: _lesson),
+          throwsA(isA<VodPermissionException>()));
+      expect(paths, ['/v1/course_vod_videoinfos']);
+    });
+  }
+
+  for (final scenario in ['mismatch', 'ended', 'notStarted', 'noDevices']) {
     test('live playback rejects $scenario before opening a decoder', () async {
       final detail = _detail();
       switch (scenario) {
-        case 'permission':
-          detail['lvcrLiveStatus'] = 0;
         case 'mismatch':
           detail['teclId'] = 999;
         case 'ended':
