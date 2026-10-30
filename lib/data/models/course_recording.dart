@@ -66,6 +66,7 @@ class VodTerm {
     }
     return switch (termNumber) {
       1 || 2 => 16,
+      3 => 4,
       _ => null,
     };
   }

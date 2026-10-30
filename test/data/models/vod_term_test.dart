@@ -32,7 +32,7 @@ void main() {
       ];
       expect(terms.map((term) => term.seasonLabel),
           ['秋季学期', '春季学期', '夏季学期', '第4学期']);
-      expect(terms.map((term) => term.teachingWeekCount), [16, 16, null, null]);
+      expect(terms.map((term) => term.teachingWeekCount), [16, 16, 4, null]);
     });
   }
 

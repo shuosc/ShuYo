@@ -427,6 +427,8 @@ void main() {
       terms: [1, 2, 3]
     ),
     (year: '2025-2026', start: DateTime(2025, 9, 1), weeks: 16, terms: [1, 2]),
+    (year: '2025-2026', start: DateTime(2026, 7, 6), weeks: 4, terms: [3]),
+    (year: '2026-2027', start: DateTime(2027, 7, 5), weeks: 4, terms: [3]),
   ]) {
     for (final termNumber in scheme.terms) {
       test('${scheme.year} term $termNumber fixes its selectable week range',
@@ -607,12 +609,12 @@ void main() {
         isEmpty);
   });
 
-  test('summer and unknown schemes retain their inferred ranges', () {
+  test('historical summer and unknown schemes retain their inferred ranges',
+      () {
     final start = DateTime(2025, 9, 1);
     final lastLesson = start.add(const Duration(days: 21 * 7));
     for (final scheme in [
       (year: '2024-2025', term: 4),
-      (year: '2025-2026', term: 3),
       (year: '', term: 1),
       (year: '未知学年', term: 2),
       (year: '2025-2026', term: 5),
@@ -636,9 +638,7 @@ void main() {
     }
   });
 
-  test(
-      'summer remains free to infer a short term instead of a fixed week count',
-      () {
+  test('current summer keeps four weeks despite an early advertised end', () {
     final data = dataFor([],
         term: VodTerm(
           id: 1,
@@ -649,8 +649,30 @@ void main() {
           endDate: DateTime(2026, 7, 26),
         ));
 
-    expect(data.maxWeek, 3);
-    expect(() => data.dateFor(4, DateTime.monday), throwsRangeError);
+    expect(data.maxWeek, 4);
+    expect(() => data.dateFor(5, DateTime.monday), throwsRangeError);
+  });
+
+  test('current summer outlying lessons do not extend selectable weeks', () {
+    final start = DateTime(2026, 7, 6);
+    final outside = start.add(const Duration(days: 28));
+    final data = dataFor(
+      [lesson(1, outside, week: 5)],
+      term: VodTerm(
+        id: 1,
+        name: '夏季学期',
+        academicYear: '2025-2026',
+        termNumber: 3,
+        startDate: start,
+        endDate: outside,
+      ),
+      now: outside,
+    );
+
+    expect(data.firstWeekMonday, start);
+    expect(data.maxWeek, 4);
+    expect(data.entriesFor(outside).single.lesson.id, 1);
+    expect(() => data.dateFor(5, DateTime.monday), throwsRangeError);
   });
 
   test('results are immutable snapshots and dateFor validates its range', () {
