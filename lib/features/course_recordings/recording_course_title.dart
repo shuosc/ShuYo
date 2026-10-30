@@ -12,12 +12,14 @@ class RecordingCourseTitle extends StatelessWidget {
     this.maxNameLines,
     this.missingTeacherLabel,
     this.large = false,
+    this.description,
   });
 
   final VodCourse course;
   final int? maxNameLines;
   final String? missingTeacherLabel;
   final bool large;
+  final Widget? description;
 
   @override
   Widget build(BuildContext context) {
@@ -52,6 +54,11 @@ class RecordingCourseTitle extends StatelessWidget {
                       color: colors.textSecondary, size: large ? 14 : 12.5),
                   maxLines: 2,
                   overflow: TextOverflow.ellipsis),
+            ),
+          if (description != null)
+            Padding(
+              padding: const EdgeInsets.only(top: 4),
+              child: description!,
             ),
         ],
       ),
