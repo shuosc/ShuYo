@@ -547,6 +547,8 @@ class _RecordingVideoControlsState extends State<RecordingVideoControls>
                 widget.dualEnabled &&
                 widget.views.length > 1 &&
                 widget.secondaryView != null;
+            final surfaces =
+                _videoSurfaces(constraints, floating, showFloating);
             return GestureDetector(
               key: const ValueKey('recording-control-surface'),
               behavior: HitTestBehavior.opaque,
@@ -555,8 +557,8 @@ class _RecordingVideoControlsState extends State<RecordingVideoControls>
               onLongPressEnd: (_) => _endLongPress(),
               onLongPressCancel: _endLongPress,
               child: Stack(children: [
-                if (widget.viewControllers.isNotEmpty)
-                  ..._videoSurfaces(constraints, floating, showFloating)
+                if (surfaces.isNotEmpty)
+                  surfaces.first
                 else if (widget.primaryView != null)
                   Positioned.fill(
                       child: IgnorePointer(child: widget.primaryView!)),
@@ -718,6 +720,9 @@ class _RecordingVideoControlsState extends State<RecordingVideoControls>
                       ),
                     ),
                   ),
+                // Keep the floating texture above the control gradients. Its
+                // keyed element stays in this Stack when the view roles swap.
+                ...surfaces.skip(1),
                 if (showFloating) floating,
                 if (widget.failure != null)
                   Positioned.fill(child: widget.failure!),
@@ -804,25 +809,34 @@ class _RecordingVideoControlsState extends State<RecordingVideoControls>
                       showFloating
                   ? 1
                   : 0,
-              child: ClipRRect(
-                borderRadius: BorderRadius.circular(
-                    identical(controller, widget.primaryController) ? 0 : 8),
-                child: RecordingSecondaryVideo(
-                  controller: controller,
-                  aspectRatio: identical(controller, widget.primaryController)
-                      ? switch (widget.aspect) {
-                          '4:3' => 4 / 3,
-                          '16:9' => 16 / 9,
-                          _ => null,
-                        }
-                      : null,
-                  fit: identical(controller, widget.primaryController)
-                      ? switch (widget.aspect) {
-                          '填充' => BoxFit.fill,
-                          '裁剪' => BoxFit.cover,
-                          _ => BoxFit.contain,
-                        }
-                      : BoxFit.contain,
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(
+                      identical(controller, widget.primaryController) ? 0 : 8),
+                  boxShadow: identical(controller, widget.primaryController)
+                      ? null
+                      : _floatingShadows,
+                ),
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(
+                      identical(controller, widget.primaryController) ? 0 : 8),
+                  child: RecordingSecondaryVideo(
+                    controller: controller,
+                    aspectRatio: identical(controller, widget.primaryController)
+                        ? switch (widget.aspect) {
+                            '4:3' => 4 / 3,
+                            '16:9' => 16 / 9,
+                            _ => null,
+                          }
+                        : null,
+                    fit: identical(controller, widget.primaryController)
+                        ? switch (widget.aspect) {
+                            '填充' => BoxFit.fill,
+                            '裁剪' => BoxFit.cover,
+                            _ => BoxFit.contain,
+                          }
+                        : BoxFit.contain,
+                  ),
                 ),
               ),
             ),
@@ -830,6 +844,10 @@ class _RecordingVideoControlsState extends State<RecordingVideoControls>
         ),
     ];
   }
+
+  static const _floatingShadows = [
+    BoxShadow(color: Colors.black54, blurRadius: 12, offset: Offset(0, 4)),
+  ];
 
   Positioned _floatingView(BoxConstraints constraints, EdgeInsets safeInsets) {
     final availableWidth =
@@ -875,12 +893,11 @@ class _RecordingVideoControlsState extends State<RecordingVideoControls>
           child: DecoratedBox(
             decoration: BoxDecoration(
               borderRadius: BorderRadius.circular(8),
-              boxShadow: const [
-                BoxShadow(
-                    color: Colors.black54,
-                    blurRadius: 12,
-                    offset: Offset(0, 4)),
-              ],
+              // Persistent textures are painted separately underneath this
+              // transparent interaction frame, so their shadow belongs behind
+              // the texture rather than on top of it.
+              boxShadow:
+                  widget.viewControllers.isEmpty ? _floatingShadows : null,
             ),
             child: ClipRRect(
               borderRadius: BorderRadius.circular(8),
@@ -1124,29 +1141,33 @@ class _RecordingVideoControlsState extends State<RecordingVideoControls>
           ? 10.0
           : 12.0;
       final time = ConstrainedBox(
-        constraints: BoxConstraints(maxWidth: narrow ? 64 : 76),
-        child: Column(
-          key: const ValueKey('recording-playback-time'),
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.end,
-          children: [
-            Text(currentTime,
-                maxLines: 1,
-                style: TextStyle(
-                    color: Colors.white,
-                    fontSize: timeFontSize,
-                    height: 1.4,
-                    fontFamily: 'Monospace',
-                    fontFeatures: const [FontFeature.tabularFigures()])),
-            Text(totalTime,
-                maxLines: 1,
-                style: TextStyle(
-                    color: const Color(0xFFD0D0D0),
-                    fontSize: timeFontSize,
-                    height: 1.4,
-                    fontFamily: 'Monospace',
-                    fontFeatures: const [FontFeature.tabularFigures()])),
-          ],
+        key: const ValueKey('recording-playback-time'),
+        constraints: BoxConstraints(
+            maxWidth: math.min(
+                narrow ? 96 : 144,
+                math.max(
+                    0,
+                    constraints.maxWidth -
+                        42 -
+                        (widget.lessons.isEmpty ? 0 : buttonWidth * 2) -
+                        buttonWidth))),
+        child: FittedBox(
+          fit: BoxFit.scaleDown,
+          child: Text.rich(
+            TextSpan(children: [
+              TextSpan(text: currentTime),
+              TextSpan(
+                  text: ' / $totalTime',
+                  style: const TextStyle(color: Color(0xFFD0D0D0))),
+            ]),
+            maxLines: 1,
+            style: TextStyle(
+                color: Colors.white,
+                fontSize: timeFontSize,
+                height: 1.4,
+                fontFamily: 'Monospace',
+                fontFeatures: const [FontFeature.tabularFigures()]),
+          ),
         ),
       );
       Widget iconButton({

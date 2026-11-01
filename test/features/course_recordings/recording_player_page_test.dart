@@ -533,8 +533,10 @@ void main() {
         expect(button.center.dy, row.center.dy);
       }
       expect(row.bottom, tester.view.physicalSize.height - 12);
-      expect(find.text('1:05:00'), findsOneWidget);
-      expect(find.text('1:30:00'), findsOneWidget);
+      final timeLabel = find.text('1:05:00 / 1:30:00');
+      expect(timeLabel, findsOneWidget);
+      expect(tester.widget<Text>(timeLabel).maxLines, 1);
+      expect(time.center.dy, row.center.dy);
       expect(find.text('选集'), findsNothing);
       expect(find.byTooltip('播放设置'), findsNothing);
       expect(find.byType(PopupMenuButton<int>), findsNothing);
@@ -1516,6 +1518,33 @@ void main() {
           Colors.transparent);
       expect(find.descendant(of: floating, matching: find.byType(IconButton)),
           findsNothing);
+      final controlStack = tester.widget<Stack>(
+          find.ancestor(of: floating, matching: find.byType(Stack)).first);
+      final secondarySurface = controlStack.children.indexWhere(
+          (child) => child.key == ObjectKey(harness.controllers[1]));
+      final primarySurface = controlStack.children.indexWhere(
+          (child) => child.key == ObjectKey(harness.controllers[0]));
+      final controlsOverlay = controlStack.children.indexWhere((child) =>
+          child is Positioned &&
+          child.child is IgnorePointer &&
+          (child.child as IgnorePointer).child is ClipRect);
+      expect(primarySurface, lessThan(controlsOverlay));
+      expect(secondarySurface, greaterThan(controlsOverlay));
+      expect(
+          secondarySurface,
+          lessThan(controlStack.children.indexWhere((child) =>
+              child.key == const ValueKey('recording-secondary-view'))));
+      for (final frame in tester.widgetList<DecoratedBox>(
+          find.descendant(of: floating, matching: find.byType(DecoratedBox)))) {
+        expect((frame.decoration as BoxDecoration).boxShadow, isNull);
+      }
+      final textures = [
+        for (final texture in [1, 2])
+          tester.element(find.descendant(
+              of: find.byKey(ObjectKey(harness.controllers[texture - 1])),
+              matching: find.byWidgetPredicate((widget) =>
+                  widget is Texture && widget.textureId == texture))),
+      ];
       await tester.tap(floating);
       await tester.pump(const Duration(milliseconds: 350));
       await tester.pumpAndSettle();
@@ -1529,6 +1558,14 @@ void main() {
       expect(ppt.state.playing, isFalse);
       expect([classroom.plays, ppt.plays], plays);
       expect([classroom.seeks.length, ppt.seeks.length], seeks);
+      for (var texture = 1; texture <= 2; texture++) {
+        expect(
+            tester.element(find.descendant(
+                of: find.byKey(ObjectKey(harness.controllers[texture - 1])),
+                matching: find.byWidgetPredicate((widget) =>
+                    widget is Texture && widget.textureId == texture))),
+            same(textures[texture - 1]));
+      }
 
       if (!live) {
         await tester.tap(find.byTooltip('播放'));
@@ -2804,8 +2841,9 @@ void main() {
       ),
     ));
     await tester.pump();
-    expect(find.text('1:05:00'), findsOneWidget);
-    expect(find.text('1:30:00'), findsOneWidget);
+    final time = find.text('1:05:00 / 1:30:00');
+    expect(time, findsOneWidget);
+    expect(tester.widget<Text>(time).maxLines, 1);
     expect(tester.takeException(), isNull);
 
     await tester.tap(find.byTooltip('暂停'));
@@ -2907,8 +2945,9 @@ void main() {
     slider.onChangeEnd!(const Duration(minutes: 10).inMilliseconds.toDouble());
     await tester.pump();
     expect(platform.lastSeek, const Duration(minutes: 10));
-    expect(find.text('10:00'), findsOneWidget);
-    expect(find.text('1:30:00'), findsOneWidget);
+    final time = find.text('10:00 / 1:30:00');
+    expect(time, findsOneWidget);
+    expect(tester.widget<Text>(time).maxLines, 1);
     expect(find.byTooltip('退出全屏'), findsNWidgets(2));
     expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox.shrink());
