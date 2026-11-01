@@ -22,6 +22,18 @@ import 'recording_playback_status.dart';
 import 'recording_seek_controller.dart';
 import 'recording_secondary_video.dart';
 
+typedef _ProgressPresentation = ({
+  double maximum,
+  double played,
+  double buffered
+});
+typedef _TimePresentation = ({int playedSeconds, int totalSeconds});
+typedef _LoadingPresentation = ({
+  bool playing,
+  bool buffering,
+  int bufferedSeconds
+});
+
 class RecordingVideoControls extends StatefulWidget {
   const RecordingVideoControls({
     super.key,
@@ -121,7 +133,18 @@ class _RecordingVideoControlsState extends State<RecordingVideoControls>
   Player get _clockPlayer => widget.timelinePlayer ?? widget.player;
   static const _episodeItemExtent = 80.0;
   final _subscriptions = <StreamSubscription<dynamic>>[];
-  final _timelineRevision = ValueNotifier(0);
+  final _loadingSubscriptions = <StreamSubscription<dynamic>>[];
+  // PiliPlus 265f879fa85973b4bf885bde2562f1007f1013b8 keeps displayed
+  // seconds separate from raw position listeners. Keep seek/slider precision,
+  // while publishing only changes to each independent UI projection.
+  final _progressPresentation = ValueNotifier<_ProgressPresentation>(
+      (maximum: 1, played: 0, buffered: 0));
+  final _timePresentation =
+      ValueNotifier<_TimePresentation>((playedSeconds: 0, totalSeconds: 0));
+  final _loadingPresentation = ValueNotifier<_LoadingPresentation>(
+      (playing: false, buffering: false, bufferedSeconds: 0));
+  final _playingPresentation = ValueNotifier(false);
+  final _ratePresentation = ValueNotifier(1.0);
   final _episodeNavigationCache = RecordingEpisodeNavigationCache();
   final _episodeScrollController = ScrollController();
   late final AnimationController _episodeAnimation;
@@ -161,6 +184,7 @@ class _RecordingVideoControlsState extends State<RecordingVideoControls>
         }
       });
     _bindPlayer();
+    _bindLoadingPlayer();
     _showControls();
   }
 
@@ -188,15 +212,42 @@ class _RecordingVideoControlsState extends State<RecordingVideoControls>
     ]) {
       _subscriptions.add(stream.listen((_) => _timelineChanged()));
     }
-    for (final stream in <Stream<dynamic>>[
-      _clockPlayer.stream.playing,
-      _clockPlayer.stream.buffering,
-      _clockPlayer.stream.rate,
-    ]) {
-      _subscriptions.add(stream.listen((_) {
-        if (mounted) setState(() {});
-      }));
+    _subscriptions.add(_clockPlayer.stream.playing.listen((_) {
+      if (mounted) _playingPresentation.value = _playing;
+    }));
+    _subscriptions.add(_clockPlayer.stream.rate.listen((rate) {
+      if (mounted) _ratePresentation.value = rate;
+    }));
+    _timelineChanged();
+    _playingPresentation.value = _playing;
+    _ratePresentation.value = _clockPlayer.state.rate;
+  }
+
+  void _bindLoadingPlayer() {
+    for (final subscription in _loadingSubscriptions) {
+      unawaited(subscription.cancel());
     }
+    _loadingSubscriptions.clear();
+    // The loading overlay describes the visible decoder, which can differ from
+    // the timeline decoder after a persistent dual-view role exchange.
+    for (final stream in <Stream<dynamic>>[
+      widget.player.stream.playing,
+      widget.player.stream.buffering,
+      widget.player.stream.buffer,
+    ]) {
+      _loadingSubscriptions.add(stream.listen((_) => _loadingChanged()));
+    }
+    _loadingChanged();
+  }
+
+  void _loadingChanged() {
+    if (!mounted) return;
+    final state = widget.player.state;
+    _loadingPresentation.value = (
+      playing: state.playing,
+      buffering: state.buffering,
+      bufferedSeconds: state.buffering ? state.buffer.inSeconds : 0,
+    );
   }
 
   @override
@@ -222,6 +273,10 @@ class _RecordingVideoControlsState extends State<RecordingVideoControls>
       _clearPendingSeekPosition();
       _dragPosition = null;
     }
+    if (oldWidget.player != widget.player) _bindLoadingPlayer();
+    _timelineChanged();
+    _playingPresentation.value = _playing;
+    _ratePresentation.value = _clockPlayer.state.rate;
   }
 
   @override
@@ -237,8 +292,12 @@ class _RecordingVideoControlsState extends State<RecordingVideoControls>
     _controlsAnimation.dispose();
     _episodeAnimation.dispose();
     _episodeScrollController.dispose();
-    _timelineRevision.dispose();
-    for (final subscription in _subscriptions) {
+    _progressPresentation.dispose();
+    _timePresentation.dispose();
+    _loadingPresentation.dispose();
+    _playingPresentation.dispose();
+    _ratePresentation.dispose();
+    for (final subscription in [..._subscriptions, ..._loadingSubscriptions]) {
       unawaited(subscription.cancel());
     }
     super.dispose();
@@ -249,12 +308,20 @@ class _RecordingVideoControlsState extends State<RecordingVideoControls>
   bool get _playing => widget.livePlaying ?? _clockPlayer.state.playing;
 
   void _timelineChanged() {
-    if (mounted) _timelineRevision.value++;
+    if (!mounted) return;
+    final progress = _progressValues();
+    _progressPresentation.value = progress;
+    _timePresentation.value = (
+      playedSeconds: Duration(milliseconds: progress.played.round()).inSeconds,
+      totalSeconds: math.max(0, _clockPlayer.state.duration.inSeconds),
+    );
   }
 
-  Widget _timeline(WidgetBuilder builder) => ValueListenableBuilder<int>(
-        valueListenable: _timelineRevision,
-        builder: (context, _, __) => builder(context),
+  Widget _progressView(
+          Widget Function(BuildContext, _ProgressPresentation) builder) =>
+      ValueListenableBuilder<_ProgressPresentation>(
+        valueListenable: _progressPresentation,
+        builder: (context, progress, _) => builder(context, progress),
       );
 
   void _startLongPress(LongPressStartDetails details) {
@@ -462,7 +529,9 @@ class _RecordingVideoControlsState extends State<RecordingVideoControls>
         position:
             Tween<Offset>(begin: Offset(0, top ? -1 : 1.2), end: Offset.zero)
                 .animate(_controlsAnimation),
-        child: child,
+        // Match PiliPlus's control-overlay paint isolation without changing
+        // texture ownership or the existing slide transition.
+        child: RepaintBoundary(child: child),
       );
 
   void _togglePlayback() {
@@ -784,15 +853,24 @@ class _RecordingVideoControlsState extends State<RecordingVideoControls>
                     bottom: safeInsets.bottom + 12,
                     child: _liveProtocolMenu(),
                   ),
-                if ((widget.loading ||
-                        widget.player.state.buffering &&
-                            widget.player.state.playing) &&
-                    widget.failure == null)
-                  _timeline((context) => RecordingPlaybackLoading(
-                        buffering: widget.player.state.buffering,
-                        buffered: widget.player.state.buffer,
-                        onRetry: widget.onReload,
-                      )),
+                // All live-video children can be positioned. An inactive
+                // non-positioned loading builder would otherwise make Stack
+                // adopt its zero size and place controls outside the viewport.
+                Positioned.fill(
+                  child: ValueListenableBuilder<_LoadingPresentation>(
+                    valueListenable: _loadingPresentation,
+                    builder: (context, loading, _) => (widget.loading ||
+                                loading.buffering && loading.playing) &&
+                            widget.failure == null
+                        ? RecordingPlaybackLoading(
+                            buffering: loading.buffering,
+                            buffered:
+                                Duration(seconds: loading.bufferedSeconds),
+                            onRetry: widget.onReload,
+                          )
+                        : const SizedBox.shrink(),
+                  ),
+                ),
                 if (_episodePanelVisible) ...[
                   Positioned.fill(
                       child: FadeTransition(
@@ -1077,7 +1155,7 @@ class _RecordingVideoControlsState extends State<RecordingVideoControls>
         colors: const [Color(0xC0000000), Colors.transparent],
       ));
 
-  ({double maximum, double played, double buffered}) _progressValues() {
+  _ProgressPresentation _progressValues() {
     final state = _clockPlayer.state;
     if (state.duration <= Duration.zero) {
       return (maximum: 1, played: 0, buffered: 0);
@@ -1097,10 +1175,10 @@ class _RecordingVideoControlsState extends State<RecordingVideoControls>
         : colors.primary;
   }
 
-  Widget _compactProgressBar() => _timeline((context) {
-        final progress = _progressValues();
+  Widget _compactProgressBar() => _progressView((context, progress) {
         final primary = _progressColor();
-        return ClipRRect(
+        return RepaintBoundary(
+            child: ClipRRect(
           key: const ValueKey('recording-compact-progress'),
           child: SizedBox(
             height: 3.5,
@@ -1127,7 +1205,7 @@ class _RecordingVideoControlsState extends State<RecordingVideoControls>
               ),
             ]),
           ),
-        );
+        ));
       });
 
   Widget _liveProtocolMenu() => PopupMenuButton<VodLiveProtocol>(
@@ -1168,7 +1246,6 @@ class _RecordingVideoControlsState extends State<RecordingVideoControls>
       );
 
   Widget _bottomControls(bool fullscreen) {
-    final state = _clockPlayer.state;
     return LayoutBuilder(builder: (context, constraints) {
       final narrow = constraints.maxWidth < 340;
       final buttonWidth = fullscreen && constraints.maxWidth >= 600
@@ -1177,55 +1254,65 @@ class _RecordingVideoControlsState extends State<RecordingVideoControls>
               ? 30.0
               : 35.0;
       final timeFontSize = fullscreen ? 14.0 : 13.0;
-      final speedWidth = widget.isLive
-          ? 0.0
-          : TextPainter.computeWidth(
-                  text: TextSpan(
-                      text: '${state.rate}X',
-                      style: DefaultTextStyle.of(context)
-                          .style
-                          .copyWith(fontSize: 13)),
-                  textDirection: Directionality.of(context),
-                  textScaler: MediaQuery.textScalerOf(context)) +
-              16;
-      final time = _timeline((context) {
-        final progress = _progressValues();
-        final currentTime =
-            _durationText(Duration(milliseconds: progress.played.round()));
-        final totalTime = _durationText(_clockPlayer.state.duration);
-        return ConstrainedBox(
-          key: const ValueKey('recording-playback-time'),
-          constraints: BoxConstraints(
-              maxWidth: math.min(
-                  narrow ? 120 : 168,
-                  math.max(
-                      0,
-                      constraints.maxWidth -
-                          42 -
-                          (widget.lessons.isEmpty ? 0 : buttonWidth * 2) -
-                          buttonWidth -
-                          speedWidth))),
-          child: FittedBox(
-            fit: BoxFit.scaleDown,
-            child: Text.rich(
-              TextSpan(children: [
-                TextSpan(text: currentTime),
-                TextSpan(
-                    text: '/$totalTime',
-                    style: const TextStyle(color: Color(0xFFD0D0D0))),
-              ]),
-              maxLines: 1,
-              style: TextStyle(
-                  color: Colors.white,
-                  fontSize: timeFontSize,
-                  fontWeight: FontWeight.w700,
-                  height: 1.4,
-                  fontFamily: 'Monospace',
-                  fontFeatures: const [FontFeature.tabularFigures()]),
-            ),
-          ),
-        );
-      });
+      final time = ValueListenableBuilder<_TimePresentation>(
+          valueListenable: _timePresentation,
+          builder: (context, time, _) {
+            final currentTime =
+                _durationText(Duration(seconds: time.playedSeconds));
+            final totalTime =
+                _durationText(Duration(seconds: time.totalSeconds));
+            return ValueListenableBuilder<double>(
+              valueListenable: _ratePresentation,
+              builder: (context, rate, child) {
+                final speedWidth = widget.isLive
+                    ? 0.0
+                    : TextPainter.computeWidth(
+                            text: TextSpan(
+                                text: '${rate}X',
+                                style: DefaultTextStyle.of(context)
+                                    .style
+                                    .copyWith(fontSize: 13)),
+                            textDirection: Directionality.of(context),
+                            textScaler: MediaQuery.textScalerOf(context)) +
+                        16;
+                return ConstrainedBox(
+                  key: const ValueKey('recording-playback-time'),
+                  constraints: BoxConstraints(
+                      maxWidth: math.min(
+                          narrow ? 120 : 168,
+                          math.max(
+                              0,
+                              constraints.maxWidth -
+                                  42 -
+                                  (widget.lessons.isEmpty
+                                      ? 0
+                                      : buttonWidth * 2) -
+                                  buttonWidth -
+                                  speedWidth))),
+                  child: FittedBox(
+                    fit: BoxFit.scaleDown,
+                    child: child,
+                  ),
+                );
+              },
+              child: Text.rich(
+                TextSpan(children: [
+                  TextSpan(text: currentTime),
+                  TextSpan(
+                      text: '/$totalTime',
+                      style: const TextStyle(color: Color(0xFFD0D0D0))),
+                ]),
+                maxLines: 1,
+                style: TextStyle(
+                    color: Colors.white,
+                    fontSize: timeFontSize,
+                    fontWeight: FontWeight.w700,
+                    height: 1.4,
+                    fontFamily: 'Monospace',
+                    fontFeatures: const [FontFeature.tabularFigures()]),
+              ),
+            );
+          });
       Widget iconButton({
         required String tooltip,
         required IconData icon,
@@ -1310,37 +1397,41 @@ class _RecordingVideoControlsState extends State<RecordingVideoControls>
                     style: const TextStyle(color: Colors.white, fontSize: 13))),
           ),
         if (!widget.isLive)
-          PopupMenuButton<double>(
-            tooltip: '播放速度',
-            color: Colors.black.withValues(alpha: .8),
-            surfaceTintColor: Colors.transparent,
-            elevation: 0,
-            requestFocus: false,
-            enabled: !widget.loading,
-            initialValue: state.rate,
-            onOpened: () => _hideTimer?.cancel(),
-            onCanceled: _showControls,
-            onSelected: (rate) {
-              unawaited(_clockPlayer.setRate(rate));
-              _showControls();
-            },
-            itemBuilder: (_) => [
-              for (final rate in [.5, .75, 1.0, 1.25, 1.5, 1.75, 2.0])
-                PopupMenuItem(
-                    value: rate,
-                    height: 35,
-                    padding: const EdgeInsets.only(left: 30),
-                    child: Semantics(
-                      selected: state.rate == rate,
-                      child: Text('${rate}X',
-                          style: const TextStyle(
-                              color: Colors.white, fontSize: 13)),
-                    ))
-            ],
-            child: Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 8),
-                child: Text('${state.rate}X',
-                    style: const TextStyle(color: Colors.white, fontSize: 13))),
+          ValueListenableBuilder<double>(
+            valueListenable: _ratePresentation,
+            builder: (context, currentRate, _) => PopupMenuButton<double>(
+              tooltip: '播放速度',
+              color: Colors.black.withValues(alpha: .8),
+              surfaceTintColor: Colors.transparent,
+              elevation: 0,
+              requestFocus: false,
+              enabled: !widget.loading,
+              initialValue: currentRate,
+              onOpened: () => _hideTimer?.cancel(),
+              onCanceled: _showControls,
+              onSelected: (rate) {
+                unawaited(_clockPlayer.setRate(rate));
+                _showControls();
+              },
+              itemBuilder: (_) => [
+                for (final rate in [.5, .75, 1.0, 1.25, 1.5, 1.75, 2.0])
+                  PopupMenuItem(
+                      value: rate,
+                      height: 35,
+                      padding: const EdgeInsets.only(left: 30),
+                      child: Semantics(
+                        selected: currentRate == rate,
+                        child: Text('${rate}X',
+                            style: const TextStyle(
+                                color: Colors.white, fontSize: 13)),
+                      ))
+              ],
+              child: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 8),
+                  child: Text('${currentRate}X',
+                      style:
+                          const TextStyle(color: Colors.white, fontSize: 13))),
+            ),
           ),
         if (widget.isLive && widget.onLiveProtocolChanged != null)
           _liveProtocolMenu(),
@@ -1370,51 +1461,55 @@ class _RecordingVideoControlsState extends State<RecordingVideoControls>
             if (!widget.isLive)
               Padding(
                 padding: const EdgeInsets.fromLTRB(10, 0, 10, 7),
-                child: _timeline((context) {
-                  final progress = _progressValues();
+                child: _progressView((context, progress) {
                   final progressColor = _progressColor();
-                  return SizedBox(
-                      key: const ValueKey('recording-seek-track'),
-                      height: 14,
-                      child: SliderTheme(
-                        data: SliderTheme.of(context).copyWith(
-                            trackHeight: 3.5,
-                            trackShape: const RoundedRectSliderTrackShape(),
-                            thumbShape: const RoundSliderThumbShape(
-                                enabledThumbRadius: 7,
-                                elevation: 0,
-                                pressedElevation: 0),
-                            overlayShape: const RoundSliderOverlayShape(
-                                overlayRadius: 12)),
-                        child: Slider(
-                          padding: EdgeInsets.zero,
-                          value: progress.played,
-                          secondaryTrackValue: progress.buffered,
-                          min: 0,
-                          max: progress.maximum,
-                          activeColor: progressColor,
-                          inactiveColor: const Color(0x33FFFFFF),
-                          secondaryActiveColor:
-                              progressColor.withValues(alpha: .4),
-                          onChangeStart: _beginSeek,
-                          onChanged:
-                              _clockPlayer.state.duration <= Duration.zero ||
+                  return RepaintBoundary(
+                      child: SizedBox(
+                          key: const ValueKey('recording-seek-track'),
+                          height: 14,
+                          child: SliderTheme(
+                            data: SliderTheme.of(context).copyWith(
+                                trackHeight: 3.5,
+                                trackShape: const RoundedRectSliderTrackShape(),
+                                thumbShape: const RoundSliderThumbShape(
+                                    enabledThumbRadius: 7,
+                                    elevation: 0,
+                                    pressedElevation: 0),
+                                overlayShape: const RoundSliderOverlayShape(
+                                    overlayRadius: 12)),
+                            child: Slider(
+                              padding: EdgeInsets.zero,
+                              value: progress.played,
+                              secondaryTrackValue: progress.buffered,
+                              min: 0,
+                              max: progress.maximum,
+                              activeColor: progressColor,
+                              inactiveColor: const Color(0x33FFFFFF),
+                              secondaryActiveColor:
+                                  progressColor.withValues(alpha: .4),
+                              onChangeStart: _beginSeek,
+                              onChanged: _clockPlayer.state.duration <=
+                                          Duration.zero ||
                                       widget.loading
                                   ? null
                                   : _previewSeek,
-                          onChangeEnd: (value) => unawaited(_finishSeek(value)),
-                        ),
-                      ));
+                              onChangeEnd: (value) =>
+                                  unawaited(_finishSeek(value)),
+                            ),
+                          )));
                 }),
               ),
             Row(key: const ValueKey('recording-bottom-controls'), children: [
-              iconButton(
-                  tooltip: _playing ? '暂停' : '播放',
-                  onPressed: widget.loading ? null : _togglePlayback,
-                  icon: _playing ? Icons.pause : Icons.play_arrow,
-                  size: 20,
-                  width: 42,
-                  height: 34),
+              ValueListenableBuilder<bool>(
+                valueListenable: _playingPresentation,
+                builder: (context, playing, _) => iconButton(
+                    tooltip: playing ? '暂停' : '播放',
+                    onPressed: widget.loading ? null : _togglePlayback,
+                    icon: playing ? Icons.pause : Icons.play_arrow,
+                    size: 20,
+                    width: 42,
+                    height: 34),
+              ),
               if (!widget.isLive) time,
               if (widget.lessons.isNotEmpty) ...[
                 iconButton(
