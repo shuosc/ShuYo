@@ -4,9 +4,9 @@ import 'package:shuyo/features/course_recordings/recording_player_tabs.dart';
 import 'package:shuyo/shared/theme/shuyo_theme.dart';
 
 class _TabsHarness extends StatefulWidget {
-  const _TabsHarness({this.noteCount = 0});
+  const _TabsHarness({this.noteCount});
 
-  final int noteCount;
+  final int? noteCount;
 
   @override
   State<_TabsHarness> createState() => _TabsHarnessState();
@@ -35,7 +35,7 @@ class _TabsHarnessState extends State<_TabsHarness>
 }
 
 void main() {
-  Widget app({int noteCount = 0, ThemeData? theme}) => MaterialApp(
+  Widget app({int? noteCount, ThemeData? theme}) => MaterialApp(
         theme: theme ?? ShuYoThemes.byId(ShuYoThemes.defaultId).themeData(),
         home: _TabsHarness(noteCount: noteCount),
       );
@@ -88,8 +88,7 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets(
-      'updating the count keeps the selected tab and hides a zero count',
+  testWidgets('unknown, empty, and populated counts preserve the selected tab',
       (tester) async {
     await tester.pumpWidget(app());
     expect(find.text('笔记'), findsOneWidget);
@@ -98,9 +97,19 @@ void main() {
     await tester.pumpAndSettle();
     final controller = tester.widget<TabBar>(find.byType(TabBar)).controller!;
     expect(controller.index, 1);
+    await tester.pumpWidget(app(noteCount: 0));
+    expect(find.text('笔记 0'), findsOneWidget);
+    expect(find.text('笔记'), findsNothing);
+    expect(tester.widget<TabBar>(find.byType(TabBar)).controller, controller);
+    expect(controller.index, 1);
     await tester.pumpWidget(app(noteCount: 8));
     expect(find.text('笔记 8'), findsOneWidget);
     expect(tester.widget<TabBar>(find.byType(TabBar)).controller, controller);
+    expect(controller.index, 1);
+    await tester.pumpWidget(app());
+    expect(find.text('笔记'), findsOneWidget);
+    expect(find.text('笔记 0'), findsNothing);
+    expect(find.text('笔记 8'), findsNothing);
     expect(controller.index, 1);
     expect(tester.takeException(), isNull);
   });

@@ -1986,7 +1986,13 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
 
   PreferredSizeWidget _portraitTabs() => RecordingPlayerTabs(
         controller: _tabController,
-        noteCount: _notes.length,
+        noteCount: _notes.isNotEmpty
+            ? _notes.length
+            : !_notesLoading &&
+                    _notesError == null &&
+                    _notesLessonId == _lesson.id
+                ? 0
+                : null,
       );
 
   Widget _placeholder() {

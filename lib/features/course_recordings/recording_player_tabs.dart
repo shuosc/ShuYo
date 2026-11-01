@@ -11,10 +11,12 @@ class RecordingPlayerTabs extends StatelessWidget
     super.key,
     required this.controller,
     required this.noteCount,
-  }) : assert(noteCount >= 0);
+  }) : assert(noteCount == null || noteCount >= 0);
 
   final TabController controller;
-  final int noteCount;
+
+  /// Null until the number of notes has been established by a successful load.
+  final int? noteCount;
 
   @override
   Size get preferredSize => const Size.fromHeight(45);
@@ -65,7 +67,7 @@ class RecordingPlayerTabs extends StatelessWidget
                 ),
                 Tab(
                   child: Text(
-                    noteCount > 0 ? '笔记 $noteCount' : '笔记',
+                    noteCount == null ? '笔记' : '笔记 $noteCount',
                     key: const ValueKey('recording-notes-tab-label'),
                     softWrap: false,
                     overflow: TextOverflow.visible,

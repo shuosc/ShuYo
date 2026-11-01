@@ -1197,7 +1197,7 @@ void main() {
     await tester.pumpWidget(const SizedBox.shrink());
   });
 
-  testWidgets('empty and failed notes omit zero count and retry only notes',
+  testWidgets('empty notes show zero while failed notes omit unknown count',
       (tester) async {
     prepareNotesPortrait(tester);
     final harness = _PlaybackHarness();
@@ -1220,7 +1220,7 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.byKey(const ValueKey('recording-notes-tab-label')));
     await tester.pumpAndSettle();
-    expect(notesTabLabel(tester), '笔记');
+    expect(notesTabLabel(tester), '笔记 0');
     expect(find.byKey(const ValueKey('recording-notes-empty')), findsOneWidget);
     expect(find.text('当前课次暂无 PPT 笔记'), findsOneWidget);
     expect(find.text('重试'), findsNothing);
@@ -1301,7 +1301,7 @@ void main() {
       await tester.pumpAndSettle();
       await tester.tap(find.byKey(const ValueKey('recording-notes-tab-label')));
       await tester.pumpAndSettle();
-      expect(notesTabLabel(tester), '笔记');
+      expect(notesTabLabel(tester), accepted ? '笔记 0' : '笔记');
       expect(find.byKey(const ValueKey('recording-notes-empty')),
           accepted ? findsOneWidget : findsNothing);
       expect(find.byKey(const ValueKey('recording-notes-error')),
@@ -1314,7 +1314,7 @@ void main() {
           const Offset(0, 350));
       await tester.pumpAndSettle();
       expect(requests, [first.id, first.id]);
-      expect(notesTabLabel(tester), '笔记');
+      expect(notesTabLabel(tester), accepted ? '笔记 0' : '笔记');
       expect(find.byKey(const ValueKey('recording-notes-empty')),
           accepted ? findsOneWidget : findsNothing);
       expect(find.byKey(const ValueKey('recording-notes-error')),
@@ -1426,17 +1426,20 @@ void main() {
     await tester.tap(find.byKey(const ValueKey('recording-notes-tab-label')));
     await tester.pumpAndSettle();
     expect(find.byKey(const ValueKey('recording-notes-empty')), findsOneWidget);
+    expect(notesTabLabel(tester), '笔记 0');
     await tester.drag(find.byKey(const ValueKey('recording-notes-scroll')),
         const Offset(0, 350));
     await tester.pumpAndSettle();
     expect(find.byKey(const ValueKey('recording-notes-error')), findsOneWidget);
     expect(find.byKey(const ValueKey('recording-notes-empty')), findsNothing);
+    expect(notesTabLabel(tester), '笔记');
     await tester.drag(find.byKey(const ValueKey('recording-notes-scroll')),
         const Offset(0, 350));
     await tester.pumpAndSettle();
     expect(requests, 3);
     expect(find.byKey(const ValueKey('recording-notes-empty')), findsOneWidget);
     expect(find.byKey(const ValueKey('recording-notes-error')), findsNothing);
+    expect(notesTabLabel(tester), '笔记 0');
     expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox.shrink());
   });
@@ -1455,6 +1458,7 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.byKey(const ValueKey('recording-notes-tab-label')));
     await tester.pumpAndSettle();
+    expect(notesTabLabel(tester), '笔记 0');
     await tester.drag(find.byKey(const ValueKey('recording-notes-scroll')),
         const Offset(0, 350));
     await tester.pump();
@@ -1463,6 +1467,7 @@ void main() {
     expect(find.byKey(const ValueKey('recording-notes-empty')), findsOneWidget);
     expect(find.byKey(const ValueKey('recording-notes-loading')), findsNothing);
     expect(find.byType(RefreshProgressIndicator), findsOneWidget);
+    expect(notesTabLabel(tester), '笔记 0');
     pendingRefresh.complete([note]);
     await tester.pumpAndSettle();
     expect(find.text(note.text), findsOneWidget);
