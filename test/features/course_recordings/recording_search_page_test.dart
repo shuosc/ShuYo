@@ -402,6 +402,95 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets(
+      'preview completions update one frozen result view without rebuilding search chrome',
+      (tester) async {
+    final responses = {
+      for (var id = 101; id <= 104; id++) id: Completer<List<VodLesson>>()
+    };
+    final repository = _Repository()
+      ..searchLoader = ((_, __) async => [
+            for (var id = 101; id <= 104; id++) _result(id - 100, classId: id),
+          ])
+      ..previewLoader =
+          (course, _) => responses[course.teachingClassId]!.future;
+    await _mount(tester, repository);
+    await _submit(tester, '程序');
+
+    final originalScaffold = tester.widget<Scaffold>(find.byType(Scaffold));
+    final originalAppBar = tester.widget<AppBar>(find.byType(AppBar));
+    final query = find.byKey(const ValueKey('vod-search-query'));
+    final originalInput = tester.widget<TextField>(query);
+    final summary = find.byKey(const ValueKey('vod-search-summary'));
+    final originalSummary = tester.widget<Padding>(summary);
+    final count = find.byKey(const ValueKey('vod-search-loaded-count'));
+    final firstRow = find.byKey(const ValueKey('vod-search-course:7:101'));
+
+    void expectStableChrome() {
+      expect(tester.widget<Scaffold>(find.byType(Scaffold)),
+          same(originalScaffold));
+      expect(tester.widget<AppBar>(find.byType(AppBar)), same(originalAppBar));
+      expect(tester.widget<TextField>(query), same(originalInput));
+    }
+
+    responses[101]!.complete([_result(1).lesson]);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 350));
+    expectStableChrome();
+    expect(tester.widget<Padding>(summary), isNot(same(originalSummary)));
+    expect(tester.widget<Text>(count).data, '1');
+    _expectSingleLessonCount(tester, firstRow, '1');
+
+    responses[102]!.complete([_result(2, classId: 102).lesson]);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 350));
+    expectStableChrome();
+    expect(tester.widget<Text>(count).data, '2');
+    expect(
+        find.byKey(const ValueKey('vod-search-course:7:102')), findsOneWidget);
+
+    final frozenSummary = tester.widget<Padding>(summary);
+    final originalFirstRow = tester.widget<ListTile>(firstRow);
+    final results = find.byKey(const ValueKey('vod-search-results'));
+    final scrollable = tester.state<ScrollableState>(
+        find.descendant(of: results, matching: find.byType(Scrollable)).first);
+    ScrollStartNotification(
+      metrics: scrollable.position,
+      context: scrollable.context,
+    ).dispatch(scrollable.context);
+    responses[103]!.complete([_result(3, classId: 103).lesson]);
+    responses[104]!.complete([_result(4, classId: 104).lesson]);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 350));
+
+    expectStableChrome();
+    expect(tester.widget<Padding>(summary), same(frozenSummary));
+    expect(tester.widget<Text>(count).data, '2');
+    expect(tester.widget<ListTile>(firstRow), same(originalFirstRow));
+    expect(find.byKey(const ValueKey('vod-search-course:7:103')), findsNothing);
+    expect(find.byKey(const ValueKey('vod-search-course:7:104')), findsNothing);
+    expect(repository.activePreviews, 0);
+
+    ScrollEndNotification(
+      metrics: scrollable.position,
+      context: scrollable.context,
+    ).dispatch(scrollable.context);
+    await tester.pumpAndSettle();
+
+    expectStableChrome();
+    expect(tester.widget<Text>(count).data, '4');
+    expect(tester.widget<Padding>(summary), isNot(same(frozenSummary)));
+    expect(tester.widget<ListTile>(firstRow), same(originalFirstRow));
+    expect(
+        find.byKey(const ValueKey('vod-search-course:7:103')), findsOneWidget);
+    expect(
+        find.byKey(const ValueKey('vod-search-course:7:104')), findsOneWidget);
+    expect(find.byKey(const ValueKey('vod-search-progress')), findsNothing);
+    expect(repository.previewRequests, 4);
+    expect(repository.verificationRequests, isEmpty);
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('scrolling back to a course does not replay its entrance',
       (tester) async {
     final repository = _Repository()

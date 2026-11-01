@@ -43,6 +43,8 @@ class _RecordingSearchPageState extends State<RecordingSearchPage> {
   final _queryController = TextEditingController();
   final _queryFocusNode = FocusNode();
   final _scrollController = ScrollController();
+  final _searchBusy = ValueNotifier(false);
+  final _searchNeedsLogin = ValueNotifier(false);
   final _collapsedTermYears = <String>{};
   late final _searchController = RecordingSearchController(widget.repository,
       selectedTermId: widget.selectedTermId,
@@ -66,8 +68,24 @@ class _RecordingSearchPageState extends State<RecordingSearchPage> {
   int get _revision => _searchController.revision;
 
   @override
+  void initState() {
+    super.initState();
+    _searchController.addListener(_updateSearchChrome);
+    _updateSearchChrome();
+  }
+
+  void _updateSearchChrome() {
+    _searchBusy.value =
+        _searchController.searching || _searchController.loadingCourses;
+    _searchNeedsLogin.value = _searchController.needsLogin;
+  }
+
+  @override
   void dispose() {
+    _searchController.removeListener(_updateSearchChrome);
     _searchController.dispose();
+    _searchBusy.dispose();
+    _searchNeedsLogin.dispose();
     _queryController.dispose();
     _queryFocusNode.dispose();
     _scrollController.dispose();
@@ -201,21 +219,9 @@ class _RecordingSearchPageState extends State<RecordingSearchPage> {
   }
 
   @override
-  Widget build(BuildContext context) => RecordingListPresentation(
-      changes: _searchController,
-      builder: (context) {
-        _view = RecordingSearchViewData(_searchController);
-        if (_renderedRevision != _revision) {
-          _renderedRevision = _revision;
-          _courseRows.clear();
-          _animatedCourses.clear();
-        }
-        return _buildScaffold();
-      });
+  Widget build(BuildContext context) => _buildScaffold();
 
   Widget _buildScaffold() {
-    final selectedTerm =
-        widget.terms.where((term) => term.id == _selectedTermId).firstOrNull;
     return Scaffold(
       appBar: AppBar(
         title: const Text('搜索录播'),
@@ -229,18 +235,21 @@ class _RecordingSearchPageState extends State<RecordingSearchPage> {
         ],
         bottom: PreferredSize(
           preferredSize: const Size.fromHeight(3),
-          child: _searching || _loadingCourses || _loggingIn
-              ? const LinearProgressIndicator(
-                  key: ValueKey('vod-search-progress'), minHeight: 3)
-              : const SizedBox(height: 3),
+          child: ValueListenableBuilder<bool>(
+            valueListenable: _searchBusy,
+            builder: (context, busy, _) => busy || _loggingIn
+                ? const LinearProgressIndicator(
+                    key: ValueKey('vod-search-progress'), minHeight: 3)
+                : const SizedBox(height: 3),
+          ),
         ),
       ),
       body: Column(children: [
         Padding(
           padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
-          child: ValueListenableBuilder<TextEditingValue>(
-            valueListenable: _queryController,
-            builder: (context, value, child) => Row(children: [
+          child: ListenableBuilder(
+            listenable: Listenable.merge([_queryController, _searchNeedsLogin]),
+            builder: (context, child) => Row(children: [
               Expanded(
                 child: TextField(
                   key: const ValueKey('vod-search-query'),
@@ -272,7 +281,7 @@ class _RecordingSearchPageState extends State<RecordingSearchPage> {
               IconButton(
                 key: const ValueKey('vod-search-submit'),
                 tooltip: '开始搜索',
-                onPressed: _needsLogin ||
+                onPressed: _searchNeedsLogin.value ||
                         _loggingIn ||
                         _queryController.text.trim().isEmpty
                     ? null
@@ -283,8 +292,28 @@ class _RecordingSearchPageState extends State<RecordingSearchPage> {
             ]),
           ),
         ),
-        _buildSummary(selectedTerm),
-        Expanded(child: _buildResults()),
+        Expanded(
+          child: RecordingListPresentation(
+            changes: _searchController,
+            builder: (context) {
+              // One frozen revision drives both the summary and lazy rows.
+              // Business completions never rebuild the AppBar or search input.
+              _view = RecordingSearchViewData(_searchController);
+              if (_renderedRevision != _revision) {
+                _renderedRevision = _revision;
+                _courseRows.clear();
+                _animatedCourses.clear();
+              }
+              final selectedTerm = widget.terms
+                  .where((term) => term.id == _selectedTermId)
+                  .firstOrNull;
+              return Column(children: [
+                _buildSummary(selectedTerm),
+                Expanded(child: _buildResults()),
+              ]);
+            },
+          ),
+        ),
       ]),
     );
   }
