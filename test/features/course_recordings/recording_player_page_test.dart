@@ -1108,6 +1108,9 @@ void main() {
     for (final player in harness.platforms) {
       player.seeks.clear();
     }
+    await tester
+        .tap(find.byKey(const ValueKey('recording-note-open-first-note')));
+    await tester.pumpAndSettle();
     final seek = find.byKey(const ValueKey('recording-note-seek-first-note'));
     await tester.ensureVisible(seek);
     await tester.tap(seek);
@@ -1116,6 +1119,8 @@ void main() {
         harness.platforms.every((player) => player.seeks.length == 1), isTrue);
     expect(harness.platforms.map((player) => player.seeks.single),
         everyElement(note.position));
+    expect(find.byKey(const ValueKey('recording-note-detail-first-note')),
+        findsNothing);
     await tester.tap(find.text('简介'));
     await tester.pumpAndSettle();
     expect(tester.widget<TabBar>(tabs).controller!.index, 0);
@@ -1276,6 +1281,82 @@ void main() {
     expect(find.text(anotherNote.text), findsOneWidget);
     expect(find.text(note.text), findsNothing);
     expect(notesTabLabel(tester), '笔记 1');
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('unavailable notes loader is an error rather than empty notes',
+      (tester) async {
+    prepareNotesPortrait(tester);
+    await tester.pumpWidget(page(
+      harness: _PlaybackHarness(),
+      load: (lesson) async => playback(lesson),
+    ));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('recording-notes-tab-label')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('recording-notes-error')), findsOneWidget);
+    expect(find.byKey(const ValueKey('recording-notes-empty')), findsNothing);
+    expect(notesTabLabel(tester), '笔记');
+    expect(find.text('暂时无法加载这节课的 PPT 笔记，请稍后下拉重试'), findsOneWidget);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  for (final failure in <(VodApiException, String)>[
+    (const VodNetworkException(), '暂时无法加载这节课的 PPT 笔记，请稍后下拉重试'),
+    (const VodSessionExpiredException(), '校园账户登录已失效，请重新进入录播平台后重试'),
+    (const VodPermissionException(), '平台暂未允许读取这节课的 PPT 笔记，请稍后下拉重试'),
+    (const VodInvalidResponseException(), '平台返回的 PPT 笔记数据异常，请稍后下拉重试'),
+  ]) {
+    testWidgets('${failure.$1.runtimeType} is not displayed as no notes',
+        (tester) async {
+      prepareNotesPortrait(tester);
+      await tester.pumpWidget(page(
+        harness: _PlaybackHarness(),
+        load: (lesson) async => playback(lesson),
+        loadNotes: (_) async => throw failure.$1,
+      ));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('recording-notes-tab-label')));
+      await tester.pumpAndSettle();
+      expect(
+          find.byKey(const ValueKey('recording-notes-error')), findsOneWidget);
+      expect(find.byKey(const ValueKey('recording-notes-empty')), findsNothing);
+      expect(find.text(failure.$2), findsOneWidget);
+      expect(find.text('重试'), findsNothing);
+      expect(notesTabLabel(tester), '笔记');
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+    });
+  }
+
+  testWidgets('failed refresh replaces a previous empty result with an error',
+      (tester) async {
+    prepareNotesPortrait(tester);
+    var requests = 0;
+    await tester.pumpWidget(page(
+      harness: _PlaybackHarness(),
+      load: (lesson) async => playback(lesson),
+      loadNotes: (_) async {
+        if (++requests == 2) throw const VodNetworkException();
+        return [];
+      },
+    ));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('recording-notes-tab-label')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('recording-notes-empty')), findsOneWidget);
+    await tester.drag(find.byKey(const ValueKey('recording-notes-scroll')),
+        const Offset(0, 350));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('recording-notes-error')), findsOneWidget);
+    expect(find.byKey(const ValueKey('recording-notes-empty')), findsNothing);
+    await tester.drag(find.byKey(const ValueKey('recording-notes-scroll')),
+        const Offset(0, 350));
+    await tester.pumpAndSettle();
+    expect(requests, 3);
+    expect(find.byKey(const ValueKey('recording-notes-empty')), findsOneWidget);
+    expect(find.byKey(const ValueKey('recording-notes-error')), findsNothing);
     expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox.shrink());
   });

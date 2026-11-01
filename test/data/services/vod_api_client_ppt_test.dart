@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
@@ -149,5 +150,56 @@ void main() {
     addTearDown(api.dispose);
     await expectLater(
         api.fetchPptSlides(42), throwsA(isA<VodInvalidResponseException>()));
+  });
+
+  test('a successful response without visible OCR is an empty lesson',
+      () async {
+    final api = client((_) async => response({
+          'docList': [
+            {'pptDocId': 'hidden', 'showFlag': false, 'ocrText': '隐藏文字'},
+            {'pptDocId': 'blank', 'ocrText': ' \n '},
+            {'pptDocId': 'image-only', 'imageUrl': '/images/1.jpg'},
+          ],
+        }));
+    addTearDown(api.dispose);
+    expect(await api.fetchPptSlides(42), isEmpty);
+  });
+
+  for (final status in [401, 403, 500]) {
+    test('HTTP $status with null data fails rather than producing empty notes',
+        () async {
+      final api = client((_) async =>
+          http.Response(jsonEncode({'status': status, 'data': null}), status));
+      addTearDown(api.dispose);
+      final Matcher failure = switch (status) {
+        401 => isA<VodSessionExpiredException>(),
+        403 => isA<VodPermissionException>(),
+        _ => isA<VodApiException>(),
+      };
+      await expectLater(api.fetchPptSlides(42), throwsA(failure));
+    });
+  }
+
+  for (final envelope in [
+    {'status': 500, 'data': null},
+    {'status': 200, 'ok': false, 'data': null},
+    {'status': 200, 'dataOk': false, 'data': null},
+    {'status': 200, 'code': 403, 'data': null},
+    {'status': 200, 'code': 10013, 'data': null},
+  ]) {
+    test('a rejected PPT response is not treated as empty: $envelope',
+        () async {
+      final api = client((_) async => http.Response(jsonEncode(envelope), 200));
+      addTearDown(api.dispose);
+      await expectLater(
+          api.fetchPptSlides(42), throwsA(isA<VodApiException>()));
+    });
+  }
+
+  test('a network failure does not become an empty PPT result', () async {
+    final api = client((_) async => throw const SocketException('offline'));
+    addTearDown(api.dispose);
+    await expectLater(
+        api.fetchPptSlides(42), throwsA(isA<VodNetworkException>()));
   });
 }

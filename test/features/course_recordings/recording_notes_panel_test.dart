@@ -61,6 +61,8 @@ void main() {
     expect(find.text('timeout'), findsOneWidget);
     expect(find.text('当前课次暂无 PPT 笔记'), findsNothing);
     expect(find.text('重试'), findsNothing);
+    expect(find.byType(TextButton), findsNothing);
+    expect(find.byType(FilledButton), findsNothing);
     expect(tester.takeException(), isNull);
   });
 
@@ -85,7 +87,8 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('OCR text is selectable and timestamps seek the current slide',
+  testWidgets(
+      'a note expands full selectable text and can seek the current slide',
       (tester) async {
     final positions = <Duration>[];
     await tester.pumpWidget(app(
@@ -102,11 +105,64 @@ void main() {
     ));
     expect(find.text('按时间排序'), findsOneWidget);
     expect(find.text('PPT 第 1 页'), findsOneWidget);
-    expect(find.byType(SelectableText), findsNWidgets(2));
+    expect(find.byType(SelectableText), findsNothing);
     expect(find.text('01:00'), findsOneWidget);
     expect(find.text('1:02:03'), findsOneWidget);
+    await tester.tap(find.byKey(const ValueKey('recording-note-open-long')));
+    await tester.pumpAndSettle();
+    expect(find.text('笔记详情'), findsOneWidget);
+    expect(find.byType(SelectableText), findsOneWidget);
+    expect(
+        tester
+            .widget<SelectableText>(
+                find.byKey(const ValueKey('recording-note-text-long')))
+            .data,
+        '能量守恒定律');
     await tester.tap(find.byKey(const ValueKey('recording-note-seek-long')));
+    await tester.pumpAndSettle();
     expect(positions, [const Duration(hours: 1, minutes: 2, seconds: 3)]);
+    expect(find.text('笔记详情'), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets(
+      'notes show a left thumbnail and a three-line summary on the right',
+      (tester) async {
+    tester.view.physicalSize = const Size(393, 852);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final note =
+        slide(1, text: List.filled(20, '这是一段完整的 PPT 识别内容。').join('\n'));
+    await tester.pumpWidget(app(slides: [note]));
+
+    final image = tester
+        .getRect(find.byKey(const ValueKey('recording-note-thumbnail-1')));
+    final text =
+        tester.getRect(find.byKey(const ValueKey('recording-note-summary-1')));
+    expect(image.left, 16);
+    expect(text.left - image.right, 12);
+    expect(text.right, 393 - 16);
+    expect(text.top, image.top);
+    expect(image.width / image.height, closeTo(16 / 9, .01));
+    final summary = tester
+        .widget<Text>(find.byKey(const ValueKey('recording-note-summary-1')));
+    expect(summary.maxLines, 3);
+    expect(summary.overflow, TextOverflow.ellipsis);
+    expect(find.text('01'), findsNothing);
+    expect(find.text('共 1 条笔记'), findsOneWidget);
+    await tester.tap(find.byKey(const ValueKey('recording-note-open-1')));
+    await tester.pumpAndSettle();
+    expect(
+        tester
+            .widget<SelectableText>(
+                find.byKey(const ValueKey('recording-note-text-1')))
+            .data,
+        note.text);
+    await tester.tap(find.byTooltip('关闭'));
+    await tester.pumpAndSettle();
+    expect(find.byType(SelectableText), findsNothing);
+    expect(find.byKey(const ValueKey('recording-note-open-1')), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 
@@ -123,14 +179,14 @@ void main() {
     ));
     await tester.pump();
     expect(requests, isNotEmpty);
-    expect(requests.length, lessThan(6));
+    expect(requests.length, lessThan(10));
     expect(find.byKey(const ValueKey('recording-note-77')), findsNothing);
     final before = requests.length;
     await tester.drag(find.byKey(const ValueKey('recording-notes-scroll')),
         const Offset(0, -700));
     await tester.pump();
     expect(requests.length, greaterThan(before));
-    expect(requests.length, lessThan(12));
+    expect(requests.length, lessThan(20));
     expect(tester.takeException(), isNull);
   });
 
@@ -156,16 +212,22 @@ void main() {
       canSeek: false,
       onSeek: positions.add,
     ));
+    await tester.tap(find.byKey(const ValueKey('recording-note-open-1')));
+    await tester.pumpAndSettle();
     final seek = find.byKey(const ValueKey('recording-note-seek-1'));
-    expect(tester.widget<TextButton>(seek).onPressed, isNull);
+    expect(tester.widget<FilledButton>(seek).onPressed, isNull);
     await tester.tap(seek);
     expect(positions, isEmpty);
     await tester.tap(find.byKey(const ValueKey('recording-note-copy-1')));
     await tester.pump();
     expect(copied, note.text);
-    expect(find.text('已复制 PPT 笔记'), findsOneWidget);
+    expect(find.text('已复制'), findsOneWidget);
+    await tester.tap(find.byTooltip('关闭'));
+    await tester.pumpAndSettle();
     await tester.pumpWidget(app(slides: [note], onSeek: positions.add));
-    expect(tester.widget<TextButton>(seek).onPressed, isNotNull);
+    await tester.tap(find.byKey(const ValueKey('recording-note-open-1')));
+    await tester.pumpAndSettle();
+    expect(tester.widget<FilledButton>(seek).onPressed, isNotNull);
     await tester.tap(seek);
     expect(positions, [note.position]);
     expect(tester.takeException(), isNull);
@@ -184,14 +246,22 @@ void main() {
     ));
     requested.single.completeError(StateError('expired credentials'));
     await tester.pump();
-    expect(find.text('PPT 预览暂不可用'), findsOneWidget);
+    expect(find.byIcon(Icons.broken_image_outlined), findsOneWidget);
     expect(find.text('第 1 页：牛顿运动定律及其应用。'), findsOneWidget);
+    await tester.tap(find.byKey(const ValueKey('recording-note-open-1')));
+    await tester.pump();
+    requested.last.completeError(StateError('detail credentials unavailable'));
+    await tester.pumpAndSettle();
+    expect(find.text('PPT 预览暂不可用'), findsOneWidget);
+    await tester
+        .ensureVisible(find.byKey(const ValueKey('recording-note-image-1')));
+    await tester.pumpAndSettle();
     await tester.tap(find.byKey(const ValueKey('recording-note-image-1')));
     await tester.pump();
     expect(find.byType(Dialog), findsOneWidget);
     expect(find.byType(InteractiveViewer), findsOneWidget);
-    expect(requested, hasLength(2));
-    await tester.tap(find.byTooltip('关闭'));
+    expect(requested, hasLength(3));
+    await tester.tap(find.byTooltip('关闭').last);
     await tester.pumpAndSettle();
     expect(find.byType(Dialog), findsNothing);
     requested.last.completeError(StateError('late completion after close'));
@@ -213,11 +283,11 @@ void main() {
     ));
     oldHeaders.completeError(StateError('old lesson'));
     await tester.pump();
-    expect(find.text('PPT 预览暂不可用'), findsNothing);
+    expect(find.byIcon(Icons.broken_image_outlined), findsNothing);
     expect(find.text('第 2 页：牛顿运动定律及其应用。'), findsOneWidget);
     newHeaders.completeError(StateError('new lesson'));
     await tester.pump();
-    expect(find.text('PPT 预览暂不可用'), findsOneWidget);
+    expect(find.byIcon(Icons.broken_image_outlined), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 
@@ -243,7 +313,39 @@ void main() {
     ));
     expect(find.text('1:02:03'), findsOneWidget);
     expect(tester.takeException(), isNull);
+    await tester.tap(find.byKey(const ValueKey('recording-note-open-long')));
+    await tester.pumpAndSettle();
+    expect(find.byType(SelectableText), findsOneWidget);
+    await tester.drag(
+        find.byKey(const ValueKey('recording-note-detail-scroll-long')),
+        const Offset(0, -400));
+    await tester.pumpAndSettle();
+    for (final key in [
+      'recording-note-copy-long',
+      'recording-note-seek-long'
+    ]) {
+      final rect = tester.getRect(find.byKey(ValueKey(key)));
+      expect(rect.left, greaterThanOrEqualTo(0));
+      expect(rect.right, lessThanOrEqualTo(320));
+      expect(rect.bottom, lessThanOrEqualTo(640));
+    }
+    await tester.tap(find.byTooltip('关闭'));
+    await tester.pumpAndSettle();
     await tester.pumpWidget(app(theme: dark.themeData(), textScale: 2.2));
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('a detail from a previous lesson cannot seek the new lesson',
+      (tester) async {
+    final positions = <Duration>[];
+    await tester.pumpWidget(app(slides: [slide(1)], onSeek: positions.add));
+    await tester.tap(find.byKey(const ValueKey('recording-note-open-1')));
+    await tester.pumpAndSettle();
+    await tester.pumpWidget(app(slides: [slide(2)], onSeek: positions.add));
+    await tester.tap(find.byKey(const ValueKey('recording-note-seek-1')));
+    await tester.pumpAndSettle();
+    expect(positions, isEmpty);
+    expect(find.byKey(const ValueKey('recording-note-open-2')), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 }

@@ -103,6 +103,22 @@ void main() {
     expect(client.requested, [42, 42]);
   });
 
+  test(
+      'failed refresh of an empty lesson reports failure and remains retryable',
+      () async {
+    final client = PptClient()..onLoad = (_) async => [];
+    final repository = VodRepository(apiClient: client);
+    addTearDown(repository.dispose);
+    expect(await repository.loadPptSlides(42), isEmpty);
+    client.onLoad = (_) => Future.error(const VodInvalidResponseException());
+    await expectLater(repository.loadPptSlides(42, forceRefresh: true),
+        throwsA(isA<VodInvalidResponseException>()));
+    client.onLoad = (_) async => [slide];
+    expect(await repository.loadPptSlides(42, forceRefresh: true), [slide]);
+    expect(await repository.loadPptSlides(42), [slide]);
+    expect(client.requested, [42, 42, 42]);
+  });
+
   test('clear rejects old results and cannot overwrite the new session',
       () async {
     final oldClient = PptClient();

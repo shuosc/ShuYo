@@ -582,6 +582,15 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
         _notesError = null;
         _notesLoading = canLoad;
       }
+      if (!canLoad) {
+        _notes = const [];
+        _notesLoading = false;
+        _notesError = lesson.isLive
+            ? '直播课次暂不支持 PPT 笔记'
+            : supported
+                ? '暂时无法加载这节课的 PPT 笔记，请稍后下拉重试'
+                : '请先选择课次，再查看 PPT 笔记';
+      }
     });
     if (!canLoad) return;
     try {
@@ -595,9 +604,12 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
       });
     } on Object catch (error) {
       if (!mounted || revision != _notesRevision) return;
-      final message = error is VodSessionExpiredException
-          ? '校园账户登录已失效，请重新进入录播平台后重试'
-          : '暂时无法加载这节课的 PPT 笔记，请稍后下拉重试';
+      final message = switch (error) {
+        VodSessionExpiredException() => '校园账户登录已失效，请重新进入录播平台后重试',
+        VodPermissionException() => '平台暂未允许读取这节课的 PPT 笔记，请稍后下拉重试',
+        VodInvalidResponseException() => '平台返回的 PPT 笔记数据异常，请稍后下拉重试',
+        _ => '暂时无法加载这节课的 PPT 笔记，请稍后下拉重试',
+      };
       final keepNotes = pullRefresh && _notes.isNotEmpty;
       setState(() {
         _notesLoading = false;
@@ -1850,8 +1862,11 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
                           key: ValueKey('recording-notes:${_lesson.id}'),
                           nested: true,
                           slides: _notes,
-                          loading: _notesLoading,
-                          error: _notesError,
+                          loading: _notesLoading ||
+                              _notesLessonId == null && _catalogLoading,
+                          error: _notesLessonId == null
+                              ? '请先选择课次，再查看 PPT 笔记'
+                              : _notesError,
                           canSeek: !_loading &&
                               _failure == null &&
                               _playback != null &&
