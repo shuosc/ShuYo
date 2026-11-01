@@ -435,8 +435,10 @@ void main() {
     addTearDown(client.dispose);
     final lessons = await client.fetchLessons(_course);
     expect(lessons.map((lesson) => lesson.id), [1, 3, 5, 6]);
-    expect(lessons.where((lesson) => lesson.canPlay).map((lesson) => lesson.id),
+    expect(lessons.where((lesson) => lesson.isPlayable).map((lesson) => lesson.id),
         [1, 3]);
+    expect(lessons.where((lesson) => lesson.canPlay).map((lesson) => lesson.id),
+        [1, 3, 5, 6]);
     expect(lessons.first.beginTime?.hour, 8);
   });
 
@@ -493,11 +495,35 @@ void main() {
     });
   }
 
-  test('an unready recording does not request a playback URL', () async {
+  test('recording status does not prevent requesting a playback URL', () async {
     final requests = <String>[];
     final client = _client((request) async {
       requests.add(request.url.path);
       return _response(_detail());
+    });
+    addTearDown(client.dispose);
+    final playback = await client.fetchPlayback(
+      course: _course,
+      lesson: const VodLesson(
+        id: 123,
+        teachingClassId: 42,
+        name: '回放生成中',
+        isPlayable: false,
+        isGenerating: true,
+      ),
+    );
+    expect(playback.lessonId, 123);
+    expect(requests, ['/v1/course_vod_urls_new']);
+  });
+
+  test('missing playback URLs fail only after the detail request', () async {
+    final requests = <String>[];
+    final client = _client((request) async {
+      requests.add(request.url.path);
+      return _response({
+        ..._detail(permission: 0),
+        'courseVodViewList': <Object>[],
+      });
     });
     addTearDown(client.dispose);
     await expectLater(
@@ -511,9 +537,9 @@ void main() {
           isGenerating: true,
         ),
       ),
-      throwsA(isA<VodPermissionException>()),
+      throwsA(isA<VodApiException>()),
     );
-    expect(requests, isEmpty);
+    expect(requests, ['/v1/course_vod_urls_new']);
   });
 
   test(
@@ -635,13 +661,50 @@ void main() {
     await expectLater(
         client.fetchTerms(),
         throwsA(allOf(
-          isA<VodApiException>(),
+          isA<VodApiException>()
+              .having((error) => error.statusCode, 'statusCode', 401),
           isNot(isA<VodSessionExpiredException>()),
         )));
     expect(requests, 2);
     expect(auth.ensureCalls, [false, true]);
     expect(auth.clears, 0);
   });
+
+  final renewalFailures = <String, Object>{
+    'unavailable identity service': const VodAuthUnavailableException(),
+    'rejected authentication': const VodAuthException('录播会话交换失败'),
+    'network socket': const SocketException('offline'),
+    'authentication timeout': TimeoutException('unavailable'),
+  };
+  for (final failure in renewalFailures.entries) {
+    test('business 401 plus ${failure.key} remains a 401 refusal', () async {
+      final auth = _SessionAuth(onEnsure: (forceRefresh) async {
+        if (forceRefresh) throw failure.value;
+      });
+      var requests = 0;
+      final client = VodApiClient(
+        authService: auth,
+        httpClient: MockClient((_) async {
+          requests++;
+          return http.Response('', 401);
+        }),
+      );
+      addTearDown(client.dispose);
+      addTearDown(auth.dispose);
+
+      await expectLater(
+          client.fetchPlayback(course: _course, lesson: _lesson),
+          throwsA(allOf(
+            isA<VodApiException>()
+                .having((error) => error.statusCode, 'statusCode', 401),
+            isNot(isA<VodNetworkException>()),
+            isNot(isA<VodSessionExpiredException>()),
+          )));
+      expect(requests, 1);
+      expect(auth.ensureCalls, [false, true]);
+      expect(auth.clears, 0);
+    });
+  }
 
   for (final result in ['permission', 'server', 'business', 'network']) {
     test('$result failure does not renew or clear the campus account',
@@ -730,9 +793,13 @@ void main() {
     final auth = _SessionAuth(onEnsure: (_) async {
       throw const VodAuthException('录播会话交换暂时不可用，请稍后重试');
     });
+    var requests = 0;
     final client = VodApiClient(
       authService: auth,
-      httpClient: MockClient((_) async => http.Response('[]', 200)),
+      httpClient: MockClient((_) async {
+        requests++;
+        return http.Response('[]', 200);
+      }),
     );
     addTearDown(client.dispose);
     addTearDown(auth.dispose);
@@ -740,9 +807,42 @@ void main() {
         client.fetchTerms(),
         throwsA(allOf(
           isA<VodApiException>()
-              .having((error) => error.message, 'message', '录播会话交换暂时不可用，请稍后重试'),
+              .having((error) => error.message, 'message', '录播会话交换暂时不可用，请稍后重试')
+              .having((error) => error.statusCode, 'statusCode', 401),
+          isNot(isA<VodSessionExpiredException>()),
+          isNot(isA<VodNetworkException>()),
+        )));
+    expect(requests, 0);
+    expect(auth.ensureCalls, [false]);
+    expect(auth.clears, 0);
+  });
+
+  test('initial unavailable authentication permits network outage handling',
+      () async {
+    final auth = _SessionAuth(onEnsure: (_) async {
+      throw const VodAuthUnavailableException();
+    });
+    var requests = 0;
+    final client = VodApiClient(
+      authService: auth,
+      httpClient: MockClient((_) async {
+        requests++;
+        return http.Response('[]', 200);
+      }),
+    );
+    addTearDown(client.dispose);
+    addTearDown(auth.dispose);
+
+    await expectLater(
+        client.fetchPlayback(course: _course, lesson: _lesson),
+        throwsA(allOf(
+          isA<VodNetworkException>()
+              .having((error) => error.statusCode, 'statusCode', isNull),
           isNot(isA<VodSessionExpiredException>()),
         )));
+    expect(requests, 0);
+    expect(auth.ensureCalls, [false]);
+    expect(auth.clears, 0);
   });
 
   test('headersLoader mock bypasses the real authentication service', () async {

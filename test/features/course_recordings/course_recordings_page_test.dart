@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -50,6 +51,8 @@ const _art = VodCourse(
 const _currentCourses = [_programming, _electronics, _art];
 
 class _Repository extends VodRepository {
+  bool hasLocalRecordings = false;
+  int cachedRecordingsChecks = 0;
   Future<List<VodTerm>> Function(bool force)? termsLoader;
   Future<List<VodCourse>> Function(int term, bool force)? coursesLoader;
   Future<List<VodLesson>> Function(VodCourse course, bool force)? lessonsLoader;
@@ -62,6 +65,12 @@ class _Repository extends VodRepository {
   int clears = 0;
   final courseRequests = <int>[];
   final forcedCourseRequests = <bool>[];
+
+  @override
+  Future<bool> hasCachedRecordings() async {
+    cachedRecordingsChecks++;
+    return hasLocalRecordings;
+  }
 
   @override
   Future<List<VodTerm>> loadTerms({bool forceRefresh = false}) async {
@@ -127,6 +136,21 @@ class _Auth extends VodAuthService {
   Future<void> clearSession({bool? useWebVpn}) async => sessionClears++;
 }
 
+class _OfflineAuth extends _Auth {
+  _OfflineAuth(this.error, {this.storedSession = true});
+
+  final Object error;
+  final bool storedSession;
+
+  @override
+  Future<void> ensureSession(
+          {required bool useWebVpn, bool forceRefresh = false}) async =>
+      throw error;
+
+  @override
+  Future<bool> hasSession({bool? useWebVpn}) async => storedSession;
+}
+
 Future<void> _mount(
   WidgetTester tester,
   _Repository repository, {
@@ -136,6 +160,7 @@ Future<void> _mount(
   Future<bool> Function()? sessionLoader,
   double textScale = 1,
   bool disableAnimations = false,
+  bool prepareSessionWithAuth = false,
 }) async {
   final authService = auth ?? _Auth();
   addTearDown(authService.dispose);
@@ -151,7 +176,8 @@ Future<void> _mount(
     home: CourseRecordingsPage(
       repository: repository,
       authService: authService,
-      sessionLoader: sessionLoader ?? () async => signedIn,
+      sessionLoader:
+          prepareSessionWithAuth ? null : sessionLoader ?? () async => signedIn,
       onLoginRequested: login ?? () async => false,
     ),
   ));
@@ -177,6 +203,74 @@ Future<void> _selectTimetableDate(
 }
 
 void main() {
+  for (final failure in <String, Object>{
+    'server unavailable': const VodAuthUnavailableException(),
+    'network unavailable': const SocketException('offline'),
+    'request timed out': TimeoutException('offline'),
+  }.entries) {
+    testWidgets('cold start loads cached recordings when ${failure.key}',
+        (tester) async {
+      final repository = _Repository()..hasLocalRecordings = true;
+      final auth = _OfflineAuth(failure.value);
+      await _mount(tester, repository,
+          auth: auth, prepareSessionWithAuth: true);
+      await tester.pumpAndSettle();
+      expect(repository.cachedRecordingsChecks, 1);
+      expect(find.byKey(const ValueKey('vod-course:101')), findsOneWidget);
+      expect(find.text('课程加载失败'), findsNothing);
+      expect(tester.takeException(), isNull);
+    });
+  }
+
+  testWidgets('cold start without recordings cache keeps its connection error',
+      (tester) async {
+    final repository = _Repository();
+    final auth = _OfflineAuth(const SocketException('offline'));
+    await _mount(tester, repository, auth: auth, prepareSessionWithAuth: true);
+    await tester.pumpAndSettle();
+    expect(repository.cachedRecordingsChecks, 1);
+    expect(repository.termRequests, 0);
+    expect(find.text('课程加载失败'), findsOneWidget);
+    expect(find.byKey(const ValueKey('vod-course:101')), findsNothing);
+  });
+
+  testWidgets('cached recordings cannot restore a missing business session',
+      (tester) async {
+    final repository = _Repository()..hasLocalRecordings = true;
+    final auth =
+        _OfflineAuth(const SocketException('offline'), storedSession: false);
+    await _mount(tester, repository, auth: auth, prepareSessionWithAuth: true);
+    await tester.pumpAndSettle();
+    expect(repository.cachedRecordingsChecks, 0);
+    expect(repository.termRequests, 0);
+    expect(find.text('课程加载失败'), findsOneWidget);
+  });
+
+  testWidgets('cached recordings do not bypass an expired campus login',
+      (tester) async {
+    final repository = _Repository()..hasLocalRecordings = true;
+    final auth =
+        _OfflineAuth(const VodCampusAuthRequiredException(ssoExpired: true));
+    await _mount(tester, repository, auth: auth, prepareSessionWithAuth: true);
+    await tester.pumpAndSettle();
+    expect(repository.cachedRecordingsChecks, 0);
+    expect(repository.termRequests, 0);
+    expect(find.text('校园账户登录已失效'), findsOneWidget);
+    expect(find.byKey(const ValueKey('vod-course:101')), findsNothing);
+  });
+
+  testWidgets('cached recordings do not bypass an identity mismatch',
+      (tester) async {
+    final repository = _Repository()..hasLocalRecordings = true;
+    final auth = _OfflineAuth(const VodAuthException('校园账户已改变，请重新加载课程录播'));
+    await _mount(tester, repository, auth: auth, prepareSessionWithAuth: true);
+    await tester.pumpAndSettle();
+    expect(repository.cachedRecordingsChecks, 0);
+    expect(repository.termRequests, 0);
+    expect(find.text('校园账户已改变，请重新加载课程录播'), findsOneWidget);
+    expect(find.byKey(const ValueKey('vod-course:101')), findsNothing);
+  });
+
   final morningLesson = VodLesson(
       id: 201,
       teachingClassId: 101,

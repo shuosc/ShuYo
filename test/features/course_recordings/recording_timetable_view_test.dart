@@ -99,7 +99,7 @@ Finder _entry(int lessonId) =>
 
 void _expectCompactMetadata(Finder entry) {
   final removedMetadata =
-      RegExp(r'第\s*\d+\s*周|\d{1,2}:\d{2}|录播回放|正在直播|回放生成中|暂不可看|直播已结束');
+      RegExp(r'第\s*\d+\s*周|\d{1,2}:\d{2}|录播回放|查看录播|正在直播|回放生成中|暂不可看|直播已结束');
   expect(
       find.descendant(
           of: entry, matching: find.textContaining(removedMetadata)),
@@ -162,7 +162,7 @@ void main() {
             themeId: themeId);
         final context = tester.element(_entry(1));
         final colors = context.shuyoColors;
-        final secondary = playable ? colors.textSecondary : colors.textMuted;
+        final secondary = colors.textSecondary;
         final primary = Theme.of(context).colorScheme.primary;
         final title = tester.widget<RecordingCourseTitle>(find.descendant(
             of: _entry(1), matching: find.byType(RecordingCourseTitle)));
@@ -176,17 +176,15 @@ void main() {
             (description.textSpan! as TextSpan).children!.cast<TextSpan>();
         expect(spans, hasLength(5));
         expect(spans[0].text, '宝山 A101');
-        expect(spans[0].style!.color, playable ? primary : colors.textMuted);
+        expect(spans[0].style!.color, primary);
         expect(spans[1].text, ' · ');
         expect(spans[1].style, isNull);
         expect(spans[2].text, '第1节');
-        expect(spans[2].style!.color,
-            playable ? colors.textPrimary : colors.textMuted);
+        expect(spans[2].style!.color, colors.textPrimary);
         expect(spans[3].text, ' · ');
         expect(spans[3].style, isNull);
         expect(spans[4].text, '第 1 集');
-        expect(spans[4].style!.color,
-            playable ? colors.textPrimary : colors.textMuted);
+        expect(spans[4].style!.color, colors.textPrimary);
         _expectCompactMetadata(_entry(1));
         expect(tester.takeException(), isNull);
       }
@@ -443,7 +441,7 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('only playable lessons open and unavailable lessons stay grey',
+  testWidgets('recordings can open while unavailable live lessons stay grey',
       (tester) async {
     final selected = <RecordingTimetableEntry>[];
     final playable = _lesson(1, 21);
@@ -477,7 +475,20 @@ void main() {
             of: _entry(1), matching: find.byIcon(Icons.chevron_right)),
         findsOneWidget);
     _expectCompactMetadata(_entry(1));
-    for (final lessonId in [2, 3, 4]) {
+    for (final lessonId in [2, 3]) {
+      final entry = _entry(lessonId);
+      final row = tester.widget<ListTile>(entry);
+      expect(row.onTap, isNotNull);
+      expect(row.enabled, isTrue);
+      expect(
+          find.descendant(
+              of: entry, matching: find.byIcon(Icons.chevron_right)),
+          findsOneWidget);
+      _expectCompactMetadata(entry);
+      await tester.tap(entry);
+    }
+    expect(selected.map((entry) => entry.lesson.id), [1, 2, 3]);
+    for (final lessonId in [4]) {
       final entry = _entry(lessonId);
       final row = tester.widget<ListTile>(entry);
       expect(row.onTap, isNull);
@@ -490,18 +501,14 @@ void main() {
       _expectCompactMetadata(entry);
       await tester.tap(entry);
     }
-    expect(selected, hasLength(1));
+    expect(selected, hasLength(3));
     expect(find.descendant(of: _entry(2), matching: find.byType(ColorFiltered)),
-        findsOneWidget);
-    final colors = tester.element(_entry(2)).shuyoColors;
+        findsNothing);
+    final colors = tester.element(_entry(4)).shuyoColors;
     final disabledTitle = tester.widget<ColorFiltered>(
-        find.descendant(of: _entry(2), matching: find.byType(ColorFiltered)));
+        find.descendant(of: _entry(4), matching: find.byType(ColorFiltered)));
     expect(disabledTitle.colorFilter,
         ColorFilter.mode(colors.textMuted, BlendMode.srcIn));
-    final disabledIcon = tester.widget<RecordingStatusIcon>(find.descendant(
-        of: _entry(2), matching: find.byType(RecordingStatusIcon)));
-    expect(disabledIcon.enabled, isFalse);
-    expect(disabledIcon.disabledColor, colors.textMuted);
     final disabledLiveIcon = tester.widget<RecordingStatusIcon>(find.descendant(
         of: _entry(4), matching: find.byType(RecordingStatusIcon)));
     expect(disabledLiveIcon.isLive, isTrue);

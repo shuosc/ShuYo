@@ -227,6 +227,41 @@ class _PendingCatalogRepository extends VodRepository {
   }
 }
 
+class _DeniedCatalogRepository extends _PendingCatalogRepository {
+  @override
+  Future<List<VodLesson>> loadCourseLessons(VodCourse course,
+      {bool forceRefresh = false}) {
+    catalogRequests++;
+    return Future.error(const VodPermissionException());
+  }
+}
+
+class _PendingPreviewRepository extends VodRepository {
+  final catalog = Completer<List<VodLesson>>();
+  Future<List<VodLesson>>? refreshCatalog;
+  final requests = <({bool forceRefresh, int courseId})>[];
+  final playback = <int, Completer<VodPlayback>>{};
+  final requested = <int>[];
+
+  @override
+  Future<List<VodLesson>> loadPreviewLessons(VodCourse course,
+      {bool forceRefresh = false}) {
+    requests
+        .add((forceRefresh: forceRefresh, courseId: course.teachingClassId));
+    return forceRefresh ? refreshCatalog ?? catalog.future : catalog.future;
+  }
+
+  @override
+  Future<VodPlayback> preparePlayback(
+      {required VodCourse course, required VodLesson lesson}) {
+    requested.add(lesson.id);
+    if (playback[lesson.id]?.isCompleted ?? true) {
+      playback[lesson.id] = Completer<VodPlayback>();
+    }
+    return playback[lesson.id]!.future;
+  }
+}
+
 class _VideoState extends VideoState {
   _VideoState({this.fullscreen = false});
 
@@ -586,8 +621,7 @@ void main() {
     await tester.pumpWidget(const SizedBox.shrink());
   });
 
-  testWidgets(
-      'fullscreen navigation skips unavailable episodes and drawer keeps them disabled',
+  testWidgets('fullscreen navigation can select a generating recording',
       (tester) async {
     final platform = _PlatformPlayer();
     final player = Player(platformPlayer: platform);
@@ -607,14 +641,19 @@ void main() {
         isNull);
     await tester.tap(find.byTooltip('下一集'));
     await tester.pump(const Duration(milliseconds: 350));
-    expect(selected?.id, second.id);
+    expect(selected?.id, unavailable.id);
     await tester.tap(find.byTooltip('选集'));
     await tester.pump(const Duration(milliseconds: 350));
     await tester.pumpAndSettle();
     final pending = find.byKey(ValueKey('fullscreen-lesson-${unavailable.id}'));
-    expect(tester.widget<ListTile>(pending).enabled, isFalse);
+    expect(tester.widget<ListTile>(pending).enabled, isTrue);
     await tester.tap(pending);
-    expect(selected?.id, second.id);
+    await tester.pump(const Duration(milliseconds: 350));
+    await tester.pumpAndSettle();
+    expect(selected?.id, unavailable.id);
+    await tester.tap(find.byTooltip('选集'));
+    await tester.pump(const Duration(milliseconds: 350));
+    await tester.pumpAndSettle();
     await tester.tap(find.byKey(ValueKey('fullscreen-lesson-${second.id}')));
     await tester.pump(const Duration(milliseconds: 350));
     await tester.pumpAndSettle();
@@ -1998,7 +2037,8 @@ void main() {
     await tester.pumpWidget(const SizedBox.shrink());
   });
 
-  testWidgets('unsupported audio selection does not block opening or view swaps',
+  testWidgets(
+      'unsupported audio selection does not block opening or view swaps',
       (tester) async {
     final harness = _PlaybackHarness();
     var loads = 0;
@@ -2016,13 +2056,13 @@ void main() {
     expect(harness.platforms.map((player) => player.state.track.audio.id),
         ['auto', 'auto']);
     expect(harness.platforms.every((player) => player.state.playing), isTrue);
-    var controls = tester.widget<RecordingVideoControls>(
-        find.byType(RecordingVideoControls));
+    var controls = tester
+        .widget<RecordingVideoControls>(find.byType(RecordingVideoControls));
     for (var index = 0; index < 3; index++) {
       controls.onSwapViews!();
       await tester.pumpAndSettle();
-      controls = tester.widget<RecordingVideoControls>(
-          find.byType(RecordingVideoControls));
+      controls = tester
+          .widget<RecordingVideoControls>(find.byType(RecordingVideoControls));
       expect(controls.selectedView, (index + 1) % 2);
     }
 
@@ -2469,6 +2509,348 @@ void main() {
     await tester.pump();
   });
 
+  for (final denied in [false, true]) {
+    testWidgets(
+        'search result skips the ordinary catalog and ${denied ? 'preserves playback denial' : 'plays its initial lesson'}',
+        (tester) async {
+      final repository = _PendingCatalogRepository();
+      final harness = _PlaybackHarness();
+      addTearDown(repository.dispose);
+      await tester.pumpWidget(MaterialApp(
+        theme: ShuYoThemes.all.first.themeData(),
+        home: RecordingPlayerPage(
+          course: course,
+          initialLesson: first,
+          loadCourseCatalog: false,
+          repository: repository,
+          playerFactory: harness.createPlayer,
+          videoControllerFactory: harness.createController,
+        ),
+      ));
+      await tester.pump();
+      expect(repository.catalogRequests, 0);
+      expect(repository.requested, [first]);
+      if (denied) {
+        repository.playback.completeError(const VodPermissionException());
+      } else {
+        repository.playback.complete(playback(first));
+      }
+      await tester.pumpAndSettle();
+      expect(repository.catalogRequests, 0);
+      expect(find.text('选集'), findsOneWidget);
+      expect(find.byType(RefreshIndicator), findsNothing);
+      if (denied) {
+        expect(find.text('无法获取这节录播的播放地址，请稍后重试。'), findsOneWidget);
+        expect(harness.platforms, isEmpty);
+      } else {
+        expect(harness.platforms.first.opened, hasLength(1));
+        expect(find.byType(RecordingPlaybackLoading), findsNothing);
+        expect(find.byTooltip('暂停'), findsOneWidget);
+      }
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pump();
+    });
+  }
+
+  testWidgets('preview merges seed and current selection without reopening',
+      (tester) async {
+    const statusUnknown = VodLesson(
+      id: 105,
+      teachingClassId: 10,
+      name: '状态未知',
+      isPlayable: false,
+    );
+    const detailedSecond = VodLesson(
+      id: 102,
+      teachingClassId: 10,
+      name: '课程详情',
+      isPlayable: true,
+      classroom: 'B202',
+    );
+    final repository = _PendingPreviewRepository();
+    final harness = _PlaybackHarness();
+    addTearDown(repository.dispose);
+    await tester.pumpWidget(MaterialApp(
+      theme: ShuYoThemes.all.first.themeData(),
+      home: RecordingPlayerPage(
+        course: course,
+        initialLesson: first,
+        lessons: [first, second],
+        loadCourseCatalog: false,
+        loadPreviewCatalog: true,
+        repository: repository,
+        playerFactory: harness.createPlayer,
+        videoControllerFactory: harness.createController,
+      ),
+    ));
+    await tester.pump();
+    expect(repository.requested, [101]);
+    expect(repository.requests.single.forceRefresh, isFalse);
+    expect(find.byKey(const ValueKey('recording-catalog-progress')),
+        findsOneWidget);
+    expect(find.byType(RefreshIndicator), findsOneWidget);
+    await tester.tap(find.byKey(const ValueKey('recording-lesson-102')));
+    await tester.pump();
+    expect(repository.requested, [101, 102]);
+    repository.catalog.complete([detailedSecond, statusUnknown]);
+    await tester.pump();
+    expect(
+        find.byKey(const ValueKey('recording-catalog-progress')), findsNothing);
+    expect(find.text('选集'), findsOneWidget);
+    expect(find.text('搜索课次'), findsNothing);
+    expect(find.byKey(const ValueKey('recording-lesson-101')), findsOneWidget);
+    expect(find.byKey(const ValueKey('recording-lesson-102')), findsOneWidget);
+    expect(find.byKey(const ValueKey('recording-lesson-105')), findsOneWidget);
+    expect(
+        tester
+            .widget<ListTile>(
+                find.byKey(const ValueKey('recording-lesson-105')))
+            .enabled,
+        isTrue);
+    final detail = tester
+        .widget<ListTile>(find.byKey(const ValueKey('recording-lesson-102')))
+        .subtitle! as Text;
+    expect(detail.textSpan!.toPlainText(), contains('B202'));
+    expect(repository.requested, [101, 102]);
+    repository.playback[101]!.complete(playback(first));
+    repository.playback[102]!.complete(playback(second));
+    await tester.pumpAndSettle();
+    expect(harness.platforms.first.opened, hasLength(1));
+    expect(
+        tester
+            .widget<ListTile>(
+                find.byKey(const ValueKey('recording-lesson-102')))
+            .selected,
+        isTrue);
+    repository.refreshCatalog = Future.value([statusUnknown]);
+    await tester
+        .widget<RefreshIndicator>(find.byType(RefreshIndicator))
+        .onRefresh();
+    await tester.pumpAndSettle();
+    expect(repository.requests.last.forceRefresh, isTrue);
+    expect(repository.requested, [101, 102]);
+    expect(find.byKey(const ValueKey('recording-lesson-101')), findsOneWidget);
+    expect(find.byKey(const ValueKey('recording-lesson-102')), findsOneWidget);
+    expect(harness.platforms.first.opened, hasLength(1));
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('preview failure preserves playback failure and permits refresh',
+      (tester) async {
+    final repository = _PendingPreviewRepository();
+    addTearDown(repository.dispose);
+    await tester.pumpWidget(MaterialApp(
+      theme: ShuYoThemes.all.first.themeData(),
+      home: RecordingPlayerPage(
+        course: course,
+        initialLesson: first,
+        lessons: [first, second],
+        loadCourseCatalog: false,
+        loadPreviewCatalog: true,
+        repository: repository,
+      ),
+    ));
+    await tester.pump();
+    repository.playback[101]!.completeError(const VodPermissionException());
+    await tester.pump();
+    expect(find.text('无法获取这节录播的播放地址，请稍后重试。'), findsOneWidget);
+    repository.catalog.completeError(const VodNetworkException());
+    await tester.pump();
+    expect(find.text('无法获取这节录播的播放地址，请稍后重试。'), findsOneWidget);
+    expect(find.text('选集刷新失败，请稍后下拉重试'), findsOneWidget);
+    expect(repository.requested, [101]);
+    repository.refreshCatalog = Future.value([]);
+    await tester
+        .widget<RefreshIndicator>(find.byType(RefreshIndicator))
+        .onRefresh();
+    await tester.pump();
+    expect(repository.requests.last.forceRefresh, isTrue);
+    expect(repository.requested, [101]);
+    expect(find.text('无法获取这节录播的播放地址，请稍后重试。'), findsOneWidget);
+    expect(find.byKey(const ValueKey('recording-lesson-102')), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  for (final alreadyPlaying in [false, true]) {
+    testWidgets(
+        'preview session expiry preserves ${alreadyPlaying ? 'playing' : 'pending'} playback',
+        (tester) async {
+      final repository = _PendingPreviewRepository();
+      final harness = _PlaybackHarness();
+      addTearDown(repository.dispose);
+      await tester.pumpWidget(MaterialApp(
+        theme: ShuYoThemes.all.first.themeData(),
+        home: RecordingPlayerPage(
+          course: course,
+          initialLesson: first,
+          loadCourseCatalog: false,
+          loadPreviewCatalog: true,
+          repository: repository,
+          playerFactory: harness.createPlayer,
+          videoControllerFactory: harness.createController,
+        ),
+      ));
+      await tester.pump();
+      if (alreadyPlaying) {
+        repository.playback[101]!.complete(playback(first));
+        await tester.pump();
+        await tester.pump();
+      }
+      final pauses = alreadyPlaying ? harness.platforms.first.pauses : 0;
+      repository.catalog.completeError(const VodSessionExpiredException());
+      await tester.pump();
+      expect(find.text('校园账户登录已失效，请重新登录。'), findsNothing);
+      if (!alreadyPlaying) {
+        repository.playback[101]!.complete(playback(first));
+        await tester.pumpAndSettle();
+      } else {
+        expect(harness.platforms.first.pauses, pauses);
+      }
+      expect(harness.platforms.first.opened, hasLength(1));
+      expect(harness.platforms.first.state.playing, isTrue);
+      expect(repository.requested, [101]);
+      expect(tester.takeException(), isNull);
+    });
+  }
+
+  testWidgets('session recovery ignores the old preview and reloads it',
+      (tester) async {
+    final repository = _PendingPreviewRepository();
+    final updated = Completer<List<VodLesson>>();
+    repository.refreshCatalog = updated.future;
+    final harness = _PlaybackHarness();
+    addTearDown(repository.dispose);
+    await tester.pumpWidget(MaterialApp(
+      theme: ShuYoThemes.all.first.themeData(),
+      home: RecordingPlayerPage(
+        course: course,
+        initialLesson: first,
+        loadCourseCatalog: false,
+        loadPreviewCatalog: true,
+        repository: repository,
+        onSessionExpired: () async => true,
+        playerFactory: harness.createPlayer,
+        videoControllerFactory: harness.createController,
+      ),
+    ));
+    await tester.pump();
+    repository.playback[101]!.completeError(const VodSessionExpiredException());
+    await tester.pump();
+    await tester.tap(find.text('重新登录'));
+    await tester.pump();
+    await tester.pump();
+    expect(repository.requested, [101, 101]);
+    expect(repository.requests.map((request) => request.forceRefresh),
+        [false, true]);
+    repository.catalog.completeError(const VodSessionExpiredException());
+    repository.playback[101]!.complete(playback(first));
+    updated.complete([second]);
+    await tester.pumpAndSettle();
+    expect(find.text('校园账户登录已失效，请重新登录。'), findsNothing);
+    expect(find.byKey(const ValueKey('recording-lesson-102')), findsOneWidget);
+    expect(harness.platforms.first.opened, hasLength(1));
+    expect(repository.requested, [101, 101]);
+    expect(tester.takeException(), isNull);
+  });
+
+  for (final playbackDenied in [false, true]) {
+    testWidgets(
+        'immediate catalog denial preserves a pending recording request '
+        'when playback ${playbackDenied ? 'is denied' : 'succeeds'}',
+        (tester) async {
+      final repository = _DeniedCatalogRepository();
+      final harness = _PlaybackHarness();
+      addTearDown(repository.dispose);
+      await tester.pumpWidget(MaterialApp(
+        theme: ShuYoThemes.all.first.themeData(),
+        home: RecordingPlayerPage(
+          course: course,
+          initialLesson: first,
+          repository: repository,
+          playerFactory: harness.createPlayer,
+          videoControllerFactory: harness.createController,
+        ),
+      ));
+      await tester.pump();
+      expect(repository.catalogRequests, 1);
+      expect(repository.requested, [first]);
+      expect(find.text('无法获取这节录播的播放地址，请稍后重试。'), findsNothing);
+      expect(find.text('选集刷新失败，请稍后下拉重试'), findsNothing);
+      if (playbackDenied) {
+        repository.playback.completeError(const VodPermissionException());
+      } else {
+        repository.playback.complete(playback(first));
+      }
+      await tester.pumpAndSettle();
+      if (playbackDenied) {
+        expect(find.text('无法获取这节录播的播放地址，请稍后重试。'), findsOneWidget);
+        expect(harness.platforms, isEmpty);
+      } else {
+        expect(find.text('无法获取这节录播的播放地址，请稍后重试。'), findsNothing);
+        expect(harness.platforms.first.opened, hasLength(1));
+        expect(harness.platforms.first.state.playing, isTrue);
+      }
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pump();
+    });
+  }
+
+  testWidgets('late catalog denial does not stop an opened recording',
+      (tester) async {
+    final repository = _PendingCatalogRepository();
+    final harness = _PlaybackHarness();
+    addTearDown(repository.dispose);
+    await tester.pumpWidget(MaterialApp(
+      theme: ShuYoThemes.all.first.themeData(),
+      home: RecordingPlayerPage(
+        course: course,
+        initialLesson: first,
+        repository: repository,
+        playerFactory: harness.createPlayer,
+        videoControllerFactory: harness.createController,
+      ),
+    ));
+    await tester.pump();
+    repository.playback.complete(playback(first));
+    await tester.pump();
+    await tester.pump();
+    final platform = harness.platforms.first;
+    expect(platform.state.playing, isTrue);
+    final pauses = platform.pauses;
+    repository.catalog.completeError(const VodPermissionException());
+    await tester.pumpAndSettle();
+    expect(platform.state.playing, isTrue);
+    expect(platform.pauses, pauses);
+    expect(find.text('无法获取这节录播的播放地址，请稍后重试。'), findsNothing);
+    expect(find.text('选集刷新失败，请稍后下拉重试'), findsNothing);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pump();
+  });
+
+  testWidgets('catalog session expiry still interrupts a pending recording',
+      (tester) async {
+    final repository = _PendingCatalogRepository();
+    addTearDown(repository.dispose);
+    await tester.pumpWidget(MaterialApp(
+      theme: ShuYoThemes.all.first.themeData(),
+      home: RecordingPlayerPage(
+          course: course, initialLesson: first, repository: repository),
+    ));
+    await tester.pump();
+    repository.catalog.completeError(const VodSessionExpiredException());
+    await tester.pumpAndSettle();
+    expect(find.text('校园账户登录已失效，请重新登录。'), findsOneWidget);
+    repository.playback.complete(playback(first));
+    await tester.pump();
+    expect(find.text('校园账户登录已失效，请重新登录。'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pump();
+  });
+
   testWidgets('live seed prepares playback while its catalog is pending',
       (tester) async {
     const live = VodLesson(
@@ -2620,7 +3002,7 @@ void main() {
   });
 
   testWidgets(
-      'direct course page prioritizes live and keeps newest generating episode disabled',
+      'direct course page prioritizes live and permits a generating episode',
       (tester) async {
     final pending = VodLesson(
         id: 105,
@@ -2648,24 +3030,22 @@ void main() {
     await tester.pumpAndSettle();
     expect(repository.requested.single.id, 106);
     final generatedRow = find.byKey(const ValueKey('recording-lesson-105'));
-    expect(tester.widget<ListTile>(generatedRow).enabled, isFalse);
-    expect(tester.widget<ListTile>(generatedRow).onTap, isNull);
+    expect(tester.widget<ListTile>(generatedRow).enabled, isTrue);
+    expect(tester.widget<ListTile>(generatedRow).onTap, isNotNull);
     final liveRow = find.byKey(const ValueKey('recording-lesson-106'));
     expect(tester.getTopLeft(generatedRow).dy,
         lessThan(tester.getTopLeft(liveRow).dy));
     expect(find.text('课程介绍'), findsNothing);
-    expect(find.text('回放生成中'), findsOneWidget);
     expect(
         find.descendant(
             of: liveRow, matching: find.byType(RecordingStatusIcon)),
         findsOneWidget);
     await tester.tap(generatedRow);
     await tester.pump();
-    expect(repository.requested, hasLength(1));
+    expect(repository.requested.map((lesson) => lesson.id), [106, 105]);
   });
 
-  testWidgets(
-      'a course containing only generating episodes never asks for playback',
+  testWidgets('a course containing only generating episodes requests playback',
       (tester) async {
     final repository = _CatalogRepository([unavailable]);
     addTearDown(repository.dispose);
@@ -2674,9 +3054,30 @@ void main() {
       home: RecordingPlayerPage(course: course, repository: repository),
     ));
     await tester.pumpAndSettle();
-    expect(repository.requested, isEmpty);
-    expect(find.text('回放生成中，生成后可观看'), findsOneWidget);
+    expect(repository.requested, [unavailable]);
+    expect(find.text('无法获取这节录播的播放地址，请稍后重试。'), findsOneWidget);
     expect(find.text('选集'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('a generated recording is selected before a newer candidate',
+      (tester) async {
+    final pending = VodLesson(
+      id: 105,
+      teachingClassId: 10,
+      name: course.name,
+      isPlayable: false,
+      isGenerating: true,
+      beginTime: DateTime(2026, 10, 28),
+    );
+    final repository = _CatalogRepository([first, pending]);
+    addTearDown(repository.dispose);
+    await tester.pumpWidget(MaterialApp(
+      theme: ShuYoThemes.all.first.themeData(),
+      home: RecordingPlayerPage(course: course, repository: repository),
+    ));
+    await tester.pumpAndSettle();
+    expect(repository.requested, [first]);
     expect(tester.takeException(), isNull);
   });
 
@@ -2692,7 +3093,7 @@ void main() {
     await tester.pump();
 
     expect(calls, 1);
-    expect(find.text('当前账号没有这节录播的观看权限。'), findsOneWidget);
+    expect(find.text('无法获取这节录播的播放地址，请稍后重试。'), findsOneWidget);
     expect(find.textContaining('private-value'), findsNothing);
     expect(find.text('选集'), findsOneWidget);
     await tester.scrollUntilVisible(
@@ -2703,7 +3104,7 @@ void main() {
             .widget<ListTile>(
                 find.byKey(const ValueKey('recording-lesson-103')))
             .enabled,
-        isFalse);
+        isTrue);
     expect(find.byKey(const ValueKey('recording-lesson-104')), findsNothing);
 
     await tester.tap(find.text('重试'));
@@ -2732,7 +3133,7 @@ void main() {
     firstRequest.completeError(const VodPermissionException());
     await tester.pump();
     expect(find.text('暂时无法连接录播平台，请检查网络后重试。'), findsOneWidget);
-    expect(find.text('当前账号没有这节录播的观看权限。'), findsNothing);
+    expect(find.text('无法获取这节录播的播放地址，请稍后重试。'), findsNothing);
     expect(tester.takeException(), isNull);
   });
 
@@ -2761,7 +3162,7 @@ void main() {
     expect(find.text('校园账户登录已失效，请重新登录。'), findsOneWidget);
   });
 
-  testWidgets('rejects ungenerated initial lessons without requesting playback',
+  testWidgets('requests playback for an ungenerated initial lesson',
       (tester) async {
     var calls = 0;
     await tester.pumpWidget(page(
@@ -2772,8 +3173,8 @@ void main() {
       },
     ));
     await tester.pump();
-    expect(calls, 0);
-    expect(find.text('这节录播暂时无法观看，请稍后重试。'), findsOneWidget);
+    expect(calls, 1);
+    expect(find.text('暂时无法连接录播平台，请检查网络后重试。'), findsOneWidget);
   });
 
   testWidgets('a response for a different lesson is never sent to the decoder',

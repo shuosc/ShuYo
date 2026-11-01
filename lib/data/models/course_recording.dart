@@ -232,7 +232,9 @@ class VodLesson {
       isPlayable &&
       (liveEndTime == null || DateTime.now().isBefore(liveEndTime!));
 
-  bool get canPlay => isLive ? isLiveAvailable : isPlayable;
+  // Recording metadata can lag behind the media server. Let a valid, listed
+  // lesson request its playback URL even when its generation status is stale.
+  bool get canPlay => isLive ? isLiveAvailable : id > 0 && teachingClassId > 0;
 
   String get statusLabel => isLive
       ? (isLiveAvailable ? '正在直播' : '直播已结束')
@@ -240,7 +242,9 @@ class VodLesson {
           ? '回放生成中'
           : isPlayable
               ? '录播回放'
-              : '暂不可看';
+              : canPlay
+                  ? '查看录播'
+                  : '暂不可看';
 }
 
 enum VodLiveProtocol { hls, flv, webRtc }
@@ -274,7 +278,8 @@ class VodView {
 
   final int viewNumber;
 
-  /// Ephemeral signed URL. Never persist, log, or use as a cache key.
+  /// Server-issued media URL. Recording links may be kept in the account's
+  /// local fallback cache; never log them or use them as widget/cache keys.
   final Uri url;
 
   /// Headers scoped to this media target, never copied from the API request.
@@ -296,7 +301,8 @@ class VodView {
       };
 }
 
-/// Held by a player route only; obtaining another playback rechecks permission.
+/// Playback metadata. Recording links are refreshed on each playback request,
+/// with a local fallback during API outages; live sources remain ephemeral.
 class VodPlayback {
   const VodPlayback({
     required this.lessonId,

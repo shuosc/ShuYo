@@ -1,6 +1,8 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:http/http.dart' as http;
 
 import '../../data/models/course_recording.dart';
 import '../../data/repositories/vod_repository.dart';
@@ -12,6 +14,7 @@ import '../../shared/theme/shuyo_theme.dart';
 import '../../shared/widgets/empty_state.dart';
 import 'recording_course_title.dart';
 import 'recording_player_page.dart';
+import 'recording_search_page.dart';
 import 'recording_status_icon.dart';
 import 'recording_term_menu.dart';
 import 'recording_timetable_data.dart';
@@ -129,8 +132,20 @@ class _CourseRecordingsPageState extends State<CourseRecordingsPage> {
         !await widget.onWebVpnSessionRequired!()) {
       throw const VodAuthException('WebVPN 连接未恢复，请检查连接后重试。');
     }
-    await _auth.ensureSession(
-        useWebVpn: widget.useWebVpn, forceRefresh: forceRefresh);
+    try {
+      await _auth.ensureSession(
+          useWebVpn: widget.useWebVpn, forceRefresh: forceRefresh);
+    } on Object catch (error) {
+      final connectionFailure = error is VodAuthUnavailableException ||
+          error is SocketException ||
+          error is TimeoutException ||
+          error is http.ClientException;
+      if (!connectionFailure ||
+          !await _auth.hasSession(useWebVpn: widget.useWebVpn) ||
+          !await _repository.hasCachedRecordings()) {
+        rethrow;
+      }
+    }
     return true;
   }
 
@@ -427,6 +442,22 @@ class _CourseRecordingsPageState extends State<CourseRecordingsPage> {
     await _load(termId: termId);
   }
 
+  Future<void> _openSearch() async {
+    final termId = _selectedTermId;
+    if (!_authenticated || termId == null) return;
+    await Navigator.of(context).push<void>(shuyoRoute(
+      builder: (_) => RecordingSearchPage(
+        repository: _repository,
+        terms: _terms,
+        selectedTermId: termId,
+        onSessionInvalidated: (ssoExpired) =>
+            _campusAuthRequired(ssoExpired: ssoExpired),
+        onLoginRequested: _login,
+        onSessionExpired: _recoverSession,
+      ),
+    ));
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -434,6 +465,12 @@ class _CourseRecordingsPageState extends State<CourseRecordingsPage> {
         title: const Text('课程录播'),
         actions: [
           if (_authenticated) ...[
+            IconButton(
+              key: const ValueKey('vod-search'),
+              tooltip: '搜索录播',
+              onPressed: _selectedTermId == null ? null : _openSearch,
+              icon: const Icon(Icons.search),
+            ),
             Tooltip(
               message: _timetableMode ? '切换为课程列表' : '切换为时间表',
               child: TextButton.icon(

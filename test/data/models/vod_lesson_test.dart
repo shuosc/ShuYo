@@ -42,7 +42,7 @@ void main() {
     'missing deletion status': {'vodDeleteStatus': null},
   };
   for (final unavailableCase in unavailableCases.entries) {
-    test('${unavailableCase.key} still prevents playback', () {
+    test('${unavailableCase.key} does not prevent a playback lookup', () {
       final lesson = VodLesson.fromJson({
         ..._generatedLessonJson,
         'vodClickEnable': 1,
@@ -50,14 +50,13 @@ void main() {
       });
 
       expect(lesson.isPlayable, isFalse);
-      expect(lesson.canPlay, isFalse);
+      expect(lesson.canPlay, isTrue);
       expect(lesson.isGenerating, isFalse);
-      expect(lesson.statusLabel, '暂不可看');
+      expect(lesson.statusLabel, '查看录播');
     });
   }
 
-  test('pending recordings retain generating status without becoming playable',
-      () {
+  test('pending recordings retain generating status while allowing lookup', () {
     for (final generatingFlags in [
       {'vodDisplayStatus': 1},
       {'vodStatusShow': 4},
@@ -72,9 +71,24 @@ void main() {
       expect(lesson.isListed, isTrue);
       expect(lesson.isGenerating, isTrue);
       expect(lesson.isPlayable, isFalse);
-      expect(lesson.canPlay, isFalse);
+      expect(lesson.canPlay, isTrue);
       expect(lesson.statusLabel, '回放生成中');
     }
+  });
+
+  test('recording playback lookup requires valid lesson and class IDs', () {
+    for (final ids in [
+      {'id': 0, 'teclId': 10},
+      {'id': -1, 'teclId': 10},
+      {'id': 42, 'teclId': 0},
+      {'id': 42, 'teclId': -1},
+    ]) {
+      final lesson = VodLesson.fromJson({..._generatedLessonJson, ...ids});
+      expect(lesson.canPlay, isFalse);
+    }
+    const invalid =
+        VodLesson(id: 0, teachingClassId: 10, name: '课程', isPlayable: false);
+    expect(invalid.statusLabel, '暂不可看');
   });
 
   test(

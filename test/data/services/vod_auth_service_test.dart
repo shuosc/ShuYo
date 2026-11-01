@@ -351,6 +351,108 @@ void main() {
     native.dispose();
   });
 
+  for (final status in [302, 429, 503]) {
+    test(
+        'identity HTTP $status preserves the stored session until service recovery',
+        () async {
+      final store = _Store();
+      final saved = jsonEncode(
+          {'studentId': 'A001', 'jwtToken': 'saved-recording-token'});
+      store.values[VodConstants.directSessionKey] = saved;
+      final jar = SessionCookieJar();
+      await jar.setCookie(const SessionCookie(
+        name: 'recording-session',
+        value: 'saved-recording-cookie',
+        domain: VodConstants.directHost,
+      ));
+      final native = _Native();
+      var unavailable = true;
+      final requests = <http.Request>[];
+      final auth =
+          service(store, native, jar: jar, client: MockClient((request) async {
+        requests.add(request);
+        expect(request.followRedirects, isFalse);
+        expect(request.headers['jwt-token'], 'saved-recording-token');
+        return unavailable ? http.Response('', status) : _identity('A001');
+      }));
+      addTearDown(auth.dispose);
+      addTearDown(native.dispose);
+
+      await expectLater(auth.ensureSession(useWebVpn: false),
+          throwsA(isA<VodAuthUnavailableException>()));
+      expect(store.values[VodConstants.directSessionKey], saved);
+      expect(store.deletes, isEmpty);
+      expect(native.calls, 0);
+      expect(await auth.hasSession(useWebVpn: false), isTrue);
+      expect(
+          (await jar.getCookies(
+                  domain: VodUrlResolver.baseUriFor(useWebVpn: false)))
+              .map((cookie) => cookie.value),
+          contains('saved-recording-cookie'));
+
+      unavailable = false;
+      await auth.ensureSession(useWebVpn: false);
+      expect(native.calls, 0);
+      expect(requests, hasLength(2));
+      expect(store.values[VodConstants.directSessionKey], saved);
+      expect(
+          (await auth.headersFor(
+              VodUrlResolver.apiUri('/v1/currentuser')))['jwt-token'],
+          'saved-recording-token');
+    });
+  }
+
+  test('unavailable VPN identity verification preserves its transport session',
+      () async {
+    final store = _Store();
+    final saved =
+        jsonEncode({'studentId': 'A001', 'jwtToken': 'saved-vpn-token'});
+    store.values[VodConstants.webVpnSessionKey] = saved;
+    final jar = SessionCookieJar();
+    await jar.setCookie(const SessionCookie(
+      name: 'webvpn-token',
+      value: 'saved-gateway-cookie',
+      domain: 'webvpn.shu.edu.cn',
+    ));
+    final native = _Native();
+    final auth =
+        service(store, native, jar: jar, client: MockClient((request) async {
+      expect(request.url.host, VodUrlResolver.webVpnHost);
+      expect(request.headers['jwt-token'], 'saved-vpn-token');
+      expect(request.headers['cookie'], 'webvpn-token=saved-gateway-cookie');
+      return http.Response('', 503);
+    }));
+    addTearDown(auth.dispose);
+    addTearDown(native.dispose);
+
+    await expectLater(auth.validateSession(useWebVpn: true),
+        throwsA(isA<VodAuthUnavailableException>()));
+    expect(store.values[VodConstants.webVpnSessionKey], saved);
+    expect(store.deletes, isEmpty);
+    expect(native.calls, 0);
+    final media = VodUrlResolver.resolveMediaUrl(
+        'https://vrmvod.cc.shu.edu.cn:40443/vod/auth-test/recording.mp4',
+        useWebVpn: true);
+    expect(await auth.mediaHeadersFor(media, useWebVpn: true),
+        {'Cookie': 'webvpn-token=saved-gateway-cookie'});
+  });
+
+  test('an unavailable new identity check is not a campus SSO expiration',
+      () async {
+    final store = _Store();
+    final native = _Native();
+    final auth = service(store, native,
+        client: MockClient((_) async => http.Response('', 503)));
+    addTearDown(auth.dispose);
+    addTearDown(native.dispose);
+
+    await expectLater(auth.ensureSession(useWebVpn: false),
+        throwsA(isA<VodAuthUnavailableException>()));
+    expect(native.calls, 1);
+    expect(store.values, isEmpty);
+    expect(await auth.hasSession(useWebVpn: false), isFalse);
+  });
+
   test('concurrent forced renewals share the same native exchange', () async {
     final reply = Completer<VodNativeSession>();
     final native = _Native(load: (_, __) => reply.future);

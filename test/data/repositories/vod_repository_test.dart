@@ -519,25 +519,23 @@ void main() {
     expect(client.courseRequests, 0);
   });
 
-  test('ungenerated lessons remain unavailable without requesting media',
+  test('recording status does not prevent requesting playback details',
       () async {
     final client = _FakeClient();
     final repository = VodRepository(apiClient: client);
     addTearDown(repository.dispose);
-    await expectLater(
-      repository.preparePlayback(
-        course: _course,
-        lesson: const VodLesson(
-          id: 123,
-          teachingClassId: 42,
-          name: '回放生成中',
-          isPlayable: false,
-          isGenerating: true,
-        ),
+    final playback = await repository.preparePlayback(
+      course: _course,
+      lesson: const VodLesson(
+        id: 123,
+        teachingClassId: 42,
+        name: '回放生成中',
+        isPlayable: false,
+        isGenerating: true,
       ),
-      throwsA(isA<VodApiException>()),
     );
-    expect(client.playbackRequests, 0);
+    expect(playback.lessonId, 123);
+    expect(client.playbackRequests, 1);
   });
 
   test('a real playback rejection is not replaced by a local permission result',

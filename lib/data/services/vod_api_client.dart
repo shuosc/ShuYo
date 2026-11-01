@@ -9,6 +9,7 @@ import 'package:flutter/foundation.dart' show debugPrint;
 import '../../core/vod_url_resolver.dart';
 import '../models/common.dart';
 import '../models/course_recording.dart';
+import '../models/vod_search_result.dart';
 import 'http_timeout.dart';
 import 'vod_auth_service.dart';
 
@@ -59,7 +60,7 @@ typedef VodUriResolver = Uri Function(
   Map<String, String> queryParameters,
 );
 
-/// Uses the ordinary account catalog and viewer endpoints exclusively.
+/// Uses the ordinary account catalog, keyword search and viewer endpoints.
 class VodApiClient {
   VodApiClient({
     VodAuthService? authService,
@@ -147,6 +148,69 @@ class VodApiClient {
     return List.unmodifiable(courses.values);
   }
 
+  /// Searches course and teacher keywords together, preserving server ranking.
+  ///
+  /// The endpoint has no pagination and currently returns at most 50 lessons.
+  /// Results are playback candidates; the viewer endpoint checks availability
+  /// when the user opens one, because search omits the usual VOD status flags.
+  Future<List<VodSearchResult>> searchLessons({
+    required int termId,
+    required String keyword,
+  }) async {
+    if (termId <= 0) throw const VodInvalidResponseException('请选择有效学期');
+    final normalizedKeyword = keyword.trim();
+    if (normalizedKeyword.runes.length < 2) {
+      throw const VodApiException('请输入至少 2 个字符的课程或教师关键词');
+    }
+    final data = _dataMap(await _get('/v1/course/source/search', const {}, {
+      'acteId': termId,
+      'keyword': normalizedKeyword,
+      'queryType': 0,
+      'maxSearchCount': 50,
+    }));
+    final records = data['courseSourceList'];
+    if (records is! List) throw const VodInvalidResponseException();
+    final results = <VodSearchResult>[];
+    final seenClasses = <int, int>{};
+    for (final record in records) {
+      if (record is! JsonMap) throw const VodInvalidResponseException();
+      final id = _searchIdentifier(record['id']);
+      final classId = _searchIdentifier(record['teclId']);
+      if (id == null || classId == null) {
+        throw const VodInvalidResponseException();
+      }
+      if (_searchIdentifier(record['acteId']) != termId) {
+        throw const VodInvalidResponseException('搜索结果与所选学期不一致，请刷新重试');
+      }
+      final previousClass = seenClasses[id];
+      if (previousClass != null && previousClass != classId) {
+        throw const VodInvalidResponseException('搜索结果课次与教学班不一致，请刷新重试');
+      }
+      // Search also returns current/upcoming live lessons. This page only
+      // presents recordings, and missing/unknown status is not a recording.
+      if (record['courseStatus'] != 2 && record['courseStatus'] != '2') {
+        continue;
+      }
+      if (previousClass != null) continue;
+      final result = VodSearchResult.fromJson(record);
+      if (result.course.name.isEmpty) {
+        throw const VodInvalidResponseException();
+      }
+      seenClasses[id] = classId;
+      results.add(result);
+    }
+    return List.unmodifiable(results);
+  }
+
+  static int? _searchIdentifier(Object? value) {
+    final id = value is int
+        ? value
+        : value is String
+            ? int.tryParse(value)
+            : null;
+    return id != null && id > 0 ? id : null;
+  }
+
   Future<List<VodLesson>> fetchLessons(VodCourse course) async {
     final records = await _readAll(
       '/v1/subject_vod_list_new',
@@ -175,6 +239,42 @@ class VodApiClient {
         return time == 0 ? a.id.compareTo(b.id) : time;
       });
     return List.unmodifiable(sorted);
+  }
+
+  /// Reads the complete preview catalog for a search result's teaching class.
+  /// Presence in this list is enough to try the viewer endpoint; status flags
+  /// can lag behind the actual video and must not filter out a lesson.
+  Future<List<VodLesson>> fetchPreviewLessons(VodCourse course) async {
+    if (course.termId <= 0 || course.teachingClassId <= 0) {
+      throw const VodInvalidResponseException();
+    }
+    final records = await _readAll(
+      '/v1/subject_vod_list/preview',
+      {
+        'teclIds': '${course.teachingClassId}',
+        'schoolOpenStatusFlag': 'false',
+      },
+      identityField: 'id',
+      orderBy: 'courBeginTime',
+      ascending: true,
+    );
+    final lessons = <VodLesson>[];
+    for (final record in records) {
+      final lesson = VodLesson.fromJson(record);
+      if (lesson.id <= 0 ||
+          lesson.teachingClassId != course.teachingClassId ||
+          (record['acteId'] != null &&
+              intValue(record['acteId']) != course.termId)) {
+        throw const VodInvalidResponseException('录播课次与所选学期或教学班不一致，请刷新重试');
+      }
+      lessons.add(lesson);
+    }
+    lessons.sort((first, second) {
+      final byTime = (second.beginTime?.millisecondsSinceEpoch ?? 0)
+          .compareTo(first.beginTime?.millisecondsSinceEpoch ?? 0);
+      return byTime == 0 ? second.id.compareTo(first.id) : byTime;
+    });
+    return List.unmodifiable(lessons);
   }
 
   Future<List<VodLesson>> fetchLiveLessons({
@@ -394,9 +494,7 @@ class VodApiClient {
     required VodCourse course,
     required VodLesson lesson,
   }) async {
-    if (!lesson.isPlayable ||
-        lesson.id <= 0 ||
-        lesson.teachingClassId != course.teachingClassId) {
+    if (lesson.id <= 0 || lesson.teachingClassId != course.teachingClassId) {
       throw const VodPermissionException('这节课尚无可观看的录播');
     }
     final data = _dataMap(await _get(
@@ -529,9 +627,17 @@ class VodApiClient {
         if (!ownsAuthentication) throw const VodSessionExpiredException();
         if (attempt == 1) {
           // An expired business JWT is not proof that the campus SSO expired.
-          throw const VodApiException('暂时无法建立录播会话，请稍后重试');
+          throw const VodApiException('暂时无法建立录播会话，请稍后重试', statusCode: 401);
         }
-        await _ensureSession(forceRefresh: true);
+        try {
+          await _ensureSession(forceRefresh: true);
+        } on VodSessionExpiredException {
+          rethrow;
+        } on VodApiException catch (error) {
+          // The API explicitly rejected this session. A failed renewal must
+          // not be mistaken for an outage that permits cached playback.
+          throw VodApiException(error.message, statusCode: 401);
+        }
       }
     }
     throw const VodApiException('暂时无法建立录播会话，请稍后重试');
@@ -546,8 +652,10 @@ class VodApiClient {
       );
     } on VodCampusAuthRequiredException catch (error) {
       throw VodSessionExpiredException.campus(ssoExpired: error.ssoExpired);
+    } on VodAuthUnavailableException {
+      throw const VodNetworkException();
     } on VodAuthException catch (error) {
-      throw VodApiException(error.message);
+      throw VodApiException(error.message, statusCode: 401);
     } on TimeoutException {
       throw const VodNetworkException('录播平台请求超时，请稍后重试');
     } on SocketException {

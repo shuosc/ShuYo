@@ -34,14 +34,17 @@ export 'recording_video_controls.dart';
 
 /// A route for account-authorized live lessons and recordings.
 ///
-/// Sources are requested again for every lesson change and retry. Signed URLs
-/// stay in this route's memory and never become widget keys or stored history.
+/// Sources are refreshed from the server for every lesson change and retry.
+/// Recordings can fall back to account-scoped local links when that refresh
+/// fails; live sources remain temporary. URLs never become widget keys.
 class RecordingPlayerPage extends StatefulWidget {
   const RecordingPlayerPage({
     super.key,
     required this.course,
     this.lessons = const [],
     this.initialLesson,
+    this.loadCourseCatalog = true,
+    this.loadPreviewCatalog = false,
     this.loadPlayback,
     this.repository,
     this.onSessionExpired,
@@ -52,6 +55,12 @@ class RecordingPlayerPage extends StatefulWidget {
   final VodCourse course;
   final List<VodLesson> lessons;
   final VodLesson? initialLesson;
+
+  /// Whether to load the regular course catalog.
+  final bool loadCourseCatalog;
+
+  /// Load a preview catalog for a lesson opened from search.
+  final bool loadPreviewCatalog;
   final Future<VodPlayback> Function(VodLesson)? loadPlayback;
   final VodRepository? repository;
   final Future<bool> Function()? onSessionExpired;
@@ -68,6 +77,8 @@ enum _PlaybackFailure { session, permission, network, unavailable, media }
 
 class _RecordingPlayerPageState extends State<RecordingPlayerPage>
     with WidgetsBindingObserver {
+  bool get _shouldLoadCatalog =>
+      widget.loadCourseCatalog || widget.loadPreviewCatalog;
   final _videoKey = GlobalKey<VideoState>();
   final _controlsRevision = ValueNotifier(0);
   RecordingPlayerPreferences _playerPreferences =
@@ -213,7 +224,8 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
 
   List<VodLesson> get _lessons => _catalog
       .where((lesson) =>
-          (lesson.isPlayable ||
+          (widget.loadPreviewCatalog ||
+              lesson.isPlayable ||
               lesson.isGenerating ||
               lesson.isLive ||
               lesson.isListed) &&
@@ -273,35 +285,60 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
         _catalog = [initial, ..._catalog];
       }
       unawaited(_loadLesson(initial));
-      if (widget.repository != null) unawaited(_loadCatalog());
+      if (widget.repository != null && _shouldLoadCatalog) {
+        unawaited(_loadCatalog());
+      }
     } else {
-      unawaited(
-          widget.repository == null ? _loadLesson(_lesson) : _loadCatalog());
+      unawaited(widget.repository == null || !_shouldLoadCatalog
+          ? _loadLesson(_lesson)
+          : _loadCatalog());
     }
   }
 
   Future<void> _loadCatalog(
       {bool forceRefresh = false, bool fromPull = false}) async {
     final repository = widget.repository;
-    if (repository == null || _catalogLoading || _catalogPullRefreshing) return;
+    if (repository == null ||
+        !_shouldLoadCatalog ||
+        _catalogLoading ||
+        _catalogPullRefreshing) {
+      return;
+    }
     final revision = ++_catalogRevision;
     _publish(() {
       _catalogLoading = true;
       _catalogPullRefreshing = fromPull;
     });
     try {
-      final lessons = await repository.loadCourseLessons(widget.course,
-          forceRefresh: forceRefresh);
+      final lessons = widget.loadPreviewCatalog
+          ? await repository.loadPreviewLessons(widget.course,
+              forceRefresh: forceRefresh)
+          : await repository.loadCourseLessons(widget.course,
+              forceRefresh: forceRefresh);
       if (!mounted || revision != _catalogRevision) return;
       _publish(() {
-        _catalog = _loading &&
-                _lesson.canPlay &&
-                !lessons.any((lesson) =>
-                    lesson.id == _lesson.id && lesson.isLive == _lesson.isLive)
-            ? [_lesson, ...lessons]
-            : lessons;
+        if (widget.loadPreviewCatalog) {
+          // Keep search results and the current selection even when the
+          // preview omits them. A response must never switch playback.
+          final merged = <(int, bool), VodLesson>{
+            for (final lesson in widget.lessons)
+              (lesson.id, lesson.isLive): lesson,
+            if (_lesson.id > 0) (_lesson.id, _lesson.isLive): _lesson,
+            for (final lesson in lessons) (lesson.id, lesson.isLive): lesson,
+          };
+          _catalog = merged.values.toList();
+        } else {
+          _catalog = _loading &&
+                  _lesson.canPlay &&
+                  !lessons.any((lesson) =>
+                      lesson.id == _lesson.id &&
+                      lesson.isLive == _lesson.isLive)
+              ? [_lesson, ...lessons]
+              : lessons;
+        }
         _catalogLoading = false;
       });
+      if (widget.loadPreviewCatalog) return;
       final ordered = _lessons;
       final current = ordered
           .where((lesson) =>
@@ -311,6 +348,9 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
           .firstOrNull;
       final selected = current ??
           ordered.where((lesson) => lesson.isLiveAvailable).firstOrNull ??
+          ordered
+              .where((lesson) => !lesson.isLive && lesson.isPlayable)
+              .firstOrNull ??
           ordered.where((lesson) => lesson.canPlay).firstOrNull;
       if (selected != null) {
         if (current == null ||
@@ -329,12 +369,15 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
       }
     } on Object catch (error) {
       if (!mounted || revision != _catalogRevision) return;
-      if ((_playback != null || _loading && _lesson.canPlay) &&
-          error is! VodSessionExpiredException &&
-          error is! VodPermissionException) {
+      if (widget.loadPreviewCatalog ||
+          ((_playback != null || _loading && _lesson.canPlay) &&
+              error is! VodSessionExpiredException &&
+              (error is! VodPermissionException || !_lesson.isLive))) {
         _publish(() => _catalogLoading = false);
-        ScaffoldMessenger.of(context)
-            .showSnackBar(const SnackBar(content: Text('选集刷新失败，请稍后下拉重试')));
+        if (error is! VodPermissionException) {
+          ScaffoldMessenger.of(context)
+              .showSnackBar(const SnackBar(content: Text('选集刷新失败，请稍后下拉重试')));
+        }
         return;
       }
       _stopLiveTimers();
@@ -461,10 +504,17 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
     _secondaryLoading = false;
     _secondaryWaitingForMain = false;
     _pendingViewIndex = null;
+    if (lesson.id != _lesson.id) _preferredView = '教室';
+    _publish(() {
+      _lesson = lesson;
+      _loading = true;
+      _failure = null;
+      _failureMessage = null;
+      _playback = null;
+    });
     await _disposeRtc();
     if (!mounted || revision != _loadRevision) return;
     unawaited(_secondaryPlayer?.pause());
-    if (lesson.id != _lesson.id) _preferredView = '教室';
     _stopLiveTimers();
     final oldProxy = _liveProxy;
     _liveProxy = null;
@@ -473,13 +523,6 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
     final oldPosition = resume && _loadedLessonId == lesson.id
         ? (_timelinePlayer ?? _player)?.state.position
         : null;
-    _publish(() {
-      _lesson = lesson;
-      _loading = true;
-      _failure = null;
-      _failureMessage = null;
-      _playback = null;
-    });
     if (!_validLesson(lesson)) {
       _publish(() {
         _loading = false;
@@ -1207,10 +1250,19 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
 
   Future<void> _retry() async {
     if (_loading || _recovering) return;
+    var recoveredPreviewSession = false;
     if (_failure == _PlaybackFailure.session) {
       final recover = widget.onSessionExpired;
       if (recover == null) return;
-      _publish(() => _recovering = true);
+      _publish(() {
+        _recovering = true;
+        if (widget.loadPreviewCatalog) {
+          // A request issued under the old session may complete after login.
+          _catalogRevision++;
+          _catalogLoading = false;
+          _catalogPullRefreshing = false;
+        }
+      });
       var recovered = false;
       try {
         recovered = await recover();
@@ -1220,11 +1272,16 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
       if (!mounted) return;
       _publish(() => _recovering = false);
       if (!recovered) return;
+      recoveredPreviewSession = widget.loadPreviewCatalog;
     }
     if (widget.repository != null && (_lesson.id == 0 || _catalog.isEmpty)) {
       await _loadCatalog(forceRefresh: true);
     } else {
-      await _loadLesson(_lesson, resume: !_lesson.isLive);
+      final playback = _loadLesson(_lesson, resume: !_lesson.isLive);
+      if (recoveredPreviewSession) {
+        unawaited(_loadCatalog(forceRefresh: true));
+      }
+      await playback;
     }
   }
 
@@ -1723,7 +1780,7 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
         message: _lessons.any((lesson) => lesson.isGenerating)
             ? '回放生成中，生成后可观看'
             : '暂无可观看的视频',
-        action: widget.repository == null
+        action: widget.repository == null || !_shouldLoadCatalog
             ? null
             : TextButton.icon(
                 onPressed: () => unawaited(_loadCatalog(forceRefresh: true)),
@@ -1738,7 +1795,7 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
         switch (_failure) {
           _PlaybackFailure.session => '校园账户登录已失效，请重新登录。',
           _PlaybackFailure.permission =>
-            _lesson.isLive ? '当前账号没有这节直播的观看权限。' : '当前账号没有这节录播的观看权限。',
+            _lesson.isLive ? '当前账号没有这节直播的观看权限。' : '无法获取这节录播的播放地址，请稍后重试。',
           _PlaybackFailure.network => '暂时无法连接录播平台，请检查网络后重试。',
           _PlaybackFailure.media => '视频暂时无法播放，可刷新播放地址后重试。',
           _ => _lesson.isLive ? '直播暂时无法观看或已结束，请刷新重试。' : '这节录播暂时无法观看，请稍后重试。',
@@ -1807,6 +1864,7 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
           pinned: true,
           delegate: _EpisodeHeader(
             colors: colors,
+            title: '选集',
             classroomFilter: _classrooms.isEmpty ? null : _classroomFilter(),
             newestFirst: _episodesNewestFirst,
             hasLessons: lessons.isNotEmpty,
@@ -1846,7 +1904,7 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
         ])),
       ],
     );
-    return widget.repository == null
+    return widget.repository == null || !_shouldLoadCatalog
         ? content
         : RefreshIndicator(
             notificationPredicate: (notification) =>
@@ -1893,6 +1951,7 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
 class _EpisodeHeader extends SliverPersistentHeaderDelegate {
   _EpisodeHeader(
       {required this.colors,
+      required this.title,
       required this.classroomFilter,
       required this.newestFirst,
       required this.hasLessons,
@@ -1903,6 +1962,7 @@ class _EpisodeHeader extends SliverPersistentHeaderDelegate {
       required this.onReverse});
 
   final ShuYoColors colors;
+  final String title;
   final Widget? classroomFilter;
   final bool newestFirst;
   final bool hasLessons;
@@ -1931,7 +1991,7 @@ class _EpisodeHeader extends SliverPersistentHeaderDelegate {
               height: 45,
               child: Row(children: [
                 const SizedBox(width: 14),
-                Text('选集',
+                Text(title,
                     style: ShuYoTextStyles.sectionTitle(
                         color: colors.textPrimary)),
                 _button(

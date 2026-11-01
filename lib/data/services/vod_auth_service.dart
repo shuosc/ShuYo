@@ -273,7 +273,7 @@ class VodAuthService {
         await HttpTimeout.request(_client.send(request))));
     if (response.statusCode == 401 || response.statusCode == 403) return false;
     if (response.statusCode != 200) {
-      throw const VodAuthException('暂时无法确认录播登录状态，请稍后重试');
+      throw const VodAuthUnavailableException();
     }
     Object? data;
     try {

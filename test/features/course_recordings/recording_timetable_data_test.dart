@@ -300,8 +300,11 @@ void main() {
     final entries = data.entriesFor(today);
     expect(entries.map((entry) => entry.lesson.id), [1, 2, 3, 4]);
     expect(entries.map((entry) => entry.number), [1, 2, 3, 4]);
-    expect(entries[1].lesson.canPlay, isFalse);
-    expect(entries[2].lesson.canPlay, isFalse);
+    expect(entries[1].lesson.isPlayable, isFalse);
+    expect(entries[1].lesson.canPlay, isTrue);
+    expect(entries[2].lesson.isPlayable, isFalse);
+    expect(entries[2].lesson.canPlay, isTrue);
+    expect(entries[3].lesson.canPlay, isFalse);
   });
 
   test('undated lessons do not invent a date or an anchor but retain numbering',

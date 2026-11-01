@@ -6,6 +6,12 @@ class VodAuthException implements Exception {
   String toString() => message;
 }
 
+/// The recording service could not be reached; the saved login has not been
+/// rejected. Allows an existing account to use its cached recording links.
+class VodAuthUnavailableException extends VodAuthException {
+  const VodAuthUnavailableException() : super('暂时无法确认录播登录状态，请稍后重试');
+}
+
 /// Campus authentication is the sole interactive login for recordings.
 class VodCampusAuthRequiredException extends VodAuthException {
   const VodCampusAuthRequiredException({this.ssoExpired = false})

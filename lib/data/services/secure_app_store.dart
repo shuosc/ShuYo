@@ -27,6 +27,7 @@ class SecureAppStore {
     'shuyo.student.pending_revocations.v1',
     'vod.auth.session.direct.v1',
     'vod.auth.session.webvpn.v1',
+    'vod.recording.cache.v1',
   ];
   static Future<void>? _mobileInitialization;
 

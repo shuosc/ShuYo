@@ -156,7 +156,7 @@ void main() {
         for (final playable in [true, false]) {
           for (final selected in [false, true]) {
             final lesson = VodLesson(
-              id: 1,
+              id: playable ? 1 : 0,
               teachingClassId: 10,
               name: '课程',
               isPlayable: playable,
@@ -270,7 +270,7 @@ void main() {
     for (final generating in [false, true]) {
       for (final dark in [false, true]) {
         final lesson = VodLesson(
-            id: 2,
+            id: 0,
             teachingClassId: 10,
             name: '课程',
             isPlayable: false,
@@ -296,7 +296,7 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('special states remain visible and unavailable lessons disabled',
+  testWidgets('generating recordings remain visible and can be opened',
       (tester) async {
     const generating = VodLesson(
         id: 2,
@@ -309,8 +309,17 @@ void main() {
     expect(find.text('回放生成中'), findsOneWidget);
     expect(
         tester.widget<ListTile>(find.byKey(const ValueKey('episode'))).enabled,
-        isFalse);
+        isTrue);
+    expect(tester.widget<ListTile>(find.byKey(const ValueKey('episode'))).onTap,
+        isNotNull);
     expect(find.text('C502'), findsOneWidget);
+    const unknown =
+        VodLesson(id: 5, teachingClassId: 10, name: '课程', isPlayable: false);
+    await tester.pumpWidget(buildTile(unknown));
+    expect(find.text('查看录播'), findsOneWidget);
+    expect(find.text('暂不可看'), findsNothing);
+    expect(tester.widget<ListTile>(find.byKey(const ValueKey('episode'))).onTap,
+        isNotNull);
     final live = VodLesson(
         id: 3, teachingClassId: 10, name: '直播', isPlayable: true, isLive: true);
     await tester.pumpWidget(buildTile(live, selected: true));
