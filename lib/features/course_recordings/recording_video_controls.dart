@@ -133,6 +133,8 @@ class _RecordingVideoControlsState extends State<RecordingVideoControls>
   bool _menuOpen = false;
   bool _localNewestFirst = true;
   double? _dragPosition;
+  Offset? _surfaceDragOrigin;
+  ({double position, double dx, double duration, double width})? _surfaceSeek;
   Duration? _pendingSeekPosition;
   Offset? _floatingPosition;
   int _seekRevision = 0;
@@ -200,6 +202,8 @@ class _RecordingVideoControlsState extends State<RecordingVideoControls>
       _seekRevision++;
       _clearPendingSeekPosition();
       _dragPosition = null;
+      _surfaceSeek = null;
+      _surfaceDragOrigin = null;
       for (final subscription in _subscriptions) {
         unawaited(subscription.cancel());
       }
@@ -213,6 +217,8 @@ class _RecordingVideoControlsState extends State<RecordingVideoControls>
       _seekRevision++;
       _clearPendingSeekPosition();
       _dragPosition = null;
+      _surfaceSeek = null;
+      _surfaceDragOrigin = null;
     }
   }
 
@@ -298,6 +304,59 @@ class _RecordingVideoControlsState extends State<RecordingVideoControls>
     _seekPositionTimer?.cancel();
     _seekPositionTimer = null;
     _pendingSeekPosition = null;
+  }
+
+  bool get _canSurfaceSeek =>
+      !widget.isLive &&
+      !widget.loading &&
+      widget.failure == null &&
+      !_episodePanelVisible &&
+      !_menuOpen &&
+      _clockPlayer.state.duration > Duration.zero;
+
+  void _startSurfaceSeek(DragStartDetails details, double width) {
+    if (!_canSurfaceSeek || width <= 0) return;
+    final origin = _surfaceDragOrigin;
+    if (origin == null) return;
+    final delta = details.localPosition - origin;
+    // A horizontal recognizer may win by default when a long press rejects
+    // vertical movement. Only start seeking after actual horizontal movement.
+    if (delta.dx.abs() <= delta.dy.abs()) return;
+    final duration = _clockPlayer.state.duration.inMilliseconds.toDouble();
+    final position =
+        (_dragPosition ?? _clockPlayer.state.position.inMilliseconds.toDouble())
+            .clamp(0.0, duration);
+    _surfaceSeek = (
+      position: position,
+      dx: origin.dx,
+      duration: duration,
+      width: width,
+    );
+    _doubleTapTimer?.cancel();
+    _lastTapPosition = null;
+    _showControls();
+    _beginSeek(position);
+    _previewSeek((position + delta.dx / width * duration).clamp(0.0, duration));
+  }
+
+  void _updateSurfaceSeek(DragUpdateDetails details) {
+    final start = _surfaceSeek;
+    if (start == null) return;
+    final value = (start.position +
+            (details.localPosition.dx - start.dx) /
+                start.width *
+                start.duration)
+        .clamp(0.0, start.duration);
+    _previewSeek(value);
+  }
+
+  void _finishSurfaceSeek() {
+    _surfaceDragOrigin = null;
+    if (_surfaceSeek == null) return;
+    _surfaceSeek = null;
+    // Previews already seek the player, so cancellation commits the latest
+    // target too, just as releasing the progress slider does.
+    unawaited(_finishSeek(_dragPosition!));
   }
 
   void _beginSeek(double value) {
@@ -568,6 +627,27 @@ class _RecordingVideoControlsState extends State<RecordingVideoControls>
                 else if (widget.primaryView != null)
                   Positioned.fill(
                       child: IgnorePointer(child: widget.primaryView!)),
+                // Keep seek gestures below buttons, the slider and the
+                // floating view so those retain their own drag behavior.
+                Positioned.fill(
+                  child: GestureDetector(
+                    behavior: HitTestBehavior.opaque,
+                    onHorizontalDragDown: _canSurfaceSeek
+                        ? (details) =>
+                            _surfaceDragOrigin = details.localPosition
+                        : null,
+                    onHorizontalDragStart: _canSurfaceSeek
+                        ? (details) =>
+                            _startSurfaceSeek(details, constraints.maxWidth)
+                        : null,
+                    onHorizontalDragUpdate:
+                        _canSurfaceSeek ? _updateSurfaceSeek : null,
+                    onHorizontalDragEnd:
+                        _canSurfaceSeek ? (_) => _finishSurfaceSeek() : null,
+                    onHorizontalDragCancel:
+                        _canSurfaceSeek ? _finishSurfaceSeek : null,
+                  ),
+                ),
                 if (!widget.isLive)
                   IgnorePointer(
                     child: Align(
