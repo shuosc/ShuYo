@@ -11,6 +11,7 @@ void main() {
       'subjName': '<em>面向对象</em>程序设计 &amp; 实践',
       'teclName': '教学班&nbsp;A',
       'subjCode': 'CS&amp;101',
+      'courseNo': 'CS&#45;202',
       'teclCode': 'not-the-subject-code',
       'teacNames': ['<em>李梦甜</em>', ' 李梦甜 ', '杨&#x5029;&#x5029;', ''],
       'teclTeacNames': ['其他教师'],
@@ -29,7 +30,8 @@ void main() {
     expect(result.course.name, '面向对象程序设计 & 实践');
     expect(result.course.teachingClassName, '教学班 A');
     expect(result.course.code, 'CS&101');
-    expect(result.course.teacherNames, ['李梦甜', '杨倩倩']);
+    expect(result.courseNumber, 'CS-202');
+    expect(result.course.teacherNames, ['李梦甜', '杨倩倩', '其他教师']);
     expect(result.course.lessonCount, 0);
     expect(result.lesson.id, 214134);
     expect(result.lesson.teachingClassId, result.course.teachingClassId);

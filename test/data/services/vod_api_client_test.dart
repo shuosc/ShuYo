@@ -407,18 +407,17 @@ void main() {
         throwsA(isA<VodInvalidResponseException>()));
   });
 
-  test(
-      'lesson list retains unavailable recordings but removes deleted and disabled entries',
+  test('lesson list keeps valid recordings regardless of status flags',
       () async {
     final client = _client((request) async {
       expect(request.url.path, '/v1/subject_vod_list_new');
       expect(request.url.queryParameters['teclIds'], '42');
       expect(request.url.queryParameters['schoolOpenStatusFlag'], 'false');
       return _response({
-        'rowCount': 6,
+        'rowCount': 8,
         'pageCount': 1,
         'records': [
-          for (var i = 0; i < 6; i++)
+          for (var i = 0; i < 7; i++)
             {
               'id': i + 1,
               'teclId': 42,
@@ -427,18 +426,25 @@ void main() {
               'vodEnable': i == 1 ? 0 : 1,
               'vodClickEnable': i == 2 ? 0 : 1,
               'vodDeleteStatus': i == 3 ? 1 : 0,
-              'vodStatus': i == 4 ? 2 : (i == 5 ? 4 : 5),
+              'vodStatus': i == 4 ? 2 : (i == 5 ? 4 : (i == 6 ? 7 : 5)),
             },
+          {
+            'id': 8,
+            'teclId': 42,
+            'subjName': '状态缺失',
+            'courBeginTime': '2026-10-20 08:00:00',
+          },
         ],
       });
     });
     addTearDown(client.dispose);
     final lessons = await client.fetchLessons(_course);
-    expect(lessons.map((lesson) => lesson.id), [1, 3, 5, 6]);
-    expect(lessons.where((lesson) => lesson.isPlayable).map((lesson) => lesson.id),
+    expect(lessons.map((lesson) => lesson.id), [1, 2, 3, 4, 5, 6, 7, 8]);
+    expect(
+        lessons.where((lesson) => lesson.isPlayable).map((lesson) => lesson.id),
         [1, 3]);
     expect(lessons.where((lesson) => lesson.canPlay).map((lesson) => lesson.id),
-        [1, 3, 5, 6]);
+        [1, 2, 3, 4, 5, 6, 7, 8]);
     expect(lessons.first.beginTime?.hour, 8);
   });
 

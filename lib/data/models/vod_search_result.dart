@@ -10,13 +10,17 @@ import 'course_recording.dart';
 /// The playback endpoint remains responsible for validating its identity and
 /// returning playable media when the user opens the result.
 class VodSearchResult {
-  const VodSearchResult({required this.course, required this.lesson});
+  const VodSearchResult(
+      {required this.course, required this.lesson, this.courseNumber = ''});
 
   factory VodSearchResult.fromJson(JsonMap json) {
     final className = _plainText(json['teclName']);
     final subjectName = _plainText(json['subjName']);
     final name = subjectName.isNotEmpty ? subjectName : className;
-    final teachers = _teacherNames(json['teacNames']);
+    final teachers = <String>{
+      ..._teacherNames(json['teacNames']),
+      ..._teacherNames(json['teclTeacNames']),
+    };
     final section = intValue(json['letiNumber']);
     final course = VodCourse(
       teachingClassId: intValue(json['teclId']),
@@ -24,11 +28,11 @@ class VodSearchResult {
       name: name,
       teachingClassName: className,
       code: _plainText(json['subjCode']),
-      teacherNames:
-          teachers.isNotEmpty ? teachers : _teacherNames(json['teclTeacNames']),
+      teacherNames: List.unmodifiable(teachers),
     );
     return VodSearchResult(
       course: course,
+      courseNumber: _plainText(json['courseNo']),
       lesson: VodLesson(
         id: intValue(json['id']),
         teachingClassId: course.teachingClassId,
@@ -46,6 +50,7 @@ class VodSearchResult {
 
   final VodCourse course;
   final VodLesson lesson;
+  final String courseNumber;
 
   static List<String> _teacherNames(Object? value) {
     if (value is! List) return const [];

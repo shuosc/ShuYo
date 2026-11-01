@@ -353,7 +353,7 @@ void main() {
     await client.keepLiveAlive(_course, _lesson);
   });
 
-  test('generating recordings remain listed but cannot be played', () {
+  test('generating recordings remain listed and allow playback lookup', () {
     final lesson = VodLesson.fromJson({
       'id': 5,
       'teclId': 42,
@@ -365,6 +365,7 @@ void main() {
     });
     expect(lesson.isGenerating, isTrue);
     expect(lesson.isListed, isTrue);
-    expect(lesson.canPlay, isFalse);
+    expect(lesson.isPlayable, isFalse);
+    expect(lesson.canPlay, isTrue);
   });
 }

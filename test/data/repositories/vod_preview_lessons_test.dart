@@ -2,9 +2,12 @@ import 'dart:async';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:shuyo/core/vod_url_resolver.dart';
 import 'package:shuyo/data/models/course_recording.dart';
 import 'package:shuyo/data/repositories/vod_repository.dart';
+import 'package:shuyo/data/services/academic_account_store.dart';
 import 'package:shuyo/data/services/vod_api_client.dart';
+import 'package:shuyo/data/services/vod_recording_cache.dart';
 
 const course = VodCourse(teachingClassId: 42, termId: 7, name: '课程');
 const anotherTerm = VodCourse(teachingClassId: 42, termId: 8, name: '课程');
@@ -36,8 +39,88 @@ class PreviewClient extends VodApiClient {
       throw StateError('preview must not fetch live lessons');
 }
 
+class DelayedPreviewCache extends VodRecordingCache {
+  final started = Completer<void>();
+  final release = Completer<void>();
+  bool backgroundWrite = false;
+  bool committed = false;
+
+  @override
+  Future<void> save(String account, bool vpn, String key, Object value,
+      {FutureOr<bool> Function()? canWrite,
+      bool Function()? canCommit,
+      int? version,
+      void Function()? onCommitted,
+      bool background = false}) async {
+    backgroundWrite = background;
+    started.complete();
+    await release.future;
+    if (!(await canWrite!()) || !canCommit!()) return;
+    committed = true;
+    onCommitted?.call();
+  }
+}
+
 void main() {
-  setUp(() => SharedPreferences.setMockInitialValues({}));
+  setUp(() {
+    SharedPreferences.setMockInitialValues({});
+    VodUrlResolver.configure(useWebVpn: false);
+  });
+  tearDown(() => VodUrlResolver.configure(useWebVpn: false));
+
+  test('preview returns before persistence and owner still waits for the write',
+      () async {
+    final cache = DelayedPreviewCache();
+    final repository = VodRepository(
+        apiClient: PreviewClient(),
+        recordingCache: cache,
+        studentIdLoader: () async => 'a');
+    addTearDown(repository.dispose);
+
+    expect((await repository.loadPreviewLessons(course)).single.id, 12);
+    await cache.started.future;
+    expect(cache.backgroundWrite, isTrue);
+    expect(cache.committed, isFalse);
+    var finished = false;
+    final waiting = repository.waitForBackgroundWarming().then((_) {
+      finished = true;
+    });
+    await Future<void>.delayed(Duration.zero);
+    expect(finished, isFalse);
+
+    cache.release.complete();
+    await waiting;
+    expect(cache.committed, isTrue);
+  });
+
+  for (final change in ['account', 'generation', 'session', 'transport']) {
+    test('deferred preview write rejects changed $change', () async {
+      var account = 'a';
+      final cache = DelayedPreviewCache();
+      final repository = VodRepository(
+          apiClient: PreviewClient(),
+          recordingCache: cache,
+          studentIdLoader: () async => account);
+      addTearDown(repository.dispose);
+      await repository.loadPreviewLessons(course);
+      await cache.started.future;
+
+      switch (change) {
+        case 'account':
+          account = 'b';
+        case 'generation':
+          repository.clear();
+        case 'session':
+          await AcademicAccountStore().clear();
+        case 'transport':
+          VodUrlResolver.configure(useWebVpn: true);
+      }
+
+      cache.release.complete();
+      await repository.waitForBackgroundWarming();
+      expect(cache.committed, isFalse);
+    });
+  }
 
   test('deduplicates concurrent requests and avoids catalog and live requests',
       () async {
@@ -46,7 +129,10 @@ void main() {
     client.onPreview = () => pending.future;
     final repository = VodRepository(
         apiClient: client, studentIdLoader: () async => 'account');
-    addTearDown(repository.dispose);
+    addTearDown(() async {
+      await repository.waitForBackgroundWarming();
+      repository.dispose();
+    });
     final first = repository.loadPreviewLessons(course);
     final second = repository.loadPreviewLessons(course);
     await Future<void>.delayed(Duration.zero);
@@ -62,6 +148,7 @@ void main() {
     final online = VodRepository(
         apiClient: PreviewClient(), studentIdLoader: () async => 'a');
     await online.loadPreviewLessons(course);
+    await online.waitForBackgroundWarming();
     online.dispose();
 
     Future<List<VodLesson>> fail() => Future.error(const VodNetworkException());
@@ -91,6 +178,7 @@ void main() {
     final repository =
         VodRepository(apiClient: client, studentIdLoader: () async => 'a');
     expect(await repository.loadPreviewLessons(course), isEmpty);
+    await repository.waitForBackgroundWarming();
     repository.dispose();
     final offlineClient = PreviewClient()
       ..onPreview = () => Future.error(const VodNetworkException());
@@ -137,6 +225,7 @@ void main() {
     pending.complete([lesson]);
     await expectLater(old, throwsA(isA<VodSessionExpiredException>()));
     expect((await repository.loadPreviewLessons(course)).single.id, 12);
+    await repository.waitForBackgroundWarming();
     expect(newClient.requests, 1);
   });
 }

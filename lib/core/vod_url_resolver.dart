@@ -16,8 +16,11 @@ class VodUrlResolver {
 
   static bool _usesWebVpn = false;
   static bool get usesWebVpn => _usesWebVpn;
+  static int _revision = 0;
+  static int get revision => _revision;
 
   static void configure({required bool useWebVpn}) {
+    if (_usesWebVpn != useWebVpn) _revision++;
     _usesWebVpn = useWebVpn;
   }
 

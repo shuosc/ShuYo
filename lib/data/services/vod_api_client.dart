@@ -4,14 +4,28 @@ import 'dart:io';
 
 import 'package:http/http.dart' as http;
 import 'package:http/io_client.dart';
-import 'package:flutter/foundation.dart' show debugPrint;
+import 'package:flutter/foundation.dart' show compute, debugPrint;
 
 import '../../core/vod_url_resolver.dart';
 import '../models/common.dart';
 import '../models/course_recording.dart';
+import '../models/vod_ppt.dart';
 import '../models/vod_search_result.dart';
 import 'http_timeout.dart';
 import 'vod_auth_service.dart';
+
+// Large catalog payloads should not block gestures and animations while JSON
+// is decoded. Return a tagged value so malformed JSON has identical semantics
+// whether decoding runs in the current isolate or a worker.
+(String, Object?) _decodeVodResponse(List<int> bytes) {
+  final text = utf8.decode(bytes, allowMalformed: true).trim();
+  if (text.startsWith('<')) return ('html', text);
+  try {
+    return ('json', jsonDecode(text));
+  } on FormatException {
+    return ('invalid', null);
+  }
+}
 
 class VodApiException implements Exception {
   const VodApiException(this.message, {this.statusCode});
@@ -47,6 +61,11 @@ class VodNetworkException extends VodApiException {
 
 class VodInvalidResponseException extends VodApiException {
   const VodInvalidResponseException([super.message = '录播平台返回的数据不完整，请刷新重试']);
+}
+
+/// A valid response explicitly contained no recording URLs.
+class VodNoPlaybackException extends VodApiException {
+  const VodNoPlaybackException() : super('这节课暂无可用的录播资源');
 }
 
 typedef VodHeadersLoader = Future<Map<String, String>> Function(Uri target);
@@ -211,6 +230,102 @@ class VodApiClient {
     return id != null && id > 0 ? id : null;
   }
 
+  /// Searches the cross-term teaching-class selector by a course identifier.
+  /// The selector paginates and does not accept a term filter, so filter the
+  /// returned subject code or course number and term locally.
+  Future<List<VodSearchResult>> searchCoursesByCode({
+    required int termId,
+    required String keyword,
+  }) async {
+    if (termId <= 0) throw const VodInvalidResponseException('请选择有效学期');
+    final code = keyword.trim().toLowerCase();
+    if (code.runes.length < 2) {
+      throw const VodApiException('请输入至少 2 个字符的课程号');
+    }
+    final courses = <VodSearchResult>[];
+    final seen = <int>{};
+    var rowsRead = 0;
+    int? expectedTotal;
+    for (var page = 1; page <= 1000; page++) {
+      final data = _dataMap(await _get('/v1/teachingclass/list', {
+        'allType': '1',
+        'type': '1',
+        'condition': keyword.trim(),
+        'pageIndex': '$page',
+        'pageSize': '$pageSize',
+      }));
+      final values = data['list'];
+      final total = intValue(data['totalCount'], -1);
+      final pages = intValue(data['totalPage'], -1);
+      if (values is! List ||
+          values.any((value) => value is! JsonMap) ||
+          total < 0 ||
+          pages < 0 ||
+          (data['currPage'] != null && intValue(data['currPage']) != page) ||
+          (expectedTotal != null && expectedTotal != total)) {
+        throw const VodInvalidResponseException('课程列表分页异常，请刷新重试');
+      }
+      expectedTotal = total;
+      for (final record in values.cast<JsonMap>()) {
+        final id = _searchIdentifier(record['id']);
+        final recordTerm = _searchIdentifier(record['acteId']);
+        if (id == null || recordTerm == null || !seen.add(id)) {
+          throw const VodInvalidResponseException('课程列表分页异常，请刷新重试');
+        }
+        rowsRead++;
+        final subjectCode = stringValue(record['subjCode']).trim();
+        final courseNo = stringValue(record['courseNo']).trim();
+        if (recordTerm != termId ||
+            (!subjectCode.toLowerCase().contains(code) &&
+                !courseNo.toLowerCase().contains(code))) {
+          continue;
+        }
+        final subjectName = stringValue(record['subjName']).trim();
+        final className = stringValue(record['teclName']).trim();
+        final name = subjectName.isEmpty ? className : subjectName;
+        if (name.isEmpty) throw const VodInvalidResponseException();
+        final teachers = record['teacherList'];
+        final course = VodCourse(
+          teachingClassId: id,
+          termId: recordTerm,
+          name: name,
+          teachingClassName: className,
+          code: subjectCode,
+          teacherNames: List.unmodifiable(teachers is List
+              ? teachers
+                  .whereType<JsonMap>()
+                  .map((teacher) => stringValue(teacher['userName']).trim())
+                  .where((name) => name.isNotEmpty)
+                  .toSet()
+              : const <String>{}),
+        );
+        courses.add(VodSearchResult(
+          course: course,
+          courseNumber: courseNo,
+          // The selector describes classes, not lessons. Fetch a real lesson
+          // from the preview catalog before allowing playback.
+          lesson: VodLesson(
+            id: 0,
+            teachingClassId: id,
+            name: name,
+            isPlayable: false,
+          ),
+        ));
+      }
+      final complete = pages > 0 ? page >= pages : rowsRead >= total;
+      if (complete) {
+        if (rowsRead != total) {
+          throw const VodInvalidResponseException('课程列表未完整加载，请刷新重试');
+        }
+        return List.unmodifiable(courses);
+      }
+      if (values.isEmpty || rowsRead >= total) {
+        throw const VodInvalidResponseException('课程列表未完整加载，请刷新重试');
+      }
+    }
+    throw const VodInvalidResponseException('课程列表分页异常，请稍后重试');
+  }
+
   Future<List<VodLesson>> fetchLessons(VodCourse course) async {
     final records = await _readAll(
       '/v1/subject_vod_list_new',
@@ -228,9 +343,9 @@ class VodApiClient {
       if (lesson.id <= 0 || lesson.teachingClassId != course.teachingClassId) {
         throw const VodInvalidResponseException('录播课次与所选教学班不一致，请刷新重试');
       }
-      if (lesson.isPlayable || lesson.isGenerating || lesson.isListed) {
-        lessons[lesson.id] = lesson;
-      }
+      // Metadata flags can lag behind the media server. Keep every valid
+      // lesson so playback availability is decided by the address request.
+      lessons[lesson.id] = lesson;
     }
     final sorted = lessons.values.toList(growable: false)
       ..sort((a, b) {
@@ -490,9 +605,95 @@ class VodApiClient {
         {'courId': lesson.id, 'subjCode': course.code});
   }
 
+  /// Reads only the selected lesson's visible PPT notes. An image is optional;
+  /// its OCR text remains useful when the platform omits a supported URL.
+  Future<List<VodPptSlide>> fetchPptSlides(int courseId) async {
+    if (courseId <= 0) throw const VodInvalidResponseException('请选择有效课次');
+    final response = await _get('/v1/course/ai/ppt', {'courseId': '$courseId'});
+    if (response is! JsonMap || !response.containsKey('data')) {
+      throw const VodInvalidResponseException();
+    }
+    final data = response['data'];
+    if (data == null) return const [];
+    if (data is! JsonMap || data['docList'] is! List) {
+      throw const VodInvalidResponseException();
+    }
+    final slides = <(int, VodPptSlide)>[];
+    for (final (index, value) in (data['docList'] as List).indexed) {
+      if (value is! JsonMap) throw const VodInvalidResponseException();
+      if (value['showFlag'] == false) continue;
+      final rawText = value['ocrText'];
+      if (rawText != null && rawText is! String) {
+        throw const VodInvalidResponseException();
+      }
+      final text = (rawText as String? ?? '').trim();
+      if (text.isEmpty) continue;
+      final documentId = stringValue(value['pptDocId']).trim();
+      final imageId = intValue(value['imageId']);
+      if (documentId.isEmpty && imageId <= 0) {
+        throw const VodInvalidResponseException();
+      }
+      final seconds = num.tryParse(stringValue(value['imageSeekTime']));
+      final milliseconds = seconds != null && seconds.isFinite && seconds > 0
+          ? (seconds * 1000).round()
+          : 0;
+      slides.add((
+        index,
+        VodPptSlide(
+          id: documentId.isNotEmpty ? documentId : 'image:$imageId',
+          imageUrl: _pptImageUrl(stringValue(value['imageUrl']).trim()),
+          position: Duration(milliseconds: milliseconds),
+          text: text,
+        ),
+      ));
+    }
+    slides.sort((a, b) {
+      final byPosition = a.$2.position.compareTo(b.$2.position);
+      return byPosition == 0 ? a.$1.compareTo(b.$1) : byPosition;
+    });
+    return List.unmodifiable(slides.map((entry) => entry.$2));
+  }
+
+  Uri? _pptImageUrl(String rawUrl) {
+    if (rawUrl.isEmpty) return null;
+    try {
+      final source = VodUrlResolver.baseUriFor(useWebVpn: useWebVpn)
+          .resolve(rawUrl)
+          .toString();
+      final resolved = _providedMediaUrlResolver?.call(source) ??
+          VodUrlResolver.resolveMediaUrl(source, useWebVpn: useWebVpn);
+      if ((resolved.scheme != 'https' && resolved.scheme != 'http') ||
+          resolved.host.isEmpty ||
+          resolved.userInfo.isNotEmpty) {
+        return null;
+      }
+      return resolved;
+    } on Object {
+      return null;
+    }
+  }
+
   Future<VodPlayback> fetchPlayback({
     required VodCourse course,
     required VodLesson lesson,
+  }) =>
+      _fetchRecordingPlayback(
+          course: course, lesson: lesson, includeMediaHeaders: true);
+
+  /// Validate the same server URLs as playback, without loading media cookies
+  /// or returning/persisting URLs for list-only availability checks.
+  Future<void> checkPlaybackUrls({
+    required VodCourse course,
+    required VodLesson lesson,
+  }) async {
+    await _fetchRecordingPlayback(
+        course: course, lesson: lesson, includeMediaHeaders: false);
+  }
+
+  Future<VodPlayback> _fetchRecordingPlayback({
+    required VodCourse course,
+    required VodLesson lesson,
+    required bool includeMediaHeaders,
   }) async {
     if (lesson.id <= 0 || lesson.teachingClassId != course.teachingClassId) {
       throw const VodPermissionException('这节课尚无可观看的录播');
@@ -527,10 +728,12 @@ class VodApiClient {
         throw const VodInvalidResponseException('录播平台返回了无效资源地址');
       }
       // JWT must not be copied to a media CDN. Auth resolves cookies per target.
-      final mediaHeaders = Map<String, String>.of(
-        await (_providedMediaHeadersLoader?.call(url) ??
-            _authService.mediaHeadersFor(url, useWebVpn: useWebVpn)),
-      );
+      final mediaHeaders = includeMediaHeaders
+          ? Map<String, String>.of(
+              await (_providedMediaHeadersLoader?.call(url) ??
+                  _authService.mediaHeadersFor(url, useWebVpn: useWebVpn)),
+            )
+          : <String, String>{};
       mediaHeaders.removeWhere((name, _) =>
           name.toLowerCase() == 'jwt-token' ||
           name.toLowerCase() == 'authorization');
@@ -540,7 +743,7 @@ class VodApiClient {
         httpHeaders: Map.unmodifiable(mediaHeaders),
       ));
     }
-    if (views.isEmpty) throw const VodApiException('这节课暂无可用的录播资源');
+    if (views.isEmpty) throw const VodNoPlaybackException();
     final seconds = intValue(data['lastPlayTime']);
     return VodPlayback(
       lessonId: lesson.id,
@@ -711,22 +914,21 @@ class VodApiClient {
     if (response.statusCode < 200 || response.statusCode >= 300) {
       throw VodApiException('录播平台请求失败，请稍后重试', statusCode: response.statusCode);
     }
-    final text = utf8.decode(response.bodyBytes, allowMalformed: true).trim();
-    if (text.startsWith('<')) {
+    final bytes = response.bodyBytes;
+    final (kind, value) = bytes.length >= 128 * 1024
+        ? await compute(_decodeVodResponse, bytes)
+        : _decodeVodResponse(bytes);
+    if (kind == 'html') {
       // Auth redirects commonly return HTML with a successful HTTP status.
       if (RegExp(r'newsso\.shu|oauth2?/|#/login|统一身份认证|webvpn',
               caseSensitive: false)
-          .hasMatch(text)) {
+          .hasMatch(value as String)) {
         throw const _VodBusinessSessionExpired();
       }
       throw const VodInvalidResponseException();
     }
-    final Object? decoded;
-    try {
-      decoded = jsonDecode(text);
-    } on FormatException {
-      throw const VodInvalidResponseException();
-    }
+    if (kind == 'invalid') throw const VodInvalidResponseException();
+    final decoded = value;
     if (decoded is JsonMap) {
       final status = intValue(decoded['status']);
       final code = intValue(decoded['code']);
