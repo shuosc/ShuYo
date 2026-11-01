@@ -3,12 +3,15 @@ import 'package:flutter/rendering.dart' show ScrollCacheExtent;
 import 'package:flutter/services.dart';
 
 import '../../data/models/vod_ppt.dart';
+import '../../shared/navigation/shuyo_route.dart';
 import '../../shared/shuyo_text_styles.dart';
 import '../../shared/theme/shuyo_theme.dart';
 import '../../shared/widgets/empty_state.dart';
+import '../../shared/widgets/fullscreen_image_page.dart';
+import 'recording_detail_sheet.dart';
 
 /// The portrait player's lesson-specific, lazily built PPT notes stream.
-class RecordingNotesPanel extends StatelessWidget {
+class RecordingNotesPanel extends StatefulWidget {
   const RecordingNotesPanel({
     super.key,
     required this.slides,
@@ -31,24 +34,51 @@ class RecordingNotesPanel extends StatelessWidget {
   final bool canSeek;
 
   @override
+  State<RecordingNotesPanel> createState() => _RecordingNotesPanelState();
+}
+
+class _RecordingNotesPanelState extends State<RecordingNotesPanel> {
+  late _PptImageHeaders _imageHeaders = _PptImageHeaders(widget.headersLoader);
+
+  @override
+  void didUpdateWidget(RecordingNotesPanel oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (!identical(oldWidget.slides, widget.slides) ||
+        oldWidget.headersLoader != widget.headersLoader) {
+      _imageHeaders = _PptImageHeaders(widget.headersLoader);
+    }
+  }
+
+  Future<void> _refresh() async {
+    try {
+      await widget.onRefresh();
+    } finally {
+      if (mounted) {
+        setState(() => _imageHeaders = _PptImageHeaders(widget.headersLoader));
+      }
+    }
+  }
+
+  @override
   Widget build(BuildContext context) {
     final colors = context.shuyoColors;
-    return RefreshIndicator(
-      onRefresh: onRefresh,
+    final panel = RefreshIndicator(
+      onRefresh: _refresh,
       child: CustomScrollView(
         key: const ValueKey('recording-notes-scroll'),
         physics: const AlwaysScrollableScrollPhysics(),
-        // Only visible attachments need image credentials and image decoding.
-        scrollCacheExtent: const ScrollCacheExtent.pixels(0),
+        // Prepare nearby rows before they enter the viewport without loading
+        // every attachment; resolved headers survive rows leaving the viewport.
+        scrollCacheExtent: const ScrollCacheExtent.pixels(300),
         slivers: [
-          if (nested)
+          if (widget.nested)
             SliverLayoutBuilder(
               builder: (context, constraints) => SliverOverlapInjector(
                 handle:
                     NestedScrollView.sliverOverlapAbsorberHandleFor(context),
               ),
             ),
-          if (loading)
+          if (widget.loading)
             const SliverFillRemaining(
               hasScrollBody: false,
               child: Center(
@@ -60,17 +90,17 @@ class RecordingNotesPanel extends StatelessWidget {
                 ]),
               ),
             )
-          else if (error != null)
+          else if (widget.error != null)
             SliverFillRemaining(
               hasScrollBody: false,
               child: EmptyState(
                 key: const ValueKey('recording-notes-error'),
                 icon: Icons.cloud_off_outlined,
                 title: 'PPT 笔记加载失败',
-                message: error!,
+                message: widget.error!,
               ),
             )
-          else if (slides.isEmpty)
+          else if (widget.slides.isEmpty)
             const SliverFillRemaining(
               hasScrollBody: false,
               child: EmptyState(
@@ -92,7 +122,7 @@ class RecordingNotesPanel extends StatelessWidget {
                       spacing: 16,
                       runSpacing: 6,
                       children: [
-                        Text('共 ${slides.length} 条笔记',
+                        Text('共 ${widget.slides.length} 条笔记',
                             style: ShuYoTextStyles.meta(
                                 size: 13, color: colors.textSecondary)),
                         Text('按时间排序',
@@ -116,15 +146,15 @@ class RecordingNotesPanel extends StatelessWidget {
               padding: EdgeInsets.fromLTRB(
                   16, 0, 16, MediaQuery.paddingOf(context).bottom + 24),
               sliver: SliverList.builder(
-                itemCount: slides.length,
+                itemCount: widget.slides.length,
                 itemBuilder: (context, index) => RepaintBoundary(
-                  key: ValueKey('recording-note-${slides[index].id}'),
+                  key: ValueKey('recording-note-${widget.slides[index].id}'),
                   child: _NoteEntry(
-                    slide: slides[index],
+                    slide: widget.slides[index],
                     index: index,
-                    onSeek: onSeek,
-                    canSeek: canSeek,
-                    headersLoader: headersLoader,
+                    onSeek: widget.onSeek,
+                    canSeek: widget.canSeek,
+                    imageHeaders: _imageHeaders,
                   ),
                 ),
               ),
@@ -133,6 +163,9 @@ class RecordingNotesPanel extends StatelessWidget {
         ],
       ),
     );
+    return RecordingDetailSheet.maybeOf(context) == null
+        ? RecordingDetailSheetHost(topInset: 0, child: panel)
+        : panel;
   }
 }
 
@@ -142,14 +175,14 @@ class _NoteEntry extends StatelessWidget {
     required this.index,
     required this.onSeek,
     required this.canSeek,
-    required this.headersLoader,
+    required this.imageHeaders,
   });
 
   final VodPptSlide slide;
   final int index;
   final ValueChanged<Duration> onSeek;
   final bool canSeek;
-  final Future<Map<String, String>> Function(Uri)? headersLoader;
+  final _PptImageHeaders imageHeaders;
 
   Duration get _position =>
       slide.position < Duration.zero ? Duration.zero : slide.position;
@@ -182,7 +215,7 @@ class _NoteEntry extends StatelessWidget {
                           child: switch (slide.imageUrl) {
                             final url? => _PptImage(
                                 url: url,
-                                headersLoader: headersLoader,
+                                imageHeaders: imageHeaders,
                                 cacheWidth: 312,
                                 compact: true,
                               ),
@@ -202,7 +235,7 @@ class _NoteEntry extends StatelessWidget {
                       crossAxisAlignment: CrossAxisAlignment.stretch,
                       children: [
                         Text(
-                          slide.text.isEmpty ? '这页暂未识别出文字' : slide.text,
+                          _preview(slide.text),
                           key: ValueKey('recording-note-summary-${slide.id}'),
                           maxLines: 3,
                           overflow: TextOverflow.ellipsis,
@@ -239,32 +272,19 @@ class _NoteEntry extends StatelessWidget {
   }
 
   void _showDetails(BuildContext context) {
-    showModalBottomSheet<void>(
-      context: context,
-      isScrollControlled: true,
-      useSafeArea: true,
-      showDragHandle: true,
-      backgroundColor: context.shuyoColors.surface,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(18)),
-      ),
-      clipBehavior: Clip.antiAlias,
-      builder: (sheetContext) => FractionallySizedBox(
-        heightFactor: .8,
-        child: _NoteDetails(
+    RecordingDetailSheet.of(context).show((close) => _NoteDetails(
           slide: slide,
           index: index,
           position: _position,
-          headersLoader: headersLoader,
+          imageHeaders: imageHeaders,
+          onClose: close,
           onSeek: canSeek
               ? () {
-                  Navigator.pop(sheetContext);
+                  close();
                   if (context.mounted) onSeek(_position);
                 }
               : null,
-        ),
-      ),
-    );
+        ));
   }
 }
 
@@ -273,159 +293,139 @@ class _NoteDetails extends StatelessWidget {
     required this.slide,
     required this.index,
     required this.position,
-    required this.headersLoader,
+    required this.imageHeaders,
     required this.onSeek,
+    required this.onClose,
   });
 
   final VodPptSlide slide;
   final int index;
   final Duration position;
-  final Future<Map<String, String>> Function(Uri)? headersLoader;
+  final _PptImageHeaders imageHeaders;
   final VoidCallback? onSeek;
+  final VoidCallback onClose;
 
   @override
   Widget build(BuildContext context) {
     final colors = context.shuyoColors;
-    return SafeArea(
-      top: false,
-      child: Column(
-        key: ValueKey('recording-note-detail-${slide.id}'),
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Padding(
-            padding: const EdgeInsets.only(left: 16, right: 4, bottom: 8),
-            child: Row(
-              children: [
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text('笔记详情',
-                          style: ShuYoTextStyles.sectionTitle(
-                              color: colors.textPrimary)),
-                      const SizedBox(height: 4),
-                      Text('PPT 第 ${index + 1} 页 · ${_timestamp(position)}',
-                          style: ShuYoTextStyles.meta(
-                              color: colors.textSecondary)),
-                    ],
+    return Material(
+      color: colors.surface,
+      child: SafeArea(
+        top: false,
+        child: Column(
+          key: ValueKey('recording-note-detail-${slide.id}'),
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Container(
+              key: const ValueKey('recording-note-detail-toolbar'),
+              height: 45,
+              padding: const EdgeInsets.only(left: 12, right: 2),
+              decoration: BoxDecoration(
+                border: Border(
+                  bottom: BorderSide(
+                    color: Theme.of(context).dividerColor.withValues(alpha: .1),
                   ),
                 ),
-                IconButton(
-                  tooltip: '关闭',
-                  onPressed: () => Navigator.pop(context),
-                  icon: const Icon(Icons.close, size: 20),
-                ),
-              ],
+              ),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Text('笔记详情',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: ShuYoTextStyles.bodyCompact(
+                            color: colors.textPrimary)),
+                  ),
+                  _CopyNoteButton(slide: slide),
+                  IconButton(
+                    key: ValueKey('recording-note-seek-${slide.id}'),
+                    tooltip: '跳转播放',
+                    onPressed: onSeek,
+                    constraints:
+                        const BoxConstraints.tightFor(width: 40, height: 40),
+                    padding: const EdgeInsets.all(8),
+                    icon: const Icon(Icons.play_arrow_rounded, size: 20),
+                  ),
+                  IconButton(
+                    tooltip: '关闭',
+                    onPressed: onClose,
+                    constraints:
+                        const BoxConstraints.tightFor(width: 40, height: 40),
+                    padding: const EdgeInsets.all(8),
+                    icon: const Icon(Icons.close, size: 20),
+                  ),
+                ],
+              ),
             ),
-          ),
-          Divider(height: 1, thickness: .5, color: colors.border),
-          Expanded(
-            child: ListView(
-              key: ValueKey('recording-note-detail-scroll-${slide.id}'),
-              padding: const EdgeInsets.all(16),
-              children: [
-                SelectableText(
-                  slide.text.isEmpty ? '这页暂未识别出文字' : slide.text,
-                  key: ValueKey('recording-note-text-${slide.id}'),
-                  style: ShuYoTextStyles.bodyCompact(
-                    size: 14,
-                    color: colors.textPrimary,
-                    height: 1.75,
-                  ),
-                ),
-                if (slide.imageUrl case final url?) ...[
-                  const SizedBox(height: 20),
-                  Align(
-                    alignment: Alignment.centerLeft,
-                    child: ConstrainedBox(
-                      constraints: const BoxConstraints(maxWidth: 640),
-                      child: AspectRatio(
-                        aspectRatio: 16 / 9,
-                        child: ClipRRect(
-                          borderRadius: BorderRadius.circular(8),
-                          child: Material(
-                            color: colors.surfaceMuted,
-                            child: InkWell(
-                              key: ValueKey('recording-note-image-${slide.id}'),
-                              onTap: () => _showPreview(context, url),
-                              child: Semantics(
-                                button: true,
-                                label: '查看第 ${index + 1} 页 PPT 大图',
-                                child: _PptImage(
-                                  url: url,
-                                  headersLoader: headersLoader,
-                                  cacheWidth: 1280,
+            Expanded(
+              child: CustomScrollView(
+                key: ValueKey('recording-note-detail-scroll-${slide.id}'),
+                physics: const AlwaysScrollableScrollPhysics(),
+                slivers: [
+                  SliverPadding(
+                    padding: const EdgeInsets.all(16),
+                    sliver: SliverList.list(
+                      children: [
+                        Text('PPT 第 ${index + 1} 页 · ${_timestamp(position)}',
+                            style: ShuYoTextStyles.meta(
+                                color: colors.textSecondary)),
+                        const SizedBox(height: 12),
+                        SelectableText(
+                          slide.text.isEmpty ? '这页暂未识别出文字' : slide.text,
+                          key: ValueKey('recording-note-text-${slide.id}'),
+                          style: ShuYoTextStyles.bodyCompact(
+                            size: 14,
+                            color: colors.textPrimary,
+                            height: 1.75,
+                          ),
+                        ),
+                        if (slide.imageUrl case final url?) ...[
+                          const SizedBox(height: 20),
+                          Align(
+                            alignment: Alignment.centerLeft,
+                            child: ConstrainedBox(
+                              constraints: const BoxConstraints(maxWidth: 640),
+                              child: AspectRatio(
+                                aspectRatio: 16 / 9,
+                                child: ClipRRect(
+                                  borderRadius: BorderRadius.circular(8),
+                                  child: Material(
+                                    color: colors.surfaceMuted,
+                                    child: InkWell(
+                                      key: ValueKey(
+                                          'recording-note-image-${slide.id}'),
+                                      onTap: () =>
+                                          Navigator.of(context).push<void>(
+                                        shuyoRoute(
+                                          builder: (_) => FullscreenImagePage(
+                                            url: url.toString(),
+                                            headersLoader: imageHeaders.loader,
+                                          ),
+                                        ),
+                                      ),
+                                      child: Semantics(
+                                        button: true,
+                                        label: '查看第 ${index + 1} 页 PPT 大图',
+                                        child: _PptImage(
+                                          url: url,
+                                          imageHeaders: imageHeaders,
+                                          cacheWidth: 1280,
+                                        ),
+                                      ),
+                                    ),
+                                  ),
                                 ),
                               ),
                             ),
                           ),
-                        ),
-                      ),
+                        ],
+                      ],
                     ),
                   ),
                 ],
-              ],
-            ),
-          ),
-          Divider(height: 1, thickness: .5, color: colors.border),
-          Padding(
-            padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
-            child: OverflowBar(
-              alignment: MainAxisAlignment.end,
-              spacing: 12,
-              overflowSpacing: 4,
-              children: [
-                _CopyNoteButton(slide: slide),
-                FilledButton.icon(
-                  key: ValueKey('recording-note-seek-${slide.id}'),
-                  onPressed: onSeek,
-                  icon: const Icon(Icons.play_arrow_rounded, size: 20),
-                  label: const Text('定位播放'),
-                ),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  void _showPreview(BuildContext context, Uri url) {
-    showDialog<void>(
-      context: context,
-      builder: (context) => Dialog(
-        insetPadding: const EdgeInsets.all(16),
-        child: SizedBox(
-          width: 960,
-          height: MediaQuery.sizeOf(context).height * .75,
-          child: Column(children: [
-            Padding(
-              padding: const EdgeInsets.only(left: 16, right: 4),
-              child: Row(children: [
-                Expanded(child: Text('PPT 第 ${index + 1} 页')),
-                IconButton(
-                  tooltip: '关闭',
-                  onPressed: () => Navigator.pop(context),
-                  icon: const Icon(Icons.close),
-                ),
-              ]),
-            ),
-            Expanded(
-              child: ClipRect(
-                child: InteractiveViewer(
-                  minScale: 1,
-                  maxScale: 5,
-                  child: SizedBox.expand(
-                    child: _PptImage(
-                      url: url,
-                      headersLoader: headersLoader,
-                      cacheWidth: 1600,
-                    ),
-                  ),
-                ),
               ),
             ),
-          ]),
+          ],
         ),
       ),
     );
@@ -445,18 +445,54 @@ class _CopyNoteButtonState extends State<_CopyNoteButton> {
   bool _copied = false;
 
   @override
-  Widget build(BuildContext context) => TextButton.icon(
+  Widget build(BuildContext context) => IconButton(
         key: ValueKey('recording-note-copy-${widget.slide.id}'),
+        tooltip: _copied ? '已复制' : '复制原文',
         onPressed: widget.slide.text.isEmpty
             ? null
             : () async {
                 await Clipboard.setData(ClipboardData(text: widget.slide.text));
                 if (mounted) setState(() => _copied = true);
               },
+        constraints: const BoxConstraints.tightFor(width: 40, height: 40),
+        padding: const EdgeInsets.all(8),
         icon:
-            Icon(_copied ? Icons.check_rounded : Icons.copy_outlined, size: 18),
-        label: Text(_copied ? '已复制' : '复制全文'),
+            Icon(_copied ? Icons.check_rounded : Icons.copy_outlined, size: 20),
       );
+}
+
+String _preview(String text) {
+  if (text.isEmpty) return '这页暂未识别出文字';
+  final preview = String.fromCharCodes(text.runes.take(320));
+  return preview.length < text.length ? '$preview…' : preview;
+}
+
+/// Scoped to the lesson panel. Row eviction does not repeat cookie reads, and
+/// completed headers can be used synchronously without a one-frame spinner.
+class _PptImageHeaders {
+  _PptImageHeaders(this.loader);
+
+  final Future<Map<String, String>> Function(Uri)? loader;
+  final _resolved = <Uri, Map<String, String>>{};
+  final _pending = <Uri, Future<Map<String, String>>>{};
+
+  Map<String, String>? peek(Uri url) =>
+      loader == null ? const {} : _resolved[url];
+
+  Future<Map<String, String>> load(Uri url) {
+    final ready = peek(url);
+    if (ready != null) return Future.value(ready);
+    return _pending.putIfAbsent(
+      url,
+      () => Future.sync(() => loader!(url)).then((headers) {
+        final resolved = Map<String, String>.unmodifiable(headers);
+        _resolved[url] = resolved;
+        return resolved;
+      }).whenComplete(() {
+        _pending.remove(url);
+      }),
+    );
+  }
 }
 
 String _timestamp(Duration position) {
@@ -472,13 +508,13 @@ String _timestamp(Duration position) {
 class _PptImage extends StatefulWidget {
   const _PptImage({
     required this.url,
-    required this.headersLoader,
+    required this.imageHeaders,
     required this.cacheWidth,
     this.compact = false,
   });
 
   final Uri url;
-  final Future<Map<String, String>> Function(Uri)? headersLoader;
+  final _PptImageHeaders imageHeaders;
   final int cacheWidth;
   final bool compact;
 
@@ -499,19 +535,21 @@ class _PptImageState extends State<_PptImage> {
   void didUpdateWidget(covariant _PptImage oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.url != widget.url ||
-        oldWidget.headersLoader != widget.headersLoader) {
+        oldWidget.imageHeaders != widget.imageHeaders) {
       _loadHeaders();
     }
   }
 
   void _loadHeaders() {
-    final loader = widget.headersLoader;
-    _headers = loader == null ? null : Future.sync(() => loader(widget.url));
+    _headers = widget.imageHeaders.peek(widget.url) == null
+        ? widget.imageHeaders.load(widget.url)
+        : null;
   }
 
   @override
   Widget build(BuildContext context) {
-    if (_headers == null) return _image(const {});
+    final ready = widget.imageHeaders.peek(widget.url);
+    if (ready != null) return _image(ready);
     return FutureBuilder<Map<String, String>>(
       future: _headers,
       builder: (context, snapshot) {

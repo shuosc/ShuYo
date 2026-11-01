@@ -6,6 +6,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:shuyo/data/models/vod_ppt.dart';
 import 'package:shuyo/features/course_recordings/recording_notes_panel.dart';
 import 'package:shuyo/shared/theme/shuyo_theme.dart';
+import 'package:shuyo/shared/widgets/fullscreen_image_page.dart';
 
 void main() {
   VodPptSlide slide(int id, {bool image = false, String? text}) => VodPptSlide(
@@ -149,6 +150,7 @@ void main() {
         .widget<Text>(find.byKey(const ValueKey('recording-note-summary-1')));
     expect(summary.maxLines, 3);
     expect(summary.overflow, TextOverflow.ellipsis);
+    expect(summary.data!.length, lessThan(note.text.length));
     expect(find.text('01'), findsNothing);
     expect(find.text('共 1 条笔记'), findsOneWidget);
     await tester.tap(find.byKey(const ValueKey('recording-note-open-1')));
@@ -166,6 +168,36 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets(
+      'detail actions share the fixed title row without a modal barrier',
+      (tester) async {
+    await tester.pumpWidget(app(slides: [slide(1)]));
+    final barriers = find.byType(ModalBarrier).evaluate().length;
+    await tester.tap(find.byKey(const ValueKey('recording-note-open-1')));
+    await tester.pumpAndSettle();
+    final toolbar = tester
+        .getRect(find.byKey(const ValueKey('recording-note-detail-toolbar')));
+    final copy =
+        tester.getRect(find.byKey(const ValueKey('recording-note-copy-1')));
+    final seek =
+        tester.getRect(find.byKey(const ValueKey('recording-note-seek-1')));
+    final close = tester.getRect(find.byTooltip('关闭'));
+    expect(toolbar.height, 45);
+    expect(copy.right, lessThanOrEqualTo(seek.left));
+    expect(seek.right, lessThanOrEqualTo(close.left));
+    for (final rect in [copy, seek, close]) {
+      expect(rect.center.dy, closeTo(toolbar.center.dy, 1));
+    }
+    expect(find.byType(ModalBarrier).evaluate().length, barriers);
+    expect(find.byType(FilledButton), findsNothing);
+    await tester.drag(
+        find.byKey(const ValueKey('recording-note-detail-scroll-1')),
+        const Offset(0, 180));
+    await tester.pumpAndSettle();
+    expect(find.text('笔记详情'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('77 PPT attachments obtain credentials only as rows appear',
       (tester) async {
     final requests = <Uri>[];
@@ -179,7 +211,7 @@ void main() {
     ));
     await tester.pump();
     expect(requests, isNotEmpty);
-    expect(requests.length, lessThan(10));
+    expect(requests.length, lessThan(15));
     expect(find.byKey(const ValueKey('recording-note-77')), findsNothing);
     final before = requests.length;
     await tester.drag(find.byKey(const ValueKey('recording-notes-scroll')),
@@ -187,6 +219,52 @@ void main() {
     await tester.pump();
     expect(requests.length, greaterThan(before));
     expect(requests.length, lessThan(20));
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('returning to evicted rows reuses resolved image credentials',
+      (tester) async {
+    final requests = <Uri, int>{};
+    final slides = List.generate(77, (index) => slide(index + 1, image: true));
+    await tester.pumpWidget(app(
+      slides: slides,
+      headersLoader: (url) async {
+        requests.update(url, (count) => count + 1, ifAbsent: () => 1);
+        return const {};
+      },
+    ));
+    await tester.pumpAndSettle();
+    final scroll = tester.state<ScrollableState>(find.descendant(
+        of: find.byKey(const ValueKey('recording-notes-scroll')),
+        matching: find.byType(Scrollable)));
+    scroll.position.jumpTo(1400);
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('recording-note-open-1')), findsNothing);
+    scroll.position.jumpTo(0);
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('recording-note-open-1')), findsOneWidget);
+    expect(requests[slides.first.imageUrl], 1);
+    expect(requests.values, everyElement(1));
+    expect(requests.length, lessThan(slides.length));
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('pull refresh renews the lesson image credential cache',
+      (tester) async {
+    var headers = 0;
+    await tester.pumpWidget(app(
+      slides: [slide(1, image: true)],
+      headersLoader: (_) async {
+        headers++;
+        return const {};
+      },
+    ));
+    await tester.pumpAndSettle();
+    expect(headers, 1);
+    await tester.drag(find.byKey(const ValueKey('recording-notes-scroll')),
+        const Offset(0, 350));
+    await tester.pumpAndSettle();
+    expect(headers, 2);
     expect(tester.takeException(), isNull);
   });
 
@@ -215,19 +293,19 @@ void main() {
     await tester.tap(find.byKey(const ValueKey('recording-note-open-1')));
     await tester.pumpAndSettle();
     final seek = find.byKey(const ValueKey('recording-note-seek-1'));
-    expect(tester.widget<FilledButton>(seek).onPressed, isNull);
+    expect(tester.widget<IconButton>(seek).onPressed, isNull);
     await tester.tap(seek);
     expect(positions, isEmpty);
     await tester.tap(find.byKey(const ValueKey('recording-note-copy-1')));
     await tester.pump();
     expect(copied, note.text);
-    expect(find.text('已复制'), findsOneWidget);
+    expect(find.byTooltip('已复制'), findsOneWidget);
     await tester.tap(find.byTooltip('关闭'));
     await tester.pumpAndSettle();
     await tester.pumpWidget(app(slides: [note], onSeek: positions.add));
     await tester.tap(find.byKey(const ValueKey('recording-note-open-1')));
     await tester.pumpAndSettle();
-    expect(tester.widget<FilledButton>(seek).onPressed, isNotNull);
+    expect(tester.widget<IconButton>(seek).onPressed, isNotNull);
     await tester.tap(seek);
     expect(positions, [note.position]);
     expect(tester.takeException(), isNull);
@@ -258,12 +336,13 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.byKey(const ValueKey('recording-note-image-1')));
     await tester.pump();
-    expect(find.byType(Dialog), findsOneWidget);
-    expect(find.byType(InteractiveViewer), findsOneWidget);
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(find.byType(FullscreenImagePage), findsOneWidget);
+    expect(find.byType(CircularProgressIndicator), findsWidgets);
     expect(requested, hasLength(3));
     await tester.tap(find.byTooltip('关闭').last);
     await tester.pumpAndSettle();
-    expect(find.byType(Dialog), findsNothing);
+    expect(find.byType(FullscreenImagePage), findsNothing);
     requested.last.completeError(StateError('late completion after close'));
     await tester.pump();
     expect(tester.takeException(), isNull);
