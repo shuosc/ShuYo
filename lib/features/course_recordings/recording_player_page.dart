@@ -26,6 +26,9 @@ import 'recording_episode_tile.dart';
 import 'recording_episode_sort_icon.dart';
 import 'recording_playback_status.dart';
 import 'recording_notes_panel.dart';
+import 'recording_notes_controller.dart';
+import 'recording_episode_catalog.dart';
+import 'recording_route_work_gate.dart';
 import 'recording_player_cache.dart';
 import 'recording_player_layout.dart';
 import 'recording_player_tabs.dart';
@@ -107,13 +110,14 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
   }
 
   final _videoKey = GlobalKey<VideoState>();
+  final _entryWork = RecordingRouteWorkGate();
   final _controlsRevision = ValueNotifier(0);
   late final TabController _tabController;
-  List<VodPptSlide> _notes = const [];
-  int? _notesLessonId;
-  int _notesRevision = 0;
-  bool _notesLoading = false;
-  String? _notesError;
+  late final RecordingNotesController _notesController;
+  final _episodeCatalogCache = RecordingEpisodeCatalogCache();
+  final _lessonListCache = <bool, (Object, Widget)>{};
+  (Object, Widget)? _portraitBodyCache;
+  PreferredSizeWidget? _portraitTabBar;
   RecordingPlayerPreferences _playerPreferences =
       const RecordingPlayerPreferences();
   Future<void> _preferencesQueue = Future<void>.value();
@@ -261,48 +265,26 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
   _PlaybackFailure? _failure;
   String? _failureMessage;
 
-  List<VodLesson> get _lessons => _catalog
-      .where((lesson) =>
-          (lesson.isLive || lesson.canPlay) &&
-          lesson.teachingClassId == widget.course.teachingClassId)
-      .toList(growable: false)
-    ..sort((first, second) {
-      final time = (second.beginTime?.millisecondsSinceEpoch ?? 0)
-          .compareTo(first.beginTime?.millisecondsSinceEpoch ?? 0);
-      return time == 0 ? second.id.compareTo(first.id) : time;
-    });
+  RecordingEpisodeCatalog get _episodeCatalog => _episodeCatalogCache.resolve(
+        lessons: _catalog,
+        teachingClassId: widget.course.teachingClassId,
+      );
 
-  List<String> get _classrooms {
-    final rooms =
-        _lessons.map((lesson) => lesson.classroom.trim()).toSet().toList()
-          ..sort((first, second) => first.isEmpty
-              ? 1
-              : second.isEmpty
-                  ? -1
-                  : first.compareTo(second));
-    return rooms;
-  }
+  List<VodLesson> get _lessons => _episodeCatalog.lessons;
 
-  VodLesson get _catalogSelection =>
-      _catalog
-          .where((lesson) =>
-              lesson.id == _lesson.id && lesson.isLive == _lesson.isLive)
-          .firstOrNull ??
-      _lesson;
+  List<String> get _classrooms => _episodeCatalog.classrooms;
 
-  String? get _activeClassroom {
-    final classrooms = _classrooms;
-    if (classrooms.contains(_selectedClassroom)) return _selectedClassroom;
-    final current = _catalogSelection.classroom.trim();
-    return classrooms.contains(current) ? current : classrooms.firstOrNull;
-  }
+  VodLesson get _catalogSelection => _episodeCatalog.selectionFor(_lesson);
 
-  List<VodLesson> get _filteredLessons {
-    final classroom = _activeClassroom;
-    return _lessons
-        .where((lesson) => lesson.classroom.trim() == classroom)
-        .toList(growable: false);
-  }
+  String? get _activeClassroom => _episodeCatalog.activeClassroom(
+        selected: _selectedClassroom,
+        current: _lesson,
+      );
+
+  RecordingClassroomEpisodes get _classroomEpisodes =>
+      _episodeCatalog.classroom(_activeClassroom);
+
+  List<VodLesson> get _filteredLessons => _classroomEpisodes.newestFirst;
 
   void _setClassroom(String classroom) {
     if (classroom == _activeClassroom) return;
@@ -322,6 +304,15 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
   void initState() {
     super.initState();
     _tabController = TabController(length: 2, vsync: this);
+    _notesController = RecordingNotesController(
+      teachingClassId: widget.course.teachingClassId,
+      loader: widget.loadNotes != null || widget.repository != null
+          ? (lessonId, {required forceRefresh}) =>
+              widget.loadNotes?.call(lessonId) ??
+              widget.repository!
+                  .loadPptSlides(lessonId, forceRefresh: forceRefresh)
+          : null,
+    );
     WidgetsBinding.instance.addObserver(this);
     unawaited(_loadPlayerPreferences());
     if (_isMobile) _systemUi.lockPortrait();
@@ -536,10 +527,17 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
   }
 
   @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _entryWork.attach(ModalRoute.of(context)?.animation);
+  }
+
+  @override
   void dispose() {
+    _entryWork.dispose();
     _episodeNavigationRevision++;
     _loadRevision++;
-    _notesRevision++;
+    _notesController.dispose();
     _resetSeekSynchronization();
     _catalogRevision++;
     _secondaryRevision++;
@@ -563,7 +561,14 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
 
   void _publish(VoidCallback update) {
     if (!mounted) return;
-    setState(update);
+    update();
+    // Derive a changed catalog once as part of publishing business state. The
+    // widgets only read its immutable groups, numbers and display metadata.
+    _episodeCatalogCache.resolve(
+      lessons: _catalog,
+      teachingClassId: widget.course.teachingClassId,
+    );
+    setState(() {});
     _controlsRevision.value++;
   }
 
@@ -574,61 +579,12 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
           item.id == lesson.id && item.isLive == lesson.isLive && item.canPlay);
 
   Future<void> _loadNotes(VodLesson lesson, {bool forceRefresh = false}) async {
-    if (!forceRefresh && _notesLessonId == lesson.id) return;
-    final revision = ++_notesRevision;
-    final repository = widget.repository;
-    final pullRefresh =
-        forceRefresh && _notesLessonId == lesson.id && !_notesLoading;
-    final supported = lesson.id > 0 &&
-        !lesson.isLive &&
-        lesson.teachingClassId == widget.course.teachingClassId;
-    final canLoad =
-        supported && (widget.loadNotes != null || repository != null);
-    setState(() {
-      _notesLessonId = lesson.id;
-      if (!pullRefresh) {
-        _notes = const [];
-        _notesError = null;
-        _notesLoading = canLoad;
-      }
-      if (!canLoad) {
-        _notes = const [];
-        _notesLoading = false;
-        _notesError = lesson.isLive
-            ? '直播课次暂不支持 PPT 笔记'
-            : supported
-                ? '暂时无法加载这节课的 PPT 笔记，请稍后下拉重试'
-                : '请先选择课次，再查看 PPT 笔记';
-      }
-    });
-    if (!canLoad) return;
-    try {
-      final slides = await (widget.loadNotes?.call(lesson.id) ??
-          repository!.loadPptSlides(lesson.id, forceRefresh: forceRefresh));
-      if (!mounted || revision != _notesRevision) return;
-      setState(() {
-        _notes = slides;
-        _notesLoading = false;
-        _notesError = null;
-      });
-    } on Object catch (error) {
-      if (!mounted || revision != _notesRevision) return;
-      final message = switch (error) {
-        VodSessionExpiredException() => '校园账户登录已失效，请重新进入录播平台后重试',
-        VodPermissionException() => '平台暂未允许读取这节课的 PPT 笔记，请稍后下拉重试',
-        VodInvalidResponseException() => '平台返回的 PPT 笔记数据异常，请稍后下拉重试',
-        _ => '暂时无法加载这节课的 PPT 笔记，请稍后下拉重试',
-      };
-      final keepNotes = pullRefresh && _notes.isNotEmpty;
-      setState(() {
-        _notesLoading = false;
-        if (!keepNotes) _notesError = message;
-      });
-      if (keepNotes) {
-        ScaffoldMessenger.maybeOf(context)?.showSnackBar(
-          SnackBar(content: Text(message)),
-        );
-      }
+    final warning =
+        await _notesController.load(lesson, forceRefresh: forceRefresh);
+    if (mounted && warning != null) {
+      ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+        SnackBar(content: Text(warning)),
+      );
     }
   }
 
@@ -729,6 +685,9 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
             description: playback.description);
         _viewIndex = selected < 0 ? 0 : selected;
       });
+      if (!await _entryWork.ready || !mounted || revision != _loadRevision) {
+        return;
+      }
       if (_isWebRtc) {
         await _openRtcViews(revision);
         return;
@@ -1411,7 +1370,7 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
       if (!mounted) return;
       _publish(() => _recovering = false);
       if (!recovered) return;
-      _notesLessonId = null;
+      _notesController.invalidate();
       recoveredPreviewSession = widget.loadPreviewCatalog;
     }
     if (widget.repository != null && !_validLesson(_lesson)) {
@@ -1536,7 +1495,11 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
       _secondaryFailed = false;
     });
     _secondaryQueue = _secondaryQueue.then((_) async {
-      if (!mounted || revision != _secondaryRevision) return;
+      if (!await _entryWork.ready ||
+          !mounted ||
+          revision != _secondaryRevision) {
+        return;
+      }
       try {
         var secondary = _secondaryPlayer;
         if (secondary == null) {
@@ -1926,43 +1889,7 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
       detailScope: _lesson.id,
       video: video,
       tabBar: _portraitTabs(),
-      body: TabBarView(
-        controller: _tabController,
-        children: [
-          _PlayerTab(
-            controller: _tabController,
-            index: 0,
-            child: _lessonList(colors, nested: true),
-          ),
-          _PlayerTab(
-              controller: _tabController,
-              index: 1,
-              scrollIdentity: _lesson.id,
-              child: RecordingNotesPanel(
-                key: ValueKey('recording-notes:${_lesson.id}'),
-                nested: true,
-                slides: _notes,
-                loading:
-                    _notesLoading || _notesLessonId == null && _catalogLoading,
-                error:
-                    _notesLessonId == null ? '请先选择课次，再查看 PPT 笔记' : _notesError,
-                canSeek: !_loading &&
-                    _failure == null &&
-                    _playback != null &&
-                    !_lesson.isLive,
-                onRefresh: () => _loadNotes(_lesson, forceRefresh: true),
-                onSeek: (position) {
-                  if (!_loading &&
-                      _failure == null &&
-                      _playback != null &&
-                      !_lesson.isLive) {
-                    unawaited(_seekPlayers(position));
-                  }
-                },
-                headersLoader: widget.repository?.mediaHeadersFor,
-              )),
-        ],
-      ),
+      body: _portraitBody(colors),
       expandedHeight: videoHeight,
       topInset: topInset,
       player: _lesson.isLive ? _player : _timelinePlayer ?? _player,
@@ -1984,15 +1911,73 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
     );
   }
 
-  PreferredSizeWidget _portraitTabs() => RecordingPlayerTabs(
-        controller: _tabController,
-        noteCount: _notes.isNotEmpty
-            ? _notes.length
-            : !_notesLoading &&
-                    _notesError == null &&
-                    _notesLessonId == _lesson.id
-                ? 0
-                : null,
+  Widget _portraitBody(ShuYoColors colors) {
+    final canSeek =
+        !_loading && _failure == null && _playback != null && !_lesson.isLive;
+    final signature = (
+      _lesson.id,
+      _episodeCatalog,
+      _activeClassroom,
+      _episodesNewestFirst,
+      _catalogLoading,
+      _catalogPullRefreshing,
+      _playback?.description,
+      canSeek,
+      colors,
+    );
+    final cached = _portraitBodyCache;
+    if (cached != null && cached.$1 == signature) return cached.$2;
+    final body = RepaintBoundary(
+        child: TabBarView(
+      controller: _tabController,
+      children: [
+        _PlayerTab(
+          controller: _tabController,
+          index: 0,
+          child: _lessonList(colors, nested: true),
+        ),
+        _PlayerTab(
+          controller: _tabController,
+          index: 1,
+          scrollIdentity: _lesson.id,
+          child: ValueListenableBuilder<RecordingNotesState>(
+            valueListenable: _notesController,
+            builder: (context, notes, _) => RecordingNotesPanel(
+              key: ValueKey('recording-notes:${_lesson.id}'),
+              nested: true,
+              slides: notes.slides,
+              loading:
+                  notes.loading || notes.lessonId == null && _catalogLoading,
+              error: notes.lessonId == null ? '请先选择课次，再查看 PPT 笔记' : notes.error,
+              canSeek: canSeek,
+              onRefresh: () => _loadNotes(_lesson, forceRefresh: true),
+              onSeek: (position) {
+                if (!_loading &&
+                    _failure == null &&
+                    _playback != null &&
+                    !_lesson.isLive) {
+                  unawaited(_seekPlayers(position));
+                }
+              },
+              headersLoader: widget.repository?.mediaHeadersFor,
+            ),
+          ),
+        ),
+      ],
+    ));
+    _portraitBodyCache = (signature, body);
+    return body;
+  }
+
+  PreferredSizeWidget _portraitTabs() => _portraitTabBar ??= PreferredSize(
+        preferredSize: const Size.fromHeight(45),
+        child: ValueListenableBuilder<RecordingNotesState>(
+          valueListenable: _notesController,
+          builder: (context, notes, _) => RecordingPlayerTabs(
+            controller: _tabController,
+            noteCount: notes.count,
+          ),
+        ),
       );
 
   Widget _placeholder() {
@@ -2044,7 +2029,7 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
   }
 
   Widget _lessonHeading(ShuYoColors colors) {
-    final days = recordingCourseDays(_filteredLessons);
+    final days = _classroomEpisodes.overviewDays;
     return Padding(
       key: const ValueKey('recording-course-banner'),
       padding: const EdgeInsets.fromLTRB(16, 20, 16, 8),
@@ -2069,21 +2054,26 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
     final episodeKeys = nested ? _episodeKeys : _landscapeEpisodeKeys;
     final headingKey =
         nested ? _episodeHeadingKey : _landscapeEpisodeHeadingKey;
+    final signature = (
+      _episodeCatalog,
+      _activeClassroom,
+      _episodesNewestFirst,
+      _catalogLoading,
+      _catalogPullRefreshing,
+      _lesson.id,
+      _playback?.description,
+      colors,
+      MediaQuery.viewPaddingOf(context).bottom,
+    );
+    final cached = _lessonListCache[nested];
+    if (cached != null && cached.$1 == signature) return cached.$2;
     final chronological = _lessons;
-    final filtered = _filteredLessons;
-    final lessons = _episodesNewestFirst
-        ? filtered
-        : filtered.reversed.toList(growable: false);
-    final episodeNumbers = {
-      for (var index = 0; index < filtered.length; index++)
-        filtered[index].id: filtered.length - index,
-    };
-    final months = <(int, int)?, List<VodLesson>>{};
-    for (final lesson in lessons) {
-      final date = lesson.beginTime;
-      final month = date == null ? null : (date.year, date.month);
-      months.putIfAbsent(month, () => []).add(lesson);
-    }
+    final episodes = _classroomEpisodes;
+    final lessons =
+        _episodesNewestFirst ? episodes.newestFirst : episodes.oldestFirst;
+    final episodeNumbers = episodes.episodeNumbers;
+    final months =
+        _episodesNewestFirst ? episodes.newestMonths : episodes.oldestMonths;
     final content = CustomScrollView(
       key: const ValueKey('course-player-episodes'),
       physics: const AlwaysScrollableScrollPhysics(),
@@ -2124,24 +2114,22 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
                   child: Text(chronological.isEmpty ? '暂无可观看回放' : '没有符合教室筛选的课次',
                       style: ShuYoTextStyles.meta(color: colors.textMuted),
                       textAlign: TextAlign.center))),
-        for (final month in months.entries)
+        for (final month in months)
           SliverMainAxisGroup(
-            key: ValueKey('recording-episode-month-group:${month.key}'),
+            key: ValueKey('recording-episode-month-group:${month.month}'),
             slivers: [
               SliverPersistentHeader(
                 pinned: true,
-                delegate: _EpisodeMonthHeader(month: month.key),
+                delegate: _EpisodeMonthHeader(month: month.month),
               ),
               SliverList.builder(
-                itemCount: month.value.length,
+                itemCount: month.lessons.length,
                 findChildIndexCallback: (key) {
                   if (key is! ValueKey<int>) return null;
-                  final index = month.value
-                      .indexWhere((lesson) => lesson.id == key.value);
-                  return index < 0 ? null : index;
+                  return month.indexByLessonId[key.value];
                 },
                 itemBuilder: (context, index) {
-                  final lesson = month.value[index];
+                  final lesson = month.lessons[index];
                   return KeyedSubtree(
                     key: ValueKey(lesson.id),
                     child: Column(
@@ -2151,6 +2139,7 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
                         RecordingEpisodeTile(
                           tileKey: ValueKey('recording-lesson-${lesson.id}'),
                           lesson: lesson,
+                          metadata: _episodeCatalog.metadataFor(lesson),
                           number: episodeNumbers[lesson.id]!,
                           selected: lesson.id == _lesson.id,
                           onTap: !lesson.canPlay || lesson.id == _lesson.id
@@ -2171,7 +2160,7 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
                 height: 24 + MediaQuery.viewPaddingOf(context).bottom)),
       ],
     );
-    return widget.repository == null || !_shouldLoadCatalog
+    final result = widget.repository == null || !_shouldLoadCatalog
         ? content
         : RefreshIndicator(
             notificationPredicate: (notification) =>
@@ -2180,6 +2169,8 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
             onRefresh: () => _loadCatalog(forceRefresh: true, fromPull: true),
             child: content,
           );
+    _lessonListCache[nested] = (signature, result);
+    return result;
   }
 
   void _scrollToEpisode(int id,
@@ -2295,32 +2286,59 @@ class _PlayerTab extends StatefulWidget {
 
 class _PlayerTabState extends State<_PlayerTab>
     with AutomaticKeepAliveClientMixin {
+  late bool _active = widget.controller.index == widget.index;
+
   @override
   bool get wantKeepAlive => true;
+
+  @override
+  void initState() {
+    super.initState();
+    widget.controller.addListener(_onTabChanged);
+  }
+
+  @override
+  void didUpdateWidget(_PlayerTab oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.controller != widget.controller) {
+      oldWidget.controller.removeListener(_onTabChanged);
+      widget.controller.addListener(_onTabChanged);
+    }
+    _active = widget.controller.index == widget.index;
+  }
+
+  void _onTabChanged() {
+    final active = widget.controller.index == widget.index;
+    // TabController also notifies at animation completion. Reparent the inner
+    // scroll controller only when the selected page actually changes.
+    if (_active != active) setState(() => _active = active);
+  }
+
+  @override
+  void dispose() {
+    widget.controller.removeListener(_onTabChanged);
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
     super.build(context);
     final nestedController = PrimaryScrollController.of(context);
-    return AnimatedBuilder(
-      animation: widget.controller,
-      child: KeyedSubtree(
-        key: PageStorageKey(
-            ('recording-player-tab', widget.index, widget.scrollIdentity)),
-        child: widget.child,
+    final child = TickerMode(
+      enabled: _active,
+      child: RepaintBoundary(
+        child: KeyedSubtree(
+          key: PageStorageKey(
+              ('recording-player-tab', widget.index, widget.scrollIdentity)),
+          child: widget.child,
+        ),
       ),
-      builder: (context, child) {
-        // NestedScrollView forwards a drag to every attached inner position.
-        // An inactive kept-alive tab must retain its own position without also
-        // receiving the visible tab's scroll deltas.
-        return widget.controller.index == widget.index
-            ? PrimaryScrollController(
-                controller: nestedController,
-                child: child!,
-              )
-            : PrimaryScrollController.none(child: child!);
-      },
     );
+    // Inactive kept-alive tabs retain their positions without receiving the
+    // visible page's NestedScrollView drag or animating hidden loading widgets.
+    return _active
+        ? PrimaryScrollController(controller: nestedController, child: child)
+        : PrimaryScrollController.none(child: child);
   }
 }
 

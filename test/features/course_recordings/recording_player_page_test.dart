@@ -1070,6 +1070,87 @@ void main() {
   );
 
   testWidgets(
+      'entry starts requests but defers decoders until the slide settles',
+      (tester) async {
+    prepareNotesPortrait(tester);
+    final harness = _PlaybackHarness();
+    var playbackRequests = 0;
+    final content = (page(
+      harness: harness,
+      load: (lesson) async {
+        playbackRequests++;
+        return playback(lesson);
+      },
+      loadNotes: (_) async => [],
+    ) as MaterialApp)
+        .home!;
+    await tester.pumpWidget(MaterialApp(
+      home: Builder(
+          builder: (context) => Scaffold(
+                body: TextButton(
+                  onPressed: () =>
+                      Navigator.of(context).push(PageRouteBuilder<void>(
+                    transitionDuration: const Duration(milliseconds: 400),
+                    pageBuilder: (_, animation, secondary) => content,
+                    transitionsBuilder: (_, animation, secondary, child) =>
+                        SlideTransition(
+                      position: animation.drive(Tween<Offset>(
+                          begin: const Offset(1, 0), end: Offset.zero)),
+                      child: child,
+                    ),
+                  )),
+                  child: const Text('打开课程'),
+                ),
+              )),
+    ));
+    await tester.tap(find.text('打开课程'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 150));
+    expect(playbackRequests, 1);
+    expect(harness.platforms, isEmpty);
+    await tester.pump(const Duration(milliseconds: 250));
+    await tester.pumpAndSettle();
+    expect(harness.platforms, isNotEmpty);
+    expect(
+        harness.platforms.every((player) => player.opened.length == 1), isTrue);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets(
+      'notes completion leaves video and introduction widgets untouched',
+      (tester) async {
+    prepareNotesPortrait(tester);
+    final pending = Completer<List<VodPptSlide>>();
+    final harness = _PlaybackHarness();
+    await tester.pumpWidget(page(
+      harness: harness,
+      load: (lesson) async => playback(lesson),
+      loadNotes: (_) => pending.future,
+    ));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+    final video = tester.widget<Video>(find.byType(Video));
+    final tabView = tester.widget<TabBarView>(find.byType(TabBarView));
+    final introduction = tester.widget<CustomScrollView>(
+        find.byKey(const ValueKey('course-player-episodes')));
+    final opens =
+        harness.platforms.map((player) => player.opened.length).toList();
+    pending.complete([note, anotherNote]);
+    await tester.pumpAndSettle();
+    expect(notesTabLabel(tester), '笔记 2');
+    expect(tester.widget<Video>(find.byType(Video)), same(video));
+    expect(tester.widget<TabBarView>(find.byType(TabBarView)), same(tabView));
+    expect(
+        tester.widget<CustomScrollView>(
+            find.byKey(const ValueKey('course-player-episodes'))),
+        same(introduction));
+    expect(harness.platforms.map((player) => player.opened.length), opens);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets(
       'portrait notes tabs show OCR count and preserve playback across taps and swipes',
       (tester) async {
     prepareNotesPortrait(tester);

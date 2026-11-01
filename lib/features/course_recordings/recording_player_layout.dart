@@ -289,7 +289,10 @@ class _RecordingVideoHeader extends SliverPersistentHeaderDelegate {
                         alignment: Alignment.topCenter,
                         minHeight: videoHeight,
                         maxHeight: videoHeight,
-                        child: SizedBox(height: videoHeight, child: video),
+                        child: SizedBox(
+                          height: videoHeight,
+                          child: RepaintBoundary(child: video),
+                        ),
                       ),
                     ),
                   ),
@@ -347,7 +350,11 @@ class _RecordingVideoHeader extends SliverPersistentHeaderDelegate {
                     ),
                   ),
                 ]))),
-        if (tabBar != null) SizedBox(height: tabHeight, child: tabBar),
+        if (tabBar != null)
+          SizedBox(
+            height: tabHeight,
+            child: RepaintBoundary(child: tabBar),
+          ),
       ]),
     );
   }
