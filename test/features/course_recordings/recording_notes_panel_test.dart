@@ -26,13 +26,16 @@ void main() {
     Future<Map<String, String>> Function(Uri)? headersLoader,
     ThemeData? theme,
     double textScale = 1,
+    double devicePixelRatio = 1,
     bool canSeek = true,
   }) =>
       MaterialApp(
         theme: theme,
         home: Scaffold(
           body: MediaQuery(
-            data: MediaQueryData(textScaler: TextScaler.linear(textScale)),
+            data: MediaQueryData(
+                textScaler: TextScaler.linear(textScale),
+                devicePixelRatio: devicePixelRatio),
             child: RecordingNotesPanel(
               slides: slides,
               loading: loading,
@@ -45,6 +48,50 @@ void main() {
           ),
         ),
       );
+
+  testWidgets(
+      'PPT decoding follows display width and DPR without renewing headers',
+      (tester) async {
+    tester.view.physicalSize = const Size(360, 780);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final slides = [slide(1, image: true)];
+    var headerRequests = 0;
+    Future<Map<String, String>> headers(Uri _) async {
+      headerRequests++;
+      return const {};
+    }
+
+    for (final dpr in [1.0, 2.0, 3.0, 4.0]) {
+      await tester.pumpWidget(
+          app(slides: slides, devicePixelRatio: dpr, headersLoader: headers));
+      await tester.pumpAndSettle();
+      final thumbnail = find.descendant(
+          of: find.byKey(const ValueKey('recording-note-thumbnail-1')),
+          matching: find.byType(Image));
+      final thumbnailProvider =
+          tester.widget<Image>(thumbnail).image as ResizeImage;
+      expect(tester.getSize(thumbnail).width, 104);
+      expect(thumbnailProvider.width, (104 * dpr).ceil().clamp(1, 312));
+      expect((thumbnailProvider.imageProvider as NetworkImage).url,
+          slides.single.imageUrl.toString());
+      await tester.tap(find.byKey(const ValueKey('recording-note-open-1')));
+      await tester.pumpAndSettle();
+      final detail = find.descendant(
+          of: find.byKey(const ValueKey('recording-note-image-1')),
+          matching: find.byType(Image));
+      final detailProvider = tester.widget<Image>(detail).image as ResizeImage;
+      expect(detailProvider.width,
+          (tester.getSize(detail).width * dpr).ceil().clamp(1, 1280));
+      expect((detailProvider.imageProvider as NetworkImage).url,
+          slides.single.imageUrl.toString());
+      await tester.tap(find.byTooltip('关闭'));
+      await tester.pumpAndSettle();
+    }
+    expect(headerRequests, 1);
+    expect(tester.takeException(), isNull);
+  });
 
   testWidgets('loading, unavailable content, and request failure are distinct',
       (tester) async {
