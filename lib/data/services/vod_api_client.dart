@@ -143,6 +143,13 @@ class VodApiClient {
     if (termId <= 0) throw const VodInvalidResponseException('请选择有效学期');
     final courses = <int, VodCourse>{};
     var parsed = 0;
+    var published = 0;
+    void publish() {
+      if (courses.length == published) return;
+      published = courses.length;
+      onProgress?.call(List<VodCourse>.unmodifiable(courses.values));
+    }
+
     await _readAll(
       '/v1/group_subject_vod_list/t-1',
       {'acteId': '$termId'},
@@ -160,8 +167,11 @@ class VodApiClient {
           }
           courses[course.teachingClassId] = course;
           parsed++;
-          onProgress?.call(List<VodCourse>.unmodifiable(courses.values));
+          // Keep the first item responsive without copying and publishing the
+          // accumulated catalog once for every row in a completed HTTP page.
+          if (courses.length == 1) publish();
         }
+        publish();
       },
     );
     return List.unmodifiable(courses.values);
@@ -400,6 +410,13 @@ class VodApiClient {
     if (termId <= 0) throw const VodInvalidResponseException('请选择有效学期');
     final lessons = <VodLesson>[];
     var parsed = 0;
+    var published = 0;
+    void publish() {
+      if (lessons.length == published) return;
+      published = lessons.length;
+      onProgress?.call(List<VodLesson>.unmodifiable(lessons));
+    }
+
     await _readAll(
       '/v1/vod_live/t-1',
       {
@@ -423,9 +440,10 @@ class VodApiClient {
           parsed++;
           if (lesson.isLiveAvailable) {
             lessons.add(lesson);
-            onProgress?.call(List<VodLesson>.unmodifiable(lessons));
+            if (lessons.length == 1) publish();
           }
         }
+        publish();
       },
     );
     return List.unmodifiable(lessons);

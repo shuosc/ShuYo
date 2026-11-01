@@ -107,9 +107,9 @@ class VodRepository {
     final account = await _cacheAccount();
     _checkGeneration(generation);
     if (account == null) return false;
-    final saved = await _recordingCache.savedLessons(account, useWebVpn, null);
+    final saved = await _recordingCache.hasSavedLessons(account, useWebVpn);
     _checkGeneration(generation);
-    return account == await _cacheAccount() && saved.isNotEmpty;
+    return account == await _cacheAccount() && saved;
   }
 
   Future<List<VodTerm>> loadTerms({bool forceRefresh = false}) {

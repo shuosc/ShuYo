@@ -34,37 +34,38 @@ class VodRecordingCache {
   String _scope(String account, bool vpn) =>
       '${Uri.encodeComponent(account)}:${vpn ? 'webvpn' : 'direct'}';
 
-  Future<Map<String, dynamic>> _read() async {
-    final raw = await _store.read(storageKey);
-    if (raw == null) return {};
-    final Object? value;
-    try {
-      value = raw.length >= 16384
-          ? await compute(_decodeCacheJson, raw)
-          : jsonDecode(raw);
-    } on FormatException {
-      return {};
-    }
-    return value is Map<String, dynamic> ? value : {};
-  }
-
   Future<List<Map<String, dynamic>>> savedLessons(
       String account, bool vpn, int? termId) async {
     try {
       _flushPendingBatches();
       await _writes;
-      final scope = (await _read())[_scope(account, vpn)];
-      if (scope is! Map) return const [];
-      return [
-        for (final entry in scope.entries)
-          if (entry.key.toString().startsWith('playback:') &&
-              entry.value is Map<String, dynamic> &&
-              (termId == null ||
-                  (entry.value['course'] as Map?)?['acteId'] == termId))
-            entry.value as Map<String, dynamic>,
-      ];
+      final raw = await _store.read(storageKey);
+      if (raw == null) return const [];
+      final request = (raw: raw, scope: _scope(account, vpn), termId: termId);
+      return raw.length >= 16384
+          ? await compute(_readSavedLessons, request,
+              debugLabel: 'vodCacheLessonsRead')
+          : _readSavedLessons(request);
     } on Object {
       return const [];
+    }
+  }
+
+  /// Checks for an offline fallback without transferring every saved lesson
+  /// and signed media URL from the worker back into the UI isolate.
+  Future<bool> hasSavedLessons(String account, bool vpn) async {
+    try {
+      _flushPendingBatches();
+      await _writes;
+      final raw = await _store.read(storageKey);
+      if (raw == null) return false;
+      final request = (raw: raw, scope: _scope(account, vpn));
+      return raw.length >= 16384
+          ? await compute(_hasSavedLessons, request,
+              debugLabel: 'vodCacheAvailabilityRead')
+          : _hasSavedLessons(request);
+    } on Object {
+      return false;
     }
   }
 
@@ -72,8 +73,13 @@ class VodRecordingCache {
     try {
       _flushPendingBatches();
       await _writes;
-      final scope = (await _read())[_scope(account, vpn)];
-      return scope is Map ? scope[key] : null;
+      final raw = await _store.read(storageKey);
+      if (raw == null) return null;
+      final request = (raw: raw, scope: _scope(account, vpn), key: key);
+      return raw.length >= 16384
+          ? await compute(_readCacheValue, request,
+              debugLabel: 'vodCacheValueRead')
+          : _readCacheValue(request);
     } on Object {
       return null;
     }
@@ -236,7 +242,35 @@ class VodRecordingCache {
       };
 }
 
-Object? _decodeCacheJson(String raw) => jsonDecode(raw);
+Map? _readCacheScope(String raw, String scope) {
+  final all = jsonDecode(raw);
+  if (all is! Map) return null;
+  final selected = all[scope];
+  return selected is Map ? selected : null;
+}
+
+Object? _readCacheValue(({String raw, String scope, String key}) request) =>
+    _readCacheScope(request.raw, request.scope)?[request.key];
+
+bool _hasSavedLessons(({String raw, String scope}) request) =>
+    _readCacheScope(request.raw, request.scope)?.entries.any((entry) =>
+        entry.key.toString().startsWith('playback:') &&
+        entry.value is Map<String, dynamic>) ??
+    false;
+
+List<Map<String, dynamic>> _readSavedLessons(
+    ({String raw, String scope, int? termId}) request) {
+  final scope = _readCacheScope(request.raw, request.scope);
+  if (scope == null) return const [];
+  return [
+    for (final entry in scope.entries)
+      if (entry.key.toString().startsWith('playback:') &&
+          entry.value is Map<String, dynamic> &&
+          (request.termId == null ||
+              (entry.value['course'] as Map?)?['acteId'] == request.termId))
+        entry.value as Map<String, dynamic>,
+  ];
+}
 
 typedef _CacheJsonEntry = ({
   String scope,

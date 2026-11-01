@@ -97,6 +97,64 @@ VodApiClient _client(
     );
 
 void main() {
+  for (final live in [false, true]) {
+    test(
+        '${live ? 'live' : 'course'} page progress avoids per-row catalog copies',
+        () async {
+      final secondPage = Completer<http.Response>();
+      final secondRequested = Completer<void>();
+      final client = _client((request) async {
+        final page = int.parse(request.url.queryParameters['page.pageIndex']!);
+        if (page == 2) {
+          secondRequested.complete();
+          return secondPage.future;
+        }
+        return _response({
+          'pageIndex': 1,
+          'pageCount': 2,
+          'rowCount': 52,
+          'records': [
+            for (var id = 1; id <= 50; id++)
+              {
+                'teclId': live ? 42 : id,
+                'acteId': 7,
+                'subjName': '课程$id',
+                if (live) ...{'id': id, 'liveType': 0},
+              },
+          ],
+        });
+      }, pageSize: 50);
+      addTearDown(client.dispose);
+      final snapshots = <List<Object>>[];
+      final result = live
+          ? client.fetchLiveLessons(termId: 7, onProgress: snapshots.add)
+          : client.fetchCourses(termId: 7, onProgress: snapshots.add);
+      await secondRequested.future;
+      // The first item is still immediate; the remainder of a received page
+      // does not trigger another 49 copies and repository/UI notifications.
+      expect(snapshots.map((value) => value.length), [1, 50]);
+      secondPage.complete(_response({
+        'pageIndex': 2,
+        'pageCount': 2,
+        'rowCount': 52,
+        'records': [
+          for (var id = 51; id <= 52; id++)
+            {
+              'teclId': live ? 42 : id,
+              'acteId': 7,
+              'subjName': '课程$id',
+              if (live) ...{'id': id, 'liveType': 0},
+            },
+        ],
+      }));
+      expect(await result, hasLength(52));
+      expect(snapshots.map((value) => value.length), [1, 50, 52]);
+      expect(snapshots.first, hasLength(1));
+      expect(() => snapshots.last.add(snapshots.last.first),
+          throwsUnsupportedError);
+    });
+  }
+
   test('course progress publishes each parsed course before later pages finish',
       () async {
     final secondPage = Completer<http.Response>();
