@@ -166,6 +166,18 @@ class _RecordingPlayerLayoutState extends State<RecordingPlayerLayout> {
     final tabHeight = widget.tabBar?.preferredSize.height ?? 0;
     final range = height - kToolbarHeight;
     final pinned = _playing && widget.canResume && !_expanding;
+    // PiliPlus keeps the header's child stable while its render object handles
+    // the scroll geometry (265f879fa85973b4bf885bde2562f1007f1013b8):
+    // https://github.com/bggRGjQaUbCoE/PiliPlus/blob/265f879fa85973b4bf885bde2562f1007f1013b8/lib/common/widgets/sliver/video_header.dart
+    // Keep our existing sliver geometry, but share one toolbar across delegate
+    // rebuilds. Only its opacity and hit testing depend on the scroll offset.
+    final collapsedToolbar = _RecordingCollapsedToolbar(
+      canResume: widget.canResume,
+      completed: widget.player?.state.completed ?? false,
+      onResume: () => unawaited(_resume()),
+      onBack: widget.onBack,
+      onMore: widget.onMore,
+    );
     // Scrolling only changes the status bar. Keep the nested viewport, tabs and
     // video subtree out of this listener's rebuilds; its sliver already receives
     // the collapse offset directly during layout.
@@ -192,11 +204,7 @@ class _RecordingPlayerLayoutState extends State<RecordingPlayerLayout> {
                         pinned: pinned,
                         video: widget.video,
                         tabBar: widget.tabBar,
-                        canResume: widget.canResume,
-                        completed: widget.player?.state.completed ?? false,
-                        onResume: () => unawaited(_resume()),
-                        onBack: widget.onBack,
-                        onMore: widget.onMore,
+                        collapsedToolbar: collapsedToolbar,
                       ),
                     )),
               ],
@@ -247,11 +255,7 @@ class _RecordingVideoHeader extends SliverPersistentHeaderDelegate {
     required this.pinned,
     required this.video,
     required this.tabBar,
-    required this.canResume,
-    required this.completed,
-    required this.onResume,
-    required this.onBack,
-    required this.onMore,
+    required this.collapsedToolbar,
   });
 
   @override
@@ -261,11 +265,7 @@ class _RecordingVideoHeader extends SliverPersistentHeaderDelegate {
   final bool pinned;
   final Widget video;
   final PreferredSizeWidget? tabBar;
-  final bool canResume;
-  final bool completed;
-  final VoidCallback onResume;
-  final VoidCallback onBack;
-  final VoidCallback? onMore;
+  final Widget collapsedToolbar;
 
   @override
   Widget build(
@@ -303,49 +303,7 @@ class _RecordingVideoHeader extends SliverPersistentHeaderDelegate {
                       child: Opacity(
                         key: const ValueKey('recording-collapsed-toolbar'),
                         opacity: ratio,
-                        child: Material(
-                          color: Theme.of(context).colorScheme.surface,
-                          child: Align(
-                            alignment: Alignment.topCenter,
-                            child: SizedBox(
-                              height: kToolbarHeight,
-                              child: Row(children: [
-                                IconButton(
-                                  tooltip: '返回课程列表',
-                                  onPressed: onBack,
-                                  icon: const Icon(Icons.arrow_back),
-                                ),
-                                Expanded(
-                                  child: TextButton.icon(
-                                    key: const ValueKey(
-                                        'recording-resume-player'),
-                                    onPressed: onResume,
-                                    icon: Icon(canResume
-                                        ? completed
-                                            ? Icons.replay_rounded
-                                            : Icons.play_arrow_rounded
-                                        : Icons.expand_more),
-                                    label: Text(canResume
-                                        ? completed
-                                            ? '重新播放'
-                                            : '继续播放'
-                                        : '展开播放器'),
-                                  ),
-                                ),
-                                if (onMore != null)
-                                  IconButton(
-                                    key: const ValueKey(
-                                        'recording-collapsed-more'),
-                                    tooltip: '更多设置',
-                                    onPressed: onMore,
-                                    icon: const Icon(Icons.more_vert_outlined),
-                                  )
-                                else
-                                  const SizedBox(width: 48),
-                              ]),
-                            ),
-                          ),
-                        ),
+                        child: collapsedToolbar,
                       ),
                     ),
                   ),
@@ -366,9 +324,66 @@ class _RecordingVideoHeader extends SliverPersistentHeaderDelegate {
       pinned != oldDelegate.pinned ||
       video != oldDelegate.video ||
       tabBar != oldDelegate.tabBar ||
-      canResume != oldDelegate.canResume ||
-      completed != oldDelegate.completed ||
-      onResume != oldDelegate.onResume ||
-      onBack != oldDelegate.onBack ||
-      onMore != oldDelegate.onMore;
+      collapsedToolbar != oldDelegate.collapsedToolbar;
+}
+
+class _RecordingCollapsedToolbar extends StatelessWidget {
+  const _RecordingCollapsedToolbar({
+    required this.canResume,
+    required this.completed,
+    required this.onResume,
+    required this.onBack,
+    required this.onMore,
+  });
+
+  final bool canResume;
+  final bool completed;
+  final VoidCallback onResume;
+  final VoidCallback onBack;
+  final VoidCallback? onMore;
+
+  @override
+  Widget build(BuildContext context) => Material(
+        color: Theme.of(context).colorScheme.surface,
+        child: Align(
+          alignment: Alignment.topCenter,
+          child: RepaintBoundary(
+            child: SizedBox(
+              height: kToolbarHeight,
+              child: Row(children: [
+                IconButton(
+                  tooltip: '返回课程列表',
+                  onPressed: onBack,
+                  icon: const Icon(Icons.arrow_back),
+                ),
+                Expanded(
+                  child: TextButton.icon(
+                    key: const ValueKey('recording-resume-player'),
+                    onPressed: onResume,
+                    icon: Icon(canResume
+                        ? completed
+                            ? Icons.replay_rounded
+                            : Icons.play_arrow_rounded
+                        : Icons.expand_more),
+                    label: Text(canResume
+                        ? completed
+                            ? '重新播放'
+                            : '继续播放'
+                        : '展开播放器'),
+                  ),
+                ),
+                if (onMore != null)
+                  IconButton(
+                    key: const ValueKey('recording-collapsed-more'),
+                    tooltip: '更多设置',
+                    onPressed: onMore,
+                    icon: const Icon(Icons.more_vert_outlined),
+                  )
+                else
+                  const SizedBox(width: 48),
+              ]),
+            ),
+          ),
+        ),
+      );
 }
