@@ -10,6 +10,7 @@ import 'package:shuyo/data/models/vod_ppt.dart';
 import 'package:shuyo/data/repositories/vod_repository.dart';
 import 'package:shuyo/data/services/vod_api_client.dart';
 import 'package:shuyo/features/course_recordings/recording_episode_sort_icon.dart';
+import 'package:shuyo/features/course_recordings/recording_episode_tile.dart';
 import 'package:shuyo/features/course_recordings/recording_course_overview.dart';
 import 'package:shuyo/features/course_recordings/recording_playback_status.dart';
 import 'package:shuyo/features/course_recordings/recording_player_page.dart';
@@ -1644,6 +1645,50 @@ void main() {
   });
 
   testWidgets(
+      'large episode groups only lay out visible rows and still navigate',
+      (tester) async {
+    tester.view.physicalSize = const Size(393, 852);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final lessons = List.generate(
+        240,
+        (index) => VodLesson(
+            id: 200 + index,
+            teachingClassId: 10,
+            name: course.name,
+            isPlayable: true,
+            beginTime: DateTime(2026, 9, 1, 8).add(Duration(minutes: index))));
+    final harness = _PlaybackHarness();
+    await tester.pumpWidget(page(
+        initial: lessons[120],
+        lessons: lessons,
+        harness: harness,
+        load: (lesson) async => playback(lesson)));
+    await tester.pumpAndSettle();
+    expect(find.byType(RecordingEpisodeTile).evaluate().length, lessThan(20));
+    expect(find.byKey(const ValueKey('recording-lesson-320')), findsNothing);
+    await tester.drag(find.byKey(const ValueKey('course-player-episodes')),
+        const Offset(0, -1200));
+    await tester.pumpAndSettle();
+    expect(find.byType(RecordingEpisodeTile).evaluate().length, lessThan(20));
+    await tester.tap(find.byTooltip('跳至底部'));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('recording-lesson-200')), findsOneWidget);
+    await tester.tap(find.byTooltip('跳至当前'));
+    await tester.pumpAndSettle();
+    final current = find.byKey(const ValueKey('recording-lesson-320'));
+    expect(current, findsOneWidget);
+    expect(tester.getTopLeft(current).dy, greaterThanOrEqualTo(0));
+    expect(tester.getBottomLeft(current).dy, lessThanOrEqualTo(852));
+    expect(find.byType(RecordingEpisodeTile).evaluate().length, lessThan(20));
+    expect(
+        harness.platforms.every((player) => player.opened.length == 1), isTrue);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets(
       'episode toolbar stays pinned and navigates and reverses the list',
       (tester) async {
     tester.view.physicalSize = const Size(393, 852);
@@ -1672,7 +1717,8 @@ void main() {
         .widgetList<Divider>(
             find.descendant(of: list, matching: find.byType(Divider)))
         .toList();
-    expect(separators, hasLength(lessons.length - 1));
+    expect(separators.length, lessThan(lessons.length - 1));
+    expect(separators, isNotEmpty);
     for (final separator in separators) {
       expect(separator.indent, 16);
       expect(separator.endIndent, 16);
@@ -1681,11 +1727,6 @@ void main() {
         find.descendant(
             of: find.byKey(const ValueKey('recording-lesson-229')),
             matching: find.text('30')),
-        findsOneWidget);
-    expect(
-        find.descendant(
-            of: find.byKey(const ValueKey('recording-lesson-215')),
-            matching: find.text('16')),
         findsOneWidget);
     await tester.drag(list, const Offset(0, -700));
     await tester.pumpAndSettle();
@@ -1712,11 +1753,8 @@ void main() {
         findsOneWidget);
     await tester.tap(find.byTooltip('跳至顶部'));
     await tester.pumpAndSettle();
-    expect(
-        tester.getTopLeft(last).dy,
-        lessThan(tester
-            .getTopLeft(find.byKey(const ValueKey('recording-lesson-229')))
-            .dy));
+    expect(tester.getTopLeft(last).dy, greaterThanOrEqualTo(pinnedTop));
+    expect(find.byKey(const ValueKey('recording-lesson-229')), findsNothing);
     expect(
         harness.platforms.every((player) => player.opened.length == 1), isTrue);
     expect(tester.takeException(), isNull);
@@ -1811,9 +1849,9 @@ void main() {
         ]);
     expect(
         find.descendant(
-            of: find.byKey(const ValueKey('recording-lesson-215'),
+            of: find.byKey(const ValueKey('recording-lesson-200'),
                 skipOffstage: false),
-            matching: find.text('16', skipOffstage: false),
+            matching: find.text('1', skipOffstage: false),
             skipOffstage: false),
         findsOneWidget);
     expect(
@@ -1886,15 +1924,15 @@ void main() {
     expect(find.byKey(const ValueKey('recording-lesson-215')), findsNothing);
     expect(
         find.descendant(
-            of: find.byKey(const ValueKey('recording-lesson-214')),
-            matching: find.text('8')),
+            of: find.byKey(const ValueKey('recording-lesson-228')),
+            matching: find.text('15')),
         findsOneWidget);
     expect(
         harness.platforms.every((player) => player.opened.length == 1), isTrue);
     await tester.tap(roomA);
     await tester.pumpAndSettle();
     expect(tester.widget<ChoiceChip>(roomA).selected, isTrue);
-    expect(find.byKey(const ValueKey('recording-lesson-214')), findsOneWidget);
+    expect(find.byKey(const ValueKey('recording-lesson-228')), findsOneWidget);
     expect(find.text('没有符合教室筛选的课次'), findsNothing);
     await tester.tap(find.byTooltip('跳至当前'));
     await tester.pump();

@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:shuyo/features/course_recordings/recording_player_layout.dart';
+import 'package:shuyo/features/course_recordings/recording_detail_sheet.dart';
 
 class _LayoutPlatformPlayer extends PlatformPlayer {
   _LayoutPlatformPlayer({bool playing = false, bool completed = false})
@@ -156,6 +157,27 @@ Future<void> _collapse(WidgetTester tester) async {
 }
 
 void main() {
+  testWidgets('collapse updates chrome without rebuilding the nested viewport',
+      (tester) async {
+    await _pumpLayout(tester);
+    final viewport = find.byKey(const ValueKey('recording-player-scroll'));
+    final initialViewport = tester.widget<NestedScrollView>(viewport);
+    for (final offset in [41.0, 82.0, 123.0, 164.0]) {
+      _outerController(tester).jumpTo(offset);
+      await tester.pump();
+      expect(identical(tester.widget(viewport), initialViewport), isTrue);
+      expect(
+          tester
+              .widget<RecordingDetailSheetHost>(
+                  find.byType(RecordingDetailSheetHost))
+              .topInset,
+          closeTo(44 + 220 - offset, .001));
+    }
+    expect(_toolbarOpacity(tester), 1);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
   testWidgets('more action follows the back button throughout collapse',
       (tester) async {
     final platform = _LayoutPlatformPlayer();

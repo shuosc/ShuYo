@@ -3,6 +3,7 @@ import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
@@ -137,6 +138,8 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
   bool _episodesNewestFirst = true;
   String? _selectedClassroom;
   final _episodeKeys = <int, GlobalKey>{};
+  final _episodeHeadingKey = GlobalKey();
+  int _episodeNavigationRevision = 0;
   int _catalogRevision = 0;
   VodPlayback? _playback;
   int _viewIndex = 0;
@@ -529,6 +532,7 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
 
   @override
   void dispose() {
+    _episodeNavigationRevision++;
     _loadRevision++;
     _notesRevision++;
     _resetSeekSynchronization();
@@ -2072,7 +2076,8 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
           const SliverToBoxAdapter(
               child: LinearProgressIndicator(
                   key: ValueKey('recording-catalog-progress'), minHeight: 2)),
-        SliverToBoxAdapter(child: _lessonHeading(colors)),
+        SliverToBoxAdapter(
+            key: _episodeHeadingKey, child: _lessonHeading(colors)),
         SliverPersistentHeader(
           pinned: true,
           delegate: _EpisodeHeader(
@@ -2104,26 +2109,38 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
                 pinned: true,
                 delegate: _EpisodeMonthHeader(month: month.key),
               ),
-              // Keep the existing episode contexts available to toolbar jumps,
-              // including targets outside the viewport.
-              SliverToBoxAdapter(
-                  child: Column(children: [
-                for (final lesson in month.value) ...[
-                  KeyedSubtree(
+              SliverList.builder(
+                itemCount: month.value.length,
+                findChildIndexCallback: (key) {
+                  if (key is! ValueKey<int>) return null;
+                  final index = month.value
+                      .indexWhere((lesson) => lesson.id == key.value);
+                  return index < 0 ? null : index;
+                },
+                itemBuilder: (context, index) {
+                  final lesson = month.value[index];
+                  return KeyedSubtree(
+                    key: ValueKey(lesson.id),
+                    child: Column(
                       key: _episodeKeys.putIfAbsent(lesson.id, GlobalKey.new),
-                      child: RecordingEpisodeTile(
-                        tileKey: ValueKey('recording-lesson-${lesson.id}'),
-                        lesson: lesson,
-                        number: episodeNumbers[lesson.id]!,
-                        selected: lesson.id == _lesson.id,
-                        onTap: !lesson.canPlay || lesson.id == _lesson.id
-                            ? null
-                            : () => unawaited(_loadLesson(lesson)),
-                      )),
-                  if (lesson.id != lessons.last.id)
-                    const Divider(indent: 16, endIndent: 16),
-                ],
-              ])),
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        RecordingEpisodeTile(
+                          tileKey: ValueKey('recording-lesson-${lesson.id}'),
+                          lesson: lesson,
+                          number: episodeNumbers[lesson.id]!,
+                          selected: lesson.id == _lesson.id,
+                          onTap: !lesson.canPlay || lesson.id == _lesson.id
+                              ? null
+                              : () => unawaited(_loadLesson(lesson)),
+                        ),
+                        if (lesson.id != lessons.last.id)
+                          const Divider(indent: 16, endIndent: 16),
+                      ],
+                    ),
+                  );
+                },
+              ),
             ],
           ),
         SliverToBoxAdapter(
@@ -2143,34 +2160,76 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
   }
 
   void _scrollToEpisode(int id, {required double alignment}) {
-    final target = _episodeKeys[id]?.currentContext;
-    if (target == null) {
-      if (_lessons.any((lesson) => lesson.id == id) &&
-          !_filteredLessons.any((lesson) => lesson.id == id)) {
-        _showCurrentClassroom();
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (mounted) _scrollToEpisode(id, alignment: alignment);
-        });
-      }
+    if (_lessons.any((lesson) => lesson.id == id) &&
+        !_filteredLessons.any((lesson) => lesson.id == id)) {
+      _showCurrentClassroom();
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _scrollToEpisode(id, alignment: alignment);
+      });
       return;
     }
+    unawaited(_revealEpisode(id,
+        alignment: alignment, revision: ++_episodeNavigationRevision));
+  }
+
+  Future<void> _revealEpisode(int id,
+      {required double alignment, required int revision}) async {
     final duration = MediaQuery.disableAnimationsOf(context)
         ? Duration.zero
         : const Duration(milliseconds: 200);
-    if (alignment == 1) {
-      // A grouped pinned header is subtracted from ensureVisible's target
-      // offset, which would leave the last row below the bottom edge.
-      final position = Scrollable.of(target).position;
-      if (duration == Duration.zero) {
-        position.jumpTo(position.maxScrollExtent);
-      } else {
-        unawaited(position.animateTo(position.maxScrollExtent,
-            duration: duration, curve: Curves.easeOut));
+    // Rows outside the viewport are deliberately unmounted. Estimate their
+    // position from a laid-out row, then let ensureVisible perform the final
+    // adjustment once the target has entered the lazy viewport. This keeps
+    // toolbar navigation without laying out every episode on every frame.
+    for (var attempt = 0; attempt < 12; attempt++) {
+      if (!mounted || revision != _episodeNavigationRevision) return;
+      final heading = _episodeHeadingKey.currentContext;
+      if (heading == null || !heading.mounted) return;
+      final position = Scrollable.of(heading).position;
+      final filtered = _filteredLessons;
+      final lessons = _episodesNewestFirst
+          ? filtered
+          : filtered.reversed.toList(growable: false);
+      final targetIndex = lessons.indexWhere((lesson) => lesson.id == id);
+      if (targetIndex < 0) return;
+      final target = _episodeKeys[id]?.currentContext;
+      if (target != null && target.mounted) {
+        if (alignment == 1) {
+          // Grouped pinned headers affect ensureVisible's end alignment.
+          if (duration == Duration.zero) {
+            position.jumpTo(position.maxScrollExtent);
+          } else {
+            await position.animateTo(position.maxScrollExtent,
+                duration: duration, curve: Curves.easeOut);
+          }
+        } else {
+          await Scrollable.ensureVisible(target,
+              alignment: alignment, duration: duration, curve: Curves.easeOut);
+        }
+        return;
       }
-      return;
+
+      var nearestIndex = -1;
+      RenderBox? nearestBox;
+      for (var index = 0; index < lessons.length; index++) {
+        final box =
+            _episodeKeys[lessons[index].id]?.currentContext?.findRenderObject();
+        if (box is! RenderBox || !box.attached || !box.hasSize) continue;
+        if (nearestIndex < 0 ||
+            (index - targetIndex).abs() < (nearestIndex - targetIndex).abs()) {
+          nearestIndex = index;
+          nearestBox = box;
+        }
+      }
+      if (nearestBox == null) return;
+      final viewport = RenderAbstractViewport.of(nearestBox);
+      final estimate = viewport.getOffsetToReveal(nearestBox, 0).offset +
+          (targetIndex - nearestIndex) * nearestBox.size.height;
+      final offset =
+          estimate.clamp(position.minScrollExtent, position.maxScrollExtent);
+      position.jumpTo(offset);
+      await WidgetsBinding.instance.endOfFrame;
     }
-    unawaited(Scrollable.ensureVisible(target,
-        alignment: alignment, duration: duration, curve: Curves.easeOut));
   }
 
   Future<void> _setTemporaryRate(double rate) async {

@@ -5,6 +5,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:media_kit/media_kit.dart';
 
+import 'recording_detail_sheet.dart';
+
 class RecordingPlayerLayout extends StatefulWidget {
   const RecordingPlayerLayout({
     super.key,
@@ -48,7 +50,6 @@ class _RecordingPlayerLayoutState extends State<RecordingPlayerLayout> {
   @override
   void initState() {
     super.initState();
-    _scrollController.addListener(_scrollChanged);
     _bindPlayer();
   }
 
@@ -93,10 +94,6 @@ class _RecordingPlayerLayoutState extends State<RecordingPlayerLayout> {
         if (mounted) unawaited(_expand());
       });
     }
-  }
-
-  void _scrollChanged() {
-    if (mounted) setState(() {});
   }
 
   Future<void> _expand() {
@@ -165,62 +162,77 @@ class _RecordingPlayerLayoutState extends State<RecordingPlayerLayout> {
     final theme = Theme.of(context);
     final height = math.max(kToolbarHeight, widget.expandedHeight);
     final tabHeight = widget.tabBar?.preferredSize.height ?? 0;
-    final offset =
-        _scrollController.hasClients ? _scrollController.offset : 0.0;
     final range = height - kToolbarHeight;
     final pinned = _playing && widget.canResume && !_expanding;
-    final ratio = pinned || range <= 0 ? 0.0 : (offset / range).clamp(0.0, 1.0);
-    final statusBrightness = ratio >= .5 ? theme.brightness : Brightness.dark;
-    return AnnotatedRegion<SystemUiOverlayStyle>(
-      value: SystemUiOverlayStyle(
-        statusBarColor: Colors.transparent,
-        statusBarIconBrightness: statusBrightness == Brightness.dark
-            ? Brightness.light
-            : Brightness.dark,
-        statusBarBrightness: statusBrightness,
+    // Scrolling only changes the status bar. Keep the nested viewport, tabs and
+    // video subtree out of this listener's rebuilds; its sliver already receives
+    // the collapse offset directly during layout.
+    return AnimatedBuilder(
+      animation: _scrollController,
+      child: Expanded(
+        child: Material(
+            key: const ValueKey('recording-scroll-surface'),
+            color: theme.colorScheme.surface,
+            child: NestedScrollView(
+              key: const ValueKey('recording-player-scroll'),
+              controller: _scrollController,
+              physics: const ClampingScrollPhysics(),
+              headerSliverBuilder: (context, innerBoxIsScrolled) => [
+                SliverOverlapAbsorber(
+                    handle: NestedScrollView.sliverOverlapAbsorberHandleFor(
+                        context),
+                    sliver: SliverPersistentHeader(
+                      pinned: true,
+                      delegate: _RecordingVideoHeader(
+                        minExtent:
+                            (pinned ? height : kToolbarHeight) + tabHeight,
+                        maxExtent: height + tabHeight,
+                        pinned: pinned,
+                        video: widget.video,
+                        tabBar: widget.tabBar,
+                        canResume: widget.canResume,
+                        completed: widget.player?.state.completed ?? false,
+                        onResume: () => unawaited(_resume()),
+                        onBack: widget.onBack,
+                        onMore: widget.onMore,
+                      ),
+                    )),
+              ],
+              body: widget.body,
+            )),
       ),
-      child: Column(children: [
-        SizedBox(
-          key: const ValueKey('recording-status-bar-inset'),
-          width: double.infinity,
-          height: widget.topInset,
-          child: ColoredBox(
-              color:
-                  Color.lerp(Colors.black, theme.colorScheme.surface, ratio)!),
-        ),
-        Expanded(
-          child: Material(
-              key: const ValueKey('recording-scroll-surface'),
-              color: theme.colorScheme.surface,
-              child: NestedScrollView(
-                key: const ValueKey('recording-player-scroll'),
-                controller: _scrollController,
-                physics: const ClampingScrollPhysics(),
-                headerSliverBuilder: (context, innerBoxIsScrolled) => [
-                  SliverOverlapAbsorber(
-                      handle: NestedScrollView.sliverOverlapAbsorberHandleFor(
-                          context),
-                      sliver: SliverPersistentHeader(
-                        pinned: true,
-                        delegate: _RecordingVideoHeader(
-                          minExtent:
-                              (pinned ? height : kToolbarHeight) + tabHeight,
-                          maxExtent: height + tabHeight,
-                          pinned: pinned,
-                          video: widget.video,
-                          tabBar: widget.tabBar,
-                          canResume: widget.canResume,
-                          completed: widget.player?.state.completed ?? false,
-                          onResume: () => unawaited(_resume()),
-                          onBack: widget.onBack,
-                          onMore: widget.onMore,
-                        ),
-                      )),
-                ],
-                body: widget.body,
-              )),
-        ),
-      ]),
+      builder: (context, child) {
+        final offset =
+            _scrollController.hasClients ? _scrollController.offset : 0.0;
+        final ratio =
+            pinned || range <= 0 ? 0.0 : (offset / range).clamp(0.0, 1.0);
+        final statusBrightness =
+            ratio >= .5 ? theme.brightness : Brightness.dark;
+        return RecordingDetailSheetHost(
+          topInset: widget.topInset + height - ratio * range,
+          child: AnnotatedRegion<SystemUiOverlayStyle>(
+            value: SystemUiOverlayStyle(
+              statusBarColor: Colors.transparent,
+              statusBarIconBrightness: statusBrightness == Brightness.dark
+                  ? Brightness.light
+                  : Brightness.dark,
+              statusBarBrightness: statusBrightness,
+            ),
+            child: Column(children: [
+              SizedBox(
+                key: const ValueKey('recording-status-bar-inset'),
+                width: double.infinity,
+                height: widget.topInset,
+                child: ColoredBox(
+                  color: Color.lerp(
+                      Colors.black, theme.colorScheme.surface, ratio)!,
+                ),
+              ),
+              child!,
+            ]),
+          ),
+        );
+      },
     );
   }
 }
