@@ -28,6 +28,7 @@ import 'recording_playback_status.dart';
 import 'recording_notes_panel.dart';
 import 'recording_player_cache.dart';
 import 'recording_player_layout.dart';
+import 'recording_player_tabs.dart';
 import 'recording_player_system_ui.dart';
 import 'recording_seek_controller.dart';
 import 'recording_secondary_video.dart';
@@ -139,6 +140,10 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
   String? _selectedClassroom;
   final _episodeKeys = <int, GlobalKey>{};
   final _episodeHeadingKey = GlobalKey();
+  final _landscapeEpisodeKeys = <int, GlobalKey>{};
+  final _landscapeEpisodeHeadingKey = GlobalKey();
+  Size? _portraitViewport;
+  MediaQueryData? _portraitMediaQuery;
   int _episodeNavigationRevision = 0;
   int _catalogRevision = 0;
   VodPlayback? _playback;
@@ -1829,152 +1834,159 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
                 final portrait =
                     MediaQuery.orientationOf(context) == Orientation.portrait &&
                         constraints.maxWidth < 1000;
-                final list = _lessonList(colors, nested: portrait);
                 final topInset = MediaQuery.viewPaddingOf(context).top;
-                if (constraints.maxWidth >= 1000) {
-                  return Padding(
-                    padding: EdgeInsets.only(top: topInset),
-                    child: MediaQuery.removePadding(
-                      context: context,
-                      removeTop: true,
-                      child: Row(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Expanded(
-                            flex: 3,
-                            child: ListView(
-                                children: [video, _lessonHeading(colors)]),
+                if (portrait) {
+                  _portraitViewport = constraints.biggest;
+                  _portraitMediaQuery = MediaQuery.of(context);
+                }
+                final portraitViewport = _portraitViewport;
+                final portraitMediaQuery = _portraitMediaQuery;
+                // PiliPlus keeps its MiniScaffold and tab view mounted behind
+                // fullscreen. Retain this entire tree too: keeping just offsets
+                // would still lose an open detail panel and its text position.
+                return Stack(fit: StackFit.expand, children: [
+                  if (portraitViewport != null && portraitMediaQuery != null)
+                    Offstage(
+                      key: const ValueKey('recording-portrait-content'),
+                      offstage: !portrait,
+                      child: TickerMode(
+                        enabled: portrait,
+                        child: OverflowBox(
+                          alignment: Alignment.topLeft,
+                          minWidth: portraitViewport.width,
+                          maxWidth: portraitViewport.width,
+                          minHeight: portraitViewport.height,
+                          maxHeight: portraitViewport.height,
+                          child: MediaQuery(
+                            data: portraitMediaQuery,
+                            child: SizedBox.fromSize(
+                              size: portraitViewport,
+                              child: _portraitLayout(
+                                colors,
+                                video:
+                                    portrait ? video : const SizedBox.shrink(),
+                                size: portraitViewport,
+                                topInset: portraitMediaQuery.viewPadding.top,
+                              ),
+                            ),
                           ),
-                          SizedBox(width: 360, child: list),
-                        ],
-                      ),
-                    ),
-                  );
-                }
-                final videoHeight = math.min(constraints.maxWidth * 9 / 16,
-                    math.max(100.0, (constraints.maxHeight - topInset) * .6));
-                if (MediaQuery.orientationOf(context) == Orientation.portrait) {
-                  return RecordingPlayerLayout(
-                    video: video,
-                    tabBar: _portraitTabs(colors),
-                    body: TabBarView(
-                      controller: _tabController,
-                      children: [
-                        _PlayerTab(child: list),
-                        _PlayerTab(
-                            child: RecordingNotesPanel(
-                          key: ValueKey('recording-notes:${_lesson.id}'),
-                          nested: true,
-                          slides: _notes,
-                          loading: _notesLoading ||
-                              _notesLessonId == null && _catalogLoading,
-                          error: _notesLessonId == null
-                              ? '请先选择课次，再查看 PPT 笔记'
-                              : _notesError,
-                          canSeek: !_loading &&
-                              _failure == null &&
-                              _playback != null &&
-                              !_lesson.isLive,
-                          onRefresh: () =>
-                              _loadNotes(_lesson, forceRefresh: true),
-                          onSeek: (position) {
-                            if (!_loading &&
-                                _failure == null &&
-                                _playback != null &&
-                                !_lesson.isLive) {
-                              unawaited(_seekPlayers(position));
-                            }
-                          },
-                          headersLoader: widget.repository?.mediaHeadersFor,
-                        )),
-                      ],
-                    ),
-                    expandedHeight: videoHeight,
-                    topInset: topInset,
-                    player:
-                        _lesson.isLive ? _player : _timelinePlayer ?? _player,
-                    playingOverride: _isWebRtc ? _rtcPlaying : null,
-                    canResume:
-                        !_loading && _failure == null && _playback != null,
-                    onResume: () async {
-                      if (_isWebRtc) {
-                        await _playRtc();
-                        return;
-                      }
-                      final player =
-                          _lesson.isLive ? _player : _timelinePlayer ?? _player;
-                      if (player?.state.completed ?? false) {
-                        await _seekPlayers(Duration.zero);
-                      }
-                      await player?.play();
-                    },
-                    onBack: () => Navigator.of(context).maybePop(),
-                    onMore: () => unawaited(_openCollapsedMenu()),
-                  );
-                }
-                return Padding(
-                  padding: EdgeInsets.only(top: topInset),
-                  child: MediaQuery.removePadding(
-                    context: context,
-                    removeTop: true,
-                    child: Column(children: [
-                      ConstrainedBox(
-                        constraints: BoxConstraints(
-                          maxHeight: math.max(
-                              100.0, (constraints.maxHeight - topInset) * .6),
                         ),
-                        child: AspectRatio(aspectRatio: 16 / 9, child: video),
                       ),
-                      Expanded(child: list),
-                    ]),
-                  ),
-                );
+                    ),
+                  if (!portrait && constraints.maxWidth >= 1000)
+                    Padding(
+                      padding: EdgeInsets.only(top: topInset),
+                      child: MediaQuery.removePadding(
+                        context: context,
+                        removeTop: true,
+                        child: Row(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Expanded(
+                              flex: 3,
+                              child: ListView(
+                                  children: [video, _lessonHeading(colors)]),
+                            ),
+                            SizedBox(
+                                width: 360,
+                                child: _lessonList(colors, nested: false)),
+                          ],
+                        ),
+                      ),
+                    ),
+                  if (!portrait && constraints.maxWidth < 1000)
+                    Padding(
+                      padding: EdgeInsets.only(top: topInset),
+                      child: MediaQuery.removePadding(
+                        context: context,
+                        removeTop: true,
+                        child: Column(children: [
+                          ConstrainedBox(
+                            constraints: BoxConstraints(
+                              maxHeight: math.max(100.0,
+                                  (constraints.maxHeight - topInset) * .6),
+                            ),
+                            child:
+                                AspectRatio(aspectRatio: 16 / 9, child: video),
+                          ),
+                          Expanded(child: _lessonList(colors, nested: false)),
+                        ]),
+                      ),
+                    ),
+                ]);
               }))),
     );
   }
 
-  PreferredSizeWidget _portraitTabs(ShuYoColors colors) => PreferredSize(
-        preferredSize: const Size.fromHeight(45),
-        child: DecoratedBox(
-          key: const ValueKey('recording-player-tabs'),
-          decoration: BoxDecoration(
-            color: Theme.of(context).colorScheme.surface,
-            border: Border(
-                bottom: BorderSide(
-                    color: colors.border.withValues(alpha: .5), width: .5)),
+  Widget _portraitLayout(ShuYoColors colors,
+      {required Widget video, required Size size, required double topInset}) {
+    final videoHeight = math.min(
+        size.width * 9 / 16, math.max(100.0, (size.height - topInset) * .6));
+    return RecordingPlayerLayout(
+      detailScope: _lesson.id,
+      video: video,
+      tabBar: _portraitTabs(),
+      body: TabBarView(
+        controller: _tabController,
+        children: [
+          _PlayerTab(
+            controller: _tabController,
+            index: 0,
+            child: _lessonList(colors, nested: true),
           ),
-          child: Align(
-            alignment: Alignment.centerLeft,
-            child: SizedBox(
-              width: 192,
-              child: TabBar(
-                controller: _tabController,
-                dividerHeight: 0,
-                labelPadding: EdgeInsets.zero,
-                labelStyle:
-                    const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
-                unselectedLabelStyle:
-                    const TextStyle(fontSize: 13, fontWeight: FontWeight.w500),
-                unselectedLabelColor: colors.textSecondary,
-                indicatorSize: TabBarIndicatorSize.label,
-                tabs: [
-                  const Tab(height: 45, text: '简介'),
-                  Tab(
-                      height: 45,
-                      child: Text.rich(
-                        key: const ValueKey('recording-notes-tab-label'),
-                        TextSpan(text: '笔记', children: [
-                          if (_notes.isNotEmpty)
-                            TextSpan(
-                                text: ' ${_notes.length}',
-                                style: const TextStyle(fontSize: 12)),
-                        ]),
-                      )),
-                ],
-              ),
-            ),
-          ),
-        ),
+          _PlayerTab(
+              controller: _tabController,
+              index: 1,
+              scrollIdentity: _lesson.id,
+              child: RecordingNotesPanel(
+                key: ValueKey('recording-notes:${_lesson.id}'),
+                nested: true,
+                slides: _notes,
+                loading:
+                    _notesLoading || _notesLessonId == null && _catalogLoading,
+                error:
+                    _notesLessonId == null ? '请先选择课次，再查看 PPT 笔记' : _notesError,
+                canSeek: !_loading &&
+                    _failure == null &&
+                    _playback != null &&
+                    !_lesson.isLive,
+                onRefresh: () => _loadNotes(_lesson, forceRefresh: true),
+                onSeek: (position) {
+                  if (!_loading &&
+                      _failure == null &&
+                      _playback != null &&
+                      !_lesson.isLive) {
+                    unawaited(_seekPlayers(position));
+                  }
+                },
+                headersLoader: widget.repository?.mediaHeadersFor,
+              )),
+        ],
+      ),
+      expandedHeight: videoHeight,
+      topInset: topInset,
+      player: _lesson.isLive ? _player : _timelinePlayer ?? _player,
+      playingOverride: _isWebRtc ? _rtcPlaying : null,
+      canResume: !_loading && _failure == null && _playback != null,
+      onResume: () async {
+        if (_isWebRtc) {
+          await _playRtc();
+          return;
+        }
+        final player = _lesson.isLive ? _player : _timelinePlayer ?? _player;
+        if (player?.state.completed ?? false) {
+          await _seekPlayers(Duration.zero);
+        }
+        await player?.play();
+      },
+      onBack: () => Navigator.of(context).maybePop(),
+      onMore: () => unawaited(_openCollapsedMenu()),
+    );
+  }
+
+  PreferredSizeWidget _portraitTabs() => RecordingPlayerTabs(
+        controller: _tabController,
+        noteCount: _notes.length,
       );
 
   Widget _placeholder() {
@@ -2048,6 +2060,9 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
   }
 
   Widget _lessonList(ShuYoColors colors, {required bool nested}) {
+    final episodeKeys = nested ? _episodeKeys : _landscapeEpisodeKeys;
+    final headingKey =
+        nested ? _episodeHeadingKey : _landscapeEpisodeHeadingKey;
     final chronological = _lessons;
     final filtered = _filteredLessons;
     final lessons = _episodesNewestFirst
@@ -2076,8 +2091,7 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
           const SliverToBoxAdapter(
               child: LinearProgressIndicator(
                   key: ValueKey('recording-catalog-progress'), minHeight: 2)),
-        SliverToBoxAdapter(
-            key: _episodeHeadingKey, child: _lessonHeading(colors)),
+        SliverToBoxAdapter(key: headingKey, child: _lessonHeading(colors)),
         SliverPersistentHeader(
           pinned: true,
           delegate: _EpisodeHeader(
@@ -2087,9 +2101,12 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
             newestFirst: _episodesNewestFirst,
             hasLessons: lessons.isNotEmpty,
             hasCurrent: chronological.any((lesson) => lesson.id == _lesson.id),
-            onFirst: () => _scrollToEpisode(lessons.first.id, alignment: .5),
-            onLast: () => _scrollToEpisode(lessons.last.id, alignment: 1),
-            onCurrent: () => _scrollToEpisode(_lesson.id, alignment: .5),
+            onFirst: () => _scrollToEpisode(lessons.first.id,
+                alignment: .5, nested: nested),
+            onLast: () =>
+                _scrollToEpisode(lessons.last.id, alignment: 1, nested: nested),
+            onCurrent: () =>
+                _scrollToEpisode(_lesson.id, alignment: .5, nested: nested),
             onReverse: () =>
                 _publish(() => _episodesNewestFirst = !_episodesNewestFirst),
           ),
@@ -2122,7 +2139,7 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
                   return KeyedSubtree(
                     key: ValueKey(lesson.id),
                     child: Column(
-                      key: _episodeKeys.putIfAbsent(lesson.id, GlobalKey.new),
+                      key: episodeKeys.putIfAbsent(lesson.id, GlobalKey.new),
                       mainAxisSize: MainAxisSize.min,
                       children: [
                         RecordingEpisodeTile(
@@ -2159,21 +2176,31 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
           );
   }
 
-  void _scrollToEpisode(int id, {required double alignment}) {
+  void _scrollToEpisode(int id,
+      {required double alignment, required bool nested}) {
     if (_lessons.any((lesson) => lesson.id == id) &&
         !_filteredLessons.any((lesson) => lesson.id == id)) {
       _showCurrentClassroom();
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted) _scrollToEpisode(id, alignment: alignment);
+        if (mounted) {
+          _scrollToEpisode(id, alignment: alignment, nested: nested);
+        }
       });
       return;
     }
     unawaited(_revealEpisode(id,
-        alignment: alignment, revision: ++_episodeNavigationRevision));
+        alignment: alignment,
+        nested: nested,
+        revision: ++_episodeNavigationRevision));
   }
 
   Future<void> _revealEpisode(int id,
-      {required double alignment, required int revision}) async {
+      {required double alignment,
+      required bool nested,
+      required int revision}) async {
+    final episodeKeys = nested ? _episodeKeys : _landscapeEpisodeKeys;
+    final headingKey =
+        nested ? _episodeHeadingKey : _landscapeEpisodeHeadingKey;
     final duration = MediaQuery.disableAnimationsOf(context)
         ? Duration.zero
         : const Duration(milliseconds: 200);
@@ -2183,7 +2210,7 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
     // toolbar navigation without laying out every episode on every frame.
     for (var attempt = 0; attempt < 12; attempt++) {
       if (!mounted || revision != _episodeNavigationRevision) return;
-      final heading = _episodeHeadingKey.currentContext;
+      final heading = headingKey.currentContext;
       if (heading == null || !heading.mounted) return;
       final position = Scrollable.of(heading).position;
       final filtered = _filteredLessons;
@@ -2192,7 +2219,7 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
           : filtered.reversed.toList(growable: false);
       final targetIndex = lessons.indexWhere((lesson) => lesson.id == id);
       if (targetIndex < 0) return;
-      final target = _episodeKeys[id]?.currentContext;
+      final target = episodeKeys[id]?.currentContext;
       if (target != null && target.mounted) {
         if (alignment == 1) {
           // Grouped pinned headers affect ensureVisible's end alignment.
@@ -2213,7 +2240,7 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
       RenderBox? nearestBox;
       for (var index = 0; index < lessons.length; index++) {
         final box =
-            _episodeKeys[lessons[index].id]?.currentContext?.findRenderObject();
+            episodeKeys[lessons[index].id]?.currentContext?.findRenderObject();
         if (box is! RenderBox || !box.attached || !box.hasSize) continue;
         if (nearestIndex < 0 ||
             (index - targetIndex).abs() < (nearestIndex - targetIndex).abs()) {
@@ -2244,8 +2271,16 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
 }
 
 class _PlayerTab extends StatefulWidget {
-  const _PlayerTab({required this.child});
+  const _PlayerTab({
+    required this.controller,
+    required this.index,
+    required this.child,
+    this.scrollIdentity,
+  });
 
+  final TabController controller;
+  final int index;
+  final Object? scrollIdentity;
   final Widget child;
 
   @override
@@ -2260,7 +2295,26 @@ class _PlayerTabState extends State<_PlayerTab>
   @override
   Widget build(BuildContext context) {
     super.build(context);
-    return widget.child;
+    final nestedController = PrimaryScrollController.of(context);
+    return AnimatedBuilder(
+      animation: widget.controller,
+      child: KeyedSubtree(
+        key: PageStorageKey(
+            ('recording-player-tab', widget.index, widget.scrollIdentity)),
+        child: widget.child,
+      ),
+      builder: (context, child) {
+        // NestedScrollView forwards a drag to every attached inner position.
+        // An inactive kept-alive tab must retain its own position without also
+        // receiving the visible tab's scroll deltas.
+        return widget.controller.index == widget.index
+            ? PrimaryScrollController(
+                controller: nestedController,
+                child: child!,
+              )
+            : PrimaryScrollController.none(child: child!);
+      },
+    );
   }
 }
 

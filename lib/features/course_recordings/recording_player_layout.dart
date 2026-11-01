@@ -21,6 +21,7 @@ class RecordingPlayerLayout extends StatefulWidget {
     this.tabBar,
     this.onMore,
     this.playingOverride,
+    this.detailScope,
   });
 
   final Widget video;
@@ -34,6 +35,7 @@ class RecordingPlayerLayout extends StatefulWidget {
   final PreferredSizeWidget? tabBar;
   final VoidCallback? onMore;
   final bool? playingOverride;
+  final Object? detailScope;
 
   @override
   State<RecordingPlayerLayout> createState() => _RecordingPlayerLayoutState();
@@ -209,6 +211,7 @@ class _RecordingPlayerLayoutState extends State<RecordingPlayerLayout> {
         final statusBrightness =
             ratio >= .5 ? theme.brightness : Brightness.dark;
         return RecordingDetailSheetHost(
+          detailScope: widget.detailScope,
           topInset: widget.topInset + height - ratio * range,
           child: AnnotatedRegion<SystemUiOverlayStyle>(
             value: SystemUiOverlayStyle(

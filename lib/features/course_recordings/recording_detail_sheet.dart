@@ -38,10 +38,14 @@ class RecordingDetailSheetHost extends StatefulWidget {
     super.key,
     required this.child,
     required this.topInset,
+    this.detailScope,
   });
 
   final Widget child;
   final double topInset;
+
+  /// A source change dismisses stale details while retaining the child view.
+  final Object? detailScope;
 
   @override
   State<RecordingDetailSheetHost> createState() =>
@@ -103,6 +107,19 @@ class _RecordingDetailSheetHostState extends State<RecordingDetailSheetHost>
   double _sheetWidth = 0;
   double? _horizontalStart;
   bool _edgeFromRight = false;
+
+  @override
+  void didUpdateWidget(RecordingDetailSheetHost oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.detailScope == widget.detailScope) return;
+    _removeHistoryEntry();
+    _sheet = null;
+    _animation.stop();
+    _animation.value = 0;
+    _edgeAnimation.stop();
+    _edgeAnimation.value = 0;
+    _horizontalStart = null;
+  }
 
   @override
   void didChangeDependencies() {
