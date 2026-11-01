@@ -12,12 +12,13 @@ import '../../shared/navigation/shuyo_route.dart';
 import '../../shared/shuyo_text_styles.dart';
 import '../../shared/theme/shuyo_theme.dart';
 import '../../shared/widgets/empty_state.dart';
+import 'recording_catalog_controller.dart';
+import 'recording_list_presentation.dart';
 import 'recording_course_title.dart';
 import 'recording_player_page.dart';
 import 'recording_search_page.dart';
 import 'recording_status_icon.dart';
 import 'recording_term_menu.dart';
-import 'recording_timetable_data.dart';
 import 'recording_timetable_view.dart';
 
 /// The ordinary account catalog.
@@ -56,32 +57,31 @@ class _CourseRecordingsPageState extends State<CourseRecordingsPage> {
       );
   final _collapsedTermYears = <String>{};
   final _presentedCourseIds = <int>{};
-  final _lessonCounts = <int, _CourseLessonCount>{};
-  final _courseLessons = <int, List<VodLesson>>{};
-  final _failedLessonCounts = <int>{};
-  final _requestedLessonCounts = <int>{};
-  final _pendingLessonCounts = <int>{};
-  final _lessonCountQueue = <({VodCourse course, int revision, bool force})>[];
-  final _activeLessonCountKeys = <({int termId, int classId})>{};
-  int _activeLessonCounts = 0;
-  List<VodTerm> _terms = const [];
-  List<VodCourse> _courses = const [];
-  int? _selectedTermId;
-  Object? _error;
+  late final _catalog = RecordingCatalogController(_repository,
+      onSessionInvalidated: (expired) =>
+          _campusAuthRequired(ssoExpired: expired));
+  late RecordingCatalogViewData _view = RecordingCatalogViewData(_catalog);
+  final _courseRows = <int, ({Object signature, Widget row})>{};
+  bool _timetableCreated = false;
+  Widget? _cachedTimetable;
+  int? _presentedTermId;
+  List<VodTerm> get _terms => _view.terms;
+  List<VodCourse> get _courses => _view.courses;
+  int? get _selectedTermId => _view.selectedTermId;
+  Object? get _error => _view.error;
+  set _error(Object? value) => _catalog.error = value;
+  bool get _loading => _view.loading;
+  Map<int, List<VodLesson>> get _courseLessons => _view.courseLessons;
+  Set<int> get _pendingLessonCounts => _view.pendingLessonCounts;
   bool _checkingSession = true;
   bool _authenticated = false;
   bool _expired = false;
-  bool _loading = false;
-  bool _pullRefreshing = false;
   bool _loggingIn = false;
   bool _openingCourse = false;
   bool _timetableMode = false;
-  int _revision = 0;
-  Completer<void>? _loadCompletion;
 
-  bool get _isLoading =>
-      _checkingSession || _loading || _pendingLessonCounts.isNotEmpty;
-  bool get _showLoadingProgress => _isLoading && !_pullRefreshing;
+  bool get _showLoadingProgress =>
+      _checkingSession || _view.showLoadingProgress;
 
   @override
   void initState() {
@@ -91,8 +91,7 @@ class _CourseRecordingsPageState extends State<CourseRecordingsPage> {
 
   @override
   void dispose() {
-    _revision++;
-    _completeLoad(force: true);
+    _catalog.dispose();
     if (widget.repository == null) {
       final repository = _repository;
       final auth = widget.authService == null ? _auth : null;
@@ -163,23 +162,14 @@ class _CourseRecordingsPageState extends State<CourseRecordingsPage> {
 
   Future<void> _campusAuthRequired({required bool ssoExpired}) async {
     if (!mounted) return;
-    _revision++;
-    _completeLoad(force: true);
+    _catalog.clear();
     _repository.clear();
     setState(() {
       _checkingSession = false;
-      _loading = false;
       _authenticated = false;
       _expired = ssoExpired;
-      _courses = const [];
-      _terms = const [];
       _presentedCourseIds.clear();
-      _lessonCounts.clear();
-      _courseLessons.clear();
-      _failedLessonCounts.clear();
-      _requestedLessonCounts.clear();
-      _pendingLessonCounts.clear();
-      _lessonCountQueue.clear();
+      _courseRows.clear();
       _error = null;
     });
     if (ssoExpired) await widget.onCampusSessionExpired?.call();
@@ -194,14 +184,12 @@ class _CourseRecordingsPageState extends State<CourseRecordingsPage> {
       if (!mounted || !succeeded) return false;
       if (!await _prepareSession(forceRefresh: true) || !mounted) return false;
       _repository.clear();
+      _catalog.clear();
       setState(() {
         _authenticated = true;
         _expired = false;
         _error = null;
-        _terms = const [];
-        _courses = const [];
         _presentedCourseIds.clear();
-        _selectedTermId = null;
       });
       await _load(force: true);
       return mounted && _authenticated;
@@ -239,190 +227,22 @@ class _CourseRecordingsPageState extends State<CourseRecordingsPage> {
 
   Future<void> _load(
       {bool force = false, int? termId, bool fromPull = false}) async {
-    if (!_authenticated || fromPull && (_isLoading || _pullRefreshing)) return;
-    _completeLoad(force: true);
-    final completion = Completer<void>();
-    _loadCompletion = completion;
-    final revision = ++_revision;
-    setState(() {
-      _loading = true;
-      _pullRefreshing = fromPull;
-      _error = null;
-      if (_courses.isEmpty) {
-        _lessonCounts.clear();
-        _courseLessons.clear();
-        _failedLessonCounts.clear();
-      }
-      _requestedLessonCounts.clear();
-      _pendingLessonCounts.clear();
-      _lessonCountQueue.clear();
-    });
-    try {
-      final terms = await _repository.loadTerms(forceRefresh: force);
-      if (!mounted || revision != _revision) return;
-      var selected = termId ?? _selectedTermId;
-      if (!terms.any((term) => term.id == selected)) {
-        selected = terms.isEmpty
-            ? null
-            : terms
-                .firstWhere((term) => term.isCurrent, orElse: () => terms.first)
-                .id;
-      }
-      if (!force) {
-        unawaited(
-            _repository.warmOwnRecordings(terms, preferredTermId: selected));
-      }
-      setState(() {
-        if (_selectedTermId != selected) {
-          _courses = const [];
-          _presentedCourseIds.clear();
-          _lessonCounts.clear();
-          _courseLessons.clear();
-          _failedLessonCounts.clear();
-        }
-        _terms = terms;
-        _selectedTermId = selected;
-      });
-      final courses = selected == null
-          ? <VodCourse>[]
-          : await _repository.loadCatalog(
-              termId: selected,
-              forceRefresh: force,
-              onProgress: (snapshot) {
-                if (!mounted || revision != _revision) return;
-                if (snapshot.isEmpty && _courses.isNotEmpty) return;
-                setState(() => _courses = snapshot);
-                _scheduleLessonCounts(snapshot, revision, force);
-              },
-            );
-      if (!mounted || revision != _revision) return;
-      if (force) {
-        unawaited(_repository.warmOwnRecordings(terms,
-            preferredTermId: selected, forceRefresh: true));
-      }
-      setState(() {
-        _courses = courses;
-      });
-      _scheduleLessonCounts(courses, revision, force);
-    } on VodSessionExpiredException catch (error) {
-      if (!mounted || revision != _revision) return;
-      await _campusAuthRequired(ssoExpired: error.ssoExpired);
-    } on Object catch (error) {
-      if (mounted && revision == _revision) setState(() => _error = error);
-    } finally {
-      if (mounted && revision == _revision) {
-        setState(() => _loading = false);
-        _completeLoad();
-      }
-    }
-    await completion.future;
+    if (!_authenticated) return;
+    await _catalog.load(force: force, termId: termId, fromPull: fromPull);
   }
 
-  void _completeLoad({bool force = false}) {
-    if (!force && (_loading || _pendingLessonCounts.isNotEmpty)) return;
-    final completion = _loadCompletion;
-    _loadCompletion = null;
-    _pullRefreshing = false;
-    completion?.complete();
-  }
-
-  void _scheduleLessonCounts(
-      List<VodCourse> courses, int revision, bool force) {
-    if (!mounted || revision != _revision) return;
-    for (final course in courses) {
-      if (_requestedLessonCounts.add(course.teachingClassId)) {
-        _pendingLessonCounts.add(course.teachingClassId);
-        _lessonCountQueue
-            .add((course: course, revision: revision, force: force));
-      }
-    }
-    _drainLessonCounts();
-  }
-
-  void _drainLessonCounts() {
-    while (mounted && _activeLessonCounts < 3 && _lessonCountQueue.isNotEmpty) {
-      final next = _lessonCountQueue.indexWhere((request) =>
-          !_activeLessonCountKeys.contains((
-            termId: request.course.termId,
-            classId: request.course.teachingClassId
-          )));
-      if (next < 0) return;
-      final request = _lessonCountQueue.removeAt(next);
-      if (request.revision != _revision) continue;
-      _activeLessonCounts++;
-      _activeLessonCountKeys.add((
-        termId: request.course.termId,
-        classId: request.course.teachingClassId
-      ));
-      unawaited(_loadLessonCount(request));
-    }
-  }
-
-  Future<void> _loadLessonCount(
-      ({VodCourse course, int revision, bool force}) request) async {
-    try {
-      final lessons = await _repository.loadCourseLessons(request.course,
-          forceRefresh: request.force);
-      if (!mounted || request.revision != _revision) return;
-      final total = <int>{};
-      final playableIds = <int>{};
-      final catalog = <VodLesson>[];
-      for (final lesson in lessons) {
-        if (lesson.id <= 0 ||
-            lesson.teachingClassId != request.course.teachingClassId) {
-          continue;
-        }
-        catalog.add(lesson);
-        if (lesson.isLive
-            ? lesson.isLiveAvailable
-            : lesson.isPlayable || lesson.isGenerating || lesson.isListed) {
-          total.add(lesson.id);
-        }
-        if (!lesson.isLive && lesson.isPlayable) playableIds.add(lesson.id);
-      }
-      setState(() {
-        _courseLessons[request.course.teachingClassId] =
-            List.unmodifiable(catalog);
-        _lessonCounts[request.course.teachingClassId] = _CourseLessonCount(
-            playable: playableIds.length, lessonIds: Set.unmodifiable(total));
-        _failedLessonCounts.remove(request.course.teachingClassId);
-      });
-    } on VodSessionExpiredException catch (error) {
-      if (mounted && request.revision == _revision) {
-        await _campusAuthRequired(ssoExpired: error.ssoExpired);
-      }
-    } on Object {
-      if (mounted && request.revision == _revision) {
-        setState(() {
-          _lessonCounts.remove(request.course.teachingClassId);
-          _courseLessons.remove(request.course.teachingClassId);
-          _failedLessonCounts.add(request.course.teachingClassId);
-        });
-      }
-    } finally {
-      _activeLessonCounts--;
-      _activeLessonCountKeys.remove((
-        termId: request.course.termId,
-        classId: request.course.teachingClassId
-      ));
-      if (mounted) {
-        if (request.revision == _revision) {
-          setState(() =>
-              _pendingLessonCounts.remove(request.course.teachingClassId));
-          _completeLoad();
-        }
-        _drainLessonCounts();
-      }
-    }
-  }
-
-  Future<void> _openCourse(VodCourse course, {VodLesson? lesson}) async {
+  Future<void> _openCourse(VodCourse course,
+      {VodLesson? lesson, List<VodLesson>? preparedLessons}) async {
     if (_openingCourse || lesson != null && !lesson.canPlay) return;
-    if (!_hasCompleteAvailability(course) || !_hasPlayableCourse(course)) {
+    if (!_authenticated ||
+        course.termId != _catalog.selectedTermId ||
+        !_catalog.hasCompleteAvailability(course) ||
+        !_catalog.hasPlayableCourse(course)) {
       return;
     }
-    final lessons =
-        _courseLessons[course.teachingClassId] ?? const <VodLesson>[];
+    final lessons = preparedLessons ??
+        _courseLessons[course.teachingClassId] ??
+        const <VodLesson>[];
     final live = course.liveLesson;
     final initial = lesson ??
         (live != null && live.isLiveAvailable && live.canPlay ? live : null) ??
@@ -467,11 +287,6 @@ class _CourseRecordingsPageState extends State<CourseRecordingsPage> {
         termId == _selectedTermId) {
       return;
     }
-    setState(() {
-      _selectedTermId = termId;
-      _courses = const [];
-      _presentedCourseIds.clear();
-    });
     await _load(termId: termId);
   }
 
@@ -508,7 +323,27 @@ class _CourseRecordingsPageState extends State<CourseRecordingsPage> {
   }
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context) => RecordingListPresentation(
+      changes: _catalog,
+      builder: (context) {
+        _view = RecordingCatalogViewData(_catalog);
+        if (_presentedTermId != _selectedTermId) {
+          _presentedTermId = _selectedTermId;
+          _presentedCourseIds.clear();
+          _courseRows.clear();
+          _timetableCreated = _timetableMode;
+          _cachedTimetable = null;
+        }
+        return _buildScaffold();
+      });
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _courseRows.clear();
+  }
+
+  Widget _buildScaffold() {
     return Scaffold(
       appBar: AppBar(
         title: Row(
@@ -605,11 +440,9 @@ class _CourseRecordingsPageState extends State<CourseRecordingsPage> {
     }
     final selectedTerm =
         _terms.where((term) => term.id == _selectedTermId).firstOrNull;
-    final visibleCourses = _courses
-        .where((course) =>
-            _lessonCounts.containsKey(course.teachingClassId) ||
-            _failedLessonCounts.contains(course.teachingClassId))
-        .toList();
+    final visibleCourses = _view.visibleCourses;
+    final visibleIndexes = _view.visibleIndexes;
+    final view = _view;
     final loadingCourses = _loading || _pendingLessonCounts.isNotEmpty;
     final unknownCourseCount = _courses.isEmpty && (_loading || _error != null);
     return Column(children: [
@@ -685,8 +518,10 @@ class _CourseRecordingsPageState extends State<CourseRecordingsPage> {
                     key: const ValueKey('vod-view-toggle'),
                     onPressed: _terms.isEmpty
                         ? null
-                        : () =>
-                            setState(() => _timetableMode = !_timetableMode),
+                        : () => setState(() {
+                              _timetableMode = !_timetableMode;
+                              _timetableCreated = true;
+                            }),
                     icon: Icon(
                       _timetableMode
                           ? Icons.view_list_outlined
@@ -742,50 +577,20 @@ class _CourseRecordingsPageState extends State<CourseRecordingsPage> {
                               padding: const EdgeInsets.only(bottom: 24),
                               itemCount: visibleCourses.length,
                               findItemIndexCallback: (key) {
-                                final index = visibleCourses.indexWhere(
-                                    (course) =>
-                                        ValueKey(course.teachingClassId) ==
-                                        key);
-                                return index < 0 ? null : index;
+                                return key is ValueKey<int>
+                                    ? visibleIndexes[key.value]
+                                    : null;
                               },
                               separatorBuilder: (_, __) =>
                                   const Divider(indent: 16, endIndent: 16),
                               itemBuilder: (context, index) {
                                 final course = visibleCourses[index];
-                                final unavailable =
-                                    _hasCompleteAvailability(course) &&
-                                        !_hasPlayableCourse(course);
                                 return _CourseEntrance(
                                   key: ValueKey(course.teachingClassId),
                                   index: index,
                                   animate: _presentedCourseIds
                                       .add(course.teachingClassId),
-                                  child: ListTile(
-                                    key: ValueKey(
-                                        'vod-course:${course.teachingClassId}'),
-                                    contentPadding: const EdgeInsets.symmetric(
-                                        horizontal: 16, vertical: 8),
-                                    leading: Tooltip(
-                                      message: course.isLive ? '正在直播' : '录播回放',
-                                      child: RecordingStatusIcon(
-                                          isLive: course.isLive,
-                                          enabled: !unavailable),
-                                    ),
-                                    title: RecordingCourseTitle(
-                                        course: course,
-                                        maxNameLines: 2,
-                                        missingTeacherLabel: '教师信息暂未提供',
-                                        enabled: !unavailable),
-                                    trailing: unavailable
-                                        ? Icon(Icons.block,
-                                            color:
-                                                Theme.of(context).disabledColor)
-                                        : _lessonCount(course),
-                                    onTap: unavailable ||
-                                            !_hasCompleteAvailability(course)
-                                        ? null
-                                        : () => _openCourse(course),
-                                  ),
+                                  child: _courseTile(course, view),
                                 );
                               },
                             ),
@@ -793,35 +598,76 @@ class _CourseRecordingsPageState extends State<CourseRecordingsPage> {
                   ),
                   TickerMode(
                     enabled: _timetableMode,
-                    child: RecordingTimetableView(
-                      key: ValueKey('vod-timetable:$_selectedTermId'),
-                      data: RecordingTimetableData(
-                        term: selectedTerm,
-                        courses: _courses,
-                        lessonsByCourse: _courseLessons,
-                      ),
-                      loading: loadingCourses,
-                      refreshEnabled: !_showLoadingProgress,
-                      failedCourseCount: _courses
-                          .where((course) => _failedLessonCounts
-                              .contains(course.teachingClassId))
-                          .length,
-                      onRefresh: () => _load(force: true, fromPull: true),
-                      canSelectLesson: (entry) =>
-                          _hasCompleteAvailability(entry.course) &&
-                          _hasPlayableCourse(entry.course),
-                      onLessonSelected: (entry) => unawaited(
-                          _openCourse(entry.course, lesson: entry.lesson)),
-                    ),
+                    child: _timetable(),
                   ),
                 ])),
     ]);
   }
 
-  Widget _lessonCount(VodCourse course) {
-    final count = _lessonCounts[course.teachingClassId];
+  Widget _timetable() {
+    if (!_timetableCreated) return const SizedBox.shrink();
+    if (!_timetableMode && _cachedTimetable != null) return _cachedTimetable!;
+    final view = _view;
+    return _cachedTimetable = RecordingTimetableView(
+      key: ValueKey('vod-timetable:${view.selectedTermId}'),
+      data: _catalog.timetable,
+      loading: view.loading || view.pendingLessonCounts.isNotEmpty,
+      refreshEnabled: !view.showLoadingProgress,
+      failedCourseCount: view.courses
+          .where((course) =>
+              view.failedLessonCounts.contains(course.teachingClassId))
+          .length,
+      onRefresh: () => _load(force: true, fromPull: true),
+      canSelectLesson: (entry) =>
+          view.hasCompleteAvailability(entry.course) &&
+          view.hasPlayableCourse(entry.course),
+      onLessonSelected: (entry) => unawaited(_openCourse(entry.course,
+          lesson: entry.lesson,
+          preparedLessons: view.courseLessons[entry.course.teachingClassId])),
+    );
+  }
+
+  Widget _courseTile(VodCourse course, RecordingCatalogViewData view) {
+    final signature = (
+      course,
+      view.lessonCounts[course.teachingClassId],
+      view.hasCompleteAvailability(course),
+      view.failedLessonCounts.contains(course.teachingClassId),
+    );
+    final cached = _courseRows[course.teachingClassId];
+    if (cached?.signature == signature) return cached!.row;
+    final unavailable =
+        view.hasCompleteAvailability(course) && !view.hasPlayableCourse(course);
+    final lessons =
+        view.courseLessons[course.teachingClassId] ?? const <VodLesson>[];
+    final row = ListTile(
+      key: ValueKey('vod-course:${course.teachingClassId}'),
+      contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      leading: Tooltip(
+        message: course.isLive ? '正在直播' : '录播回放',
+        child:
+            RecordingStatusIcon(isLive: course.isLive, enabled: !unavailable),
+      ),
+      title: RecordingCourseTitle(
+          course: course,
+          maxNameLines: 2,
+          missingTeacherLabel: '教师信息暂未提供',
+          enabled: !unavailable),
+      trailing: unavailable
+          ? Icon(Icons.block, color: Theme.of(context).disabledColor)
+          : _lessonCount(course, view),
+      onTap: unavailable || !view.hasCompleteAvailability(course)
+          ? null
+          : () => _openCourse(course, preparedLessons: lessons),
+    );
+    _courseRows[course.teachingClassId] = (signature: signature, row: row);
+    return row;
+  }
+
+  Widget _lessonCount(VodCourse course, RecordingCatalogViewData view) {
+    final count = view.lessonCounts[course.teachingClassId];
     final playable = count?.playable;
-    final failed = _failedLessonCounts.contains(course.teachingClassId);
+    final failed = view.failedLessonCounts.contains(course.teachingClassId);
     final live = course.liveLesson;
     final total = count == null
         ? null
@@ -855,22 +701,8 @@ class _CourseRecordingsPageState extends State<CourseRecordingsPage> {
         ),
       ),
       const SizedBox(width: 8),
-      if (_hasCompleteAvailability(course)) const Icon(Icons.chevron_right),
+      if (view.hasCompleteAvailability(course)) const Icon(Icons.chevron_right),
     ]);
-  }
-
-  bool _hasCompleteAvailability(VodCourse course) {
-    return _lessonCounts.containsKey(course.teachingClassId) &&
-        _requestedLessonCounts.contains(course.teachingClassId) &&
-        !_pendingLessonCounts.contains(course.teachingClassId);
-  }
-
-  bool _hasPlayableCourse(VodCourse course) {
-    if (_lessonCounts[course.teachingClassId]?.lessonIds.isNotEmpty == true) {
-      return true;
-    }
-    return course.liveLesson?.isLiveAvailable == true &&
-        course.liveLesson!.id > 0;
   }
 
   Widget _errorState() {
@@ -899,13 +731,6 @@ class _CourseRecordingsPageState extends State<CourseRecordingsPage> {
             ? error.message
             : '暂时无法连接录播平台，请稍后重试。';
   }
-}
-
-class _CourseLessonCount {
-  const _CourseLessonCount({required this.playable, required this.lessonIds});
-
-  final int playable;
-  final Set<int> lessonIds;
 }
 
 class _CourseEntrance extends StatefulWidget {

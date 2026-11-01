@@ -254,6 +254,27 @@ void _expectSingleLessonCount(WidgetTester tester, Finder row, String count) {
 }
 
 void main() {
+  testWidgets('typing only rebuilds the search controls after results load',
+      (tester) async {
+    final repository = _Repository()
+      ..searchLoader = (_, __) async => [_result(1)];
+    await _mount(tester, repository);
+    await _submit(tester, '程序');
+    await tester.pumpAndSettle();
+    final summary = find.byKey(const ValueKey('vod-search-summary'));
+    final originalSummary = tester.widget<Padding>(summary);
+    final row = find.byKey(const ValueKey('vod-search-course:7:101'));
+    final originalRow = tester.widget<ListTile>(row);
+    await tester.enterText(
+        find.byKey(const ValueKey('vod-search-query')), '程序设计');
+    await tester.pump();
+    expect(tester.widget<Padding>(summary), same(originalSummary));
+    expect(tester.widget<ListTile>(row), same(originalRow));
+    expect(repository.searches, hasLength(1));
+    expect(repository.previewCalls, hasLength(1));
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('summary uses course count and separate year and season lines',
       (tester) async {
     await _mount(tester, _Repository());

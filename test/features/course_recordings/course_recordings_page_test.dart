@@ -225,6 +225,111 @@ Future<void> _selectTimetableDate(
 }
 
 void main() {
+  testWidgets(
+      'lazy rows keep one catalog revision throughout a scrolling refresh',
+      (tester) async {
+    final courses = [
+      for (var id = 1; id <= 40; id++)
+        VodCourse(teachingClassId: id, termId: 7, name: '程序设计 $id')
+    ];
+    final repository = _Repository()
+      ..coursesLoader = ((_, __) async => courses)
+      ..lessonsLoader =
+          (course, force) async => force && course.teachingClassId == 20
+              ? []
+              : [
+                  VodLesson(
+                      id: course.teachingClassId,
+                      teachingClassId: course.teachingClassId,
+                      name: '回放',
+                      isPlayable: true)
+                ];
+    await _mount(tester, repository);
+    await tester.pumpAndSettle();
+    final context =
+        tester.element(find.byKey(const ValueKey('vod-course-summary')));
+    final metrics = FixedScrollMetrics(
+        minScrollExtent: 0,
+        maxScrollExtent: 8000,
+        pixels: 0,
+        viewportDimension: 600,
+        axisDirection: AxisDirection.down,
+        devicePixelRatio: 1);
+    ScrollStartNotification(metrics: metrics, context: context)
+        .dispatch(context);
+    final refresh =
+        tester.widget<RefreshIndicator>(find.byType(RefreshIndicator));
+    await refresh.onRefresh();
+    await tester.pump();
+    final row = find.byKey(const ValueKey('vod-course:20'));
+    await tester.scrollUntilVisible(row, 600,
+        scrollable: find.descendant(
+            of: find.byKey(const ValueKey('vod-courses:7')),
+            matching: find.byType(Scrollable)));
+    await tester.pumpAndSettle();
+    expect(tester.widget<ListTile>(row).onTap, isNotNull);
+    expect(
+        tester
+            .widget<Text>(
+                find.byKey(const ValueKey('vod-course-lesson-count:20')))
+            .textSpan!
+            .toPlainText(),
+        '1/1节');
+    ScrollEndNotification(metrics: metrics, context: context).dispatch(context);
+    await tester.pumpAndSettle();
+    expect(tester.widget<ListTile>(row).onTap, isNull);
+    expect(
+        find.byKey(const ValueKey('vod-course-lesson-count:20')), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets(
+      'background counts reuse rows and leave the hidden timetable untouched',
+      (tester) async {
+    final pending = Completer<List<VodLesson>>();
+    final repository = _Repository()
+      ..lessonsLoader = (course, _) async {
+        if (course.teachingClassId == 102) return await pending.future;
+        return [
+          VodLesson(
+              id: course.teachingClassId,
+              teachingClassId: course.teachingClassId,
+              name: '回放',
+              isPlayable: true)
+        ];
+      };
+    await _mount(tester, repository);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 450));
+    final first = find.byKey(const ValueKey('vod-course:101'));
+    final tile = tester.widget<ListTile>(first);
+    expect(
+        find.byType(RecordingTimetableView, skipOffstage: false), findsNothing);
+    pending.complete([
+      const VodLesson(
+          id: 102, teachingClassId: 102, name: '回放', isPlayable: true)
+    ]);
+    await tester.pumpAndSettle();
+    expect(tester.widget<ListTile>(first), same(tile));
+    expect(
+        find.byType(RecordingTimetableView, skipOffstage: false), findsNothing);
+    final toggle = find.byKey(const ValueKey('vod-view-toggle'));
+    await tester.tap(toggle);
+    await tester.pumpAndSettle();
+    final table = tester
+        .widget<RecordingTimetableView>(find.byType(RecordingTimetableView));
+    await tester.tap(toggle);
+    await tester.pumpAndSettle();
+    repository.progressCallbacks[7]!(_currentCourses);
+    await tester.pumpAndSettle();
+    expect(
+        tester.widget<RecordingTimetableView>(
+            find.byType(RecordingTimetableView, skipOffstage: false)),
+        same(table));
+    expect(repository.lessonRequests, 3);
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('home uses platform flags without probing recording links',
       (tester) async {
     const lessons = [
