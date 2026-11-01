@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart' show listEquals;
 import 'package:flutter/material.dart';
 
 import '../../data/services/image_saver.dart';
@@ -8,10 +9,12 @@ class FullscreenImagePage extends StatefulWidget {
     String? url,
     List<String>? urls,
     this.initialIndex = 0,
+    this.headersLoader,
   }) : urls = urls ?? (url == null ? const <String>[] : <String>[url]);
 
   final List<String> urls;
   final int initialIndex;
+  final Future<Map<String, String>> Function(Uri)? headersLoader;
 
   @override
   State<FullscreenImagePage> createState() => _FullscreenImagePageState();
@@ -27,6 +30,26 @@ class _FullscreenImagePageState extends State<FullscreenImagePage> {
     super.initState();
     _index = _clampIndex(widget.initialIndex);
     _pageController = PageController(initialPage: _index);
+  }
+
+  @override
+  void didUpdateWidget(covariant FullscreenImagePage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.headersLoader != widget.headersLoader) {
+      _currentPageZoomed = false;
+    }
+    if (oldWidget.initialIndex != widget.initialIndex ||
+        !listEquals(oldWidget.urls, widget.urls)) {
+      _index = _clampIndex(oldWidget.initialIndex != widget.initialIndex
+          ? widget.initialIndex
+          : _index);
+      _currentPageZoomed = false;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && _pageController.hasClients) {
+          _pageController.jumpToPage(_index);
+        }
+      });
+    }
   }
 
   @override
@@ -70,6 +93,7 @@ class _FullscreenImagePageState extends State<FullscreenImagePage> {
                         return _ZoomableNetworkImage(
                           key: ValueKey(urls[index]),
                           url: urls[index],
+                          headersLoader: widget.headersLoader,
                           onSwipePrevious: _previousPage,
                           onSwipeNext: _nextPage,
                           onZoomChanged: (zoomed) {
@@ -132,10 +156,11 @@ class _FullscreenImagePageState extends State<FullscreenImagePage> {
   }
 
   Future<void> _showImageActions() async {
-    final urls = widget.urls;
+    final urls = List<String>.of(widget.urls);
     if (urls.isEmpty) {
       return;
     }
+    final selectedUrl = urls[_index.clamp(0, urls.length - 1)];
     const sheetBackground = Color(0xFF111111);
     const actionForeground = Color(0xFFF2F2F2);
     final action = await showModalBottomSheet<_ImageAction>(
@@ -184,8 +209,9 @@ class _FullscreenImagePageState extends State<FullscreenImagePage> {
         );
       },
     );
+    if (!mounted) return;
     if (action == _ImageAction.saveCurrent) {
-      await _saveImage(urls[_index]);
+      await _saveImage(selectedUrl);
     } else if (action == _ImageAction.saveAll) {
       await _saveAllImages(urls);
     }
@@ -197,7 +223,9 @@ class _FullscreenImagePageState extends State<FullscreenImagePage> {
       ..hideCurrentSnackBar()
       ..showSnackBar(const SnackBar(content: Text('正在保存图片...')));
     try {
-      await ImageSaver.saveNetworkImage(url);
+      final headers = await widget.headersLoader?.call(Uri.parse(url));
+      if (!mounted) return;
+      await ImageSaver.saveNetworkImage(url, headers: headers);
       if (!mounted) {
         return;
       }
@@ -222,7 +250,9 @@ class _FullscreenImagePageState extends State<FullscreenImagePage> {
     var saved = 0;
     for (final url in urls) {
       try {
-        await ImageSaver.saveNetworkImage(url);
+        final headers = await widget.headersLoader?.call(Uri.parse(url));
+        if (!mounted) return;
+        await ImageSaver.saveNetworkImage(url, headers: headers);
         saved++;
       } on Object {
         // 保存多图时不中断后续图片，最终给出汇总结果。
@@ -304,12 +334,14 @@ class _ZoomableNetworkImage extends StatefulWidget {
   const _ZoomableNetworkImage({
     super.key,
     required this.url,
+    required this.headersLoader,
     required this.onZoomChanged,
     required this.onSwipePrevious,
     required this.onSwipeNext,
   });
 
   final String url;
+  final Future<Map<String, String>> Function(Uri)? headersLoader;
   final ValueChanged<bool> onZoomChanged;
   final VoidCallback onSwipePrevious;
   final VoidCallback onSwipeNext;
@@ -329,6 +361,8 @@ class _ZoomableNetworkImageState extends State<_ZoomableNetworkImage> {
   Size? _imageSize;
   Size? _viewportSize;
   int _reloadToken = 0;
+  int _headersRevision = 0;
+  Map<String, String> _headers = const {};
   bool _headersLoaded = false;
   bool _imageLoadFailed = false;
   bool _zoomed = false;
@@ -356,7 +390,7 @@ class _ZoomableNetworkImageState extends State<_ZoomableNetworkImage> {
       }
     });
     _controller.addListener(_handleTransformChanged);
-    _loadCachedFile();
+    _loadHeaders();
   }
 
   @override
@@ -370,18 +404,22 @@ class _ZoomableNetworkImageState extends State<_ZoomableNetworkImage> {
   @override
   void didUpdateWidget(covariant _ZoomableNetworkImage oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.url != widget.url) {
+    if (oldWidget.url != widget.url ||
+        oldWidget.headersLoader != widget.headersLoader) {
+      _imageStream?.removeListener(_imageListener);
+      _imageStream = null;
       _imageSize = null;
       _headersLoaded = false;
       _imageLoadFailed = false;
+      _zoomed = false;
       _controller.value = Matrix4.identity();
-      _setZoomed(false);
-      _loadCachedFile();
+      _loadHeaders();
     }
   }
 
   @override
   void dispose() {
+    _headersRevision++;
     _imageStream?.removeListener(_imageListener);
     _controller
       ..removeListener(_handleTransformChanged)
@@ -453,6 +491,7 @@ class _ZoomableNetworkImageState extends State<_ZoomableNetworkImage> {
   }) {
     return Image.network(
       widget.url,
+      headers: _headers,
       key: ValueKey('${widget.url}:$_reloadToken'),
       width: width,
       height: height,
@@ -467,7 +506,7 @@ class _ZoomableNetworkImageState extends State<_ZoomableNetworkImage> {
       return;
     }
     final oldStream = _imageStream;
-    final provider = NetworkImage(widget.url);
+    final provider = NetworkImage(widget.url, headers: _headers);
     final newStream = provider.resolve(
       createLocalImageConfiguration(context),
     );
@@ -478,23 +517,41 @@ class _ZoomableNetworkImageState extends State<_ZoomableNetworkImage> {
     _imageStream = newStream..addListener(_imageListener);
   }
 
-  Future<void> _loadCachedFile() async {
-    if (!mounted) return;
+  Future<void> _loadHeaders() async {
+    final revision = ++_headersRevision;
+    final loader = widget.headersLoader;
+    Map<String, String> headers;
+    try {
+      headers = loader == null
+          ? const {}
+          : Map<String, String>.unmodifiable(
+              await loader(Uri.parse(widget.url)));
+    } on Object {
+      if (!mounted || revision != _headersRevision) return;
+      setState(() {
+        _headersLoaded = true;
+        _imageLoadFailed = true;
+      });
+      return;
+    }
+    if (!mounted || revision != _headersRevision) return;
     setState(() {
+      _headers = headers;
       _headersLoaded = true;
     });
     // The initial call happens in initState, before inherited MediaQuery data
     // may be read. didChangeDependencies resolves the first image; a deferred
     // resolve also covers retries and URL changes after that lifecycle step.
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted) _resolveImage();
+      if (mounted && revision == _headersRevision) _resolveImage();
     });
   }
 
   Future<void> _retry() async {
-    final provider = NetworkImage(widget.url);
+    final revision = _headersRevision;
+    final provider = NetworkImage(widget.url, headers: _headers);
     await provider.evict();
-    if (!mounted) {
+    if (!mounted || revision != _headersRevision) {
       return;
     }
     _imageStream?.removeListener(_imageListener);
@@ -507,7 +564,7 @@ class _ZoomableNetworkImageState extends State<_ZoomableNetworkImage> {
     _controller.value = Matrix4.identity();
     widget.onZoomChanged(false);
     setState(() {});
-    await _loadCachedFile();
+    await _loadHeaders();
   }
 
   void _handleInteractionUpdate(ScaleUpdateDetails details) {
