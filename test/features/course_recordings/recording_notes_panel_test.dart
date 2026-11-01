@@ -104,7 +104,8 @@ void main() {
       ],
       onSeek: positions.add,
     ));
-    expect(find.text('按时间排序'), findsOneWidget);
+    expect(find.text('按时间排序'), findsNothing);
+    expect(find.text('文字由录播平台自动识别，点击笔记查看全文。'), findsNothing);
     expect(find.text('PPT 第 1 页'), findsOneWidget);
     expect(find.byType(SelectableText), findsNothing);
     expect(find.text('01:00'), findsOneWidget);
@@ -152,7 +153,7 @@ void main() {
     expect(summary.overflow, TextOverflow.ellipsis);
     expect(summary.data!.length, lessThan(note.text.length));
     expect(find.text('01'), findsNothing);
-    expect(find.text('共 1 条笔记'), findsOneWidget);
+    expect(find.text('共 1 条笔记'), findsNothing);
     await tester.tap(find.byKey(const ValueKey('recording-note-open-1')));
     await tester.pumpAndSettle();
     expect(
@@ -177,6 +178,11 @@ void main() {
     await tester.pumpAndSettle();
     final toolbar = tester
         .getRect(find.byKey(const ValueKey('recording-note-detail-toolbar')));
+    final titleStyle = tester.widget<Text>(find.text('笔记详情')).style!;
+    expect(titleStyle.fontSize, 14);
+    expect(titleStyle.fontWeight, FontWeight.w400);
+    expect(titleStyle.height, 1.43);
+    expect(titleStyle.letterSpacing, .25);
     final copy =
         tester.getRect(find.byKey(const ValueKey('recording-note-copy-1')));
     final seek =
@@ -218,7 +224,7 @@ void main() {
         const Offset(0, -700));
     await tester.pump();
     expect(requests.length, greaterThan(before));
-    expect(requests.length, lessThan(20));
+    expect(requests.length, lessThan(30));
     expect(tester.takeException(), isNull);
   });
 

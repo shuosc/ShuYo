@@ -61,7 +61,6 @@ class _RecordingNotesPanelState extends State<RecordingNotesPanel> {
 
   @override
   Widget build(BuildContext context) {
-    final colors = context.shuyoColors;
     final panel = RefreshIndicator(
       onRefresh: _refresh,
       child: CustomScrollView(
@@ -111,37 +110,6 @@ class _RecordingNotesPanelState extends State<RecordingNotesPanel> {
               ),
             )
           else ...[
-            SliverPadding(
-              padding: const EdgeInsets.fromLTRB(16, 16, 16, 0),
-              sliver: SliverToBoxAdapter(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    Wrap(
-                      alignment: WrapAlignment.spaceBetween,
-                      spacing: 16,
-                      runSpacing: 6,
-                      children: [
-                        Text('共 ${widget.slides.length} 条笔记',
-                            style: ShuYoTextStyles.meta(
-                                size: 13, color: colors.textSecondary)),
-                        Text('按时间排序',
-                            style: ShuYoTextStyles.meta(
-                                color: colors.textTertiary)),
-                      ],
-                    ),
-                    const SizedBox(height: 8),
-                    Text(
-                      '文字由录播平台自动识别，点击笔记查看全文。',
-                      style: ShuYoTextStyles.meta(
-                        color: colors.textTertiary,
-                        height: 1.5,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
             SliverPadding(
               padding: EdgeInsets.fromLTRB(
                   16, 0, 16, MediaQuery.paddingOf(context).bottom + 24),
@@ -333,8 +301,13 @@ class _NoteDetails extends StatelessWidget {
                     child: Text('笔记详情',
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
-                        style: ShuYoTextStyles.bodyCompact(
-                            color: colors.textPrimary)),
+                        style: TextStyle(
+                          fontSize: 14,
+                          fontWeight: FontWeight.w400,
+                          height: 1.43,
+                          letterSpacing: .25,
+                          color: colors.textPrimary,
+                        )),
                   ),
                   _CopyNoteButton(slide: slide),
                   IconButton(

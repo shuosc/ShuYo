@@ -1203,7 +1203,7 @@ class _RecordingVideoControlsState extends State<RecordingVideoControls>
             TextSpan(children: [
               TextSpan(text: currentTime),
               TextSpan(
-                  text: ' / $totalTime',
+                  text: '/$totalTime',
                   style: const TextStyle(color: Color(0xFFD0D0D0))),
             ]),
             maxLines: 1,
