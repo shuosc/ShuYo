@@ -14,6 +14,7 @@ class RecordingEpisodeTile extends StatelessWidget {
     required this.number,
     required this.selected,
     required this.onTap,
+    this.metadata,
     this.dark = false,
   });
 
@@ -22,6 +23,7 @@ class RecordingEpisodeTile extends StatelessWidget {
   final int number;
   final bool selected;
   final VoidCallback? onTap;
+  final RecordingEpisodeMetadata? metadata;
   final bool dark;
 
   @override
@@ -42,9 +44,10 @@ class RecordingEpisodeTile extends StatelessWidget {
         : dark
             ? Colors.white70
             : colors.textSecondary;
-    final heading = recordingEpisodeHeading(lesson);
-    final classroom = lesson.classroom.trim();
-    final dateAndTime = recordingEpisodeDateTime(lesson);
+    final text = metadata ?? RecordingEpisodeMetadata(lesson);
+    final heading = text.heading;
+    final classroom = text.classroom;
+    final dateAndTime = text.dateAndTime;
     final status =
         lesson.isLive || !enabled || (lesson.isGenerating && !lesson.isPlayable)
             ? lesson.statusLabel
