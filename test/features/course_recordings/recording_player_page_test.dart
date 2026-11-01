@@ -1126,6 +1126,10 @@ void main() {
     expect(harness.platforms.map((player) => player.seeks.single),
         everyElement(note.position));
     expect(find.byKey(const ValueKey('recording-note-detail-first-note')),
+        findsOneWidget);
+    await tester.tap(find.byTooltip('关闭'));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('recording-note-detail-first-note')),
         findsNothing);
     await tester.tap(find.text('简介'));
     await tester.pumpAndSettle();

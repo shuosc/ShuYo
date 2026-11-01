@@ -21,19 +21,25 @@ class RecordingPlayerTabs extends StatelessWidget
   @override
   Size get preferredSize => const Size.fromHeight(45);
 
-  @override
-  Widget build(BuildContext context) {
+  /// Shared typography for the player tabs and the note detail title.
+  static TextStyle labelStyleOf(BuildContext context) {
     final theme = Theme.of(context);
     // PiliPlus uses the Material 3 titleSmall metrics with a 13-pixel override.
     // Its count is part of the same Text, rather than a smaller numeric badge.
-    final labelStyle =
-        (TabBarTheme.of(context).labelStyle ?? Typography.dense2021.titleSmall!)
-            .copyWith(
+    return (TabBarTheme.of(context).labelStyle ??
+            Typography.dense2021.titleSmall!)
+        .copyWith(
       fontSize: 13,
       fontFamily: theme.textTheme.titleSmall?.fontFamily,
       fontFamilyFallback: theme.textTheme.titleSmall?.fontFamilyFallback,
       inherit: true,
     );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final labelStyle = labelStyleOf(context);
     return DecoratedBox(
       key: const ValueKey('recording-player-tabs'),
       decoration: BoxDecoration(

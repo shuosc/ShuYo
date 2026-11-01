@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shuyo/data/models/vod_ppt.dart';
 import 'package:shuyo/features/course_recordings/recording_notes_panel.dart';
+import 'package:shuyo/features/course_recordings/recording_player_tabs.dart';
 import 'package:shuyo/shared/theme/shuyo_theme.dart';
 import 'package:shuyo/shared/widgets/fullscreen_image_page.dart';
 
@@ -123,7 +124,48 @@ void main() {
     await tester.tap(find.byKey(const ValueKey('recording-note-seek-long')));
     await tester.pumpAndSettle();
     expect(positions, [const Duration(hours: 1, minutes: 2, seconds: 3)]);
+    expect(find.text('笔记详情'), findsOneWidget);
+    await tester.tap(find.byTooltip('关闭'));
+    await tester.pumpAndSettle();
     expect(find.text('笔记详情'), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('seeking retains the open detail and its body scroll position',
+      (tester) async {
+    final positions = <Duration>[];
+    final note = slide(1,
+        text: List.generate(150, (index) => '第 $index 行 PPT 识别正文。').join('\n'));
+    await tester.pumpWidget(app(slides: [note], onSeek: positions.add));
+    await tester.tap(find.byKey(const ValueKey('recording-note-open-1')));
+    await tester.pumpAndSettle();
+    final body = find.byKey(const ValueKey('recording-note-detail-scroll-1'));
+    final bodyState = tester.state<ScrollableState>(
+        find.descendant(of: body, matching: find.byType(Scrollable)).first);
+    bodyState.position.jumpTo(600);
+    await tester.pumpAndSettle();
+    expect(bodyState.position.pixels, 600);
+    final before = tester
+        .getRect(find.byKey(const ValueKey('recording-note-detail-toolbar')));
+
+    await tester.tap(find.byKey(const ValueKey('recording-note-seek-1')));
+    await tester.pumpAndSettle();
+
+    expect(positions, [note.position]);
+    expect(find.text('笔记详情'), findsOneWidget);
+    expect(
+        tester.state<ScrollableState>(
+            find.descendant(of: body, matching: find.byType(Scrollable)).first),
+        same(bodyState));
+    expect(bodyState.position.pixels, 600);
+    expect(
+        tester.getRect(
+            find.byKey(const ValueKey('recording-note-detail-toolbar'))),
+        before);
+    await tester.tap(find.byTooltip('关闭'));
+    await tester.pumpAndSettle();
+    expect(find.text('笔记详情'), findsNothing);
+    expect(find.byKey(const ValueKey('recording-note-open-1')), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 
@@ -179,10 +221,10 @@ void main() {
     final toolbar = tester
         .getRect(find.byKey(const ValueKey('recording-note-detail-toolbar')));
     final titleStyle = tester.widget<Text>(find.text('笔记详情')).style!;
-    expect(titleStyle.fontSize, 14);
-    expect(titleStyle.fontWeight, FontWeight.w400);
+    expect(titleStyle.fontSize, 13);
+    expect(titleStyle.fontWeight, FontWeight.w500);
     expect(titleStyle.height, 1.43);
-    expect(titleStyle.letterSpacing, .25);
+    expect(titleStyle.letterSpacing, .1);
     final copy =
         tester.getRect(find.byKey(const ValueKey('recording-note-copy-1')));
     final seek =
@@ -202,6 +244,67 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('笔记详情'), findsOneWidget);
     expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('detail heading shares the actual tab label style and theme',
+      (tester) async {
+    final base = ShuYoThemes.byId(ShuYoThemes.defaultId).themeData();
+    for (final theme in [
+      base,
+      base.copyWith(
+        tabBarTheme: base.tabBarTheme.copyWith(
+          labelStyle: const TextStyle(
+            fontSize: 18,
+            fontWeight: FontWeight.w700,
+            height: 1.6,
+            letterSpacing: .5,
+          ),
+        ),
+      ),
+    ]) {
+      await tester.pumpWidget(MaterialApp(
+        theme: theme,
+        home: DefaultTabController(
+          length: 2,
+          child: Builder(builder: (context) {
+            return Scaffold(
+              body: Column(children: [
+                RecordingPlayerTabs(
+                  controller: DefaultTabController.of(context),
+                  noteCount: 1,
+                ),
+                Expanded(
+                  child: RecordingNotesPanel(
+                    slides: [slide(1)],
+                    loading: false,
+                    error: null,
+                    onRefresh: () async {},
+                    onSeek: (_) {},
+                  ),
+                ),
+              ]),
+            );
+          }),
+        ),
+      ));
+      await tester.pumpAndSettle();
+      final tabStyle = tester.widget<TabBar>(find.byType(TabBar)).labelStyle!;
+      await tester.tap(find.byKey(const ValueKey('recording-note-open-1')));
+      await tester.pumpAndSettle();
+      final title = find.text('笔记详情');
+      final context = tester.element(title);
+      final titleStyle = tester.widget<Text>(title).style!;
+      expect(titleStyle,
+          tabStyle.copyWith(color: Theme.of(context).colorScheme.onSurface));
+      expect(
+          titleStyle,
+          RecordingPlayerTabs.labelStyleOf(context).copyWith(
+            color: Theme.of(context).colorScheme.onSurface,
+          ));
+      await tester.tap(find.byTooltip('关闭'));
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull);
+    }
   });
 
   testWidgets('77 PPT attachments obtain credentials only as rows appear',

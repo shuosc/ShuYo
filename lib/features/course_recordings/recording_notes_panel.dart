@@ -9,6 +9,7 @@ import '../../shared/theme/shuyo_theme.dart';
 import '../../shared/widgets/empty_state.dart';
 import '../../shared/widgets/fullscreen_image_page.dart';
 import 'recording_detail_sheet.dart';
+import 'recording_player_tabs.dart';
 
 /// The portrait player's lesson-specific, lazily built PPT notes stream.
 class RecordingNotesPanel extends StatefulWidget {
@@ -248,7 +249,6 @@ class _NoteEntry extends StatelessWidget {
           onClose: close,
           onSeek: canSeek
               ? () {
-                  close();
                   if (context.mounted) onSeek(_position);
                 }
               : null,
@@ -301,11 +301,8 @@ class _NoteDetails extends StatelessWidget {
                     child: Text('笔记详情',
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
-                        style: TextStyle(
-                          fontSize: 14,
-                          fontWeight: FontWeight.w400,
-                          height: 1.43,
-                          letterSpacing: .25,
+                        style:
+                            RecordingPlayerTabs.labelStyleOf(context).copyWith(
                           color: colors.textPrimary,
                         )),
                   ),
