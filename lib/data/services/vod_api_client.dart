@@ -610,16 +610,21 @@ class VodApiClient {
   Future<List<VodPptSlide>> fetchPptSlides(int courseId) async {
     if (courseId <= 0) throw const VodInvalidResponseException('请选择有效课次');
     final response = await _get('/v1/course/ai/ppt', {'courseId': '$courseId'});
-    if (response is! JsonMap || !response.containsKey('data')) {
+    if (response is! JsonMap ||
+        !response.containsKey('data') && !_isEmptyPptSuccess(response)) {
       throw const VodInvalidResponseException();
     }
     final data = response['data'];
     if (data == null) return const [];
-    if (data is! JsonMap || data['docList'] is! List) {
+    if (data is! JsonMap) {
       throw const VodInvalidResponseException();
     }
+    final documents = data['docList'];
+    // The PPT response model leaves docList optional when no OCR was produced.
+    if (documents == null) return const [];
+    if (documents is! List) throw const VodInvalidResponseException();
     final slides = <(int, VodPptSlide)>[];
-    for (final (index, value) in (data['docList'] as List).indexed) {
+    for (final (index, value) in documents.indexed) {
       if (value is! JsonMap) throw const VodInvalidResponseException();
       if (value['showFlag'] == false) continue;
       final rawText = value['ocrText'];
@@ -653,6 +658,12 @@ class VodApiClient {
     });
     return List.unmodifiable(slides.map((entry) => entry.$2));
   }
+
+  static bool _isEmptyPptSuccess(JsonMap response) =>
+      intValue(response['status']) == 200 &&
+      response['ok'] == true &&
+      response['dataOk'] == false &&
+      response['data'] == null;
 
   Uri? _pptImageUrl(String rawUrl) {
     if (rawUrl.isEmpty) return null;
@@ -937,10 +948,16 @@ class VodApiClient {
         throw const _VodBusinessSessionExpired();
       }
       if (status == 403 || code == 403) throw const VodPermissionException();
+      // This endpoint returns ok:true/status:200 with data:null/dataOk:false
+      // for a lesson without PPT OCR. dataOk describes the absent payload here,
+      // rather than a failed request. Keep the exception endpoint-specific and
+      // require explicit business success; all error codes still fail below.
+      final emptyPpt =
+          path == '/v1/course/ai/ppt' && _isEmptyPptSuccess(decoded);
       if ((status != 0 && status != 200) ||
           (code != 0 && code != 200) ||
           decoded['ok'] == false ||
-          decoded['dataOk'] == false) {
+          decoded['dataOk'] == false && !emptyPpt) {
         // Do not include backend messages: they can contain signed URLs.
         throw VodApiException('录播平台暂时无法完成请求，请稍后重试',
             statusCode: status == 0 ? code : status);
