@@ -2,7 +2,6 @@ import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
-import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/services.dart';
 import 'package:media_kit/media_kit.dart';
@@ -29,6 +28,7 @@ class RecordingVideoControls extends StatefulWidget {
     required this.player,
     this.timelinePlayer,
     required this.title,
+    this.termLabel,
     required this.loading,
     required this.failure,
     required this.views,
@@ -72,6 +72,7 @@ class RecordingVideoControls extends StatefulWidget {
   final Player player;
   final Player? timelinePlayer;
   final String title;
+  final String? termLabel;
   final bool loading;
   final Widget? failure;
   final List<VodView> views;
@@ -496,13 +497,18 @@ class _RecordingVideoControlsState extends State<RecordingVideoControls>
         .indexWhere((lesson) => lesson.id == widget.selectedLessonId);
     if (index >= 0) {
       _jumpToEpisodePosition(index * _episodeItemExtent);
+    } else if (showMessage && widget.onClearClassroomFilter != null) {
+      widget.onClearClassroomFilter!();
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _jumpToCurrentEpisode(showMessage: false);
+      });
     } else if (showMessage && widget.selectedLessonId != null) {
       ScaffoldMessenger.maybeOf(context)?.showSnackBar(SnackBar(
         content: const Text('当前课次不在教室筛选结果中'),
         action: widget.onClearClassroomFilter == null
             ? null
             : SnackBarAction(
-                label: '清除筛选', onPressed: widget.onClearClassroomFilter!),
+                label: '切换至当前教室', onPressed: widget.onClearClassroomFilter!),
       ));
     }
   }
@@ -634,15 +640,46 @@ class _RecordingVideoControlsState extends State<RecordingVideoControls>
                                               SingleChildScrollView(
                                                   scrollDirection:
                                                       Axis.horizontal,
-                                                  child: Text(widget.title,
-                                                      key: const ValueKey(
-                                                          'recording-fullscreen-title'),
-                                                      maxLines: 1,
-                                                      style: const TextStyle(
-                                                          color: Colors.white,
-                                                          fontWeight:
-                                                              FontWeight.w600,
-                                                          fontSize: 16))),
+                                                  child: Row(
+                                                    mainAxisSize:
+                                                        MainAxisSize.min,
+                                                    crossAxisAlignment:
+                                                        CrossAxisAlignment
+                                                            .baseline,
+                                                    textBaseline:
+                                                        TextBaseline.alphabetic,
+                                                    children: [
+                                                      Text(widget.title,
+                                                          key: const ValueKey(
+                                                              'recording-fullscreen-title'),
+                                                          maxLines: 1,
+                                                          style:
+                                                              const TextStyle(
+                                                                  color: Colors
+                                                                      .white,
+                                                                  fontWeight:
+                                                                      FontWeight
+                                                                          .w600,
+                                                                  fontSize:
+                                                                      16)),
+                                                      if (widget.termLabel
+                                                              ?.isNotEmpty ??
+                                                          false) ...[
+                                                        const SizedBox(
+                                                            width: 12),
+                                                        Text(widget.termLabel!,
+                                                            key: const ValueKey(
+                                                                'recording-fullscreen-term'),
+                                                            maxLines: 1,
+                                                            style:
+                                                                const TextStyle(
+                                                                    color: Colors
+                                                                        .white,
+                                                                    fontSize:
+                                                                        12)),
+                                                      ],
+                                                    ],
+                                                  )),
                                               if (episodeHeading.isNotEmpty)
                                                 Text(episodeHeading,
                                                     key: const ValueKey(
@@ -919,6 +956,7 @@ class _RecordingVideoControlsState extends State<RecordingVideoControls>
 
   Widget _episodePanel(EdgeInsets safeInsets) {
     final panelLessons = _panelLessons;
+    final numberedLessons = widget.episodeLessons ?? widget.lessons;
     final colors = context.shuyoColors;
     return Material(
       key: const ValueKey('recording-fullscreen-episode-panel'),
@@ -945,7 +983,7 @@ class _RecordingVideoControlsState extends State<RecordingVideoControls>
                         itemCount: panelLessons.length,
                         itemBuilder: (context, index) {
                           final lesson = panelLessons[index];
-                          final originalIndex = widget.lessons
+                          final originalIndex = numberedLessons
                               .indexWhere((item) => item.id == lesson.id);
                           final selected = lesson.id == widget.selectedLessonId;
                           return Column(children: [
@@ -954,7 +992,7 @@ class _RecordingVideoControlsState extends State<RecordingVideoControls>
                               tileKey:
                                   ValueKey('fullscreen-lesson-${lesson.id}'),
                               lesson: lesson,
-                              number: widget.lessons.length - originalIndex,
+                              number: numberedLessons.length - originalIndex,
                               selected: selected,
                               onTap: !lesson.canPlay
                                   ? null
@@ -1135,22 +1173,30 @@ class _RecordingVideoControlsState extends State<RecordingVideoControls>
           : narrow
               ? 30.0
               : 35.0;
-      final timeFontSize = !kIsWeb &&
-              const [TargetPlatform.android, TargetPlatform.iOS]
-                  .contains(defaultTargetPlatform)
-          ? 10.0
-          : 12.0;
+      final timeFontSize = fullscreen ? 14.0 : 13.0;
+      final speedWidth = widget.isLive
+          ? 0.0
+          : TextPainter.computeWidth(
+                  text: TextSpan(
+                      text: '${state.rate}X',
+                      style: DefaultTextStyle.of(context)
+                          .style
+                          .copyWith(fontSize: 13)),
+                  textDirection: Directionality.of(context),
+                  textScaler: MediaQuery.textScalerOf(context)) +
+              16;
       final time = ConstrainedBox(
         key: const ValueKey('recording-playback-time'),
         constraints: BoxConstraints(
             maxWidth: math.min(
-                narrow ? 96 : 144,
+                narrow ? 120 : 168,
                 math.max(
                     0,
                     constraints.maxWidth -
                         42 -
                         (widget.lessons.isEmpty ? 0 : buttonWidth * 2) -
-                        buttonWidth))),
+                        buttonWidth -
+                        speedWidth))),
         child: FittedBox(
           fit: BoxFit.scaleDown,
           child: Text.rich(
@@ -1164,6 +1210,7 @@ class _RecordingVideoControlsState extends State<RecordingVideoControls>
             style: TextStyle(
                 color: Colors.white,
                 fontSize: timeFontSize,
+                fontWeight: FontWeight.w700,
                 height: 1.4,
                 fontFamily: 'Monospace',
                 fontFeatures: const [FontFeature.tabularFigures()]),

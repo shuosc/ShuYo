@@ -13,6 +13,7 @@ class RecordingCourseTitle extends StatelessWidget {
     this.missingTeacherLabel,
     this.large = false,
     this.description,
+    this.enabled = true,
   });
 
   final VodCourse course;
@@ -20,10 +21,14 @@ class RecordingCourseTitle extends StatelessWidget {
   final String? missingTeacherLabel;
   final bool large;
   final Widget? description;
+  final bool enabled;
 
   @override
   Widget build(BuildContext context) {
     final colors = context.shuyoColors;
+    final disabledColor = Theme.of(context).disabledColor;
+    final titleColor = enabled ? colors.textPrimary : disabledColor;
+    final metadataColor = enabled ? colors.textSecondary : disabledColor;
     final code = course.code.trim();
     final teacher = course.teacherLabel.trim();
     final metadata = [
@@ -33,25 +38,27 @@ class RecordingCourseTitle extends StatelessWidget {
       else if (missingTeacherLabel != null)
         missingTeacherLabel!,
     ].join(' · ');
+    final title = Text(course.name,
+        style: large
+            ? ShuYoTextStyles.pageTitle(color: titleColor)
+            : ShuYoTextStyles.title(color: titleColor),
+        maxLines: maxNameLines,
+        overflow: maxNameLines == null ? null : TextOverflow.ellipsis);
     return CourseColorLabel(
       code: course.code,
       name: course.name,
+      color: enabled ? null : disabledColor,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         mainAxisSize: MainAxisSize.min,
         children: [
-          Text(course.name,
-              style: large
-                  ? ShuYoTextStyles.pageTitle(color: colors.textPrimary)
-                  : ShuYoTextStyles.title(color: colors.textPrimary),
-              maxLines: maxNameLines,
-              overflow: maxNameLines == null ? null : TextOverflow.ellipsis),
+          title,
           if (metadata.isNotEmpty)
             Padding(
               padding: EdgeInsets.only(top: large ? 4 : 2),
               child: Text(metadata,
                   style: ShuYoTextStyles.meta(
-                      color: colors.textSecondary, size: large ? 14 : 12.5),
+                      color: metadataColor, size: large ? 14 : 12.5),
                   maxLines: 2,
                   overflow: TextOverflow.ellipsis),
             ),

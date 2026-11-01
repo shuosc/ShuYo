@@ -16,6 +16,7 @@ class RecordingTimetableView extends StatefulWidget {
     required this.refreshEnabled,
     required this.onRefresh,
     required this.onLessonSelected,
+    this.canSelectLesson,
     this.failedCourseCount = 0,
   });
 
@@ -24,6 +25,7 @@ class RecordingTimetableView extends StatefulWidget {
   final bool refreshEnabled;
   final Future<void> Function() onRefresh;
   final ValueChanged<RecordingTimetableEntry> onLessonSelected;
+  final bool Function(RecordingTimetableEntry)? canSelectLesson;
   final int failedCourseCount;
 
   @override
@@ -237,6 +239,7 @@ class _RecordingTimetableViewState extends State<RecordingTimetableView> {
                       hasLoadFailures: widget.failedCourseCount > 0,
                       onRefresh: widget.onRefresh,
                       onLessonSelected: widget.onLessonSelected,
+                      canSelectLesson: widget.canSelectLesson,
                     );
                   },
                 ),
@@ -338,6 +341,7 @@ class _TimetableDayPage extends StatelessWidget {
     required this.hasLoadFailures,
     required this.onRefresh,
     required this.onLessonSelected,
+    required this.canSelectLesson,
   });
 
   final DateTime date;
@@ -347,6 +351,7 @@ class _TimetableDayPage extends StatelessWidget {
   final bool hasLoadFailures;
   final Future<void> Function() onRefresh;
   final ValueChanged<RecordingTimetableEntry> onLessonSelected;
+  final bool Function(RecordingTimetableEntry)? canSelectLesson;
 
   @override
   Widget build(BuildContext context) {
@@ -404,7 +409,9 @@ class _TimetableDayPage extends StatelessWidget {
                 return Column(mainAxisSize: MainAxisSize.min, children: [
                   _TimetableEntryTile(
                     entry: entry,
-                    onTap: () => onLessonSelected(entry),
+                    onTap: canSelectLesson?.call(entry) == false
+                        ? null
+                        : () => onLessonSelected(entry),
                   ),
                   if (!last || index < slot.entries.length - 1)
                     const Divider(indent: 16, endIndent: 16),
@@ -476,14 +483,14 @@ class _TimetableEntryTile extends StatelessWidget {
   });
 
   final RecordingTimetableEntry entry;
-  final VoidCallback onTap;
+  final VoidCallback? onTap;
 
   @override
   Widget build(BuildContext context) {
     final colors = context.shuyoColors;
     final primary = Theme.of(context).colorScheme.primary;
     final lesson = entry.lesson;
-    final enabled = lesson.canPlay;
+    final enabled = lesson.canPlay && onTap != null;
     final secondary = enabled ? colors.textSecondary : colors.textMuted;
     final classroom = lesson.classroom.trim();
     final section = lesson.sectionLabel.trim();

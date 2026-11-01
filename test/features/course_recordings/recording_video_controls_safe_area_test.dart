@@ -40,17 +40,25 @@ Widget _controls({
   required EdgeInsets viewPadding,
   bool fullscreen = true,
   bool dual = false,
+  String title = '电路与模拟电子技术',
+  String? termLabel,
+  VodLesson? selectedLesson,
+  TextScaler textScaler = TextScaler.noScaling,
 }) =>
     MaterialApp(
       home: MediaQuery(
         data: MediaQueryData(
-            size: size, padding: EdgeInsets.zero, viewPadding: viewPadding),
+            size: size,
+            padding: EdgeInsets.zero,
+            viewPadding: viewPadding,
+            textScaler: textScaler),
         child: Scaffold(
           body: RecordingVideoControls(
             state: _SafeAreaVideoState(),
             fullscreen: fullscreen,
             player: player,
-            title: '电路与模拟电子技术',
+            title: title,
+            termLabel: termLabel,
             loading: false,
             failure: null,
             views: [
@@ -66,6 +74,7 @@ Widget _controls({
             selectedView: 0,
             lessons: _lessons,
             selectedLessonId: 2,
+            selectedLesson: selectedLesson,
             onLessonSelected: (_) {},
             onBack: () {},
             onDualChanged: (_) {},
@@ -80,6 +89,145 @@ Widget _controls({
     );
 
 void main() {
+  testWidgets('term accompanies the fullscreen title using episode text style',
+      (tester) async {
+    const size = Size(873, 393);
+    tester.view.physicalSize = size;
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final player = Player(platformPlayer: _SafeAreaPlayer());
+    addTearDown(player.dispose);
+    final lesson = VodLesson(
+        id: 2,
+        teachingClassId: 10,
+        name: '第二节',
+        isPlayable: true,
+        beginTime: DateTime(2026, 10, 29, 13),
+        endTime: DateTime(2026, 10, 29, 13, 45));
+    await tester.pumpWidget(_controls(
+        player: player,
+        size: size,
+        viewPadding: const EdgeInsets.fromLTRB(44, 12, 44, 24),
+        termLabel: '26-27 秋季',
+        selectedLesson: lesson));
+    await tester.pump();
+
+    final title = find.byKey(const ValueKey('recording-fullscreen-title'));
+    final term = find.byKey(const ValueKey('recording-fullscreen-term'));
+    final metadata =
+        find.byKey(const ValueKey('recording-fullscreen-episode-heading'));
+    final termText = tester.widget<Text>(term);
+    final metadataText = tester.widget<Text>(metadata);
+    expect(termText.data, '26-27 秋季');
+    expect(termText.style!.fontSize, 12);
+    expect(termText.style!.fontSize, metadataText.style!.fontSize);
+    expect(termText.style!.color, metadataText.style!.color);
+    expect(tester.getTopLeft(term).dx,
+        greaterThanOrEqualTo(tester.getTopRight(title).dx + 12));
+    expect(
+        tester.getTopLeft(term).dy, lessThan(tester.getBottomRight(title).dy));
+    expect(tester.getBottomRight(term).dy,
+        greaterThan(tester.getTopLeft(title).dy));
+    expect(tester.takeException(), isNull);
+
+    await tester.pumpWidget(_controls(
+        player: player,
+        size: size,
+        viewPadding: EdgeInsets.zero,
+        fullscreen: false,
+        termLabel: '26-27 秋季',
+        selectedLesson: lesson));
+    expect(term, findsNothing);
+    expect(find.text('26-27 秋季'), findsNothing);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets(
+      'long fullscreen title and term scroll inside the safe title area',
+      (tester) async {
+    const size = Size(600, 320);
+    const insets = EdgeInsets.fromLTRB(44, 12, 44, 24);
+    tester.view.physicalSize = size;
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final player = Player(platformPlayer: _SafeAreaPlayer());
+    addTearDown(player.dispose);
+    await tester.pumpWidget(_controls(
+        player: player,
+        size: size,
+        viewPadding: insets,
+        title: '电路与模拟电子技术以及课程名称较长情况下的播放器顶部课程信息',
+        termLabel: '26-27 秋季',
+        textScaler: const TextScaler.linear(2)));
+    await tester.pump();
+
+    final term = find.byKey(const ValueKey('recording-fullscreen-term'));
+    final scroll =
+        find.ancestor(of: term, matching: find.byType(SingleChildScrollView));
+    expect(scroll, findsOneWidget);
+    expect(tester.widget<SingleChildScrollView>(scroll).scrollDirection,
+        Axis.horizontal);
+    final titleArea = tester.getRect(scroll);
+    expect(titleArea.left, greaterThanOrEqualTo(insets.left + 10));
+    expect(titleArea.right, lessThanOrEqualTo(size.width - insets.right - 10));
+    expect(tester.getRect(find.byTooltip('更多设置')).right,
+        lessThanOrEqualTo(size.width - insets.right - 10));
+    await tester.drag(scroll, const Offset(-2000, 0));
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(tester.getRect(term).right, lessThanOrEqualTo(titleArea.right + 1));
+    expect(tester.getRect(term).left, greaterThanOrEqualTo(titleArea.left));
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  for (final fullscreen in [false, true]) {
+    for (final size in [const Size(320, 221), const Size(873, 393)]) {
+      testWidgets(
+          'bold larger time stays on one line at double text scale ($fullscreen, $size)',
+          (tester) async {
+        tester.view.physicalSize = size;
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.resetPhysicalSize);
+        addTearDown(tester.view.resetDevicePixelRatio);
+        final platform = _SafeAreaPlayer();
+        platform.state =
+            platform.state.copyWith(position: const Duration(minutes: 65));
+        final player = Player(platformPlayer: platform);
+        await tester.pumpWidget(_controls(
+            player: player,
+            size: size,
+            viewPadding: EdgeInsets.zero,
+            fullscreen: fullscreen,
+            textScaler: const TextScaler.linear(2)));
+        await tester.pump();
+
+        final time = find.byKey(const ValueKey('recording-playback-time'));
+        final label = tester.widget<Text>(
+            find.descendant(of: time, matching: find.byType(Text)));
+        expect(label.textSpan!.toPlainText(), '1:05:00 / 1:30:00');
+        expect(label.maxLines, 1);
+        expect(label.style!.fontWeight, FontWeight.w700);
+        expect(label.style!.fontSize, fullscreen ? 14 : 13);
+        final controls = tester
+            .getRect(find.byKey(const ValueKey('recording-bottom-controls')));
+        final timeRect = tester.getRect(time);
+        expect(timeRect.left, greaterThanOrEqualTo(controls.left));
+        expect(timeRect.right, lessThanOrEqualTo(controls.right));
+        if (!fullscreen) {
+          expect(tester.getRect(find.byTooltip('下一集')).right,
+              lessThanOrEqualTo(tester.getRect(find.byTooltip('播放速度')).left));
+        }
+        expect(tester.takeException(), isNull);
+
+        await tester.pumpWidget(const SizedBox.shrink());
+        await player.dispose();
+      });
+    }
+  }
+
   for (final insets in [
     const EdgeInsets.fromLTRB(44, 12, 0, 24),
     const EdgeInsets.fromLTRB(0, 12, 44, 24),

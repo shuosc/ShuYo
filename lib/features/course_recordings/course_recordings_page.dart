@@ -93,8 +93,20 @@ class _CourseRecordingsPageState extends State<CourseRecordingsPage> {
   void dispose() {
     _revision++;
     _completeLoad(force: true);
-    if (widget.repository == null) _repository.dispose();
-    if (widget.authService == null) _auth.dispose();
+    if (widget.repository == null) {
+      final repository = _repository;
+      final auth = widget.authService == null ? _auth : null;
+      unawaited(() async {
+        try {
+          await repository.waitForBackgroundWarming();
+        } finally {
+          repository.dispose();
+          auth?.dispose();
+        }
+      }());
+    } else if (widget.authService == null) {
+      _auth.dispose();
+    }
     super.dispose();
   }
 
@@ -256,6 +268,10 @@ class _CourseRecordingsPageState extends State<CourseRecordingsPage> {
                 .firstWhere((term) => term.isCurrent, orElse: () => terms.first)
                 .id;
       }
+      if (!force) {
+        unawaited(
+            _repository.warmOwnRecordings(terms, preferredTermId: selected));
+      }
       setState(() {
         if (_selectedTermId != selected) {
           _courses = const [];
@@ -280,6 +296,10 @@ class _CourseRecordingsPageState extends State<CourseRecordingsPage> {
               },
             );
       if (!mounted || revision != _revision) return;
+      if (force) {
+        unawaited(_repository.warmOwnRecordings(terms,
+            preferredTermId: selected, forceRefresh: true));
+      }
       setState(() {
         _courses = courses;
       });
@@ -345,7 +365,7 @@ class _CourseRecordingsPageState extends State<CourseRecordingsPage> {
           forceRefresh: request.force);
       if (!mounted || request.revision != _revision) return;
       final total = <int>{};
-      final playable = <int>{};
+      final playableIds = <int>{};
       final catalog = <VodLesson>[];
       for (final lesson in lessons) {
         if (lesson.id <= 0 ||
@@ -358,13 +378,13 @@ class _CourseRecordingsPageState extends State<CourseRecordingsPage> {
             : lesson.isPlayable || lesson.isGenerating || lesson.isListed) {
           total.add(lesson.id);
         }
-        if (!lesson.isLive && lesson.isPlayable) playable.add(lesson.id);
+        if (!lesson.isLive && lesson.isPlayable) playableIds.add(lesson.id);
       }
       setState(() {
         _courseLessons[request.course.teachingClassId] =
             List.unmodifiable(catalog);
         _lessonCounts[request.course.teachingClassId] = _CourseLessonCount(
-            playable: playable.length, lessonIds: Set.unmodifiable(total));
+            playable: playableIds.length, lessonIds: Set.unmodifiable(total));
         _failedLessonCounts.remove(request.course.teachingClassId);
       });
     } on VodSessionExpiredException catch (error) {
@@ -398,14 +418,27 @@ class _CourseRecordingsPageState extends State<CourseRecordingsPage> {
 
   Future<void> _openCourse(VodCourse course, {VodLesson? lesson}) async {
     if (_openingCourse || lesson != null && !lesson.canPlay) return;
+    if (!_hasCompleteAvailability(course) || !_hasPlayableCourse(course)) {
+      return;
+    }
+    final lessons =
+        _courseLessons[course.teachingClassId] ?? const <VodLesson>[];
+    final live = course.liveLesson;
+    final initial = lesson ??
+        (live != null && live.isLiveAvailable && live.canPlay ? live : null) ??
+        lessons.where((item) => item.isLiveAvailable).firstOrNull ??
+        lessons.where((item) => !item.isLive && item.isPlayable).firstOrNull ??
+        lessons.where((item) => !item.isLive && item.canPlay).firstOrNull;
     _openingCourse = true;
     try {
       await Navigator.of(context).push<void>(shuyoRoute(
         builder: (_) => RecordingPlayerPage(
           repository: _repository,
           course: course,
-          initialLesson: lesson,
-          lessons: _courseLessons[course.teachingClassId] ?? const [],
+          term: _terms.where((term) => term.id == course.termId).firstOrNull,
+          initialLesson: initial,
+          lessons: lessons,
+          skipInitialCatalogLoad: true,
           onSessionExpired: _recoverSession,
         ),
       ));
@@ -458,11 +491,49 @@ class _CourseRecordingsPageState extends State<CourseRecordingsPage> {
     ));
   }
 
+  Future<void> _showDataInfo() async {
+    await showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('课程录播信息说明'),
+        content: const Text('学校录播平台接口可能随时更改，部分功能的可用性和完整性无法保证。'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('知道了'),
+          ),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('课程录播'),
+        title: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Flexible(
+              child: Text('课程录播', maxLines: 1, overflow: TextOverflow.ellipsis),
+            ),
+            Transform.translate(
+              offset: const Offset(-3, -0.5),
+              child: Opacity(
+                opacity: 0.65,
+                child: IconButton(
+                  tooltip: '课程录播信息说明',
+                  visualDensity: VisualDensity.compact,
+                  padding: EdgeInsets.zero,
+                  constraints:
+                      const BoxConstraints(minWidth: 28, minHeight: 28),
+                  icon: const Icon(Icons.info_outline, size: 18),
+                  onPressed: _showDataInfo,
+                ),
+              ),
+            ),
+          ],
+        ),
         actions: [
           if (_authenticated) ...[
             IconButton(
@@ -470,21 +541,6 @@ class _CourseRecordingsPageState extends State<CourseRecordingsPage> {
               tooltip: '搜索录播',
               onPressed: _selectedTermId == null ? null : _openSearch,
               icon: const Icon(Icons.search),
-            ),
-            Tooltip(
-              message: _timetableMode ? '切换为课程列表' : '切换为时间表',
-              child: TextButton.icon(
-                key: const ValueKey('vod-view-toggle'),
-                onPressed: _terms.isEmpty
-                    ? null
-                    : () => setState(() => _timetableMode = !_timetableMode),
-                icon: Icon(
-                    _timetableMode
-                        ? Icons.view_list_outlined
-                        : Icons.calendar_view_week_outlined,
-                    size: 20),
-                label: Text(_timetableMode ? '列表' : '时间表'),
-              ),
             ),
             IconButton(
               key: const ValueKey('vod-term-filter'),
@@ -573,41 +629,78 @@ class _CourseRecordingsPageState extends State<CourseRecordingsPage> {
           padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
           child: Row(children: [
             Expanded(
-              child: Text.rich(
-                TextSpan(children: [
-                  if (selectedTerm.academicYear.isEmpty)
-                    TextSpan(text: selectedTerm.name)
-                  else ...[
-                    TextSpan(text: '${selectedTerm.academicYear} 学年 '),
-                    TextSpan(
-                      text: selectedTerm.seasonLabel,
-                      style: TextStyle(
-                          color: Theme.of(context).colorScheme.primary),
-                    ),
-                  ],
-                ]),
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis,
-                style: ShuYoTextStyles.bodyCompact(
-                        color: context.shuyoColors.textPrimary)
-                    .copyWith(fontWeight: FontWeight.w600),
-              ),
-            ),
-            const SizedBox(width: 12),
-            Text.rich(
-              key: const ValueKey('vod-course-count'),
-              TextSpan(children: [
-                TextSpan(
-                    text: unknownCourseCount ? '—' : '${_courses.length}',
-                    style: unknownCourseCount
-                        ? null
-                        : TextStyle(
-                            color: Theme.of(context).colorScheme.primary)),
-                const TextSpan(text: '个课程'),
+              flex: 2,
+              child: Row(children: [
+                Expanded(
+                  child: Text.rich(
+                    TextSpan(children: [
+                      if (selectedTerm.academicYear.isEmpty)
+                        TextSpan(text: selectedTerm.name)
+                      else ...[
+                        TextSpan(text: '${selectedTerm.academicYear} 学年 '),
+                        TextSpan(
+                          text: selectedTerm.seasonLabel,
+                          style: TextStyle(
+                              color: Theme.of(context).colorScheme.primary),
+                        ),
+                      ],
+                    ]),
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: ShuYoTextStyles.bodyCompact(
+                            color: context.shuyoColors.textPrimary)
+                        .copyWith(fontWeight: FontWeight.w600),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Flexible(
+                  child: Text.rich(
+                    key: const ValueKey('vod-course-count'),
+                    TextSpan(children: [
+                      TextSpan(
+                          text: unknownCourseCount ? '—' : '${_courses.length}',
+                          style: unknownCourseCount
+                              ? null
+                              : TextStyle(
+                                  color:
+                                      Theme.of(context).colorScheme.primary)),
+                      const TextSpan(text: '个课程'),
+                    ]),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: ShuYoTextStyles.meta(
+                            color: context.shuyoColors.textPrimary)
+                        .copyWith(fontWeight: FontWeight.w600),
+                  ),
+                ),
               ]),
-              style:
-                  ShuYoTextStyles.meta(color: context.shuyoColors.textPrimary)
-                      .copyWith(fontWeight: FontWeight.w600),
+            ),
+            const SizedBox(width: 4),
+            Expanded(
+              child: Align(
+                alignment: Alignment.centerRight,
+                child: Tooltip(
+                  message: _timetableMode ? '切换为课程列表' : '切换为时间表',
+                  child: TextButton.icon(
+                    key: const ValueKey('vod-view-toggle'),
+                    onPressed: _terms.isEmpty
+                        ? null
+                        : () =>
+                            setState(() => _timetableMode = !_timetableMode),
+                    icon: Icon(
+                      _timetableMode
+                          ? Icons.view_list_outlined
+                          : Icons.calendar_view_week_outlined,
+                      size: 20,
+                    ),
+                    label: Text(
+                      _timetableMode ? '列表' : '时间表',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                ),
+              ),
             ),
           ]),
         ),
@@ -659,6 +752,9 @@ class _CourseRecordingsPageState extends State<CourseRecordingsPage> {
                                   const Divider(indent: 16, endIndent: 16),
                               itemBuilder: (context, index) {
                                 final course = visibleCourses[index];
+                                final unavailable =
+                                    _hasCompleteAvailability(course) &&
+                                        !_hasPlayableCourse(course);
                                 return _CourseEntrance(
                                   key: ValueKey(course.teachingClassId),
                                   index: index,
@@ -672,14 +768,23 @@ class _CourseRecordingsPageState extends State<CourseRecordingsPage> {
                                     leading: Tooltip(
                                       message: course.isLive ? '正在直播' : '录播回放',
                                       child: RecordingStatusIcon(
-                                          isLive: course.isLive),
+                                          isLive: course.isLive,
+                                          enabled: !unavailable),
                                     ),
                                     title: RecordingCourseTitle(
                                         course: course,
                                         maxNameLines: 2,
-                                        missingTeacherLabel: '教师信息暂未提供'),
-                                    trailing: _lessonCount(course),
-                                    onTap: () => _openCourse(course),
+                                        missingTeacherLabel: '教师信息暂未提供',
+                                        enabled: !unavailable),
+                                    trailing: unavailable
+                                        ? Icon(Icons.block,
+                                            color:
+                                                Theme.of(context).disabledColor)
+                                        : _lessonCount(course),
+                                    onTap: unavailable ||
+                                            !_hasCompleteAvailability(course)
+                                        ? null
+                                        : () => _openCourse(course),
                                   ),
                                 );
                               },
@@ -702,6 +807,9 @@ class _CourseRecordingsPageState extends State<CourseRecordingsPage> {
                               .contains(course.teachingClassId))
                           .length,
                       onRefresh: () => _load(force: true, fromPull: true),
+                      canSelectLesson: (entry) =>
+                          _hasCompleteAvailability(entry.course) &&
+                          _hasPlayableCourse(entry.course),
                       onLessonSelected: (entry) => unawaited(
                           _openCourse(entry.course, lesson: entry.lesson)),
                     ),
@@ -712,6 +820,7 @@ class _CourseRecordingsPageState extends State<CourseRecordingsPage> {
 
   Widget _lessonCount(VodCourse course) {
     final count = _lessonCounts[course.teachingClassId];
+    final playable = count?.playable;
     final failed = _failedLessonCounts.contains(course.teachingClassId);
     final live = course.liveLesson;
     final total = count == null
@@ -734,8 +843,8 @@ class _CourseRecordingsPageState extends State<CourseRecordingsPage> {
           key: ValueKey('vod-course-lesson-count:${course.teachingClassId}'),
           TextSpan(children: [
             TextSpan(
-              text: count == null ? '—' : '${count.playable}',
-              style: count == null
+              text: playable == null ? '—' : '$playable',
+              style: playable == null
                   ? null
                   : TextStyle(color: Theme.of(context).colorScheme.primary),
             ),
@@ -746,8 +855,22 @@ class _CourseRecordingsPageState extends State<CourseRecordingsPage> {
         ),
       ),
       const SizedBox(width: 8),
-      const Icon(Icons.chevron_right),
+      if (_hasCompleteAvailability(course)) const Icon(Icons.chevron_right),
     ]);
+  }
+
+  bool _hasCompleteAvailability(VodCourse course) {
+    return _lessonCounts.containsKey(course.teachingClassId) &&
+        _requestedLessonCounts.contains(course.teachingClassId) &&
+        !_pendingLessonCounts.contains(course.teachingClassId);
+  }
+
+  bool _hasPlayableCourse(VodCourse course) {
+    if (_lessonCounts[course.teachingClassId]?.lessonIds.isNotEmpty == true) {
+      return true;
+    }
+    return course.liveLesson?.isLiveAvailable == true &&
+        course.liveLesson!.id > 0;
   }
 
   Widget _errorState() {

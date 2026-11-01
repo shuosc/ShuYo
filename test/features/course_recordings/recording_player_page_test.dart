@@ -6,6 +6,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 import 'package:shuyo/data/models/course_recording.dart';
+import 'package:shuyo/data/models/vod_ppt.dart';
 import 'package:shuyo/data/repositories/vod_repository.dart';
 import 'package:shuyo/data/services/vod_api_client.dart';
 import 'package:shuyo/features/course_recordings/recording_episode_sort_icon.dart';
@@ -242,6 +243,27 @@ class _PendingPreviewRepository extends VodRepository {
   final requests = <({bool forceRefresh, int courseId})>[];
   final playback = <int, Completer<VodPlayback>>{};
   final requested = <int>[];
+  final warmed = <List<VodLesson>>[];
+
+  @override
+  Future<void> warmCourseRecordings(VodCourse course, List<VodLesson> lessons,
+      {bool forceRefresh = false}) async {
+    warmed.add(List.of(lessons));
+  }
+
+  @override
+  Future<List<VodLesson>> loadAndWarmSearchLessons(
+      VodCourse course, List<VodLesson> seed,
+      {bool forceRefresh = false}) async {
+    final lessons =
+        await loadPreviewLessons(course, forceRefresh: forceRefresh);
+    final merged = <(int, bool), VodLesson>{
+      for (final lesson in seed) (lesson.id, lesson.isLive): lesson,
+      for (final lesson in lessons) (lesson.id, lesson.isLive): lesson,
+    };
+    await warmCourseRecordings(course, merged.values.toList());
+    return lessons;
+  }
 
   @override
   Future<List<VodLesson>> loadPreviewLessons(VodCourse course,
@@ -974,6 +996,7 @@ void main() {
 
   Widget page({
     required Future<VodPlayback> Function(VodLesson) load,
+    Future<List<VodPptSlide>> Function(int)? loadNotes,
     Future<bool> Function()? login,
     VodLesson? initial,
     _PlaybackHarness? harness,
@@ -991,6 +1014,7 @@ void main() {
           lessons: lessons ?? [first, second, unavailable, unrelated],
           initialLesson: initial ?? first,
           loadPlayback: load,
+          loadNotes: loadNotes,
           onSessionExpired: login,
           playerFactory: harness?.createPlayer,
           videoControllerFactory: harness?.createController,
@@ -1008,6 +1032,388 @@ void main() {
           VodView(viewNumber: 3, url: Uri.https('media.example', '/students')),
         ],
       );
+
+  void prepareNotesPortrait(WidgetTester tester) {
+    tester.view.physicalSize = const Size(393, 852);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    const channel = MethodChannel('com.alexmercerind/media_kit_video');
+    tester.binding.defaultBinaryMessenger
+        .setMockMethodCallHandler(channel, (_) async => null);
+    addTearDown(() => tester.binding.defaultBinaryMessenger
+        .setMockMethodCallHandler(channel, null));
+  }
+
+  String notesTabLabel(WidgetTester tester) => tester
+      .widget<Text>(find.byKey(const ValueKey('recording-notes-tab-label')))
+      .textSpan!
+      .toPlainText();
+
+  const note = VodPptSlide(
+    id: 'first-note',
+    imageUrl: null,
+    position: Duration(seconds: 12),
+    text: '当前课次第一张 PPT 的识别文字',
+  );
+  const anotherNote = VodPptSlide(
+    id: 'second-note',
+    imageUrl: null,
+    position: Duration(seconds: 24),
+    text: '当前课次第二张 PPT 的识别文字',
+  );
+
+  testWidgets(
+      'portrait notes tabs show OCR count and preserve playback across taps and swipes',
+      (tester) async {
+    prepareNotesPortrait(tester);
+    final pending = Completer<List<VodPptSlide>>();
+    final harness = _PlaybackHarness();
+    final noteRequests = <int>[];
+    var playbackRequests = 0;
+    await tester.pumpWidget(page(
+      harness: harness,
+      load: (lesson) async {
+        playbackRequests++;
+        return playback(lesson);
+      },
+      loadNotes: (id) {
+        noteRequests.add(id);
+        return pending.future;
+      },
+    ));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+    final tabs = find.byType(TabBar);
+    final header = find.byKey(const ValueKey('recording-player-header'));
+    expect(tester.getSize(tabs), const Size(192, 45));
+    expect(tester.getTopLeft(tabs).dx, 0);
+    expect(tester.getTopLeft(tabs).dy,
+        closeTo(tester.getBottomLeft(header).dy, .01));
+    expect(tester.widget<TabBar>(tabs).controller!.index, 0);
+    expect(notesTabLabel(tester), '笔记');
+    final videoState = tester.state(find.byType(Video));
+    final videoController = tester.widget<Video>(find.byType(Video)).controller;
+
+    pending.complete([note, anotherNote]);
+    await tester.pumpAndSettle();
+    expect(notesTabLabel(tester), '笔记 2');
+    await tester.tap(find.byKey(const ValueKey('recording-notes-tab-label')));
+    await tester.pumpAndSettle();
+    expect(tester.widget<TabBar>(tabs).controller!.index, 1);
+    expect(find.text(note.text), findsOneWidget);
+    expect(noteRequests, [first.id]);
+    final opens =
+        harness.platforms.map((player) => player.opened.length).toList();
+    for (final player in harness.platforms) {
+      player.seeks.clear();
+    }
+    final seek = find.byKey(const ValueKey('recording-note-seek-first-note'));
+    await tester.ensureVisible(seek);
+    await tester.tap(seek);
+    await tester.pumpAndSettle();
+    expect(
+        harness.platforms.every((player) => player.seeks.length == 1), isTrue);
+    expect(harness.platforms.map((player) => player.seeks.single),
+        everyElement(note.position));
+    await tester.tap(find.text('简介'));
+    await tester.pumpAndSettle();
+    expect(tester.widget<TabBar>(tabs).controller!.index, 0);
+    await tester.drag(find.byType(TabBarView), const Offset(-350, 0));
+    await tester.pumpAndSettle();
+    expect(tester.widget<TabBar>(tabs).controller!.index, 1);
+    await tester.drag(find.byType(TabBarView), const Offset(350, 0));
+    await tester.pumpAndSettle();
+    expect(tester.widget<TabBar>(tabs).controller!.index, 0);
+    expect(noteRequests, [first.id]);
+    expect(playbackRequests, 1);
+    expect(harness.platforms.map((player) => player.opened.length), opens);
+    expect(identical(tester.state(find.byType(Video)), videoState), isTrue);
+    expect(
+        tester.widget<Video>(find.byType(Video)).controller, videoController);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets(
+      'switching lessons clears notes count and rejects a late previous lesson response',
+      (tester) async {
+    prepareNotesPortrait(tester);
+    final harness = _PlaybackHarness();
+    final oldLessonRequest = Completer<List<VodPptSlide>>();
+    final currentLessonRequest = Completer<List<VodPptSlide>>();
+    final requested = <int>[];
+    await tester.pumpWidget(page(
+      harness: harness,
+      load: (lesson) async => playback(lesson),
+      loadNotes: (id) {
+        requested.add(id);
+        if (requested.length == 1) return Future.value([note, anotherNote]);
+        return id == second.id
+            ? oldLessonRequest.future
+            : currentLessonRequest.future;
+      },
+    ));
+    await tester.pumpAndSettle();
+    expect(notesTabLabel(tester), '笔记 2');
+    await tester.tap(find.byKey(const ValueKey('recording-notes-tab-label')));
+    await tester.pumpAndSettle();
+    tester
+        .widget<RecordingVideoControls>(find.byType(RecordingVideoControls))
+        .onLessonSelected!(second);
+    await tester.pump();
+    expect(notesTabLabel(tester), '笔记');
+    expect(find.text(note.text), findsNothing);
+    expect(
+        find.byKey(const ValueKey('recording-notes-loading')), findsOneWidget);
+    await tester.pump(const Duration(milliseconds: 300));
+    tester
+        .widget<RecordingVideoControls>(find.byType(RecordingVideoControls))
+        .onLessonSelected!(first);
+    await tester.pump();
+    expect(notesTabLabel(tester), '笔记');
+    currentLessonRequest.complete([note]);
+    await tester.pumpAndSettle();
+    expect(notesTabLabel(tester), '笔记 1');
+    expect(find.text(note.text), findsOneWidget);
+    oldLessonRequest.complete([anotherNote, anotherNote]);
+    await tester.pumpAndSettle();
+    expect(requested, [first.id, second.id, first.id]);
+    expect(notesTabLabel(tester), '笔记 1');
+    expect(find.text(note.text), findsOneWidget);
+    expect(find.text(anotherNote.text), findsNothing);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('empty and failed notes omit zero count and retry only notes',
+      (tester) async {
+    prepareNotesPortrait(tester);
+    final harness = _PlaybackHarness();
+    final requested = <int>[];
+    var secondAttempts = 0;
+    var playbackRequests = 0;
+    await tester.pumpWidget(page(
+      harness: harness,
+      load: (lesson) async {
+        playbackRequests++;
+        return playback(lesson);
+      },
+      loadNotes: (id) async {
+        requested.add(id);
+        if (id == first.id) return [];
+        if (secondAttempts++ == 0) throw const VodNetworkException();
+        return [note];
+      },
+    ));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('recording-notes-tab-label')));
+    await tester.pumpAndSettle();
+    expect(notesTabLabel(tester), '笔记');
+    expect(find.byKey(const ValueKey('recording-notes-empty')), findsOneWidget);
+    expect(find.text('当前课次暂无 PPT 笔记'), findsOneWidget);
+    expect(find.text('重试'), findsNothing);
+    await tester.drag(find.byKey(const ValueKey('recording-notes-scroll')),
+        const Offset(0, 350));
+    await tester.pumpAndSettle();
+    expect(requested, [first.id, first.id]);
+    tester
+        .widget<RecordingVideoControls>(find.byType(RecordingVideoControls))
+        .onLessonSelected!(second);
+    await tester.pumpAndSettle();
+    expect(notesTabLabel(tester), '笔记');
+    expect(find.byKey(const ValueKey('recording-notes-error')), findsOneWidget);
+    final opens =
+        harness.platforms.map((player) => player.opened.length).toList();
+    expect(find.text('重试'), findsNothing);
+    await tester.drag(find.byKey(const ValueKey('recording-notes-scroll')),
+        const Offset(0, 350));
+    await tester.pumpAndSettle();
+    expect(notesTabLabel(tester), '笔记 1');
+    expect(find.text(note.text), findsOneWidget);
+    await tester.drag(find.byKey(const ValueKey('recording-notes-scroll')),
+        const Offset(0, 350));
+    await tester.pumpAndSettle();
+    expect(notesTabLabel(tester), '笔记 1');
+    expect(requested, [first.id, first.id, second.id, second.id, second.id]);
+    expect(playbackRequests, 2);
+    expect(harness.platforms.map((player) => player.opened.length), opens);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('a pending pull refresh cannot overwrite a new lesson',
+      (tester) async {
+    prepareNotesPortrait(tester);
+    final pendingRefresh = Completer<List<VodPptSlide>>();
+    var firstRequests = 0;
+    await tester.pumpWidget(page(
+      harness: _PlaybackHarness(),
+      load: (lesson) async => playback(lesson),
+      loadNotes: (id) {
+        if (id == second.id) return Future.value([anotherNote]);
+        if (firstRequests++ == 0) return Future.value([note]);
+        return pendingRefresh.future;
+      },
+    ));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('recording-notes-tab-label')));
+    await tester.pumpAndSettle();
+    await tester.drag(find.byKey(const ValueKey('recording-notes-scroll')),
+        const Offset(0, 350));
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 1));
+    expect(firstRequests, 2);
+    expect(find.text(note.text), findsOneWidget);
+    expect(find.byKey(const ValueKey('recording-notes-loading')), findsNothing);
+    expect(find.byType(RefreshProgressIndicator), findsOneWidget);
+    tester
+        .widget<RecordingVideoControls>(find.byType(RecordingVideoControls))
+        .onLessonSelected!(second);
+    await tester.pump(const Duration(milliseconds: 300));
+    pendingRefresh.complete([note]);
+    await tester.pumpAndSettle();
+    expect(find.text(anotherNote.text), findsOneWidget);
+    expect(find.text(note.text), findsNothing);
+    expect(notesTabLabel(tester), '笔记 1');
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('empty notes stay visible while pull refresh is pending',
+      (tester) async {
+    prepareNotesPortrait(tester);
+    final pendingRefresh = Completer<List<VodPptSlide>>();
+    var requests = 0;
+    await tester.pumpWidget(page(
+      harness: _PlaybackHarness(),
+      load: (lesson) async => playback(lesson),
+      loadNotes: (_) =>
+          ++requests == 1 ? Future.value([]) : pendingRefresh.future,
+    ));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('recording-notes-tab-label')));
+    await tester.pumpAndSettle();
+    await tester.drag(find.byKey(const ValueKey('recording-notes-scroll')),
+        const Offset(0, 350));
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 1));
+    expect(requests, 2);
+    expect(find.byKey(const ValueKey('recording-notes-empty')), findsOneWidget);
+    expect(find.byKey(const ValueKey('recording-notes-loading')), findsNothing);
+    expect(find.byType(RefreshProgressIndicator), findsOneWidget);
+    pendingRefresh.complete([note]);
+    await tester.pumpAndSettle();
+    expect(find.text(note.text), findsOneWidget);
+    expect(notesTabLabel(tester), '笔记 1');
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('failed pull refresh retains existing notes and reports failure',
+      (tester) async {
+    prepareNotesPortrait(tester);
+    final pendingRefresh = Completer<List<VodPptSlide>>();
+    var requests = 0;
+    await tester.pumpWidget(page(
+      harness: _PlaybackHarness(),
+      load: (lesson) async => playback(lesson),
+      loadNotes: (_) =>
+          ++requests == 1 ? Future.value([note]) : pendingRefresh.future,
+    ));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('recording-notes-tab-label')));
+    await tester.pumpAndSettle();
+    await tester.drag(find.byKey(const ValueKey('recording-notes-scroll')),
+        const Offset(0, 350));
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 1));
+    expect(requests, 2);
+    expect(find.text(note.text), findsOneWidget);
+    expect(find.byKey(const ValueKey('recording-notes-loading')), findsNothing);
+    expect(notesTabLabel(tester), '笔记 1');
+    pendingRefresh.completeError(const VodNetworkException());
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(find.text(note.text), findsOneWidget);
+    expect(notesTabLabel(tester), '笔记 1');
+    expect(find.text('暂时无法加载这节课的 PPT 笔记，请稍后下拉重试'), findsOneWidget);
+    expect(find.text('重试'), findsNothing);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets(
+      'session recovery automatically reloads notes for the same lesson',
+      (tester) async {
+    prepareNotesPortrait(tester);
+    final harness = _PlaybackHarness();
+    var playbackRequests = 0;
+    var noteRequests = 0;
+    var loginRequests = 0;
+    await tester.pumpWidget(page(
+      harness: harness,
+      load: (lesson) async {
+        if (playbackRequests++ == 0) {
+          throw const VodSessionExpiredException();
+        }
+        return playback(lesson);
+      },
+      loadNotes: (_) async {
+        if (noteRequests++ == 0) {
+          throw const VodSessionExpiredException();
+        }
+        return [note];
+      },
+      login: () async {
+        loginRequests++;
+        return true;
+      },
+    ));
+    await tester.pumpAndSettle();
+    expect(playbackRequests, 1);
+    expect(noteRequests, 1);
+    expect(loginRequests, 0);
+    expect(notesTabLabel(tester), '笔记');
+    await tester.tap(find.byKey(const ValueKey('recording-notes-tab-label')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('recording-notes-error')), findsOneWidget);
+    await tester.tap(find.text('重新登录'));
+    await tester.pumpAndSettle();
+    expect(loginRequests, 1);
+    expect(playbackRequests, 2);
+    expect(noteRequests, 2);
+    expect(notesTabLabel(tester), '笔记 1');
+    expect(find.text(note.text), findsOneWidget);
+    expect(find.byKey(const ValueKey('recording-notes-error')), findsNothing);
+    expect(harness.platforms, hasLength(2));
+    expect(
+        harness.platforms.every((player) => player.opened.length == 1), isTrue);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('leaving the player safely ignores pending notes completion',
+      (tester) async {
+    prepareNotesPortrait(tester);
+    final pending = Completer<List<VodPptSlide>>();
+    final harness = _PlaybackHarness();
+    await tester.pumpWidget(page(
+      harness: harness,
+      load: (lesson) async => playback(lesson),
+      loadNotes: (_) => pending.future,
+    ));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+    await tester.tap(find.byKey(const ValueKey('recording-notes-tab-label')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(
+        find.byKey(const ValueKey('recording-notes-loading')), findsOneWidget);
+    await tester.pumpWidget(const SizedBox.shrink());
+    pending.complete([note]);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(tester.takeException(), isNull);
+  });
 
   for (final live in [false, true]) {
     testWidgets(
@@ -1237,7 +1643,134 @@ void main() {
   });
 
   testWidgets(
-      'classroom filters stay pinned and preserve playback and episode numbers',
+      'episode month headers pin below the toolbar and follow the active group',
+      (tester) async {
+    tester.view.physicalSize = const Size(393, 852);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final lessons = List.generate(
+        30,
+        (index) => VodLesson(
+            id: 200 + index,
+            teachingClassId: 10,
+            name: course.name,
+            isPlayable: true,
+            beginTime: DateTime(2026, 9 + index ~/ 10, 1 + index % 10)));
+    final harness = _PlaybackHarness();
+    await tester.pumpWidget(page(
+        initial: lessons[15],
+        lessons: lessons,
+        harness: harness,
+        load: (lesson) async => playback(lesson)));
+    await tester.pumpAndSettle();
+    final toolbar = find.byKey(const ValueKey('recording-episode-header'));
+    final september = find.byKey(
+        const ValueKey('recording-episode-month:(2026, 9)'),
+        skipOffstage: false);
+    final october = find.byKey(
+        const ValueKey('recording-episode-month:(2026, 10)'),
+        skipOffstage: false);
+    final november = find.byKey(
+        const ValueKey('recording-episode-month:(2026, 11)'),
+        skipOffstage: false);
+    expect(find.descendant(of: november, matching: find.text('2026年11月')),
+        findsOneWidget);
+    expect(tester.getSize(november).height, 34);
+    expect(
+        tester
+            .widgetList<SliverMainAxisGroup>(
+                find.byType(SliverMainAxisGroup, skipOffstage: false))
+            .map((group) => group.key),
+        [
+          const ValueKey('recording-episode-month-group:(2026, 11)'),
+          const ValueKey('recording-episode-month-group:(2026, 10)'),
+          const ValueKey('recording-episode-month-group:(2026, 9)'),
+        ]);
+    final novemberDelegate = tester.widget<SliverPersistentHeader>(find
+        .ancestor(of: november, matching: find.byType(SliverPersistentHeader)));
+    expect(novemberDelegate.pinned, isTrue);
+    expect(
+        find.ancestor(of: november, matching: find.byType(SliverMainAxisGroup)),
+        findsOneWidget);
+
+    await tester.tap(find.byTooltip('跳至底部'));
+    await tester.pumpAndSettle();
+    expect(tester.getTopLeft(september).dy,
+        closeTo(tester.getBottomLeft(toolbar).dy, 1));
+    expect(
+        tester
+            .getBottomLeft(find.byKey(const ValueKey('recording-lesson-200')))
+            .dy,
+        lessThanOrEqualTo(852));
+
+    await tester.tap(find.byTooltip('跳至当前'));
+    await tester.pumpAndSettle();
+    expect(tester.getTopLeft(october).dy,
+        closeTo(tester.getBottomLeft(toolbar).dy, 1));
+    expect(tester.getBottomLeft(november).dy,
+        lessThanOrEqualTo(tester.getTopLeft(october).dy));
+    final current = find.byKey(const ValueKey('recording-lesson-215'));
+    expect(tester.getTopLeft(current).dy,
+        greaterThanOrEqualTo(tester.getBottomLeft(october).dy));
+
+    await tester.tap(find.byTooltip('切换为正序'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('跳至顶部'));
+    await tester.pumpAndSettle();
+    expect(
+        tester
+            .widgetList<SliverMainAxisGroup>(
+                find.byType(SliverMainAxisGroup, skipOffstage: false))
+            .map((group) => group.key),
+        [
+          const ValueKey('recording-episode-month-group:(2026, 9)'),
+          const ValueKey('recording-episode-month-group:(2026, 10)'),
+          const ValueKey('recording-episode-month-group:(2026, 11)'),
+        ]);
+    expect(
+        find.descendant(
+            of: find.byKey(const ValueKey('recording-lesson-215'),
+                skipOffstage: false),
+            matching: find.text('16', skipOffstage: false),
+            skipOffstage: false),
+        findsOneWidget);
+    expect(
+        harness.platforms.every((player) => player.opened.length == 1), isTrue);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('episodes without dates retain a separate month group',
+      (tester) async {
+    final dated = VodLesson(
+        id: 201,
+        teachingClassId: 10,
+        name: course.name,
+        beginTime: DateTime(2026, 10, 1),
+        isPlayable: true);
+    final undated = VodLesson(
+        id: 202, teachingClassId: 10, name: course.name, isPlayable: true);
+    await tester.pumpWidget(page(
+        initial: dated,
+        lessons: [dated, undated],
+        load: (_) async => throw const VodInvalidResponseException()));
+    await tester.pumpAndSettle();
+    await tester.ensureVisible(find
+        .byKey(const ValueKey('recording-lesson-202'), skipOffstage: false));
+    await tester.pumpAndSettle();
+    final unknown = find.byKey(const ValueKey('recording-episode-month:null'),
+        skipOffstage: false);
+    expect(find.descendant(of: unknown, matching: find.text('日期未知')),
+        findsOneWidget);
+    expect(find.byKey(const ValueKey('recording-lesson-201')), findsOneWidget);
+    expect(find.byKey(const ValueKey('recording-lesson-202')), findsOneWidget);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets(
+      'classroom selection stays pinned and numbers episodes within each room',
       (tester) async {
     tester.view.physicalSize = const Size(393, 852);
     tester.view.devicePixelRatio = 1;
@@ -1262,34 +1795,40 @@ void main() {
     final header = find.byKey(const ValueKey('recording-episode-header'));
     final classrooms = find.byKey(const ValueKey('recording-classroom-filter'));
     final roomB = find.byKey(const ValueKey('recording-classroom:B202'));
-    expect(tester.widget<FilterChip>(roomB).selected, isTrue);
-    await tester.tap(roomB);
+    expect(tester.widget<ChoiceChip>(roomB).selected, isTrue);
+    final roomA = find.byKey(const ValueKey('recording-classroom:A101'));
+    expect(tester.widget<ChoiceChip>(roomA).selected, isFalse);
+    await tester.tap(roomA);
     await tester.pumpAndSettle();
-    expect(tester.widget<FilterChip>(roomB).selected, isFalse);
+    expect(tester.widget<ChoiceChip>(roomB).selected, isFalse);
+    expect(tester.widget<ChoiceChip>(roomA).selected, isTrue);
     expect(find.byKey(const ValueKey('recording-lesson-215')), findsNothing);
     expect(
         find.descendant(
             of: find.byKey(const ValueKey('recording-lesson-214')),
-            matching: find.text('15')),
+            matching: find.text('8')),
         findsOneWidget);
     expect(
         harness.platforms.every((player) => player.opened.length == 1), isTrue);
-    await tester.tap(find.byKey(const ValueKey('recording-classroom:A101')));
+    await tester.tap(roomA);
     await tester.pumpAndSettle();
-    expect(find.text('没有符合教室筛选的课次'), findsOneWidget);
+    expect(tester.widget<ChoiceChip>(roomA).selected, isTrue);
+    expect(find.byKey(const ValueKey('recording-lesson-214')), findsOneWidget);
+    expect(find.text('没有符合教室筛选的课次'), findsNothing);
     await tester.tap(find.byTooltip('跳至当前'));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 300));
-    expect(find.text('当前课次不在教室筛选结果中'), findsOneWidget);
-    await tester.tap(find.text('清除筛选'));
+    expect(find.text('当前课次不在教室筛选结果中'), findsNothing);
     await tester.pumpAndSettle();
     expect(find.byKey(const ValueKey('recording-lesson-215')), findsOneWidget);
+    expect(tester.widget<ChoiceChip>(roomB).selected, isTrue);
+    expect(tester.widget<ChoiceChip>(roomA).selected, isFalse);
     final list = find.byKey(const ValueKey('course-player-episodes'));
     await tester.drag(list, const Offset(0, -700));
     await tester.pumpAndSettle();
     final pinned = tester.getTopLeft(header).dy;
-    final videoHeader = find.byKey(const ValueKey('recording-player-header'));
-    expect(pinned, closeTo(tester.getBottomLeft(videoHeader).dy, .01));
+    final playerTabs = find.byKey(const ValueKey('recording-player-tabs'));
+    expect(pinned, closeTo(tester.getBottomLeft(playerTabs).dy, .01));
     final surface = tester.widget<Material>(
         find.byKey(const ValueKey('recording-scroll-surface')));
     expect(surface.color, Theme.of(tester.element(header)).colorScheme.surface);
@@ -1303,7 +1842,7 @@ void main() {
     await tester.drag(list, const Offset(0, -200));
     await tester.pumpAndSettle();
     expect(tester.getTopLeft(header).dy,
-        closeTo(tester.getBottomLeft(videoHeader).dy, .01));
+        closeTo(tester.getBottomLeft(playerTabs).dy, .01));
     expect(
         harness.platforms.every((player) => player.opened.length == 1), isTrue);
     expect(tester.takeException(), isNull);
@@ -1354,8 +1893,12 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.byTooltip('选集'));
     await tester.pumpAndSettle();
-    expect(find.byKey(const ValueKey('fullscreen-lesson-202')), findsNothing);
-    expect(find.byKey(const ValueKey('fullscreen-lesson-203')), findsOneWidget);
+    final selectedEpisode = find.byKey(const ValueKey('fullscreen-lesson-202'));
+    expect(selectedEpisode, findsOneWidget);
+    expect(find.byKey(const ValueKey('fullscreen-lesson-201')), findsNothing);
+    expect(find.byKey(const ValueKey('fullscreen-lesson-203')), findsNothing);
+    expect(find.descendant(of: selectedEpisode, matching: find.text('1')),
+        findsOneWidget);
     expect(
         find.byKey(const ValueKey('recording-classroom-filter')), findsNothing);
     await tester.tap(find.byTooltip('切换为正序'));
@@ -1368,20 +1911,21 @@ void main() {
     expect(find.byTooltip('切换为倒序'), findsOneWidget);
     expect(
         tester
-            .widget<FilterChip>(
+            .widget<ChoiceChip>(
                 find.byKey(const ValueKey('recording-classroom:B202')))
             .selected,
-        isFalse);
-    await tester.tap(find.byKey(const ValueKey('recording-classroom:B202')));
+        isTrue);
+    await tester.tap(find.byKey(const ValueKey('recording-classroom:A101')));
     await tester.pumpAndSettle();
-    expect(find.byKey(const ValueKey('recording-lesson-202')), findsOneWidget);
+    expect(find.byKey(const ValueKey('recording-lesson-201')), findsOneWidget);
+    expect(find.byKey(const ValueKey('recording-lesson-202')), findsNothing);
     expect(
         harness.platforms.every((player) => player.opened.length == 1), isTrue);
     expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox.shrink());
   });
 
-  testWidgets('a single classroom is selected and cannot be toggled',
+  testWidgets('a single classroom hides the classroom selection row',
       (tester) async {
     const lesson = VodLesson(
         id: 201,
@@ -1396,11 +1940,65 @@ void main() {
         harness: harness,
         load: (lesson) async => playback(lesson)));
     await tester.pumpAndSettle();
-    final chip = tester.widget<FilterChip>(
-        find.byKey(const ValueKey('recording-classroom:A101')));
-    expect(chip.selected, isTrue);
-    expect(chip.onSelected, isNull);
+    expect(
+        find.byKey(const ValueKey('recording-classroom-filter')), findsNothing);
+    expect(
+        find.byKey(const ValueKey('recording-classroom:A101')), findsNothing);
     expect(find.byKey(const ValueKey('recording-lesson-201')), findsOneWidget);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets(
+      'classroom selection updates the course overview without playback',
+      (tester) async {
+    final roomA = VodLesson(
+      id: 201,
+      teachingClassId: 10,
+      name: course.name,
+      classroom: 'A101',
+      isPlayable: true,
+      beginTime: DateTime(2026, 9, 7),
+      sectionLabel: '第1节',
+    );
+    final roomB = VodLesson(
+      id: 202,
+      teachingClassId: 10,
+      name: course.name,
+      classroom: 'B202',
+      isPlayable: true,
+      beginTime: DateTime(2026, 9, 9),
+      sectionLabel: '第4节',
+    );
+    final harness = _PlaybackHarness();
+    final requested = <int>[];
+    await tester.pumpWidget(page(
+        initial: roomA,
+        lessons: [roomA, roomB],
+        harness: harness,
+        load: (lesson) async {
+          requested.add(lesson.id);
+          return playback(lesson);
+        }));
+    await tester.pumpAndSettle();
+    RecordingCourseOverview overview() => tester
+        .widget<RecordingCourseOverview>(find.byType(RecordingCourseOverview));
+    expect(overview().days.map((day) => day.weekday), [DateTime.monday]);
+    expect(overview().days.single.sections, {1});
+
+    await tester.tap(find.byKey(const ValueKey('recording-classroom:B202')));
+    await tester.pumpAndSettle();
+    expect(overview().days.map((day) => day.weekday), [DateTime.wednesday]);
+    expect(overview().days.single.sections, {4});
+    final controls = tester
+        .widget<RecordingVideoControls>(find.byType(RecordingVideoControls));
+    expect(controls.episodeLessons!.map((lesson) => lesson.id), [202]);
+
+    await tester.tap(find.byKey(const ValueKey('recording-classroom:A101')));
+    await tester.pumpAndSettle();
+    expect(overview().days.map((day) => day.weekday), [DateTime.monday]);
+    expect(overview().days.single.sections, {1});
+    expect(requested, [201]);
+    expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox.shrink());
   });
 
@@ -2509,6 +3107,154 @@ void main() {
     await tester.pump();
   });
 
+  for (final preview in [false, true]) {
+    testWidgets(
+        '${preview ? 'preview' : 'course'} uses the preloaded catalog until a manual refresh',
+        (tester) async {
+      final regular = _PendingCatalogRepository();
+      final search = _PendingPreviewRepository();
+      regular.refreshCatalog = Future.value([first, second]);
+      search.refreshCatalog = Future.value([first, second]);
+      final repository = preview ? search : regular;
+      final requested = <int>[];
+      final harness = _PlaybackHarness();
+      addTearDown(regular.dispose);
+      addTearDown(search.dispose);
+      await tester.pumpWidget(MaterialApp(
+        theme: ShuYoThemes.all.first.themeData(),
+        home: RecordingPlayerPage(
+          course: course,
+          lessons: [first, second],
+          initialLesson: first,
+          loadCourseCatalog: !preview,
+          loadPreviewCatalog: preview,
+          skipInitialCatalogLoad: true,
+          repository: repository,
+          loadPlayback: (lesson) async {
+            requested.add(lesson.id);
+            return playback(lesson);
+          },
+          playerFactory: harness.createPlayer,
+          videoControllerFactory: harness.createController,
+        ),
+      ));
+      await tester.pumpAndSettle();
+      expect(regular.catalogRequests, 0);
+      expect(search.requests, isEmpty);
+      expect(requested, [first.id]);
+      expect(
+          find.byKey(const ValueKey('recording-lesson-102')), findsOneWidget);
+      await tester
+          .widget<RefreshIndicator>(find.byType(RefreshIndicator))
+          .onRefresh();
+      await tester.pumpAndSettle();
+      if (preview) {
+        expect(search.requests.single.forceRefresh, isTrue);
+      } else {
+        expect(regular.catalogRequests, 1);
+      }
+      expect(requested, [first.id]);
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+    });
+  }
+
+  testWidgets('preloaded catalog selects a valid lesson without an initial one',
+      (tester) async {
+    final repository = _PendingCatalogRepository();
+    final requested = <int>[];
+    final harness = _PlaybackHarness();
+    addTearDown(repository.dispose);
+    await tester.pumpWidget(MaterialApp(
+      home: RecordingPlayerPage(
+        course: course,
+        lessons: [unrelated, first, second],
+        skipInitialCatalogLoad: true,
+        repository: repository,
+        loadPlayback: (lesson) async {
+          requested.add(lesson.id);
+          return playback(lesson);
+        },
+        playerFactory: harness.createPlayer,
+        videoControllerFactory: harness.createController,
+      ),
+    ));
+    await tester.pumpAndSettle();
+    expect(repository.catalogRequests, 0);
+    expect(requested, [second.id]);
+    expect(harness.platforms.first.opened, hasLength(1));
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('empty preloaded catalog shows empty state and permits refresh',
+      (tester) async {
+    final repository = _PendingCatalogRepository();
+    repository.refreshCatalog = Future.value([first]);
+    final harness = _PlaybackHarness();
+    addTearDown(repository.dispose);
+    await tester.pumpWidget(MaterialApp(
+      home: RecordingPlayerPage(
+        course: course,
+        skipInitialCatalogLoad: true,
+        repository: repository,
+        loadPlayback: (lesson) async => playback(lesson),
+        playerFactory: harness.createPlayer,
+        videoControllerFactory: harness.createController,
+      ),
+    ));
+    await tester.pumpAndSettle();
+    expect(repository.catalogRequests, 0);
+    expect(find.text('暂无可观看的视频'), findsOneWidget);
+    await tester.tap(find.text('刷新选集'));
+    await tester.pumpAndSettle();
+    expect(repository.catalogRequests, 1);
+    expect(harness.platforms.first.opened, hasLength(1));
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('preloaded search playback can recover an expired session',
+      (tester) async {
+    final repository = _PendingPreviewRepository();
+    repository.refreshCatalog = Future.value([first, second]);
+    final harness = _PlaybackHarness();
+    var attempts = 0;
+    var recoveries = 0;
+    addTearDown(repository.dispose);
+    await tester.pumpWidget(MaterialApp(
+      home: RecordingPlayerPage(
+        course: course,
+        initialLesson: first,
+        lessons: [first],
+        loadCourseCatalog: false,
+        loadPreviewCatalog: true,
+        skipInitialCatalogLoad: true,
+        repository: repository,
+        onSessionExpired: () async {
+          recoveries++;
+          return true;
+        },
+        loadPlayback: (lesson) async {
+          if (++attempts == 1) throw const VodSessionExpiredException();
+          return playback(lesson);
+        },
+        playerFactory: harness.createPlayer,
+        videoControllerFactory: harness.createController,
+      ),
+    ));
+    await tester.pumpAndSettle();
+    expect(repository.requests, isEmpty);
+    await tester.tap(find.text('重新登录'));
+    await tester.pumpAndSettle();
+    expect(recoveries, 1);
+    expect(attempts, 2);
+    expect(repository.requests.single.forceRefresh, isTrue);
+    expect(harness.platforms.first.opened, hasLength(1));
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
   for (final denied in [false, true]) {
     testWidgets(
         'search result skips the ordinary catalog and ${denied ? 'preserves playback denial' : 'plays its initial lesson'}',
@@ -2553,8 +3299,120 @@ void main() {
     });
   }
 
+  testWidgets('preview without an initial lesson selects and plays a lesson',
+      (tester) async {
+    final repository = _PendingPreviewRepository();
+    final harness = _PlaybackHarness();
+    addTearDown(repository.dispose);
+    await tester.pumpWidget(MaterialApp(
+      theme: ShuYoThemes.all.first.themeData(),
+      home: RecordingPlayerPage(
+        course: course,
+        loadCourseCatalog: false,
+        loadPreviewCatalog: true,
+        repository: repository,
+        playerFactory: harness.createPlayer,
+        videoControllerFactory: harness.createController,
+      ),
+    ));
+    await tester.pump();
+    expect(repository.requested, isEmpty);
+    expect(repository.warmed, isEmpty);
+    expect(find.byType(RecordingPlaybackLoading), findsOneWidget);
+    repository.catalog.complete([first, second]);
+    await tester.pump();
+    await tester.pump();
+    expect(repository.requested, [102]);
+    expect(repository.warmed.single.map((lesson) => lesson.id), [101, 102]);
+    repository.playback[102]!.complete(playback(second));
+    await tester.pumpAndSettle();
+    expect(harness.platforms.first.opened, hasLength(1));
+    expect(find.byKey(const ValueKey('recording-lesson-101')), findsOneWidget);
+    expect(find.byKey(const ValueKey('recording-lesson-102')), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('empty preview stops loading and permits a refresh',
+      (tester) async {
+    final repository = _PendingPreviewRepository();
+    addTearDown(repository.dispose);
+    await tester.pumpWidget(MaterialApp(
+      theme: ShuYoThemes.all.first.themeData(),
+      home: RecordingPlayerPage(
+        course: course,
+        loadCourseCatalog: false,
+        loadPreviewCatalog: true,
+        repository: repository,
+      ),
+    ));
+    repository.catalog.complete([]);
+    await tester.pumpAndSettle();
+    expect(find.byType(RecordingPlaybackLoading), findsNothing);
+    expect(find.text('暂无可观看的视频'), findsOneWidget);
+    expect(find.text('刷新选集'), findsOneWidget);
+    repository.refreshCatalog = Future.value([first]);
+    await tester.tap(find.text('刷新选集'));
+    await tester.pump();
+    await tester.pump();
+    expect(repository.requests.last.forceRefresh, isTrue);
+    expect(repository.requested, [101]);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('preview failure without a selection stops loading and retries',
+      (tester) async {
+    final repository = _PendingPreviewRepository();
+    addTearDown(repository.dispose);
+    await tester.pumpWidget(MaterialApp(
+      theme: ShuYoThemes.all.first.themeData(),
+      home: RecordingPlayerPage(
+        course: course,
+        loadCourseCatalog: false,
+        loadPreviewCatalog: true,
+        repository: repository,
+      ),
+    ));
+    repository.catalog.completeError(const VodNetworkException());
+    await tester.pumpAndSettle();
+    expect(find.byType(RecordingPlaybackLoading), findsNothing);
+    expect(find.text('暂时无法连接录播平台，请检查网络后重试。'), findsOneWidget);
+    repository.refreshCatalog = Future.value([first]);
+    await tester.tap(find.text('重试'));
+    await tester.pump();
+    await tester.pump();
+    expect(repository.requests.last.forceRefresh, isTrue);
+    expect(repository.requested, [101]);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('preview can complete background warming after the route closes',
+      (tester) async {
+    final repository = _PendingPreviewRepository();
+    addTearDown(repository.dispose);
+    await tester.pumpWidget(MaterialApp(
+      theme: ShuYoThemes.all.first.themeData(),
+      home: RecordingPlayerPage(
+        course: course,
+        loadCourseCatalog: false,
+        loadPreviewCatalog: true,
+        repository: repository,
+      ),
+    ));
+    await tester.pump();
+    await tester.pumpWidget(const SizedBox.shrink());
+    repository.catalog.complete([first, second]);
+    await tester.pump();
+    expect(repository.warmed.single.map((lesson) => lesson.id), [101, 102]);
+    expect(repository.requested, isEmpty);
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('preview merges seed and current selection without reopening',
       (tester) async {
+    tester.view.physicalSize = const Size(800, 1400);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
     const statusUnknown = VodLesson(
       id: 105,
       teachingClassId: 10,
@@ -2590,6 +3448,9 @@ void main() {
     expect(find.byKey(const ValueKey('recording-catalog-progress')),
         findsOneWidget);
     expect(find.byType(RefreshIndicator), findsOneWidget);
+    await tester
+        .ensureVisible(find.byKey(const ValueKey('recording-lesson-102')));
+    await tester.pump();
     await tester.tap(find.byKey(const ValueKey('recording-lesson-102')));
     await tester.pump();
     expect(repository.requested, [101, 102]);
@@ -2599,8 +3460,23 @@ void main() {
         find.byKey(const ValueKey('recording-catalog-progress')), findsNothing);
     expect(find.text('选集'), findsOneWidget);
     expect(find.text('搜索课次'), findsNothing);
-    expect(find.byKey(const ValueKey('recording-lesson-101')), findsOneWidget);
+    expect(find.byKey(const ValueKey('recording-lesson-101')), findsNothing);
     expect(find.byKey(const ValueKey('recording-lesson-102')), findsOneWidget);
+    expect(find.byKey(const ValueKey('recording-lesson-105')), findsNothing);
+    final detail = tester
+        .widget<ListTile>(find.byKey(const ValueKey('recording-lesson-102')))
+        .subtitle! as Text;
+    expect(detail.textSpan!.toPlainText(), contains('B202'));
+    expect(
+        tester
+            .widget<ChoiceChip>(
+                find.byKey(const ValueKey('recording-classroom:B202')))
+            .selected,
+        isTrue);
+    await tester.tap(find.byKey(const ValueKey('recording-classroom:')));
+    await tester.pump();
+    expect(find.byKey(const ValueKey('recording-lesson-101')), findsOneWidget);
+    expect(find.byKey(const ValueKey('recording-lesson-102')), findsNothing);
     expect(find.byKey(const ValueKey('recording-lesson-105')), findsOneWidget);
     expect(
         tester
@@ -2608,15 +3484,14 @@ void main() {
                 find.byKey(const ValueKey('recording-lesson-105')))
             .enabled,
         isTrue);
-    final detail = tester
-        .widget<ListTile>(find.byKey(const ValueKey('recording-lesson-102')))
-        .subtitle! as Text;
-    expect(detail.textSpan!.toPlainText(), contains('B202'));
     expect(repository.requested, [101, 102]);
     repository.playback[101]!.complete(playback(first));
     repository.playback[102]!.complete(playback(second));
     await tester.pumpAndSettle();
     expect(harness.platforms.first.opened, hasLength(1));
+    expect(find.byKey(const ValueKey('recording-lesson-102')), findsNothing);
+    await tester.tap(find.byKey(const ValueKey('recording-classroom:B202')));
+    await tester.pumpAndSettle();
     expect(
         tester
             .widget<ListTile>(
@@ -2630,8 +3505,13 @@ void main() {
     await tester.pumpAndSettle();
     expect(repository.requests.last.forceRefresh, isTrue);
     expect(repository.requested, [101, 102]);
-    expect(find.byKey(const ValueKey('recording-lesson-101')), findsOneWidget);
+    expect(find.byKey(const ValueKey('recording-lesson-101')), findsNothing);
     expect(find.byKey(const ValueKey('recording-lesson-102')), findsOneWidget);
+    await tester.tap(find.byKey(const ValueKey('recording-classroom:')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('recording-lesson-101')), findsOneWidget);
+    expect(find.byKey(const ValueKey('recording-lesson-105')), findsOneWidget);
+    expect(find.byKey(const ValueKey('recording-lesson-102')), findsNothing);
     expect(harness.platforms.first.opened, hasLength(1));
     expect(tester.takeException(), isNull);
   });
@@ -2939,7 +3819,15 @@ void main() {
     addTearDown(repository.dispose);
     await tester.pumpWidget(MaterialApp(
       theme: ShuYoThemes.all.first.themeData(),
-      home: RecordingPlayerPage(course: course, repository: repository),
+      home: RecordingPlayerPage(
+        course: course,
+        term: const VodTerm(
+            id: 7,
+            name: '2026-2027学年第1学期',
+            academicYear: '2026-2027',
+            termNumber: 1),
+        repository: repository,
+      ),
     ));
     await tester.pumpAndSettle();
 
@@ -2954,6 +3842,8 @@ void main() {
         lessThan(tester.widget<Text>(name).style!.fontSize!));
     expect(tester.widget<Text>(name).style!.fontSize, 19);
     expect(tester.widget<Text>(code).style!.fontSize, 14);
+    expect(find.descendant(of: label, matching: find.text('26-27 秋季')),
+        findsNothing);
     expect(find.text('A101/B202'), findsNothing);
     final banner = find.byKey(const ValueKey('recording-course-banner'));
     final overview = find.descendant(
@@ -2977,7 +3867,15 @@ void main() {
             .widget<RecordingCourseOverview>(overview)
             .days
             .map((day) => day.weekday),
-        [2, 4]);
+        [4]);
+    expect(tester.widget<RecordingCourseOverview>(overview).term?.id, 7);
+    expect(
+        tester
+            .widget<Text>(
+                find.byKey(const ValueKey('recording-course-overview-term')))
+            .textSpan!
+            .toPlainText(),
+        '2026-2027 学年 秋季学期');
     expect(
         find.ancestor(
             of: overview, matching: find.byType(SliverPersistentHeader)),
@@ -3060,6 +3958,30 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets('a course with unknown recording status requests playback',
+      (tester) async {
+    const unknown = VodLesson(
+        id: 110, teachingClassId: 10, name: '状态未知', isPlayable: false);
+    final repository = _CatalogRepository([first, unknown]);
+    addTearDown(repository.dispose);
+    await tester.pumpWidget(MaterialApp(
+      theme: ShuYoThemes.all.first.themeData(),
+      home: RecordingPlayerPage(course: course, repository: repository),
+    ));
+    await tester.pumpAndSettle();
+    expect(repository.requested, [first]);
+    final row =
+        find.byKey(const ValueKey('recording-lesson-110'), skipOffstage: false);
+    expect(tester.widget<ListTile>(row).enabled, isTrue);
+    expect(tester.widget<ListTile>(row).onTap, isNotNull);
+    await tester.ensureVisible(row);
+    await tester.pumpAndSettle();
+    await tester.tap(row);
+    await tester.pump();
+    expect(repository.requested, [first, unknown]);
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('a generated recording is selected before a newer candidate',
       (tester) async {
     final pending = VodLesson(
@@ -3096,9 +4018,9 @@ void main() {
     expect(find.text('无法获取这节录播的播放地址，请稍后重试。'), findsOneWidget);
     expect(find.textContaining('private-value'), findsNothing);
     expect(find.text('选集'), findsOneWidget);
-    await tester.scrollUntilVisible(
-        find.byKey(const ValueKey('recording-lesson-103')), 100,
-        scrollable: find.byType(Scrollable).last);
+    await tester.ensureVisible(find
+        .byKey(const ValueKey('recording-lesson-103'), skipOffstage: false));
+    await tester.pump();
     expect(
         tester
             .widget<ListTile>(
@@ -3107,6 +4029,8 @@ void main() {
         isTrue);
     expect(find.byKey(const ValueKey('recording-lesson-104')), findsNothing);
 
+    await tester.ensureVisible(find.text('重试'));
+    await tester.pump();
     await tester.tap(find.text('重试'));
     await tester.pump();
     expect(calls, 2);

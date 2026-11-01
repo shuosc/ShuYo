@@ -96,7 +96,8 @@ void main() {
           {bool selected = false,
           bool dark = false,
           double scale = 1,
-          String themeId = ShuYoThemes.defaultId}) =>
+          String themeId = ShuYoThemes.defaultId,
+          VoidCallback? onTap}) =>
       MaterialApp(
         theme: ShuYoThemes.byId(themeId).themeData(),
         home: Scaffold(
@@ -108,7 +109,7 @@ void main() {
               number: 26,
               selected: selected,
               dark: dark,
-              onTap: lesson.canPlay ? () {} : null,
+              onTap: lesson.canPlay ? onTap ?? () {} : null,
             ),
           ),
         ),
@@ -313,13 +314,6 @@ void main() {
     expect(tester.widget<ListTile>(find.byKey(const ValueKey('episode'))).onTap,
         isNotNull);
     expect(find.text('C502'), findsOneWidget);
-    const unknown =
-        VodLesson(id: 5, teachingClassId: 10, name: '课程', isPlayable: false);
-    await tester.pumpWidget(buildTile(unknown));
-    expect(find.text('查看录播'), findsOneWidget);
-    expect(find.text('暂不可看'), findsNothing);
-    expect(tester.widget<ListTile>(find.byKey(const ValueKey('episode'))).onTap,
-        isNotNull);
     final live = VodLesson(
         id: 3, teachingClassId: 10, name: '直播', isPlayable: true, isLive: true);
     await tester.pumpWidget(buildTile(live, selected: true));
@@ -331,6 +325,31 @@ void main() {
             .isLive,
         isTrue);
     await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets(
+      'unknown recording status is hidden but the episode can be opened',
+      (tester) async {
+    const lesson = VodLesson(
+      id: 5,
+      teachingClassId: 10,
+      name: '课程',
+      isPlayable: false,
+      classroom: 'C502',
+    );
+    var taps = 0;
+    for (final dark in [false, true]) {
+      await tester
+          .pumpWidget(buildTile(lesson, dark: dark, onTap: () => taps++));
+      expect(find.text('查看录播'), findsNothing);
+      expect(find.text('暂不可看'), findsNothing);
+      expect(find.text('C502'), findsOneWidget);
+      final tile = find.byKey(const ValueKey('episode'));
+      expect(tester.widget<ListTile>(tile).enabled, isTrue);
+      await tester.tap(tile);
+      await tester.pump();
+    }
+    expect(taps, 2);
   });
 
   testWidgets('narrow large text and missing or cross-day times stay safe',

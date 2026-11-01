@@ -8,6 +8,7 @@ import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 
 import '../../data/models/course_recording.dart';
+import '../../data/models/vod_ppt.dart';
 import '../../data/repositories/vod_repository.dart';
 import '../../data/services/vod_api_client.dart';
 import '../../data/services/vod_live_stream_proxy.dart';
@@ -23,6 +24,7 @@ import 'recording_player_menu.dart';
 import 'recording_episode_tile.dart';
 import 'recording_episode_sort_icon.dart';
 import 'recording_playback_status.dart';
+import 'recording_notes_panel.dart';
 import 'recording_player_cache.dart';
 import 'recording_player_layout.dart';
 import 'recording_player_system_ui.dart';
@@ -41,11 +43,14 @@ class RecordingPlayerPage extends StatefulWidget {
   const RecordingPlayerPage({
     super.key,
     required this.course,
+    this.term,
     this.lessons = const [],
     this.initialLesson,
     this.loadCourseCatalog = true,
     this.loadPreviewCatalog = false,
+    this.skipInitialCatalogLoad = false,
     this.loadPlayback,
+    this.loadNotes,
     this.repository,
     this.onSessionExpired,
     this.playerFactory,
@@ -53,6 +58,7 @@ class RecordingPlayerPage extends StatefulWidget {
   });
 
   final VodCourse course;
+  final VodTerm? term;
   final List<VodLesson> lessons;
   final VodLesson? initialLesson;
 
@@ -61,7 +67,11 @@ class RecordingPlayerPage extends StatefulWidget {
 
   /// Load a preview catalog for a lesson opened from search.
   final bool loadPreviewCatalog;
+
+  /// Use the supplied catalog on entry; explicit refreshes are still allowed.
+  final bool skipInitialCatalogLoad;
   final Future<VodPlayback> Function(VodLesson)? loadPlayback;
+  final Future<List<VodPptSlide>> Function(int courseId)? loadNotes;
   final VodRepository? repository;
   final Future<bool> Function()? onSessionExpired;
   @visibleForTesting
@@ -76,11 +86,32 @@ class RecordingPlayerPage extends StatefulWidget {
 enum _PlaybackFailure { session, permission, network, unavailable, media }
 
 class _RecordingPlayerPageState extends State<RecordingPlayerPage>
-    with WidgetsBindingObserver {
+    with WidgetsBindingObserver, SingleTickerProviderStateMixin {
   bool get _shouldLoadCatalog =>
       widget.loadCourseCatalog || widget.loadPreviewCatalog;
+  VodTerm? get _courseTerm =>
+      widget.term?.id == widget.course.termId ? widget.term : null;
+
+  String? get _compactTermLabel {
+    final term = _courseTerm;
+    if (term == null) return null;
+    final year = term.academicYear.isEmpty
+        ? ''
+        : term.academicYearLabel.replaceFirst('学年', '');
+    return [
+      if (year.isNotEmpty) year,
+      term.seasonLabel.replaceFirst('学期', ''),
+    ].join(' ');
+  }
+
   final _videoKey = GlobalKey<VideoState>();
   final _controlsRevision = ValueNotifier(0);
+  late final TabController _tabController;
+  List<VodPptSlide> _notes = const [];
+  int? _notesLessonId;
+  int _notesRevision = 0;
+  bool _notesLoading = false;
+  String? _notesError;
   RecordingPlayerPreferences _playerPreferences =
       const RecordingPlayerPreferences();
   Future<void> _preferencesQueue = Future<void>.value();
@@ -104,7 +135,7 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
   bool _catalogLoading = false;
   bool _catalogPullRefreshing = false;
   bool _episodesNewestFirst = true;
-  final _excludedClassrooms = <String>{};
+  String? _selectedClassroom;
   final _episodeKeys = <int, GlobalKey>{};
   int _catalogRevision = 0;
   VodPlayback? _playback;
@@ -224,11 +255,7 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
 
   List<VodLesson> get _lessons => _catalog
       .where((lesson) =>
-          (widget.loadPreviewCatalog ||
-              lesson.isPlayable ||
-              lesson.isGenerating ||
-              lesson.isLive ||
-              lesson.isListed) &&
+          (lesson.isLive || lesson.canPlay) &&
           lesson.teachingClassId == widget.course.teachingClassId)
       .toList(growable: false)
     ..sort((first, second) {
@@ -248,46 +275,80 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
     return rooms;
   }
 
-  List<VodLesson> get _filteredLessons => _classrooms.length < 2
-      ? _lessons
-      : _lessons
+  VodLesson get _catalogSelection =>
+      _catalog
           .where((lesson) =>
-              !_excludedClassrooms.contains(lesson.classroom.trim()))
-          .toList();
+              lesson.id == _lesson.id && lesson.isLive == _lesson.isLive)
+          .firstOrNull ??
+      _lesson;
 
-  void _setClassroom(String classroom, bool selected) => _publish(() {
-        if (selected) {
-          _excludedClassrooms.remove(classroom);
-        } else {
-          _excludedClassrooms.add(classroom);
-        }
-      });
+  String? get _activeClassroom {
+    final classrooms = _classrooms;
+    if (classrooms.contains(_selectedClassroom)) return _selectedClassroom;
+    final current = _catalogSelection.classroom.trim();
+    return classrooms.contains(current) ? current : classrooms.firstOrNull;
+  }
+
+  List<VodLesson> get _filteredLessons {
+    final classroom = _activeClassroom;
+    return _lessons
+        .where((lesson) => lesson.classroom.trim() == classroom)
+        .toList(growable: false);
+  }
+
+  void _setClassroom(String classroom) {
+    if (classroom == _activeClassroom) return;
+    _publish(() => _selectedClassroom = classroom);
+  }
+
+  void _showCurrentClassroom() =>
+      _publish(() => _selectedClassroom = _catalogSelection.classroom.trim());
 
   Widget _classroomFilter() => RecordingClassroomFilter(
         classrooms: _classrooms,
-        excluded: _excludedClassrooms,
+        selected: _activeClassroom,
         onChanged: _setClassroom,
       );
 
   @override
   void initState() {
     super.initState();
+    _tabController = TabController(length: 2, vsync: this);
     WidgetsBinding.instance.addObserver(this);
     unawaited(_loadPlayerPreferences());
     if (_isMobile) _systemUi.lockPortrait();
-    final initial = widget.initialLesson ?? widget.course.liveLesson;
+    var initial = widget.initialLesson ?? widget.course.liveLesson;
+    if (widget.skipInitialCatalogLoad &&
+        (initial == null ||
+            !initial.canPlay ||
+            initial.id <= 0 ||
+            initial.teachingClassId != widget.course.teachingClassId)) {
+      final candidates = _lessons.where((lesson) => lesson.id > 0).toList();
+      initial =
+          candidates.where((lesson) => lesson.isLiveAvailable).firstOrNull ??
+              candidates
+                  .where((lesson) => !lesson.isLive && lesson.isPlayable)
+                  .firstOrNull ??
+              candidates.where((lesson) => lesson.canPlay).firstOrNull;
+    }
     if (initial != null &&
         initial.canPlay &&
+        initial.id > 0 &&
         initial.teachingClassId == widget.course.teachingClassId) {
-      _lesson = initial;
+      final selected = initial;
+      _lesson = selected;
       if (!_catalog.any((lesson) =>
-          lesson.id == initial.id && lesson.isLive == initial.isLive)) {
-        _catalog = [initial, ..._catalog];
+          lesson.id == selected.id && lesson.isLive == selected.isLive)) {
+        _catalog = [selected, ..._catalog];
       }
-      unawaited(_loadLesson(initial));
-      if (widget.repository != null && _shouldLoadCatalog) {
+      unawaited(_loadLesson(selected));
+      if (widget.repository != null &&
+          _shouldLoadCatalog &&
+          !widget.skipInitialCatalogLoad) {
         unawaited(_loadCatalog());
       }
+    } else if (widget.skipInitialCatalogLoad) {
+      _loading = false;
     } else {
       unawaited(widget.repository == null || !_shouldLoadCatalog
           ? _loadLesson(_lesson)
@@ -311,7 +372,12 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
     });
     try {
       final lessons = widget.loadPreviewCatalog
-          ? await repository.loadPreviewLessons(widget.course,
+          ? await repository.loadAndWarmSearchLessons(
+              widget.course,
+              [
+                ...widget.lessons,
+                if (_lesson.id > 0) _lesson,
+              ],
               forceRefresh: forceRefresh)
           : await repository.loadCourseLessons(widget.course,
               forceRefresh: forceRefresh);
@@ -323,7 +389,7 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
           final merged = <(int, bool), VodLesson>{
             for (final lesson in widget.lessons)
               (lesson.id, lesson.isLive): lesson,
-            if (_lesson.id > 0) (_lesson.id, _lesson.isLive): _lesson,
+            if (_lesson.id > 0) (_lesson.id, _lesson.isLive): _catalogSelection,
             for (final lesson in lessons) (lesson.id, lesson.isLive): lesson,
           };
           _catalog = merged.values.toList();
@@ -338,7 +404,9 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
         }
         _catalogLoading = false;
       });
-      if (widget.loadPreviewCatalog) return;
+      // Preview refreshes must not interrupt an existing playback. A course
+      // opened without an initial lesson still needs its first selection.
+      if (widget.loadPreviewCatalog && _validLesson(_lesson)) return;
       final ordered = _lessons;
       final current = ordered
           .where((lesson) =>
@@ -369,7 +437,7 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
       }
     } on Object catch (error) {
       if (!mounted || revision != _catalogRevision) return;
-      if (widget.loadPreviewCatalog ||
+      if (widget.loadPreviewCatalog && _validLesson(_lesson) ||
           ((_playback != null || _loading && _lesson.canPlay) &&
               error is! VodSessionExpiredException &&
               (error is! VodPermissionException || !_lesson.isLive))) {
@@ -462,6 +530,7 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
   @override
   void dispose() {
     _loadRevision++;
+    _notesRevision++;
     _resetSeekSynchronization();
     _catalogRevision++;
     _secondaryRevision++;
@@ -479,6 +548,7 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
     // Player and releases its native decoder, streams and network requests.
     unawaited(_releasePlayer(_player, _errorSubscription));
     _controlsRevision.dispose();
+    _tabController.dispose();
     super.dispose();
   }
 
@@ -493,6 +563,53 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
       lesson.teachingClassId == widget.course.teachingClassId &&
       _catalog.any((item) =>
           item.id == lesson.id && item.isLive == lesson.isLive && item.canPlay);
+
+  Future<void> _loadNotes(VodLesson lesson, {bool forceRefresh = false}) async {
+    if (!forceRefresh && _notesLessonId == lesson.id) return;
+    final revision = ++_notesRevision;
+    final repository = widget.repository;
+    final pullRefresh =
+        forceRefresh && _notesLessonId == lesson.id && !_notesLoading;
+    final supported = lesson.id > 0 &&
+        !lesson.isLive &&
+        lesson.teachingClassId == widget.course.teachingClassId;
+    final canLoad =
+        supported && (widget.loadNotes != null || repository != null);
+    setState(() {
+      _notesLessonId = lesson.id;
+      if (!pullRefresh) {
+        _notes = const [];
+        _notesError = null;
+        _notesLoading = canLoad;
+      }
+    });
+    if (!canLoad) return;
+    try {
+      final slides = await (widget.loadNotes?.call(lesson.id) ??
+          repository!.loadPptSlides(lesson.id, forceRefresh: forceRefresh));
+      if (!mounted || revision != _notesRevision) return;
+      setState(() {
+        _notes = slides;
+        _notesLoading = false;
+        _notesError = null;
+      });
+    } on Object catch (error) {
+      if (!mounted || revision != _notesRevision) return;
+      final message = error is VodSessionExpiredException
+          ? '校园账户登录已失效，请重新进入录播平台后重试'
+          : '暂时无法加载这节课的 PPT 笔记，请稍后下拉重试';
+      final keepNotes = pullRefresh && _notes.isNotEmpty;
+      setState(() {
+        _notesLoading = false;
+        if (!keepNotes) _notesError = message;
+      });
+      if (keepNotes) {
+        ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+          SnackBar(content: Text(message)),
+        );
+      }
+    }
+  }
 
   Future<void> _loadLesson(VodLesson lesson, {bool resume = false}) async {
     final revision = ++_loadRevision;
@@ -512,6 +629,7 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
       _failureMessage = null;
       _playback = null;
     });
+    unawaited(_loadNotes(lesson));
     await _disposeRtc();
     if (!mounted || revision != _loadRevision) return;
     unawaited(_secondaryPlayer?.pause());
@@ -1272,9 +1390,10 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
       if (!mounted) return;
       _publish(() => _recovering = false);
       if (!recovered) return;
+      _notesLessonId = null;
       recoveredPreviewSession = widget.loadPreviewCatalog;
     }
-    if (widget.repository != null && (_lesson.id == 0 || _catalog.isEmpty)) {
+    if (widget.repository != null && !_validLesson(_lesson)) {
       await _loadCatalog(forceRefresh: true);
     } else {
       final playback = _loadLesson(_lesson, resume: !_lesson.isLive);
@@ -1639,6 +1758,7 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
                                           },
                                         ),
                               title: widget.course.name,
+                              termLabel: _compactTermLabel,
                               onBack: () => Navigator.of(context).maybePop(),
                               onEpisodePanelVisibilityChanged: (visible) =>
                                   _episodePanelVisible = visible,
@@ -1647,8 +1767,7 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
                               episodeNewestFirst: _episodesNewestFirst,
                               onEpisodeOrderChanged: (value) =>
                                   _publish(() => _episodesNewestFirst = value),
-                              onClearClassroomFilter: () =>
-                                  _publish(_excludedClassrooms.clear),
+                              onClearClassroomFilter: _showCurrentClassroom,
                               selectedLessonId: _lesson.id,
                               selectedLesson: _lesson.id > 0 ? _lesson : null,
                               onLessonSelected: (lesson) =>
@@ -1721,7 +1840,36 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
                 if (MediaQuery.orientationOf(context) == Orientation.portrait) {
                   return RecordingPlayerLayout(
                     video: video,
-                    body: list,
+                    tabBar: _portraitTabs(colors),
+                    body: TabBarView(
+                      controller: _tabController,
+                      children: [
+                        _PlayerTab(child: list),
+                        _PlayerTab(
+                            child: RecordingNotesPanel(
+                          key: ValueKey('recording-notes:${_lesson.id}'),
+                          nested: true,
+                          slides: _notes,
+                          loading: _notesLoading,
+                          error: _notesError,
+                          canSeek: !_loading &&
+                              _failure == null &&
+                              _playback != null &&
+                              !_lesson.isLive,
+                          onRefresh: () =>
+                              _loadNotes(_lesson, forceRefresh: true),
+                          onSeek: (position) {
+                            if (!_loading &&
+                                _failure == null &&
+                                _playback != null &&
+                                !_lesson.isLive) {
+                              unawaited(_seekPlayers(position));
+                            }
+                          },
+                          headersLoader: widget.repository?.mediaHeadersFor,
+                        )),
+                      ],
+                    ),
                     expandedHeight: videoHeight,
                     topInset: topInset,
                     player:
@@ -1765,6 +1913,50 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
               }))),
     );
   }
+
+  PreferredSizeWidget _portraitTabs(ShuYoColors colors) => PreferredSize(
+        preferredSize: const Size.fromHeight(45),
+        child: DecoratedBox(
+          key: const ValueKey('recording-player-tabs'),
+          decoration: BoxDecoration(
+            color: Theme.of(context).colorScheme.surface,
+            border: Border(
+                bottom: BorderSide(
+                    color: colors.border.withValues(alpha: .5), width: .5)),
+          ),
+          child: Align(
+            alignment: Alignment.centerLeft,
+            child: SizedBox(
+              width: 192,
+              child: TabBar(
+                controller: _tabController,
+                dividerHeight: 0,
+                labelPadding: EdgeInsets.zero,
+                labelStyle:
+                    const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+                unselectedLabelStyle:
+                    const TextStyle(fontSize: 13, fontWeight: FontWeight.w500),
+                unselectedLabelColor: colors.textSecondary,
+                indicatorSize: TabBarIndicatorSize.label,
+                tabs: [
+                  const Tab(height: 45, text: '简介'),
+                  Tab(
+                      height: 45,
+                      child: Text.rich(
+                        key: const ValueKey('recording-notes-tab-label'),
+                        TextSpan(text: '笔记', children: [
+                          if (_notes.isNotEmpty)
+                            TextSpan(
+                                text: ' ${_notes.length}',
+                                style: const TextStyle(fontSize: 12)),
+                        ]),
+                      )),
+                ],
+              ),
+            ),
+          ),
+        ),
+      );
 
   Widget _placeholder() {
     if (_loading || _recovering || _catalogLoading && _catalog.isEmpty) {
@@ -1815,7 +2007,7 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
   }
 
   Widget _lessonHeading(ShuYoColors colors) {
-    final days = recordingCourseDays(_lessons);
+    final days = recordingCourseDays(_filteredLessons);
     return Padding(
       key: const ValueKey('recording-course-banner'),
       padding: const EdgeInsets.fromLTRB(16, 20, 16, 8),
@@ -1824,7 +2016,7 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
         if (days.isNotEmpty) ...[
           const Padding(
               padding: EdgeInsets.symmetric(vertical: 12), child: Divider()),
-          RecordingCourseOverview(days: days),
+          RecordingCourseOverview(days: days, term: _courseTerm),
           const Padding(padding: EdgeInsets.only(top: 12), child: Divider()),
         ],
         if (_playback?.description.isNotEmpty ?? false) ...[
@@ -1843,9 +2035,15 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
         ? filtered
         : filtered.reversed.toList(growable: false);
     final episodeNumbers = {
-      for (var index = 0; index < chronological.length; index++)
-        chronological[index].id: chronological.length - index,
+      for (var index = 0; index < filtered.length; index++)
+        filtered[index].id: filtered.length - index,
     };
+    final months = <(int, int)?, List<VodLesson>>{};
+    for (final lesson in lessons) {
+      final date = lesson.beginTime;
+      final month = date == null ? null : (date.year, date.month);
+      months.putIfAbsent(month, () => []).add(lesson);
+    }
     final content = CustomScrollView(
       key: const ValueKey('course-player-episodes'),
       physics: const AlwaysScrollableScrollPhysics(),
@@ -1865,7 +2063,7 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
           delegate: _EpisodeHeader(
             colors: colors,
             title: '选集',
-            classroomFilter: _classrooms.isEmpty ? null : _classroomFilter(),
+            classroomFilter: _classrooms.length < 2 ? null : _classroomFilter(),
             newestFirst: _episodesNewestFirst,
             hasLessons: lessons.isNotEmpty,
             hasCurrent: chronological.any((lesson) => lesson.id == _lesson.id),
@@ -1883,25 +2081,39 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
                   child: Text(chronological.isEmpty ? '暂无可观看回放' : '没有符合教室筛选的课次',
                       style: ShuYoTextStyles.meta(color: colors.textMuted),
                       textAlign: TextAlign.center))),
+        for (final month in months.entries)
+          SliverMainAxisGroup(
+            key: ValueKey('recording-episode-month-group:${month.key}'),
+            slivers: [
+              SliverPersistentHeader(
+                pinned: true,
+                delegate: _EpisodeMonthHeader(month: month.key),
+              ),
+              // Keep the existing episode contexts available to toolbar jumps,
+              // including targets outside the viewport.
+              SliverToBoxAdapter(
+                  child: Column(children: [
+                for (final lesson in month.value) ...[
+                  KeyedSubtree(
+                      key: _episodeKeys.putIfAbsent(lesson.id, GlobalKey.new),
+                      child: RecordingEpisodeTile(
+                        tileKey: ValueKey('recording-lesson-${lesson.id}'),
+                        lesson: lesson,
+                        number: episodeNumbers[lesson.id]!,
+                        selected: lesson.id == _lesson.id,
+                        onTap: !lesson.canPlay || lesson.id == _lesson.id
+                            ? null
+                            : () => unawaited(_loadLesson(lesson)),
+                      )),
+                  if (lesson.id != lessons.last.id)
+                    const Divider(indent: 16, endIndent: 16),
+                ],
+              ])),
+            ],
+          ),
         SliverToBoxAdapter(
-            child: Column(children: [
-          for (final lesson in lessons) ...[
-            KeyedSubtree(
-                key: _episodeKeys.putIfAbsent(lesson.id, GlobalKey.new),
-                child: RecordingEpisodeTile(
-                  tileKey: ValueKey('recording-lesson-${lesson.id}'),
-                  lesson: lesson,
-                  number: episodeNumbers[lesson.id]!,
-                  selected: lesson.id == _lesson.id,
-                  onTap: !lesson.canPlay || lesson.id == _lesson.id
-                      ? null
-                      : () => unawaited(_loadLesson(lesson)),
-                )),
-            if (lesson.id != lessons.last.id)
-              const Divider(indent: 16, endIndent: 16),
-          ],
-          SizedBox(height: 24 + MediaQuery.viewPaddingOf(context).bottom),
-        ])),
+            child: SizedBox(
+                height: 24 + MediaQuery.viewPaddingOf(context).bottom)),
       ],
     );
     return widget.repository == null || !_shouldLoadCatalog
@@ -1920,21 +2132,30 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
     if (target == null) {
       if (_lessons.any((lesson) => lesson.id == id) &&
           !_filteredLessons.any((lesson) => lesson.id == id)) {
-        ScaffoldMessenger.maybeOf(context)?.showSnackBar(SnackBar(
-          content: const Text('当前课次不在教室筛选结果中'),
-          action: SnackBarAction(
-              label: '清除筛选',
-              onPressed: () => _publish(_excludedClassrooms.clear)),
-        ));
+        _showCurrentClassroom();
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) _scrollToEpisode(id, alignment: alignment);
+        });
+      }
+      return;
+    }
+    final duration = MediaQuery.disableAnimationsOf(context)
+        ? Duration.zero
+        : const Duration(milliseconds: 200);
+    if (alignment == 1) {
+      // A grouped pinned header is subtracted from ensureVisible's target
+      // offset, which would leave the last row below the bottom edge.
+      final position = Scrollable.of(target).position;
+      if (duration == Duration.zero) {
+        position.jumpTo(position.maxScrollExtent);
+      } else {
+        unawaited(position.animateTo(position.maxScrollExtent,
+            duration: duration, curve: Curves.easeOut));
       }
       return;
     }
     unawaited(Scrollable.ensureVisible(target,
-        alignment: alignment,
-        duration: MediaQuery.disableAnimationsOf(context)
-            ? Duration.zero
-            : const Duration(milliseconds: 200),
-        curve: Curves.easeOut));
+        alignment: alignment, duration: duration, curve: Curves.easeOut));
   }
 
   Future<void> _setTemporaryRate(double rate) async {
@@ -1946,6 +2167,69 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
         secondary.setRate(rate),
     ]);
   }
+}
+
+class _PlayerTab extends StatefulWidget {
+  const _PlayerTab({required this.child});
+
+  final Widget child;
+
+  @override
+  State<_PlayerTab> createState() => _PlayerTabState();
+}
+
+class _PlayerTabState extends State<_PlayerTab>
+    with AutomaticKeepAliveClientMixin {
+  @override
+  bool get wantKeepAlive => true;
+
+  @override
+  Widget build(BuildContext context) {
+    super.build(context);
+    return widget.child;
+  }
+}
+
+class _EpisodeMonthHeader extends SliverPersistentHeaderDelegate {
+  const _EpisodeMonthHeader({required this.month});
+
+  final (int, int)? month;
+
+  @override
+  double get minExtent => 34;
+
+  @override
+  double get maxExtent => minExtent;
+
+  @override
+  Widget build(
+      BuildContext context, double shrinkOffset, bool overlapsContent) {
+    final date = month;
+    return Material(
+      key: ValueKey('recording-episode-month:$date'),
+      color: Theme.of(context).colorScheme.surface,
+      child: SizedBox.expand(
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16),
+          child: Align(
+            alignment: Alignment.centerLeft,
+            child: Text(
+              date == null ? '日期未知' : '${date.$1}年${date.$2}月',
+              style: ShuYoTextStyles.meta(
+                color: context.shuyoColors.textSecondary,
+                size: 12.5,
+                weight: FontWeight.w600,
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  @override
+  bool shouldRebuild(_EpisodeMonthHeader oldDelegate) =>
+      month != oldDelegate.month;
 }
 
 class _EpisodeHeader extends SliverPersistentHeaderDelegate {

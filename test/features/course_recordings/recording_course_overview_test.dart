@@ -90,8 +90,14 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('inline overview header and six blocks fit doubled narrow themes',
+  testWidgets('separate overview heading and term fit doubled narrow themes',
       (tester) async {
+    const term = VodTerm(
+      id: 10,
+      name: '2025-2026学年第1学期',
+      academicYear: '2025-2026',
+      termNumber: 1,
+    );
     final days = recordingCourseDays([
       lesson(1, DateTime(2026, 10, 27), '第1-2节'),
       lesson(2, DateTime(2026, 10, 27), '第5-6节'),
@@ -107,7 +113,8 @@ void main() {
                       child: MediaQuery(
                           data: const MediaQueryData(
                               textScaler: TextScaler.linear(2)),
-                          child: RecordingCourseOverview(days: days))))),
+                          child: RecordingCourseOverview(
+                              days: days, term: term))))),
         ));
         final context = tester.element(find.byType(RecordingCourseOverview));
         final heading = tester.widget<Text>(find.text('概览'));
@@ -116,28 +123,44 @@ void main() {
         final overview = find.byType(RecordingCourseOverview);
         final header =
             find.byKey(const ValueKey('recording-course-overview-header'));
+        final times =
+            find.byKey(const ValueKey('recording-course-overview-times'));
+        final termFinder =
+            find.byKey(const ValueKey('recording-course-overview-term'));
         final headingFinder = find.text('概览');
         final dayRow = find
             .ancestor(of: find.text('周二'), matching: find.byType(Row))
             .first;
         expect(
             find.ancestor(of: headingFinder, matching: header), findsOneWidget);
+        expect(find.ancestor(of: termFinder, matching: header), findsOneWidget);
+        final termText = tester.widget<Text>(termFinder);
+        expect(termText.textSpan!.toPlainText(), '2025-2026 学年 秋季学期');
+        expect(termText.style!.fontWeight, FontWeight.w600);
+        expect(termText.style!.color, context.shuyoColors.textPrimary);
+        final seasonSpan = (termText.textSpan! as TextSpan).children!.last;
+        expect(seasonSpan.style!.color, Theme.of(context).colorScheme.primary);
         for (var block = 0; block < 6; block++) {
           final label = find.text('${block * 2 + 1}–${block * 2 + 2}');
-          expect(find.ancestor(of: label, matching: header), findsOneWidget);
+          expect(find.ancestor(of: label, matching: header), findsNothing);
+          expect(find.ancestor(of: label, matching: times), findsOneWidget);
         }
         expect(tester.getRect(header).top,
             closeTo(tester.getRect(overview).top, .001));
         expect(tester.getRect(headingFinder).center.dy,
             closeTo(tester.getRect(header).center.dy, .001));
-        expect(tester.getRect(headingFinder).right,
-            lessThanOrEqualTo(tester.getRect(overview).left + 40.001));
+        expect(tester.getRect(termFinder).left,
+            greaterThanOrEqualTo(tester.getRect(headingFinder).right + 11.999));
+        expect(tester.getRect(times).top,
+            closeTo(tester.getRect(header).bottom + 12, .001));
         expect(tester.getRect(dayRow).top,
-            closeTo(tester.getRect(header).bottom + 8, .001));
+            closeTo(tester.getRect(times).bottom + 8, .001));
         expect(
             tester.getSize(overview).height,
             closeTo(
                 tester.getSize(header).height +
+                    12 +
+                    tester.getSize(times).height +
                     8 +
                     tester.getSize(dayRow).height,
                 .001));

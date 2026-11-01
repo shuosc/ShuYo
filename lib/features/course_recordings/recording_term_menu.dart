@@ -127,7 +127,7 @@ class _RecordingTermMenuState extends State<_RecordingTermMenu> {
                           contentPadding:
                               const EdgeInsets.only(left: 16, right: 12),
                           title: Text(
-                            groups[year]!.first.academicYearLabel,
+                            year.isEmpty ? '其他学年' : '$year 学年',
                             style: const TextStyle(fontWeight: FontWeight.w600),
                           ),
                           trailing: Icon(_collapsedYears.contains(year)

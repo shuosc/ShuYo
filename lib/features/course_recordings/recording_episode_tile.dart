@@ -45,9 +45,10 @@ class RecordingEpisodeTile extends StatelessWidget {
     final heading = recordingEpisodeHeading(lesson);
     final classroom = lesson.classroom.trim();
     final dateAndTime = recordingEpisodeDateTime(lesson);
-    final status = lesson.isLive || !lesson.isPlayable || !enabled
-        ? lesson.statusLabel
-        : null;
+    final status =
+        lesson.isLive || !enabled || (lesson.isGenerating && !lesson.isPlayable)
+            ? lesson.statusLabel
+            : null;
     return ListTile(
       key: tileKey,
       contentPadding: const EdgeInsets.symmetric(horizontal: 16),

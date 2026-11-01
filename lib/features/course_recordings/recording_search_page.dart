@@ -45,9 +45,20 @@ class _RecordingSearchPageState extends State<RecordingSearchPage> {
   final _collapsedTermYears = <String>{};
   late int _selectedTermId = widget.selectedTermId;
   List<VodSearchResult> _results = const [];
+  final _resultsByCourse = <(int, int), List<VodSearchResult>>{};
+  final _courseLessons = <(int, int), List<VodLesson>>{};
+  final _pendingLessons = <(int, int), List<VodLesson>>{};
+  final _courseUpdates = ValueNotifier<int>(0);
+  final _courseRows = <(int, int), Widget>{};
+  List<VodCourse> _courses = const [];
+  int _visibleCourseCount = 0;
+  int _availableCourseCount = 0;
+  bool _courseUpdateScheduled = false;
+  final _animatedCourses = <(int, int)>{};
   String? _activeKeyword;
   Object? _error;
   bool _searching = false;
+  bool _loadingCourses = false;
   bool _needsLogin = false;
   bool _loggingIn = false;
   bool _openingLesson = false;
@@ -56,10 +67,57 @@ class _RecordingSearchPageState extends State<RecordingSearchPage> {
   @override
   void dispose() {
     _revision++;
+    _courseUpdates.dispose();
     _queryController.dispose();
     _queryFocusNode.dispose();
     _scrollController.dispose();
     super.dispose();
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    // Cached rows still follow theme and text scale changes.
+    _courseRows.clear();
+  }
+
+  void _resetCourses() {
+    _courses = const [];
+    _visibleCourseCount = 0;
+    _availableCourseCount = 0;
+    _courseLessons.clear();
+    _pendingLessons.clear();
+    _courseRows.clear();
+    _animatedCourses.clear();
+    _courseUpdateScheduled = false;
+  }
+
+  void _flushCourseUpdates(int revision) {
+    if (!mounted || revision != _revision || _pendingLessons.isEmpty) return;
+    _courseLessons.addAll(_pendingLessons);
+    _pendingLessons.clear();
+    _availableCourseCount =
+        _courseLessons.values.where((lessons) => lessons.isNotEmpty).length;
+    // Keep search ranking stable even when requests finish out of order.
+    while (_visibleCourseCount < _courses.length) {
+      final course = _courses[_visibleCourseCount];
+      if (!_courseLessons
+          .containsKey((course.termId, course.teachingClassId))) {
+        break;
+      }
+      _visibleCourseCount++;
+    }
+    _courseUpdates.value++;
+  }
+
+  void _scheduleCourseUpdate(int revision) {
+    if (_courseUpdateScheduled) return;
+    _courseUpdateScheduled = true;
+    WidgetsBinding.instance.scheduleFrameCallback((_) {
+      if (!mounted || revision != _revision) return;
+      _courseUpdateScheduled = false;
+      _flushCourseUpdates(revision);
+    });
   }
 
   void _clearSearch({bool clearField = true}) {
@@ -69,12 +127,15 @@ class _RecordingSearchPageState extends State<RecordingSearchPage> {
     setState(() {
       _activeKeyword = null;
       _results = const [];
+      _resultsByCourse.clear();
+      _resetCourses();
       _error = null;
       _searching = false;
+      _loadingCourses = false;
     });
   }
 
-  Future<void> _search() async {
+  Future<void> _search({bool forceRefresh = false}) async {
     final keyword = _queryController.text.trim();
     if (_needsLogin || _loggingIn) return;
     if (keyword.isEmpty) {
@@ -83,7 +144,7 @@ class _RecordingSearchPageState extends State<RecordingSearchPage> {
     }
     if (keyword.runes.length < 2) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('请输入至少 2 个字的课程或教师关键词')),
+        const SnackBar(content: Text('请输入至少 2 个字的课程、教师或课程号关键词')),
       );
       return;
     }
@@ -93,8 +154,11 @@ class _RecordingSearchPageState extends State<RecordingSearchPage> {
     setState(() {
       _activeKeyword = keyword;
       _results = const [];
+      _resultsByCourse.clear();
+      _resetCourses();
       _error = null;
       _searching = true;
+      _loadingCourses = false;
     });
     try {
       final results = await widget.repository.searchLessons(
@@ -102,8 +166,72 @@ class _RecordingSearchPageState extends State<RecordingSearchPage> {
         keyword: keyword,
       );
       if (!mounted || revision != _revision) return;
-      final sorted = results.toList()..sort(_compareResults);
-      setState(() => _results = sorted);
+      final matchingClasses = <(int, int)>{
+        for (final result in results)
+          if (_matches(result, keyword))
+            (result.course.termId, result.course.teachingClassId),
+      };
+      setState(() {
+        _results = results
+            .where((result) => matchingClasses.contains(
+                (result.course.termId, result.course.teachingClassId)))
+            .toList(growable: false);
+        _resultsByCourse.clear();
+        for (final result in _results) {
+          final course = result.course;
+          _resultsByCourse.putIfAbsent(
+              (course.termId, course.teachingClassId), () => []).add(result);
+        }
+        _courses = _resultsByCourse.values
+            .map((results) => results
+                .firstWhere((result) => _matches(result, keyword),
+                    orElse: () => results.first)
+                .course)
+            .toList(growable: false);
+        _searching = false;
+        _loadingCourses = _resultsByCourse.isNotEmpty;
+      });
+      final courses = _courses;
+      var nextCourse = 0;
+      Future<void> loadNext() async {
+        while (
+            mounted && revision == _revision && nextCourse < courses.length) {
+          final course = courses[nextCourse++];
+          List<VodLesson> lessons;
+          try {
+            lessons = await widget.repository
+                .loadPreviewLessons(course, forceRefresh: forceRefresh);
+          } on VodSessionExpiredException {
+            rethrow;
+          } on VodCampusAuthRequiredException {
+            rethrow;
+          } on Object {
+            lessons = const [];
+          }
+          if (!mounted || revision != _revision) return;
+          final catalog = <int, VodLesson>{
+            for (final lesson in lessons)
+              if (lesson.id > 0 &&
+                  !lesson.isLive &&
+                  lesson.teachingClassId == course.teachingClassId)
+                lesson.id: lesson,
+          }.values.toList()
+            ..sort((a, b) {
+              final byTime = (b.beginTime?.millisecondsSinceEpoch ?? 0)
+                  .compareTo(a.beginTime?.millisecondsSinceEpoch ?? 0);
+              return byTime == 0 ? b.id.compareTo(a.id) : byTime;
+            });
+          _pendingLessons[(course.termId, course.teachingClassId)] =
+              List.unmodifiable(catalog);
+          _scheduleCourseUpdate(revision);
+        }
+      }
+
+      // Only catalog metadata is parallelized. Video-link warming stays on its
+      // independent low-frequency queue and starts after a course is opened.
+      await Future.wait(
+          [for (var i = 0; i < 3 && i < courses.length; i++) loadNext()],
+          eagerError: true);
     } on VodSessionExpiredException catch (error) {
       if (!mounted || revision != _revision) return;
       await _invalidateSession(error.ssoExpired);
@@ -114,7 +242,11 @@ class _RecordingSearchPageState extends State<RecordingSearchPage> {
       if (mounted && revision == _revision) setState(() => _error = error);
     } finally {
       if (mounted && revision == _revision) {
-        setState(() => _searching = false);
+        _flushCourseUpdates(revision);
+        setState(() {
+          _searching = false;
+          _loadingCourses = false;
+        });
       }
     }
   }
@@ -124,7 +256,10 @@ class _RecordingSearchPageState extends State<RecordingSearchPage> {
     setState(() {
       _needsLogin = true;
       _searching = false;
+      _loadingCourses = false;
       _results = const [];
+      _resultsByCourse.clear();
+      _resetCourses();
       _error = null;
     });
     await widget.onSessionInvalidated?.call(ssoExpired);
@@ -172,24 +307,45 @@ class _RecordingSearchPageState extends State<RecordingSearchPage> {
     _clearSearch(clearField: false);
   }
 
-  Future<void> _openLesson(VodSearchResult result) async {
-    if (_openingLesson || _needsLogin || !result.lesson.canPlay) return;
+  bool _matches(VodSearchResult result, String keyword) {
+    final query = keyword.trim().toLowerCase();
+    if (query.isEmpty) return false;
+    final course = result.course;
+    return [
+      course.name,
+      course.teachingClassName,
+      course.code,
+      result.courseNumber,
+      ...course.teacherNames,
+    ].any((value) => value.toLowerCase().contains(query));
+  }
+
+  Future<void> _refreshCourses() async {
+    if (_needsLogin || _searching || _loadingCourses || _results.isEmpty) {
+      return;
+    }
+    await _search(forceRefresh: true);
+  }
+
+  Future<void> _openCourse(VodCourse course) async {
+    if (_openingLesson || _needsLogin) return;
+    final lessons = _courseLessons[(course.termId, course.teachingClassId)];
+    if (lessons == null || lessons.isEmpty) return;
+    final initial = lessons.where((lesson) => lesson.canPlay).firstOrNull;
     _openingLesson = true;
+    unawaited(widget.repository.warmCourseRecordings(course, lessons));
     try {
       await Navigator.of(context).push<void>(shuyoRoute(
         builder: (_) => RecordingPlayerPage(
-          course: result.course,
-          initialLesson: result.lesson,
-          lessons: _results
-              .where((candidate) =>
-                  candidate.course.teachingClassId ==
-                      result.course.teachingClassId &&
-                  candidate.course.termId == result.course.termId &&
-                  candidate.lesson.canPlay)
-              .map((candidate) => candidate.lesson)
-              .toList(),
+          course: course,
+          term: widget.terms
+              .where((term) => term.id == course.termId)
+              .firstOrNull,
+          initialLesson: initial,
+          lessons: lessons,
           loadCourseCatalog: false,
           loadPreviewCatalog: true,
+          skipInitialCatalogLoad: true,
           repository: widget.repository,
           onSessionExpired: _recoverPlaybackSession,
         ),
@@ -204,9 +360,12 @@ class _RecordingSearchPageState extends State<RecordingSearchPage> {
     if (mounted) {
       setState(() {
         _results = const [];
+        _resultsByCourse.clear();
+        _resetCourses();
         _activeKeyword = null;
         _error = null;
         _searching = false;
+        _loadingCourses = false;
         _needsLogin = true;
       });
     }
@@ -217,7 +376,6 @@ class _RecordingSearchPageState extends State<RecordingSearchPage> {
 
   @override
   Widget build(BuildContext context) {
-    final colors = context.shuyoColors;
     final selectedTerm =
         widget.terms.where((term) => term.id == _selectedTermId).firstOrNull;
     return Scaffold(
@@ -233,7 +391,7 @@ class _RecordingSearchPageState extends State<RecordingSearchPage> {
         ],
         bottom: PreferredSize(
           preferredSize: const Size.fromHeight(3),
-          child: _searching || _loggingIn
+          child: _searching || _loadingCourses || _loggingIn
               ? const LinearProgressIndicator(
                   key: ValueKey('vod-search-progress'), minHeight: 3)
               : const SizedBox(height: 3),
@@ -260,7 +418,7 @@ class _RecordingSearchPageState extends State<RecordingSearchPage> {
                   }
                 },
                 decoration: InputDecoration(
-                  labelText: '课程 / 教师关键词',
+                  labelText: '课程 / 教师 / 课程号关键词',
                   suffixIcon: _queryController.text.isEmpty
                       ? null
                       : IconButton(
@@ -286,33 +444,107 @@ class _RecordingSearchPageState extends State<RecordingSearchPage> {
             ),
           ]),
         ),
-        Padding(
-          padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
-          child: Align(
-            alignment: Alignment.centerLeft,
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  [
-                    if (selectedTerm != null) selectedTerm.name,
-                    '实验性搜索',
-                    if (_activeKeyword != null &&
-                        !_searching &&
-                        _error == null &&
-                        !_needsLogin)
-                      '${_results.length} 节课次',
-                  ].join(' · '),
-                  style: ShuYoTextStyles.meta(color: colors.textSecondary),
+        ValueListenableBuilder<int>(
+          valueListenable: _courseUpdates,
+          builder: (context, _, __) => _buildSummary(selectedTerm),
+        ),
+        Expanded(
+          child: ValueListenableBuilder<int>(
+            valueListenable: _courseUpdates,
+            builder: (context, _, __) => _buildResults(),
+          ),
+        ),
+      ]),
+    );
+  }
+
+  Widget _buildSummary(VodTerm? term) {
+    final colors = context.shuyoColors;
+    final primary = Theme.of(context).colorScheme.primary;
+    Widget number(String key, int value, Color color, double size) => Text(
+          '$value',
+          key: ValueKey(key),
+          maxLines: 1,
+          style: TextStyle(
+            color: color,
+            fontSize: size,
+            fontWeight: FontWeight.w600,
+            fontFeatures: const [FontFeature.tabularFigures()],
+          ),
+        );
+    return Padding(
+      key: const ValueKey('vod-search-summary'),
+      padding: const EdgeInsets.fromLTRB(16, 2, 16, 12),
+      child: Row(children: [
+        Expanded(
+          flex: 2,
+          child: Column(
+            key: const ValueKey('vod-search-term-label'),
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              if (term != null) ...[
+                FittedBox(
+                  fit: BoxFit.scaleDown,
+                  alignment: Alignment.centerLeft,
+                  child: Text(
+                    term.academicYear.isEmpty
+                        ? term.name
+                        : '${term.academicYear} 学年',
+                    key: const ValueKey('vod-search-year-label'),
+                    maxLines: 1,
+                    style:
+                        ShuYoTextStyles.bodyCompact(color: colors.textPrimary)
+                            .copyWith(fontWeight: FontWeight.w600),
+                  ),
                 ),
-                const SizedBox(height: 4),
-                Text('搜索最多返回 50 条，请细化关键词。',
-                    style: ShuYoTextStyles.meta(color: colors.textMuted)),
+                if (term.academicYear.isNotEmpty)
+                  Text(
+                    term.seasonLabel,
+                    key: const ValueKey('vod-search-season-label'),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: ShuYoTextStyles.bodyCompact(color: primary)
+                        .copyWith(fontWeight: FontWeight.w600),
+                  ),
               ],
+            ],
+          ),
+        ),
+        const SizedBox(width: 16),
+        Flexible(
+          child: Align(
+            alignment: Alignment.centerRight,
+            child: FittedBox(
+              fit: BoxFit.scaleDown,
+              alignment: Alignment.centerRight,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.end,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text('课程数',
+                      style: TextStyle(color: colors.textMuted, fontSize: 12)),
+                  Row(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.baseline,
+                    textBaseline: TextBaseline.alphabetic,
+                    children: [
+                      number('vod-search-loaded-count', _availableCourseCount,
+                          primary, 26),
+                      Text('/',
+                          style: TextStyle(
+                              color: colors.textPrimary,
+                              fontSize: 18,
+                              fontWeight: FontWeight.w600)),
+                      number('vod-search-total-count', _resultsByCourse.length,
+                          colors.textPrimary, 18),
+                    ],
+                  ),
+                ],
+              ),
             ),
           ),
         ),
-        Expanded(child: _buildResults()),
       ]),
     );
   }
@@ -346,36 +578,16 @@ class _RecordingSearchPageState extends State<RecordingSearchPage> {
       );
     } else if (_searching) {
       state = const Center(child: Text('正在搜索录播…'));
+    } else if (_loadingCourses && _visibleCourseCount == 0) {
+      state = const Center(child: Text('正在加载课程…'));
     } else if (_results.isEmpty) {
       state = EmptyState(
         icon: _activeKeyword == null ? Icons.search : Icons.search_off,
-        title: _activeKeyword == null ? '搜索课程或教师' : '没有找到录播',
-        message:
-            _activeKeyword == null ? '输入课程或教师关键词后点击搜索。' : '试试其他关键词，或切换学期后搜索。',
+        title: _activeKeyword == null ? '搜索课程、教师或课程号' : '没有找到录播',
+        message: _activeKeyword == null
+            ? '输入课程、教师或课程号关键词后点击搜索。'
+            : '试试其他关键词，或切换学期后搜索。',
       );
-    }
-    final rows = <Widget>[];
-    String? previousDate;
-    for (final result in _results) {
-      final date = _dateLabel(result.lesson.beginTime);
-      if (date != previousDate) {
-        rows.add(Padding(
-          padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
-          child: Semantics(
-            header: true,
-            child: Text(date,
-                style: ShuYoTextStyles.meta(
-                    color: context.shuyoColors.textSecondary,
-                    weight: FontWeight.w600)),
-          ),
-        ));
-        previousDate = date;
-      }
-      rows.add(_SearchLessonTile(
-        result: result,
-        onTap: () => unawaited(_openLesson(result)),
-      ));
-      rows.add(const Divider(indent: 16, endIndent: 16));
     }
     return ScrollbarTheme(
       data: ScrollbarThemeData(
@@ -388,24 +600,101 @@ class _RecordingSearchPageState extends State<RecordingSearchPage> {
         controller: _scrollController,
         thumbVisibility: true,
         interactive: true,
-        child: CustomScrollView(
-          key: const ValueKey('vod-search-results'),
-          controller: _scrollController,
-          keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
-          slivers: [
-            if (state != null)
-              SliverFillRemaining(hasScrollBody: false, child: state)
-            else ...[
-              const SliverToBoxAdapter(child: SizedBox(height: 8)),
-              SliverList.builder(
-                itemCount: rows.length,
-                itemBuilder: (_, index) => rows[index],
-              ),
-              const SliverToBoxAdapter(child: SizedBox(height: 24)),
+        child: RefreshIndicator(
+          onRefresh: _refreshCourses,
+          child: CustomScrollView(
+            physics: const AlwaysScrollableScrollPhysics(),
+            key: const ValueKey('vod-search-results'),
+            controller: _scrollController,
+            keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
+            slivers: [
+              if (state != null)
+                SliverFillRemaining(hasScrollBody: false, child: state)
+              else ...[
+                const SliverToBoxAdapter(child: SizedBox(height: 8)),
+                SliverList.builder(
+                  itemCount: _visibleCourseCount == 0
+                      ? 0
+                      : _visibleCourseCount * 2 - 1,
+                  itemBuilder: (context, index) {
+                    if (index.isOdd) {
+                      return const Divider(indent: 16, endIndent: 16);
+                    }
+                    final course = _courses[index ~/ 2];
+                    final key = (course.termId, course.teachingClassId);
+                    final row =
+                        _courseRows.putIfAbsent(key, () => _courseTile(course));
+                    return _SearchCourseEntrance(
+                      key: ValueKey(
+                          'vod-search-entrance:$_revision:${course.termId}:${course.teachingClassId}'),
+                      animate: _animatedCourses.add(key),
+                      child: row,
+                    );
+                  },
+                ),
+                const SliverToBoxAdapter(child: SizedBox(height: 24)),
+              ],
             ],
-          ],
+          ),
         ),
       ),
+    );
+  }
+
+  Widget _courseTile(VodCourse course) {
+    final key = (course.termId, course.teachingClassId);
+    final enabled = _courseLessons[key]?.isNotEmpty ?? false;
+    final courseResults = _resultsByCourse[key]!;
+    final result =
+        courseResults.firstWhere((result) => identical(result.course, course));
+    final query = (_activeKeyword ?? '').toLowerCase();
+    final extraMatches = [
+      if (course.teachingClassName.isNotEmpty &&
+          course.teachingClassName != course.name &&
+          course.teachingClassName.toLowerCase().contains(query))
+        course.teachingClassName,
+      if (result.courseNumber.isNotEmpty &&
+          result.courseNumber != course.code &&
+          result.courseNumber.toLowerCase().contains(query))
+        result.courseNumber,
+    ];
+    return ListTile(
+      key: ValueKey(
+          'vod-search-course:${course.termId}:${course.teachingClassId}'),
+      contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      enabled: enabled,
+      leading: Tooltip(
+        message: course.isLive ? '正在直播' : '录播回放',
+        child: RecordingStatusIcon(isLive: course.isLive, enabled: enabled),
+      ),
+      title: RecordingCourseTitle(
+          course: course,
+          enabled: enabled,
+          maxNameLines: 2,
+          missingTeacherLabel: '教师信息暂未提供',
+          description: extraMatches.isEmpty
+              ? null
+              : Text(extraMatches.join(' · '),
+                  style: ShuYoTextStyles.meta(
+                      color: enabled
+                          ? context.shuyoColors.textSecondary
+                          : Theme.of(context).disabledColor))),
+      trailing: enabled
+          ? Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text('${_courseLessons[key]!.length}节',
+                    key: ValueKey(
+                        'vod-search-lesson-count:${course.termId}:${course.teachingClassId}'),
+                    style: ShuYoTextStyles.meta(
+                            color: Theme.of(context).colorScheme.primary)
+                        .copyWith(fontWeight: FontWeight.w600)),
+                const SizedBox(width: 8),
+                const Icon(Icons.chevron_right),
+              ],
+            )
+          : Icon(Icons.block, color: Theme.of(context).disabledColor),
+      onTap: enabled ? () => unawaited(_openCourse(course)) : null,
     );
   }
 
@@ -419,112 +708,51 @@ class _RecordingSearchPageState extends State<RecordingSearchPage> {
   }
 }
 
-class _SearchLessonTile extends StatelessWidget {
-  const _SearchLessonTile({required this.result, required this.onTap});
+class _SearchCourseEntrance extends StatefulWidget {
+  const _SearchCourseEntrance({
+    super.key,
+    required this.animate,
+    required this.child,
+  });
 
-  final VodSearchResult result;
-  final VoidCallback onTap;
+  final bool animate;
+  final Widget child;
 
   @override
-  Widget build(BuildContext context) {
-    final colors = context.shuyoColors;
-    final lesson = result.lesson;
-    final enabled = lesson.canPlay;
-    final primary = Theme.of(context).colorScheme.primary;
-    final secondary = enabled ? colors.textSecondary : colors.textMuted;
-    final title = RecordingCourseTitle(
-      course: result.course,
-      maxNameLines: 2,
-      missingTeacherLabel: '教师信息暂未提供',
-      description: Text.rich(
-        TextSpan(children: [
-          if (lesson.classroom.trim().isNotEmpty) ...[
-            TextSpan(
-                text: lesson.classroom.trim(),
-                style: TextStyle(color: enabled ? primary : secondary)),
-            const TextSpan(text: ' · '),
-          ],
-          TextSpan(
-              text: [
-            if (lesson.sectionLabel.trim().isNotEmpty)
-              lesson.sectionLabel.trim(),
-            if (_lessonTime(lesson).isNotEmpty) _lessonTime(lesson),
-            if (!enabled) lesson.statusLabel,
-          ].join(' · ')),
-        ]),
-        maxLines: 3,
-        overflow: TextOverflow.ellipsis,
-        style: ShuYoTextStyles.meta(color: secondary),
-      ),
-    );
-    return ListTile(
-      key: ValueKey(
-          'vod-search-result:${result.course.teachingClassId}:${lesson.id}'),
-      contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-      enabled: enabled,
-      leading: RecordingStatusIcon(
-          isLive: lesson.isLive,
-          enabled: enabled,
-          disabledColor: colors.textMuted),
-      title: enabled
-          ? title
-          : ColorFiltered(
-              colorFilter: ColorFilter.mode(colors.textMuted, BlendMode.srcIn),
-              child: title,
-            ),
-      trailing:
-          enabled ? Icon(Icons.chevron_right, color: colors.textMuted) : null,
-      onTap: enabled ? onTap : null,
-    );
+  State<_SearchCourseEntrance> createState() => _SearchCourseEntranceState();
+}
+
+class _SearchCourseEntranceState extends State<_SearchCourseEntrance>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 280),
+    value: widget.animate ? 0 : 1,
+  );
+  late final Animation<double> _opacity =
+      _controller.drive(CurveTween(curve: Curves.easeOutCubic));
+  late final Animation<Offset> _position =
+      _opacity.drive(Tween(begin: const Offset(.12, 0), end: Offset.zero));
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (MediaQuery.disableAnimationsOf(context)) {
+      _controller.value = 1;
+    } else if (!_controller.isAnimating && _controller.value < 1) {
+      _controller.forward();
+    }
   }
-}
 
-DateTime? _schoolTime(DateTime? date) {
-  if (date == null) return null;
-  final time = date.isUtc ? date.add(const Duration(hours: 8)) : date;
-  return DateTime.utc(time.year, time.month, time.day, time.hour, time.minute,
-      time.second, time.millisecond, time.microsecond);
-}
-
-String _dateLabel(DateTime? date) {
-  final time = _schoolTime(date);
-  if (time == null) return '日期待定';
-  const weekdays = ['周一', '周二', '周三', '周四', '周五', '周六', '周日'];
-  return '${time.year}年${time.month}月${time.day}日 ${weekdays[time.weekday - 1]}';
-}
-
-String _lessonTime(VodLesson lesson) {
-  String format(DateTime time) =>
-      '${time.hour.toString().padLeft(2, '0')}:${time.minute.toString().padLeft(2, '0')}';
-  final begin = _schoolTime(lesson.beginTime);
-  final end = _schoolTime(lesson.endTime);
-  if (begin == null) return '';
-  if (end == null ||
-      !end.isAfter(begin) ||
-      end.year != begin.year ||
-      end.month != begin.month ||
-      end.day != begin.day) {
-    return format(begin);
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
   }
-  return '${format(begin)}-${format(end)}';
-}
 
-int _compareResults(VodSearchResult first, VodSearchResult second) {
-  final firstTime = _schoolTime(first.lesson.beginTime);
-  final secondTime = _schoolTime(second.lesson.beginTime);
-  if (firstTime == null && secondTime != null) return 1;
-  if (secondTime == null && firstTime != null) return -1;
-  if (firstTime != null && secondTime != null) {
-    final firstDate =
-        DateTime.utc(firstTime.year, firstTime.month, firstTime.day);
-    final secondDate =
-        DateTime.utc(secondTime.year, secondTime.month, secondTime.day);
-    final byDate = secondDate.compareTo(firstDate);
-    if (byDate != 0) return byDate;
-  }
-  final byTime = firstTime?.compareTo(secondTime!) ?? 0;
-  if (byTime != 0) return byTime;
-  final byCourse =
-      first.course.teachingClassId.compareTo(second.course.teachingClassId);
-  return byCourse == 0 ? second.lesson.id.compareTo(first.lesson.id) : byCourse;
+  @override
+  Widget build(BuildContext context) => SlideTransition(
+        position: _position,
+        child: FadeTransition(opacity: _opacity, child: widget.child),
+      );
 }

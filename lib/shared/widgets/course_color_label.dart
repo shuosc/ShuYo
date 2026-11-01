@@ -8,11 +8,13 @@ class CourseColorLabel extends StatelessWidget {
     required this.code,
     required this.name,
     required this.child,
+    this.color,
   });
 
   final String code;
   final String name;
   final Widget child;
+  final Color? color;
 
   @override
   Widget build(BuildContext context) {
@@ -26,7 +28,7 @@ class CourseColorLabel extends StatelessWidget {
             width: 3,
             height: 18,
             decoration: BoxDecoration(
-              color: courseColorForSeed(context, seed),
+              color: color ?? courseColorForSeed(context, seed),
               borderRadius: BorderRadius.circular(1.5),
             ),
           ),

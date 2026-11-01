@@ -58,10 +58,13 @@ class _Repository extends VodRepository {
   Future<List<VodLesson>> Function(VodCourse course, bool force)? lessonsLoader;
   Future<VodPlayback> Function(VodCourse course, VodLesson lesson)?
       playbackLoader;
+  Future<VodRecordingAvailability> Function(VodCourse course, VodLesson lesson)?
+      availabilityLoader;
   final playbackRequests = <VodLesson>[];
   final progressCallbacks = <int, void Function(List<VodCourse>)>{};
   int termRequests = 0;
   int lessonRequests = 0;
+  int verificationRequests = 0;
   int clears = 0;
   final courseRequests = <int>[];
   final forcedCourseRequests = <bool>[];
@@ -115,6 +118,25 @@ class _Repository extends VodRepository {
   }) async {
     lessonRequests++;
     return await lessonsLoader?.call(course, forceRefresh) ?? [];
+  }
+
+  @override
+  Future<void> verifyCourseRecordings(VodCourse course, List<VodLesson> lessons,
+      {required void Function(int, VodRecordingAvailability) onResult,
+      required bool Function() isCurrent,
+      bool fresh = false,
+      bool forceRefresh = false}) async {
+    verificationRequests++;
+    final seen = <int>{};
+    for (final lesson in lessons) {
+      if (lesson.isLive || !seen.add(lesson.id)) continue;
+      final result = await (availabilityLoader?.call(course, lesson) ??
+          Future.value(lesson.isPlayable
+              ? VodRecordingAvailability.available
+              : VodRecordingAvailability.unavailable));
+      if (!isCurrent()) return;
+      onResult(lesson.id, result);
+    }
   }
 
   @override
@@ -203,6 +225,104 @@ Future<void> _selectTimetableDate(
 }
 
 void main() {
+  testWidgets('home uses platform flags without probing recording links',
+      (tester) async {
+    const lessons = [
+      VodLesson(id: 1, teachingClassId: 101, name: '已启用', isPlayable: true),
+      VodLesson(
+          id: 2,
+          teachingClassId: 101,
+          name: '未启用',
+          isPlayable: false,
+          isListed: true),
+    ];
+    final repository = _Repository()
+      ..coursesLoader = ((_, __) async => [_programming])
+      ..lessonsLoader = ((_, __) async => lessons)
+      ..availabilityLoader =
+          (_, __) async => throw StateError('unexpected probe');
+    await _mount(tester, repository);
+    await tester.pumpAndSettle();
+    final count = find.byKey(const ValueKey('vod-course-lesson-count:101'));
+    expect(tester.widget<Text>(count).textSpan!.toPlainText(), '1/2节');
+    expect(repository.verificationRequests, 0);
+    expect(repository.playbackRequests, isEmpty);
+    expect(
+        tester
+            .widget<ListTile>(find.byKey(const ValueKey('vod-course:101')))
+            .onTap,
+        isNotNull);
+  });
+
+  testWidgets(
+      'home keeps a listed course with zero platform playables selectable',
+      (tester) async {
+    final repository = _Repository()
+      ..coursesLoader = ((_, __) async => [_programming])
+      ..lessonsLoader = ((_, __) async => [
+            const VodLesson(
+                id: 1,
+                teachingClassId: 101,
+                name: '未启用',
+                isPlayable: false,
+                isListed: true)
+          ]);
+    await _mount(tester, repository);
+    await tester.pumpAndSettle();
+    final row = find.byKey(const ValueKey('vod-course:101'));
+    final count = find.byKey(const ValueKey('vod-course-lesson-count:101'));
+    expect(tester.widget<Text>(count).textSpan!.toPlainText(), '0/1节');
+    expect(tester.widget<ListTile>(row).onTap, isNotNull);
+    expect(find.descendant(of: row, matching: find.byIcon(Icons.chevron_right)),
+        findsOneWidget);
+    await tester.tap(row);
+    await tester.pumpAndSettle();
+    final player =
+        tester.widget<RecordingPlayerPage>(find.byType(RecordingPlayerPage));
+    expect(player.initialLesson?.id, 1);
+  });
+
+  testWidgets(
+      'home opens the platform playable recording using the preloaded list',
+      (tester) async {
+    final repository = _Repository()
+      ..coursesLoader = ((_, __) async => [_programming])
+      ..lessonsLoader = ((_, __) async => [
+            const VodLesson(
+                id: 1, teachingClassId: 101, name: '已启用', isPlayable: true),
+            const VodLesson(
+                id: 2,
+                teachingClassId: 101,
+                name: '未启用',
+                isPlayable: false,
+                isListed: true),
+          ]);
+    await _mount(tester, repository);
+    await tester.pumpAndSettle();
+    final before = repository.lessonRequests;
+    await tester.tap(find.byKey(const ValueKey('vod-course:101')));
+    await tester.pumpAndSettle();
+    final player =
+        tester.widget<RecordingPlayerPage>(find.byType(RecordingPlayerPage));
+    expect(player.initialLesson?.id, 1);
+    expect(player.skipInitialCatalogLoad, isTrue);
+    expect(repository.lessonRequests, before);
+  });
+
+  testWidgets('recording platform information is available from the title',
+      (tester) async {
+    await _mount(tester, _Repository(), signedIn: false);
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byTooltip('课程录播信息说明'));
+    await tester.pumpAndSettle();
+    expect(find.text('学校录播平台接口可能随时更改，部分功能的可用性和完整性无法保证。'), findsOneWidget);
+
+    await tester.tap(find.text('知道了'));
+    await tester.pumpAndSettle();
+    expect(find.byType(AlertDialog), findsNothing);
+  });
+
   for (final failure in <String, Object>{
     'server unavailable': const VodAuthUnavailableException(),
     'network unavailable': const SocketException('offline'),
@@ -288,6 +408,26 @@ void main() {
       weekNumber: 7,
       sectionLabel: '第7节');
 
+  testWidgets('timetable opens lessons without link checks', (tester) async {
+    final repository = _Repository()
+      ..coursesLoader = ((_, __) async => [_programming])
+      ..lessonsLoader = ((_, __) async => [morningLesson, afternoonLesson]);
+    await _mount(tester, repository);
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('vod-view-toggle')));
+    await tester.pumpAndSettle();
+    await _selectTimetableDate(tester, 7, '2026-10-28');
+    final row = find.byKey(const ValueKey('timetable-entry-101-201'));
+    expect(tester.widget<ListTile>(row).onTap, isNotNull);
+    expect(repository.verificationRequests, 0);
+    await tester.tap(row);
+    await tester.pumpAndSettle();
+    final player =
+        tester.widget<RecordingPlayerPage>(find.byType(RecordingPlayerPage));
+    expect(player.initialLesson?.id, 201);
+    expect(player.skipInitialCatalogLoad, isTrue);
+  });
+
   testWidgets('timetable mode reuses catalog and preserves the chosen date',
       (tester) async {
     final repository = _Repository();
@@ -297,13 +437,19 @@ void main() {
     await _mount(tester, repository);
     await tester.pumpAndSettle();
     final toggle = find.byKey(const ValueKey('vod-view-toggle'));
+    final summary = find.byKey(const ValueKey('vod-course-summary'));
+    final courseCount = find.byKey(const ValueKey('vod-course-count'));
     expect(find.descendant(of: find.byType(AppBar), matching: toggle),
-        findsOneWidget);
+        findsNothing);
+    expect(find.descendant(of: summary, matching: toggle), findsOneWidget);
+    expect(tester.getTopRight(courseCount).dx,
+        lessThanOrEqualTo(tester.getTopLeft(toggle).dx));
+    expect(tester.getTopRight(toggle).dx,
+        lessThanOrEqualTo(tester.getTopRight(summary).dx));
     expect(find.byType(RecordingTimetableView), findsNothing);
     await tester.tap(toggle);
     await tester.pumpAndSettle();
     await _selectTimetableDate(tester, 7, '2026-10-28');
-    final summary = find.byKey(const ValueKey('vod-course-summary'));
     final weeks = find.byType(ScheduleWeekSwitcher);
     final dates = find.byKey(const ValueKey('timetable-weekdays'));
     expect(tester.getBottomLeft(summary).dy,
@@ -520,6 +666,13 @@ void main() {
       (tester) async {
     final courses = Completer<List<VodCourse>>();
     final repository = _Repository()..coursesLoader = (_, __) => courses.future;
+    repository.lessonsLoader = (course, _) async => [
+          VodLesson(
+              id: 1,
+              teachingClassId: course.teachingClassId,
+              name: '回放',
+              isPlayable: true)
+        ];
     await _mount(tester, repository);
     await tester.pump();
     repository.progressCallbacks[7]!([_programming]);
@@ -591,12 +744,19 @@ void main() {
     expect(find.byKey(const ValueKey('vod-loading-progress')), findsNothing);
   });
 
-  testWidgets('failed refresh keeps successful catalog content usable',
+  testWidgets('failed refresh keeps catalog visible but count unknown',
       (tester) async {
     final refresh = Completer<List<VodCourse>>();
-    final repository = _Repository()
-      ..coursesLoader =
-          (_, force) => force ? refresh.future : Future.value(_currentCourses);
+    final repository = _Repository();
+    repository.coursesLoader =
+        (_, force) => force ? refresh.future : Future.value(_currentCourses);
+    repository.lessonsLoader = (course, _) async => [
+          VodLesson(
+              id: 1,
+              teachingClassId: course.teachingClassId,
+              name: '回放',
+              isPlayable: true)
+        ];
     await _mount(tester, repository);
     await tester.pumpAndSettle();
     final refreshing = tester
@@ -624,7 +784,12 @@ void main() {
                 find.byKey(const ValueKey('vod-course-lesson-count:101')))
             .textSpan!
             .toPlainText(),
-        '0/0节');
+        '1/1节');
+    expect(
+        tester
+            .widget<ListTile>(find.byKey(const ValueKey('vod-course:101')))
+            .onTap,
+        isNull);
   });
 
   testWidgets(
@@ -826,10 +991,10 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.byTooltip('选择学期'));
     await tester.pumpAndSettle();
-    expect(find.text('26-27学年'), findsOneWidget);
-    expect(find.text('25-26学年'), findsOneWidget);
-    expect(tester.getTopLeft(find.text('26-27学年')).dy,
-        lessThan(tester.getTopLeft(find.text('25-26学年')).dy));
+    expect(find.text('2026-2027 学年'), findsOneWidget);
+    expect(find.text('2025-2026 学年'), findsOneWidget);
+    expect(tester.getTopLeft(find.text('2026-2027 学年')).dy,
+        lessThan(tester.getTopLeft(find.text('2025-2026 学年')).dy));
     final autumn = find.byKey(const ValueKey('vod-term-option:5'));
     final spring = find.byKey(const ValueKey('vod-term-option:6'));
     final summer = find.byKey(const ValueKey('vod-term-option:8'));
@@ -871,8 +1036,8 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.byTooltip('选择学期'));
     await tester.pumpAndSettle();
-    expect(tester.getTopLeft(find.text('26-27学年')).dy,
-        lessThan(tester.getTopLeft(find.text('24-25学年')).dy));
+    expect(tester.getTopLeft(find.text('2026-2027 学年')).dy,
+        lessThan(tester.getTopLeft(find.text('2024-2025 学年')).dy));
     await tester.tap(find.byKey(const ValueKey('vod-term-year:2026-2027')));
     await tester.pumpAndSettle();
     final autumn = find.byKey(const ValueKey('vod-term-option:41'));
@@ -1085,7 +1250,14 @@ void main() {
   testWidgets('plain course list keeps pull-to-refresh including empty results',
       (tester) async {
     final repository = _Repository()
-      ..coursesLoader = (_, force) async => force ? [] : _currentCourses;
+      ..coursesLoader = ((_, force) async => force ? [] : _currentCourses)
+      ..lessonsLoader = (course, _) async => [
+            VodLesson(
+                id: course.teachingClassId,
+                teachingClassId: course.teachingClassId,
+                name: course.name,
+                isPlayable: true),
+          ];
     await _mount(tester, repository);
     await tester.pumpAndSettle();
     expect(find.byTooltip('刷新课程'), findsNothing);
@@ -1189,6 +1361,60 @@ void main() {
     expect(tester.getTopLeft(finder).dx,
         lessThan(tester.getTopLeft(find.byIcon(Icons.chevron_right)).dx));
     expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('confirmed empty course is dimmed and cannot open',
+      (tester) async {
+    final repository = _Repository();
+    repository.coursesLoader = (_, __) async => [_programming, _electronics];
+    repository.lessonsLoader = (course, _) async =>
+        course.teachingClassId == 101
+            ? []
+            : [
+                const VodLesson(
+                    id: 2, teachingClassId: 102, name: '回放', isPlayable: true)
+              ];
+    await _mount(tester, repository);
+    await tester.pumpAndSettle();
+
+    final empty = find.byKey(const ValueKey('vod-course:101'));
+    final available = find.byKey(const ValueKey('vod-course:102'));
+    expect(tester.widget<ListTile>(empty).onTap, isNull);
+    expect(tester.widget<ListTile>(available).onTap, isNotNull);
+    expect(find.byKey(const ValueKey('vod-course-lesson-count:101')),
+        findsNothing);
+    expect(find.byKey(const ValueKey('vod-course-lesson-count:102')),
+        findsOneWidget);
+    expect(find.descendant(of: empty, matching: find.byIcon(Icons.block)),
+        findsOneWidget);
+    expect(
+        find.descendant(of: empty, matching: find.byIcon(Icons.chevron_right)),
+        findsNothing);
+    expect(
+        find.descendant(
+            of: available, matching: find.byIcon(Icons.chevron_right)),
+        findsOneWidget);
+    expect(find.descendant(of: available, matching: find.byIcon(Icons.block)),
+        findsNothing);
+    expect(find.descendant(of: empty, matching: find.byType(ColorFiltered)),
+        findsNothing);
+    final disabledColor = Theme.of(tester.element(empty)).disabledColor;
+    final label =
+        find.descendant(of: empty, matching: find.byType(CourseColorLabel));
+    expect(tester.widget<CourseColorLabel>(label).color, disabledColor);
+    for (final text in tester.widgetList<Text>(
+        find.descendant(of: label, matching: find.byType(Text)))) {
+      expect(text.style?.color, disabledColor);
+    }
+    expect(find.descendant(of: available, matching: find.byType(ColorFiltered)),
+        findsNothing);
+    await tester.tap(empty);
+    await tester.pumpAndSettle();
+    expect(find.byType(RecordingPlayerPage), findsNothing);
+    expect(repository.playbackRequests, isEmpty);
+    await tester.tap(available);
+    await tester.pumpAndSettle();
+    expect(find.byType(RecordingPlayerPage), findsOneWidget);
   });
 
   testWidgets('course and its count enter together after the count loads',
@@ -1450,6 +1676,11 @@ void main() {
     expect(tester.widget<Text>(finder).textSpan!.toPlainText(), '—/—节');
     expect(find.byTooltip('课次统计暂不可用，下拉刷新重试'), findsOneWidget);
     expect(find.byKey(const ValueKey('vod-course:101')), findsOneWidget);
+    expect(
+        find.descendant(
+            of: find.byKey(const ValueKey('vod-course:101')),
+            matching: find.byIcon(Icons.block)),
+        findsNothing);
   });
 
   testWidgets('course metadata handles missing codes and teachers',
@@ -1508,7 +1739,14 @@ void main() {
   testWidgets(
       'course rows open the player directly with introduction and episodes',
       (tester) async {
-    final repository = _Repository();
+    final repository = _Repository()
+      ..lessonsLoader = (course, _) async => [
+            VodLesson(
+                id: 1,
+                teachingClassId: course.teachingClassId,
+                name: '回放',
+                isPlayable: true)
+          ];
     await _mount(tester, repository);
     await tester.pumpAndSettle();
     final requestsBeforeOpening = repository.lessonRequests;
@@ -1521,11 +1759,12 @@ void main() {
     );
     expect(lessonsPage.course.teachingClassId, 101);
     expect(identical(lessonsPage.repository, repository), isTrue);
-    expect(repository.lessonRequests, greaterThan(requestsBeforeOpening));
+    expect(lessonsPage.skipInitialCatalogLoad, isTrue);
+    expect(repository.lessonRequests, requestsBeforeOpening);
     expect(find.text('课程介绍'), findsNothing);
     expect(find.text('选集'), findsOneWidget);
     expect(find.text('剧集'), findsNothing);
-    expect(find.text('暂无可观看回放'), findsOneWidget);
+    expect(find.text('暂无可观看回放'), findsNothing);
   });
 
   testWidgets(
@@ -1539,12 +1778,27 @@ void main() {
       ..coursesLoader = (_, force) async => force ? [] : _currentCourses;
     await _mount(tester, repository, textScale: 2);
     await tester.pumpAndSettle();
+    final summary = find.byKey(const ValueKey('vod-course-summary'));
+    final courseCount = find.byKey(const ValueKey('vod-course-count'));
+    final toggle = find.byKey(const ValueKey('vod-view-toggle'));
+    void expectToggleInSummary() {
+      expect(find.descendant(of: summary, matching: toggle), findsOneWidget);
+      expect(find.descendant(of: find.byType(AppBar), matching: toggle),
+          findsNothing);
+      expect(tester.getTopRight(courseCount).dx,
+          lessThanOrEqualTo(tester.getTopLeft(toggle).dx));
+      expect(tester.getTopRight(toggle).dx,
+          lessThanOrEqualTo(tester.getTopRight(summary).dx));
+      expect(tester.takeException(), isNull);
+    }
+
+    expectToggleInSummary();
     expect(tester.takeException(), isNull);
-    await tester.tap(find.byKey(const ValueKey('vod-view-toggle')));
+    await tester.tap(toggle);
     await tester.pumpAndSettle();
     expect(find.byKey(const ValueKey('timetable-weekdays')), findsOneWidget);
-    expect(tester.takeException(), isNull);
-    await tester.tap(find.byKey(const ValueKey('vod-view-toggle')));
+    expectToggleInSummary();
+    await tester.tap(toggle);
     await tester.pumpAndSettle();
     await tester.drag(
         find.byKey(const ValueKey('vod-courses:7')), const Offset(0, 350));

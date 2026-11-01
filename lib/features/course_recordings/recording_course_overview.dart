@@ -41,9 +41,14 @@ List<RecordingCourseDay> recordingCourseDays(Iterable<VodLesson> lessons) {
 }
 
 class RecordingCourseOverview extends StatelessWidget {
-  const RecordingCourseOverview({super.key, required this.days});
+  const RecordingCourseOverview({
+    super.key,
+    required this.days,
+    this.term,
+  });
 
   final List<RecordingCourseDay> days;
+  final VodTerm? term;
 
   @override
   Widget build(BuildContext context) {
@@ -55,16 +60,38 @@ class RecordingCourseOverview extends StatelessWidget {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Row(key: const ValueKey('recording-course-overview-header'), children: [
-          SizedBox(
-            width: 40,
-            child: FittedBox(
-              fit: BoxFit.scaleDown,
-              alignment: Alignment.centerLeft,
-              child: Text('概览',
-                  style:
-                      ShuYoTextStyles.sectionTitle(color: colors.textPrimary)),
+          Text('概览',
+              style: ShuYoTextStyles.sectionTitle(color: colors.textPrimary)),
+          if (term case final selectedTerm?) ...[
+            const SizedBox(width: 12),
+            Expanded(
+              child: FittedBox(
+                fit: BoxFit.scaleDown,
+                alignment: Alignment.centerLeft,
+                child: Text.rich(
+                  key: const ValueKey('recording-course-overview-term'),
+                  TextSpan(children: [
+                    if (selectedTerm.academicYear.isEmpty)
+                      TextSpan(text: selectedTerm.name)
+                    else ...[
+                      TextSpan(text: '${selectedTerm.academicYear} 学年 '),
+                      TextSpan(
+                        text: selectedTerm.seasonLabel,
+                        style: TextStyle(color: primary),
+                      ),
+                    ],
+                  ]),
+                  maxLines: 1,
+                  style: ShuYoTextStyles.bodyCompact(color: colors.textPrimary)
+                      .copyWith(fontWeight: FontWeight.w600),
+                ),
+              ),
             ),
-          ),
+          ],
+        ]),
+        const SizedBox(height: 12),
+        Row(key: const ValueKey('recording-course-overview-times'), children: [
+          const SizedBox(width: 40),
           for (var block = 0; block < 6; block++)
             Expanded(
                 child: Padding(

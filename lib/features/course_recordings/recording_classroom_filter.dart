@@ -6,17 +6,17 @@ class RecordingClassroomFilter extends StatelessWidget {
   const RecordingClassroomFilter({
     super.key,
     required this.classrooms,
-    required this.excluded,
+    required this.selected,
     required this.onChanged,
   });
 
   final List<String> classrooms;
-  final Set<String> excluded;
-  final void Function(String classroom, bool selected) onChanged;
+  final String? selected;
+  final ValueChanged<String> onChanged;
 
   @override
   Widget build(BuildContext context) {
-    if (classrooms.isEmpty) return const SizedBox.shrink();
+    if (classrooms.length < 2) return const SizedBox.shrink();
     final colors = Theme.of(context).colorScheme;
     return MediaQuery.withClampedTextScaling(
       maxScaleFactor: 1.3,
@@ -36,19 +36,15 @@ class RecordingClassroomFilter extends StatelessWidget {
               separatorBuilder: (_, __) => const SizedBox(width: 6),
               itemBuilder: (context, index) {
                 final room = classrooms[index];
-                final selected =
-                    classrooms.length == 1 || !excluded.contains(room);
                 return Center(
-                  child: FilterChip(
+                  child: ChoiceChip(
                     key: ValueKey('recording-classroom:$room'),
                     label: Text(room.isEmpty ? '教室未知' : room),
-                    selected: selected,
-                    onSelected: classrooms.length == 1
-                        ? null
-                        : (value) => onChanged(room, value),
+                    selected: selected == room,
+                    onSelected: (_) => onChanged(room),
                     visualDensity: VisualDensity.compact,
                     materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                    showCheckmark: true,
+                    showCheckmark: false,
                     labelStyle:
                         TextStyle(fontSize: 12, color: colors.onSurface),
                   ),
