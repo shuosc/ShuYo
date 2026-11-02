@@ -4,6 +4,32 @@ import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 import 'package:shuyo/features/course_recordings/recording_video_controls.dart';
 
+class _VideoOutput extends PlatformVideoController {
+  _VideoOutput(Player player)
+      : super(player, const VideoControllerConfiguration()) {
+    id.value = 123;
+    rect.value = const Rect.fromLTWH(0, 0, 1920, 1080);
+  }
+
+  @override
+  Future<void> setSize({int? width, int? height}) async {}
+}
+
+class _VideoController implements VideoController {
+  _VideoController(PlatformVideoController output)
+      : player = output.player,
+        notifier = ValueNotifier<PlatformVideoController?>(output);
+
+  @override
+  final Player player;
+
+  @override
+  final ValueNotifier<PlatformVideoController?> notifier;
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
 class _SeekPlayer extends PlatformPlayer {
   _SeekPlayer({bool playing = false})
       : super(configuration: const PlayerConfiguration()) {
@@ -51,6 +77,7 @@ Widget _controls(
   bool isLive = false,
   Widget? failure,
   Player? timelinePlayer,
+  VideoController? primaryController,
 }) =>
     MaterialApp(
       home: Scaffold(
@@ -68,11 +95,71 @@ Widget _controls(
           isLive: isLive,
           onSeek: onSeek,
           primaryView: primaryView,
+          primaryController: primaryController,
         ),
       ),
     );
 
 void main() {
+  for (final fullscreen in [false, true]) {
+    testWidgets(
+        'seek toast and centered preview reuse the visible texture ($fullscreen)',
+        (tester) async {
+      tester.view.physicalSize =
+          fullscreen ? const Size(873, 393) : const Size(393, 221);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final platform = _SeekPlayer();
+      final player = Player(platformPlayer: platform);
+      addTearDown(player.dispose);
+      final output = _VideoOutput(player);
+      final controller = _VideoController(output);
+      addTearDown(controller.notifier.dispose);
+      addTearDown(output.id.dispose);
+      addTearDown(output.rect.dispose);
+      await tester.pumpWidget(_controls(player,
+          fullscreen: fullscreen,
+          primaryController: controller,
+          primaryView: const Texture(textureId: 123)));
+      expect(find.byType(Texture), findsOneWidget);
+      expect(find.byKey(const ValueKey('recording-seek-toast')), findsNothing);
+      final slider = tester.widget<Slider>(find.byType(Slider));
+      slider.onChangeStart!(0);
+      slider.onChanged!(3723000);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 150));
+      final toast = find.byKey(const ValueKey('recording-seek-toast'));
+      final thumbnail = find.byKey(const ValueKey('recording-seek-thumbnail'));
+      expect(find.descendant(of: toast, matching: find.text('1:02:03')),
+          findsOneWidget);
+      expect(find.descendant(of: toast, matching: find.text('1:30:00')),
+          findsOneWidget);
+      final surface = tester
+          .getRect(find.byKey(const ValueKey('recording-control-surface')));
+      expect(tester.getCenter(thumbnail), surface.center);
+      expect(tester.getSize(thumbnail).height, fullscreen ? 108 : 81);
+      expect(tester.getRect(toast).bottom,
+          lessThan(tester.getRect(thumbnail).top));
+      expect(
+          tester
+              .widgetList<Texture>(find.byType(Texture))
+              .map((texture) => texture.textureId),
+          [123, 123]);
+      expect(platform.positions,
+          [const Duration(hours: 1, minutes: 2, seconds: 3)]);
+      slider.onChangeEnd!(3723000);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 150));
+      expect(thumbnail, findsNothing);
+      expect(toast, findsNothing);
+      expect(find.byType(Texture), findsOneWidget);
+      expect(platform.playbackChanges, 0);
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+    });
+  }
+
   for (final fullscreen in [false, true]) {
     for (final playing in [false, true]) {
       testWidgets(
@@ -100,6 +187,8 @@ void main() {
           final target = Duration(seconds: direction > 0 ? 60 : 50);
           // Preview applies before release, and release submits the same target.
           expect(platform.positions.last, target);
+          expect(find.byKey(const ValueKey('recording-seek-toast')),
+              findsOneWidget);
           await gesture.up();
           await tester.pump();
           expect(platform.positions.last, target);
@@ -222,6 +311,7 @@ void main() {
       expect(targets, isEmpty);
       expect(platform.positions, isEmpty);
       expect(platform.playbackChanges, 0);
+      expect(find.byKey(const ValueKey('recording-seek-toast')), findsNothing);
       if (mode == 'live') expect(find.byType(Slider), findsNothing);
       await tester.pumpWidget(const SizedBox.shrink());
     });
@@ -251,6 +341,7 @@ void main() {
       await gesture.up();
       await tester.pump(const Duration(milliseconds: 200));
       expect(targets, hasLength(1));
+      expect(find.byKey(const ValueKey('recording-seek-toast')), findsNothing);
       await tester.pumpWidget(const SizedBox.shrink());
     });
   }

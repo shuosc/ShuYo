@@ -21,6 +21,7 @@ import 'recording_player_menu.dart';
 import 'recording_player_preferences.dart';
 import 'recording_playback_status.dart';
 import 'recording_seek_controller.dart';
+import 'recording_seek_preview.dart';
 import 'recording_secondary_video.dart';
 
 typedef _ProgressPresentation = ({
@@ -148,6 +149,8 @@ class _RecordingVideoControlsState extends State<RecordingVideoControls>
       (playing: false, buffering: false, bufferedSeconds: 0));
   final _playingPresentation = ValueNotifier(false);
   final _ratePresentation = ValueNotifier(1.0);
+  final _seekPreview = ValueNotifier<RecordingSeekPreviewData>(
+      (visible: false, position: 0, total: 0));
   final _episodeNavigationCache = RecordingEpisodeNavigationCache();
   final _episodeScrollController = ScrollController();
   late final AnimationController _episodeAnimation;
@@ -271,6 +274,7 @@ class _RecordingVideoControlsState extends State<RecordingVideoControls>
       _dragPosition = null;
       _surfaceSeek = null;
       _surfaceDragOrigin = null;
+      _hideSeekPreview();
       for (final subscription in _subscriptions) {
         unawaited(subscription.cancel());
       }
@@ -278,7 +282,8 @@ class _RecordingVideoControlsState extends State<RecordingVideoControls>
       _bindPlayer();
     } else if (oldWidget.selectedLessonId != widget.selectedLessonId ||
         oldWidget.isLive != widget.isLive ||
-        !oldWidget.loading && widget.loading) {
+        !oldWidget.loading && widget.loading ||
+        oldWidget.failure == null && widget.failure != null) {
       _endLongPress();
       _seekController.begin();
       _seekRevision++;
@@ -286,6 +291,7 @@ class _RecordingVideoControlsState extends State<RecordingVideoControls>
       _dragPosition = null;
       _surfaceSeek = null;
       _surfaceDragOrigin = null;
+      _hideSeekPreview();
     }
     if (oldWidget.player != widget.player) _bindLoadingPlayer();
     _timelineChanged();
@@ -311,6 +317,7 @@ class _RecordingVideoControlsState extends State<RecordingVideoControls>
     _loadingPresentation.dispose();
     _playingPresentation.dispose();
     _ratePresentation.dispose();
+    _seekPreview.dispose();
     for (final subscription in [..._subscriptions, ..._loadingSubscriptions]) {
       unawaited(subscription.cancel());
     }
@@ -458,17 +465,37 @@ class _RecordingVideoControlsState extends State<RecordingVideoControls>
     _seekController.begin();
     _hideTimer?.cancel();
     _dragPosition = value;
+    _showSeekPreview(value);
     _timelineChanged();
+  }
+
+  void _showSeekPreview(double value) {
+    _seekPreview.value = (
+      visible: true,
+      position: value ~/ 1000,
+      total: _clockPlayer.state.duration.inSeconds,
+    );
+  }
+
+  void _hideSeekPreview() {
+    final previous = _seekPreview.value;
+    _seekPreview.value = (
+      visible: false,
+      position: previous.position,
+      total: previous.total,
+    );
   }
 
   void _previewSeek(double value) {
     _hideTimer?.cancel();
     _dragPosition = value;
+    _showSeekPreview(value);
     _timelineChanged();
     _seekController.preview(Duration(milliseconds: value.round()));
   }
 
   Future<void> _finishSeek(double value) async {
+    _hideSeekPreview();
     final revision = ++_seekRevision;
     final target = Duration(milliseconds: value.round());
     _dragPosition = value;
@@ -945,6 +972,22 @@ class _RecordingVideoControlsState extends State<RecordingVideoControls>
                 // keyed element stays in this Stack when the view roles swap.
                 ...surfaces.skip(1),
                 if (showFloating) floating,
+                if (!widget.isLive && widget.failure == null)
+                  Positioned.fill(
+                    child: ValueListenableBuilder<RecordingSeekPreviewData>(
+                      valueListenable: _seekPreview,
+                      builder: (context, data, _) => RecordingSeekPreview(
+                        key: ValueKey((
+                          widget.selectedLessonId,
+                          widget.primaryController
+                        )),
+                        data: data,
+                        fullscreen: fullscreen,
+                        safeInsets: safeInsets,
+                        controller: widget.primaryController,
+                      ),
+                    ),
+                  ),
                 if (widget.failure != null)
                   Positioned.fill(child: widget.failure!),
                 if (widget.failure != null &&
@@ -1585,6 +1628,9 @@ class _RecordingVideoControlsState extends State<RecordingVideoControls>
                           height: 14,
                           child: SliderTheme(
                             data: SliderTheme.of(context).copyWith(
+                                // PiliPlus BottomControl uses a 25px glow at
+                                // alpha 80 around its 7px thumb.
+                                overlayColor: progressColor.withAlpha(80),
                                 trackHeight: 3.5,
                                 trackShape: const RoundedRectSliderTrackShape(),
                                 thumbShape: const RoundSliderThumbShape(
@@ -1592,7 +1638,7 @@ class _RecordingVideoControlsState extends State<RecordingVideoControls>
                                     elevation: 0,
                                     pressedElevation: 0),
                                 overlayShape: const RoundSliderOverlayShape(
-                                    overlayRadius: 12)),
+                                    overlayRadius: 25)),
                             child: Slider(
                               padding: EdgeInsets.zero,
                               value: progress.played,

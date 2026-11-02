@@ -190,6 +190,15 @@ void main() {
     final row =
         tester.getRect(find.byKey(const ValueKey('recording-bottom-controls')));
     expect(track.height, 14);
+    final sliderContext = tester.element(find.byType(Slider));
+    final sliderTheme = SliderTheme.of(sliderContext);
+    expect((sliderTheme.overlayShape! as RoundSliderOverlayShape).overlayRadius,
+        25);
+    final colors = Theme.of(sliderContext).colorScheme;
+    final progressColor = colors.brightness == Brightness.light
+        ? colors.inversePrimary
+        : colors.primary;
+    expect(sliderTheme.overlayColor, progressColor.withAlpha(80));
     expect(row.top - track.bottom, 7);
     expect(row.height, 34);
     expect(tester.getSize(find.byTooltip('播放')), const Size(42, 34));
