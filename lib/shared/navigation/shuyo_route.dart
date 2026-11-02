@@ -3,6 +3,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import '../theme/custom_background.dart';
+import 'background_work_boundary.dart';
 
 Route<T> shuyoRoute<T>({
   required WidgetBuilder builder,
@@ -86,12 +87,13 @@ class ShuYoRouteSurface extends StatelessWidget {
     // paint offset and creates no layer. Without a repaint boundary the whole
     // page is re-recorded on every frame of the transition; this boundary lets
     // the recorded layer be reused and only re-composited.
-    return RepaintBoundary(
+    return BackgroundWorkBoundary(
+        child: RepaintBoundary(
       child: CustomBackgroundLayer(
         settings: customBackground,
         fallbackColor: Theme.of(context).scaffoldBackgroundColor,
         child: child,
       ),
-    );
+    ));
   }
 }
