@@ -1150,12 +1150,15 @@ void main() {
     VodWebRtcSession Function(VodWebRtcSource)? webRtcSessionFactory,
     List<VodLesson>? lessons,
     EdgeInsets insets = EdgeInsets.zero,
+    bool disableAnimations = true,
   }) =>
       MaterialApp(
         theme: ShuYoThemes.all.first.themeData(),
         builder: (context, child) => MediaQuery(
             data: MediaQuery.of(context).copyWith(
-                disableAnimations: true, padding: insets, viewPadding: insets),
+                disableAnimations: disableAnimations,
+                padding: insets,
+                viewPadding: insets),
             child: child!),
         home: RecordingPlayerPage(
           course: course,
@@ -3058,6 +3061,13 @@ void main() {
     expect(tester.widget<ChoiceChip>(roomB).selected, isTrue);
     final roomA = find.byKey(const ValueKey('recording-classroom:A101'));
     expect(tester.widget<ChoiceChip>(roomA).selected, isFalse);
+    expect(find.descendant(of: classrooms, matching: find.text('教室')),
+        findsNothing);
+    for (final chip in [roomA, roomB]) {
+      final name = find.descendant(of: chip, matching: find.byType(Text));
+      expect(tester.widget<Text>(name).textAlign, TextAlign.left);
+      expect(tester.getSize(name).width, greaterThanOrEqualTo(96));
+    }
     await tester.tap(roomA);
     await tester.pumpAndSettle();
     expect(tester.widget<ChoiceChip>(roomB).selected, isFalse);
@@ -3105,6 +3115,60 @@ void main() {
         closeTo(tester.getBottomLeft(playerTabs).dy, .01));
     expect(
         harness.platforms.every((player) => player.opened.length == 1), isTrue);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('pinned episode toolbar does not stretch with bottom overscroll',
+      (tester) async {
+    tester.view.physicalSize = const Size(393, 852);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final lessons = List.generate(
+        40,
+        (index) => VodLesson(
+            id: 200 + index,
+            teachingClassId: 10,
+            name: course.name,
+            isPlayable: true,
+            classroom: index.isEven ? 'A101' : 'B202',
+            beginTime: DateTime(2026, 9, 1).add(Duration(days: index))));
+    final harness = _PlaybackHarness();
+    await tester.pumpWidget(page(
+        initial: lessons.first,
+        lessons: lessons,
+        harness: harness,
+        disableAnimations: false,
+        load: (lesson) async => playback(lesson)));
+    await tester.pumpAndSettle();
+    final list = find.byKey(const ValueKey('course-player-episodes'));
+    final header = find.byKey(const ValueKey('recording-episode-header'));
+    await tester.drag(list, const Offset(0, -700));
+    await tester.pumpAndSettle();
+    final position = Scrollable.of(tester.element(header)).position;
+    position.jumpTo(position.maxScrollExtent);
+    await tester.pumpAndSettle();
+    final pinned = tester.getRect(header);
+    expect(
+        pinned.top,
+        closeTo(
+            tester
+                .getBottomLeft(
+                    find.byKey(const ValueKey('recording-player-tabs')))
+                .dy,
+            .01));
+    final gesture = await tester.startGesture(const Offset(200, 700));
+    for (var i = 0; i < 8; i++) {
+      await gesture.moveBy(const Offset(0, -30));
+      await tester.pump(const Duration(milliseconds: 16));
+      expect(tester.getRect(header), pinned);
+    }
+    await gesture.up();
+    for (var i = 0; i < 20; i++) {
+      await tester.pump(const Duration(milliseconds: 16));
+      expect(tester.getRect(header), pinned);
+    }
     expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox.shrink());
   });
@@ -5753,13 +5817,15 @@ void main() {
     expect(overview, findsOneWidget);
     final overviewTitle = tester
         .widget<Text>(find.descendant(of: overview, matching: find.text('概览')));
-    final classroomTitle = tester.widget<Text>(find.descendant(
-        of: find.byKey(const ValueKey('recording-classroom-filter')),
-        matching: find.text('教室')));
+    expect(
+        find.descendant(
+            of: find.byKey(const ValueKey('recording-classroom-filter')),
+            matching: find.text('教室')),
+        findsNothing);
     final episodeTitle = tester.widget<Text>(find.descendant(
         of: find.byKey(const ValueKey('recording-episode-header')),
         matching: find.text('选集')));
-    for (final heading in [overviewTitle, classroomTitle, episodeTitle]) {
+    for (final heading in [overviewTitle, episodeTitle]) {
       expect(heading.style!.fontWeight, FontWeight.w600);
       expect(heading.style!.fontSize, overviewTitle.style!.fontSize);
     }

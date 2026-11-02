@@ -2525,14 +2525,21 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
                 height: 24 + MediaQuery.viewPaddingOf(context).bottom)),
       ],
     );
+    // Android's stretch indicator transforms the entire inner viewport,
+    // including pinned slivers, pushing the episode toolbar behind the tabs.
+    // Keep the viewport rigid while its content still scrolls normally.
+    final viewport = ScrollConfiguration(
+      behavior: ScrollConfiguration.of(context).copyWith(overscroll: false),
+      child: content,
+    );
     final result = widget.repository == null || !_shouldLoadCatalog
-        ? content
+        ? viewport
         : RefreshIndicator(
             notificationPredicate: (notification) =>
                 (!_catalogLoading || _catalogPullRefreshing) &&
                 defaultScrollNotificationPredicate(notification),
             onRefresh: () => _loadCatalog(forceRefresh: true, fromPull: true),
-            child: content,
+            child: viewport,
           );
     _lessonListCache[nested] = (signature, result);
     return result;

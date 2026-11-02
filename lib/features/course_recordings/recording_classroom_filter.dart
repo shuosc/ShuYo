@@ -1,7 +1,5 @@
 import 'package:flutter/material.dart';
 
-import '../../shared/shuyo_text_styles.dart';
-
 class RecordingClassroomFilter extends StatelessWidget {
   const RecordingClassroomFilter({
     super.key,
@@ -23,36 +21,31 @@ class RecordingClassroomFilter extends StatelessWidget {
       child: SizedBox(
         key: const ValueKey('recording-classroom-filter'),
         height: 50,
-        child: Row(children: [
-          const SizedBox(width: 14),
-          Text('教室',
-              style: ShuYoTextStyles.sectionTitle(color: colors.onSurface)),
-          const SizedBox(width: 10),
-          Expanded(
-            child: ListView.separated(
-              scrollDirection: Axis.horizontal,
-              padding: const EdgeInsets.only(right: 14),
-              itemCount: classrooms.length,
-              separatorBuilder: (_, __) => const SizedBox(width: 6),
-              itemBuilder: (context, index) {
-                final room = classrooms[index];
-                return Center(
-                  child: ChoiceChip(
-                    key: ValueKey('recording-classroom:$room'),
-                    label: Text(room.isEmpty ? '教室未知' : room),
-                    selected: selected == room,
-                    onSelected: (_) => onChanged(room),
-                    visualDensity: VisualDensity.compact,
-                    materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                    showCheckmark: false,
-                    labelStyle:
-                        TextStyle(fontSize: 12, color: colors.onSurface),
-                  ),
-                );
-              },
-            ),
-          ),
-        ]),
+        child: ListView.separated(
+          scrollDirection: Axis.horizontal,
+          padding: const EdgeInsets.symmetric(horizontal: 14),
+          itemCount: classrooms.length,
+          separatorBuilder: (_, __) => const SizedBox(width: 6),
+          itemBuilder: (context, index) {
+            final room = classrooms[index];
+            return Center(
+              child: ChoiceChip(
+                key: ValueKey('recording-classroom:$room'),
+                label: ConstrainedBox(
+                  constraints: const BoxConstraints(minWidth: 96),
+                  child: Text(room.isEmpty ? '教室未知' : room,
+                      textAlign: TextAlign.left),
+                ),
+                selected: selected == room,
+                onSelected: (_) => onChanged(room),
+                visualDensity: VisualDensity.compact,
+                materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                showCheckmark: false,
+                labelStyle: TextStyle(fontSize: 12, color: colors.onSurface),
+              ),
+            );
+          },
+        ),
       ),
     );
   }
