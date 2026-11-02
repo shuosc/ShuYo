@@ -54,18 +54,25 @@ void main() {
         findsNothing);
 
     await tester.pumpWidget(frame(settings.copyWith(opacity: 100)));
-    final imageOpacity = find.descendant(
+    final image = find.descendant(
       of: find.byType(CustomBackgroundLayer),
-      matching: find.byType(Opacity),
+      matching: find.byType(Image),
     );
-    expect(imageOpacity, findsOneWidget);
-    expect(tester.widget<Opacity>(imageOpacity).opacity, 1);
+    expect(image, findsOneWidget);
+    expect(tester.widget<Image>(image).opacity!.value, 1);
+    expect(
+        find.descendant(
+            of: find.byType(CustomBackgroundLayer),
+            matching: find.byType(Opacity)),
+        findsNothing);
     expect(
         find.descendant(
           of: find.byType(CustomBackgroundLayer),
           matching: find.byType(ColoredBox),
         ),
         findsOneWidget);
+    await tester.pumpWidget(frame(settings.copyWith(opacity: 37)));
+    expect(tester.widget<Image>(image).opacity!.value, .37);
   });
 
   test('only custom theme strengthens small text colors', () {
