@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
+import 'package:shuyo/data/models/course_recording.dart';
+import 'package:shuyo/features/course_recordings/recording_secondary_video.dart';
 import 'package:shuyo/features/course_recordings/recording_video_controls.dart';
 
 class _BufferPlayer extends PlatformPlayer {
@@ -21,13 +23,54 @@ class _BufferPlayer extends PlatformPlayer {
     if (buffer != null) bufferController.add(buffer);
     if (duration != null) durationController.add(duration);
   }
+
+  void updatePlayback({bool? playing, bool? buffering}) {
+    state = state.copyWith(playing: playing, buffering: buffering);
+    if (playing != null) playingController.add(playing);
+    if (buffering != null) bufferingController.add(buffering);
+  }
+
+  void showVideo(int width, int height) {
+    widthController.add(width);
+    heightController.add(height);
+  }
 }
 
 class _VideoState extends VideoState {}
 
+class _VideoOutput extends PlatformVideoController {
+  _VideoOutput(Player player, {int textureId = 123})
+      : super(player, const VideoControllerConfiguration()) {
+    id.value = textureId;
+    rect.value = const Rect.fromLTWH(0, 0, 640, 360);
+  }
+
+  @override
+  Future<void> setSize({int? width, int? height}) async {}
+}
+
+class _VideoController implements VideoController {
+  _VideoController(PlatformVideoController output)
+      : player = output.player,
+        notifier = ValueNotifier<PlatformVideoController?>(output);
+
+  @override
+  final Player player;
+
+  @override
+  final ValueNotifier<PlatformVideoController?> notifier;
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
 Widget _controls(Player player,
         {bool fullscreen = false,
         bool isLive = false,
+        bool loading = false,
+        Widget? primaryView,
+        List<VideoController> viewControllers = const [],
+        VideoController? primaryController,
         EdgeInsets insets = EdgeInsets.zero,
         ThemeData? theme}) =>
     MaterialApp(
@@ -39,18 +82,178 @@ Widget _controls(Player player,
             state: _VideoState(),
             player: player,
             title: '课程录播',
-            loading: false,
+            loading: loading,
             failure: null,
             views: const [],
             selectedView: 0,
             fullscreen: fullscreen,
             isLive: isLive,
+            primaryView: primaryView,
+            viewControllers: viewControllers,
+            primaryController: primaryController,
           ),
         ),
       ),
     );
 
 void main() {
+  testWidgets('host texture is single when primary and survives view swaps',
+      (tester) async {
+    final hostPlatform = _BufferPlayer();
+    final otherPlatform = _BufferPlayer();
+    final hostPlayer = Player(platformPlayer: hostPlatform);
+    final otherPlayer = Player(platformPlayer: otherPlatform);
+    final hostOutput = _VideoOutput(hostPlayer);
+    final otherOutput = _VideoOutput(otherPlayer, textureId: 124);
+    final host = _VideoController(hostOutput);
+    final other = _VideoController(otherOutput);
+    addTearDown(() async {
+      host.notifier.dispose();
+      other.notifier.dispose();
+      hostOutput.dispose();
+      otherOutput.dispose();
+      await hostPlayer.dispose();
+      await otherPlayer.dispose();
+    });
+    const videoKey = ValueKey('stable-video-host');
+    final hostTexture = find.byWidgetPredicate(
+        (widget) => widget is Texture && widget.textureId == 123);
+    final otherTexture = find.byWidgetPredicate(
+        (widget) => widget is Texture && widget.textureId == 124,
+        skipOffstage: false);
+    final mask = find.byKey(const ValueKey('recording-live-loading-mask'));
+    Widget video({required VideoController primary, bool loading = false}) =>
+        MaterialApp(
+          home: Scaffold(
+            body: Video(
+              key: videoKey,
+              controller: host,
+              wakelock: false,
+              controls: (state) => RecordingVideoControls(
+                state: state,
+                player: identical(primary, host) ? hostPlayer : otherPlayer,
+                title: '课程录播',
+                loading: loading,
+                failure: null,
+                views: [
+                  VodView(
+                      viewNumber: 1, url: Uri.parse('https://example.test/1')),
+                  VodView(
+                      viewNumber: 2, url: Uri.parse('https://example.test/2')),
+                ],
+                selectedView: 0,
+                fullscreen: true,
+                isLive: true,
+                dualEnabled: true,
+                secondaryView: const SizedBox.expand(),
+                viewControllers: [host, other],
+                primaryController: primary,
+              ),
+            ),
+          ),
+        );
+
+    await tester.pumpWidget(video(primary: host, loading: true));
+    hostPlatform.showVideo(640, 360);
+    await tester.pump();
+    expect(hostTexture, findsOneWidget);
+    expect(otherTexture, findsOneWidget);
+    expect(mask, findsOneWidget);
+    final videoState = tester.state<VideoState>(find.byKey(videoKey));
+    final originalHostTexture = tester.element(hostTexture);
+    final originalOtherTexture = tester.element(otherTexture);
+
+    await tester.pumpWidget(video(primary: host));
+    await tester.pump();
+    expect(mask, findsNothing);
+    expect(tester.state<VideoState>(find.byKey(videoKey)), same(videoState));
+    expect(tester.element(hostTexture), same(originalHostTexture));
+    expect(tester.element(otherTexture), same(originalOtherTexture));
+    expect(find.byTooltip('播放'), findsOneWidget);
+
+    await tester.pumpWidget(video(primary: other, loading: true));
+    await tester.pump();
+    expect(hostTexture, findsNWidgets(2));
+    expect(otherTexture, findsOneWidget);
+    expect(tester.state<VideoState>(find.byKey(videoKey)), same(videoState));
+    expect(tester.element(otherTexture), same(originalOtherTexture));
+    expect(mask, findsOneWidget);
+    expect(find.byTooltip('播放'), findsOneWidget);
+
+    await tester.pumpWidget(video(primary: host));
+    await tester.pump();
+    expect(hostTexture, findsOneWidget);
+    expect(tester.element(hostTexture), same(originalHostTexture));
+    expect(tester.element(otherTexture), same(originalOtherTexture));
+    expect(tester.state<VideoState>(find.byKey(videoKey)), same(videoState));
+    expect(mask, findsNothing);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets(
+      'live loading masks the persistent texture until playback resumes',
+      (tester) async {
+    final platform = _BufferPlayer();
+    final player = Player(platformPlayer: platform);
+    addTearDown(player.dispose);
+    final output = _VideoOutput(player);
+    final controller = _VideoController(output);
+    addTearDown(() {
+      controller.notifier.dispose();
+      output.dispose();
+    });
+    final mask = find.byKey(const ValueKey('recording-live-loading-mask'));
+    final spinner = find.byKey(const ValueKey('recording-loading-indicator'));
+
+    Widget controls({bool loading = false}) => _controls(player,
+        isLive: true,
+        loading: loading,
+        primaryView: RecordingSecondaryVideo(controller: controller));
+    await tester.pumpWidget(controls(loading: true));
+    expect(tester.widget<ColoredBox>(mask).color, Colors.black);
+    expect(tester.getRect(mask),
+        tester.getRect(find.byType(RecordingVideoControls)));
+    expect(spinner, findsOneWidget);
+    final textureElement = tester.element(find.byType(Texture));
+
+    await tester.pumpWidget(controls());
+    expect(mask, findsNothing);
+    expect(tester.element(find.byType(Texture)), same(textureElement));
+    platform.updatePlayback(playing: false, buffering: true);
+    await tester.pump();
+    expect(tester.widget<ColoredBox>(mask).color, Colors.black);
+    expect(spinner, findsOneWidget);
+    expect(tester.element(find.byType(Texture)), same(textureElement));
+    platform.updatePlayback(playing: true, buffering: false);
+    await tester.pump();
+    expect(mask, findsNothing);
+    expect(spinner, findsNothing);
+    expect(tester.element(find.byType(Texture)), same(textureElement));
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('recording loading retains its transparent presentation',
+      (tester) async {
+    final platform = _BufferPlayer();
+    final player = Player(platformPlayer: platform);
+    addTearDown(player.dispose);
+    final mask = find.byKey(const ValueKey('recording-live-loading-mask'));
+    final spinner = find.byKey(const ValueKey('recording-loading-indicator'));
+    await tester.pumpWidget(_controls(player, loading: true));
+    expect(mask, findsNothing);
+    expect(spinner, findsOneWidget);
+    await tester.pumpWidget(_controls(player));
+    platform.updatePlayback(playing: false, buffering: true);
+    await tester.pump();
+    expect(mask, findsNothing);
+    expect(spinner, findsNothing);
+    platform.updatePlayback(playing: true);
+    await tester.pump();
+    expect(mask, findsNothing);
+    expect(spinner, findsOneWidget);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
   for (final fullscreen in [false, true]) {
     testWidgets(
         '${fullscreen ? 'fullscreen' : 'portrait'} keeps played, buffered and unbuffered progress visible',

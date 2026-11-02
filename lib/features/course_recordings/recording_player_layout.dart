@@ -21,6 +21,7 @@ class RecordingPlayerLayout extends StatefulWidget {
     this.tabBar,
     this.onMore,
     this.playingOverride,
+    this.loading = false,
     this.detailScope,
   });
 
@@ -35,6 +36,7 @@ class RecordingPlayerLayout extends StatefulWidget {
   final PreferredSizeWidget? tabBar;
   final VoidCallback? onMore;
   final bool? playingOverride;
+  final bool loading;
   final Object? detailScope;
 
   @override
@@ -44,7 +46,9 @@ class RecordingPlayerLayout extends StatefulWidget {
 class _RecordingPlayerLayoutState extends State<RecordingPlayerLayout> {
   final _scrollController = ScrollController();
   StreamSubscription<bool>? _playingSubscription;
+  StreamSubscription<bool>? _bufferingSubscription;
   bool _playing = false;
+  bool _buffering = false;
   bool _expanding = false;
   Future<void>? _expandTask;
   Future<void>? _resumeTask;
@@ -71,7 +75,7 @@ class _RecordingPlayerLayoutState extends State<RecordingPlayerLayout> {
         }
       }
     }
-    if (!oldWidget.canResume && widget.canResume && _playing) {
+    if (!oldWidget.canResume && widget.canResume && (_playing || _buffering)) {
       _expanding = true;
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!mounted) return;
@@ -80,18 +84,31 @@ class _RecordingPlayerLayoutState extends State<RecordingPlayerLayout> {
         }));
       });
     }
+    if (!oldWidget.loading && widget.loading) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) unawaited(_expand());
+      });
+    }
   }
 
   void _bindPlayer() {
     unawaited(_playingSubscription?.cancel());
+    unawaited(_bufferingSubscription?.cancel());
     _playing = widget.playingOverride ?? widget.player?.state.playing ?? false;
+    _buffering = widget.player?.state.buffering ?? false;
     _playingSubscription = widget.player?.stream.playing.listen((playing) {
       if (widget.playingOverride != null) return;
       if (!mounted || playing == _playing) return;
       setState(() => _playing = playing);
       if (playing) unawaited(_expand());
     });
-    if (_playing) {
+    _bufferingSubscription =
+        widget.player?.stream.buffering.listen((buffering) {
+      if (!mounted || buffering == _buffering) return;
+      setState(() => _buffering = buffering);
+      if (buffering && widget.canResume) unawaited(_expand());
+    });
+    if (_playing || _buffering || widget.loading) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted) unawaited(_expand());
       });
@@ -155,6 +172,7 @@ class _RecordingPlayerLayoutState extends State<RecordingPlayerLayout> {
   @override
   void dispose() {
     unawaited(_playingSubscription?.cancel());
+    unawaited(_bufferingSubscription?.cancel());
     _scrollController.dispose();
     super.dispose();
   }
@@ -165,7 +183,9 @@ class _RecordingPlayerLayoutState extends State<RecordingPlayerLayout> {
     final height = math.max(kToolbarHeight, widget.expandedHeight);
     final tabHeight = widget.tabBar?.preferredSize.height ?? 0;
     final range = height - kToolbarHeight;
-    final pinned = _playing && widget.canResume && !_expanding;
+    final pinned =
+        (widget.loading || (_playing || _buffering) && widget.canResume) &&
+            !_expanding;
     // PiliPlus keeps the header's child stable while its render object handles
     // the scroll geometry (265f879fa85973b4bf885bde2562f1007f1013b8):
     // https://github.com/bggRGjQaUbCoE/PiliPlus/blob/265f879fa85973b4bf885bde2562f1007f1013b8/lib/common/widgets/sliver/video_header.dart

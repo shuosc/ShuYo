@@ -1,4 +1,5 @@
 import '../../data/models/course_recording.dart';
+import 'recording_lesson_selection.dart';
 
 /// A revision of fullscreen episode navigation, independent of player ticks.
 /// The input sequence is already newest first; its numbers remain stable when
@@ -63,7 +64,7 @@ class RecordingEpisodeNavigation {
   VodLesson? get older {
     while (_olderIndex < _olderCandidates.length) {
       final candidate = _olderCandidates[_olderIndex];
-      if (candidate.canPlay) return candidate;
+      if (recordingLessonCanSelect(candidate)) return candidate;
       _olderIndex++;
     }
     return null;
@@ -72,7 +73,7 @@ class RecordingEpisodeNavigation {
   VodLesson? get newer {
     while (_newerIndex < _newerCandidates.length) {
       final candidate = _newerCandidates[_newerIndex];
-      if (candidate.canPlay) return candidate;
+      if (recordingLessonCanSelect(candidate)) return candidate;
       _newerIndex++;
     }
     return null;

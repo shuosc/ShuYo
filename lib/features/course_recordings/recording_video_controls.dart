@@ -15,6 +15,7 @@ import 'recording_episode_metadata.dart';
 import 'recording_episode_navigation.dart';
 import 'recording_episode_sort_icon.dart';
 import 'recording_fullscreen_status.dart';
+import 'recording_lesson_selection.dart';
 import 'recording_playback_info.dart';
 import 'recording_player_menu.dart';
 import 'recording_player_preferences.dart';
@@ -249,6 +250,11 @@ class _RecordingVideoControlsState extends State<RecordingVideoControls>
       bufferedSeconds: state.buffering ? state.buffer.inSeconds : 0,
     );
   }
+
+  bool _showLiveLoadingMask(_LoadingPresentation loading) =>
+      widget.isLive &&
+      widget.failure == null &&
+      (widget.loading || loading.buffering);
 
   @override
   void didUpdateWidget(covariant RecordingVideoControls oldWidget) {
@@ -650,6 +656,20 @@ class _RecordingVideoControlsState extends State<RecordingVideoControls>
                 else if (widget.primaryView != null)
                   Positioned.fill(
                       child: IgnorePointer(child: widget.primaryView!)),
+                Positioned.fill(
+                  child: ValueListenableBuilder<_LoadingPresentation>(
+                    valueListenable: _loadingPresentation,
+                    builder: (context, loading, _) =>
+                        _showLiveLoadingMask(loading)
+                            ? const IgnorePointer(
+                                child: ColoredBox(
+                                  key: ValueKey('recording-live-loading-mask'),
+                                  color: Colors.black,
+                                ),
+                              )
+                            : const SizedBox.shrink(),
+                  ),
+                ),
                 if (!widget.isLive)
                   IgnorePointer(
                     child: Align(
@@ -860,7 +880,8 @@ class _RecordingVideoControlsState extends State<RecordingVideoControls>
                   child: ValueListenableBuilder<_LoadingPresentation>(
                     valueListenable: _loadingPresentation,
                     builder: (context, loading, _) => (widget.loading ||
-                                loading.buffering && loading.playing) &&
+                                loading.buffering &&
+                                    (widget.isLive || loading.playing)) &&
                             widget.failure == null
                         ? RecordingPlaybackLoading(
                             buffering: loading.buffering,
@@ -948,22 +969,42 @@ class _RecordingVideoControlsState extends State<RecordingVideoControls>
                 child: ClipRRect(
                   borderRadius: BorderRadius.circular(
                       identical(controller, widget.primaryController) ? 0 : 8),
-                  child: RecordingSecondaryVideo(
-                    controller: controller,
-                    aspectRatio: identical(controller, widget.primaryController)
-                        ? switch (widget.aspect) {
-                            '4:3' => 4 / 3,
-                            '16:9' => 16 / 9,
-                            _ => null,
-                          }
-                        : null,
-                    fit: identical(controller, widget.primaryController)
-                        ? switch (widget.aspect) {
-                            '填充' => BoxFit.fill,
-                            '裁剪' => BoxFit.cover,
-                            _ => BoxFit.contain,
-                          }
-                        : BoxFit.contain,
+                  child: Stack(
+                    fit: StackFit.expand,
+                    children: [
+                      // The host Video already paints this texture beneath
+                      // the controls when it is the primary view.
+                      if (identical(controller, widget.viewControllers.first) &&
+                          identical(controller, widget.primaryController))
+                        const SizedBox.expand()
+                      else
+                        RecordingSecondaryVideo(
+                          controller: controller,
+                          aspectRatio:
+                              identical(controller, widget.primaryController)
+                                  ? switch (widget.aspect) {
+                                      '4:3' => 4 / 3,
+                                      '16:9' => 16 / 9,
+                                      _ => null,
+                                    }
+                                  : null,
+                          fit: identical(controller, widget.primaryController)
+                              ? switch (widget.aspect) {
+                                  '填充' => BoxFit.fill,
+                                  '裁剪' => BoxFit.cover,
+                                  _ => BoxFit.contain,
+                                }
+                              : BoxFit.contain,
+                        ),
+                      if (!identical(controller, widget.primaryController))
+                        ValueListenableBuilder<_LoadingPresentation>(
+                          valueListenable: _loadingPresentation,
+                          builder: (context, loading, _) =>
+                              _showLiveLoadingMask(loading)
+                                  ? const ColoredBox(color: Colors.black)
+                                  : const SizedBox.shrink(),
+                        ),
+                    ],
                   ),
                 ),
               ),
@@ -1083,7 +1124,7 @@ class _RecordingVideoControlsState extends State<RecordingVideoControls>
                               lesson: lesson,
                               number: numbers[lesson.id]!,
                               selected: selected,
-                              onTap: !lesson.canPlay
+                              onTap: !recordingLessonCanSelect(lesson)
                                   ? null
                                   : () {
                                       if (!selected) {

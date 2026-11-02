@@ -6,15 +6,24 @@ import 'package:shuyo/features/course_recordings/recording_player_layout.dart';
 import 'package:shuyo/features/course_recordings/recording_detail_sheet.dart';
 
 class _LayoutPlatformPlayer extends PlatformPlayer {
-  _LayoutPlatformPlayer({bool playing = false, bool completed = false})
-      : super(configuration: const PlayerConfiguration()) {
-    state = state.copyWith(playing: playing, completed: completed);
+  _LayoutPlatformPlayer({
+    bool playing = false,
+    bool buffering = false,
+    bool completed = false,
+  }) : super(configuration: const PlayerConfiguration()) {
+    state = state.copyWith(
+        playing: playing, buffering: buffering, completed: completed);
   }
 
   int plays = 0;
   int pauses = 0;
   int opens = 0;
   final seeks = <Duration>[];
+
+  void emitBuffering(bool buffering) {
+    state = state.copyWith(buffering: buffering);
+    bufferingController.add(buffering);
+  }
 
   @override
   Future<void> play() async {
@@ -105,6 +114,7 @@ Future<void> _pumpLayout(
   WidgetTester tester, {
   Player? player,
   bool canResume = true,
+  bool loading = false,
   Future<void> Function()? onResume,
   VoidCallback? onBack,
   VoidCallback? onMore,
@@ -138,6 +148,7 @@ Future<void> _pumpLayout(
           topInset: 44,
           player: player,
           canResume: canResume,
+          loading: loading,
           onResume: onResume ??
               () async {
                 await player?.play();
@@ -289,6 +300,77 @@ void main() {
     expect(platform.plays, 0);
     expect(platform.pauses, 0);
     expect(platform.opens, 0);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('loading pins the full player before playback is ready',
+      (tester) async {
+    await _pumpLayout(tester, canResume: false, loading: true);
+    await tester.drag(
+      find.byKey(const ValueKey('recording-test-lesson-list')),
+      const Offset(0, -500),
+    );
+    await tester.pumpAndSettle();
+
+    expect(_headerHeight(tester), 220);
+    expect(_toolbarOpacity(tester), 0);
+    expect(find.text('课程 0'), findsNothing);
+    expect(find.byKey(_resumeKey).hitTestable(), findsNothing);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('buffering stays expanded when the player reports not playing',
+      (tester) async {
+    final platform = _LayoutPlatformPlayer(buffering: true);
+    final player = Player(platformPlayer: platform);
+    addTearDown(player.dispose);
+    await _pumpLayout(tester, player: player);
+    final list = find.byKey(const ValueKey('recording-test-lesson-list'));
+    await tester.drag(list, const Offset(0, -500));
+    await tester.pumpAndSettle();
+    expect(_headerHeight(tester), 220);
+    expect(_toolbarOpacity(tester), 0);
+
+    platform.emitBuffering(false);
+    await tester.pumpAndSettle();
+    expect(
+        tester
+            .widget<SliverPersistentHeader>(find.byType(SliverPersistentHeader))
+            .delegate
+            .minExtent,
+        kToolbarHeight);
+    await _collapse(tester);
+    expect(_headerHeight(tester), kToolbarHeight);
+    expect(_toolbarOpacity(tester), 1);
+    expect(platform.plays, 0);
+    expect(platform.opens, 0);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('loading and buffering expand a collapsed header without replay',
+      (tester) async {
+    final platform = _LayoutPlatformPlayer();
+    final player = Player(platformPlayer: platform);
+    addTearDown(player.dispose);
+    await _pumpLayout(tester, player: player);
+    await _collapse(tester);
+    platform.emitBuffering(true);
+    await tester.pumpAndSettle();
+    expect(_headerHeight(tester), 220);
+
+    platform.emitBuffering(false);
+    await tester.pump();
+    await _collapse(tester);
+    await _pumpLayout(tester, player: player, canResume: false, loading: true);
+    await tester.pumpAndSettle();
+    expect(_headerHeight(tester), 220);
+    expect(_toolbarOpacity(tester), 0);
+    expect(platform.plays, 0);
+    expect(platform.pauses, 0);
+    expect(platform.opens, 0);
+    expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox.shrink());
   });
 
