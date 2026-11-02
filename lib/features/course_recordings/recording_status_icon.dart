@@ -6,12 +6,16 @@ class RecordingStatusIcon extends StatefulWidget {
   const RecordingStatusIcon(
       {super.key,
       required this.isLive,
+      this.isGenerating = false,
       this.enabled = true,
-      this.disabledColor});
+      this.disabledColor,
+      this.backgroundColor});
 
   final bool isLive;
+  final bool isGenerating;
   final bool enabled;
   final Color? disabledColor;
+  final Color? backgroundColor;
 
   @override
   State<RecordingStatusIcon> createState() => _RecordingStatusIconState();
@@ -37,8 +41,7 @@ class _RecordingStatusIconState extends State<RecordingStatusIcon>
   }
 
   void _updateAnimation() {
-    if (widget.isLive &&
-        widget.enabled &&
+    if ((widget.isGenerating || widget.isLive && widget.enabled) &&
         !MediaQuery.disableAnimationsOf(context)) {
       if (!_animation.isAnimating) _animation.repeat();
     } else {
@@ -58,8 +61,39 @@ class _RecordingStatusIconState extends State<RecordingStatusIcon>
         ? Theme.of(context).colorScheme.primary
         : widget.disabledColor ?? Theme.of(context).disabledColor;
     if (!widget.isLive) {
-      return Icon(Icons.smart_display_rounded,
-          color: color, semanticLabel: '录播回放');
+      return Semantics(
+        label: widget.isGenerating ? '回放生成中' : '录播回放',
+        excludeSemantics: true,
+        child: SizedBox(
+          width: 24,
+          height: 24,
+          child: Stack(clipBehavior: Clip.none, children: [
+            Icon(Icons.smart_display_rounded, color: color),
+            if (widget.isGenerating)
+              Positioned(
+                right: -1,
+                bottom: -1,
+                child: SizedBox(
+                  width: 12,
+                  height: 12,
+                  child: AnimatedBuilder(
+                    animation: _animation,
+                    child: CustomPaint(
+                      key: const ValueKey('recording-generating-indicator'),
+                      painter: _GenerationIndicator(
+                        color: color,
+                        background: widget.backgroundColor ??
+                            Theme.of(context).colorScheme.surface,
+                      ),
+                    ),
+                    builder: (context, child) => Transform.rotate(
+                        angle: _animation.value * math.pi * 2, child: child),
+                  ),
+                ),
+              ),
+          ]),
+        ),
+      );
     }
     return Semantics(
       label: widget.enabled ? '正在直播' : '直播已结束',
@@ -89,4 +123,33 @@ class _RecordingStatusIconState extends State<RecordingStatusIcon>
       ),
     );
   }
+}
+
+class _GenerationIndicator extends CustomPainter {
+  const _GenerationIndicator({required this.color, required this.background});
+
+  final Color color;
+  final Color background;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final center = size.center(Offset.zero);
+    final radius = size.shortestSide / 2;
+    canvas.drawCircle(center, radius, Paint()..color = background);
+    final bounds = Rect.fromCircle(center: center, radius: radius - 2);
+    canvas.drawArc(
+        bounds,
+        -math.pi / 2,
+        math.pi * 1.5,
+        false,
+        Paint()
+          ..color = color
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 1.6
+          ..strokeCap = StrokeCap.round);
+  }
+
+  @override
+  bool shouldRepaint(_GenerationIndicator oldDelegate) =>
+      color != oldDelegate.color || background != oldDelegate.background;
 }

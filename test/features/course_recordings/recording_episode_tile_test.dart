@@ -42,6 +42,29 @@ void main() {
     expect(recordingFullscreenEpisodeHeading(lesson), '第7周 · 第4节');
   });
 
+  test('live headings show the recovered term week in lists and fullscreen',
+      () {
+    final lesson = VodLesson.fromLiveJson({
+      'id': 84,
+      'teclId': 10,
+      'liveType': 0,
+      'courBeginTime': '2026-11-02 10:55:00',
+      'courEndTime': '2026-11-02 11:40:00',
+      'letiNumber': 4,
+      'weekNo': null,
+      'weekNumber': null,
+    },
+        term: VodTerm.fromJson({
+          'id': 7,
+          'acyeCode': '2026-2027',
+          'acteTerm': 1,
+          'acteBeginDate': 1789315200000,
+        }));
+    expect(recordingEpisodeHeading(lesson), '第8周 周一 · 第4节');
+    expect(recordingFullscreenEpisodeHeading(lesson),
+        '第8周 周一 · 第4节 (10:55-11:40)');
+  });
+
   test('episode date uses zero-padded month and day regardless of year', () {
     final lesson = VodLesson(
         id: 1,
@@ -102,7 +125,8 @@ void main() {
         theme: ShuYoThemes.byId(themeId).themeData(),
         home: Scaffold(
           body: MediaQuery(
-            data: MediaQueryData(textScaler: TextScaler.linear(scale)),
+            data: MediaQueryData(
+                disableAnimations: true, textScaler: TextScaler.linear(scale)),
             child: RecordingEpisodeTile(
               tileKey: const ValueKey('episode'),
               lesson: lesson,
@@ -285,8 +309,14 @@ void main() {
             tester.widget<Text>(find.text('26')).style!.color, disabledColor);
         expect(
             tester.widget<Text>(find.text('第4节')).style!.color, disabledColor);
-        final status = find.text(generating ? '回放生成中' : '暂不可看');
-        expect(tester.widget<Text>(status).style!.color, disabledColor);
+        if (generating) {
+          expect(find.text('回放生成中'), findsNothing);
+          expect(find.byKey(const ValueKey('recording-generating-indicator')),
+              findsOneWidget);
+        } else {
+          expect(tester.widget<Text>(find.text('暂不可看')).style!.color,
+              disabledColor);
+        }
         expect(
             tester.widget<Icon>(find.byIcon(Icons.smart_display_rounded)).color,
             disabledColor);
@@ -297,8 +327,9 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('generating recordings remain visible and can be opened',
+  testWidgets('generating recordings remain visible with disabled semantics',
       (tester) async {
+    final semantics = tester.ensureSemantics();
     const generating = VodLesson(
         id: 2,
         teachingClassId: 10,
@@ -306,18 +337,26 @@ void main() {
         isPlayable: false,
         isGenerating: true,
         classroom: 'C502');
-    await tester.pumpWidget(buildTile(generating, dark: true));
-    expect(find.text('回放生成中'), findsOneWidget);
+    var taps = 0;
+    await tester
+        .pumpWidget(buildTile(generating, dark: true, onTap: () => taps++));
+    expect(find.text('回放生成中'), findsNothing);
+    expect(find.bySemanticsLabel(RegExp('回放生成中')), findsOneWidget);
     expect(
         tester.widget<ListTile>(find.byKey(const ValueKey('episode'))).enabled,
-        isTrue);
+        isFalse);
     expect(tester.widget<ListTile>(find.byKey(const ValueKey('episode'))).onTap,
-        isNotNull);
+        isNull);
     expect(find.text('C502'), findsOneWidget);
+    await tester.tap(find.byKey(const ValueKey('episode')));
+    expect(taps, 0);
+    expect(find.byKey(const ValueKey('recording-generating-indicator')),
+        findsOneWidget);
     final live = VodLesson(
         id: 3, teachingClassId: 10, name: '直播', isPlayable: true, isLive: true);
     await tester.pumpWidget(buildTile(live, selected: true));
-    expect(find.text('正在直播'), findsOneWidget);
+    expect(find.text('正在直播'), findsNothing);
+    expect(find.bySemanticsLabel(RegExp('正在直播')), findsOneWidget);
     expect(find.text('当前'), findsOneWidget);
     expect(
         tester
@@ -325,6 +364,27 @@ void main() {
             .isLive,
         isTrue);
     await tester.pumpWidget(const SizedBox.shrink());
+    semantics.dispose();
+  });
+
+  testWidgets('a generating flag also disables an otherwise playable row',
+      (tester) async {
+    const lesson = VodLesson(
+        id: 2,
+        teachingClassId: 10,
+        name: '课程',
+        isPlayable: true,
+        isGenerating: true);
+    var taps = 0;
+    await tester.pumpWidget(buildTile(lesson, onTap: () => taps++));
+    final row = tester.widget<ListTile>(find.byKey(const ValueKey('episode')));
+    expect(row.enabled, isFalse);
+    expect(row.onTap, isNull);
+    expect(row.trailing, isNull);
+    expect(find.byKey(const ValueKey('recording-generating-indicator')),
+        findsOneWidget);
+    await tester.tap(find.byKey(const ValueKey('episode')));
+    expect(taps, 0);
   });
 
   testWidgets(
@@ -368,7 +428,7 @@ void main() {
         beginTime: DateTime(2026, 12, 31, 23, 30),
         endTime: DateTime(2027, 1, 1, 0, 15));
     await tester.pumpWidget(buildTile(lesson, scale: 2));
-    expect(find.text('回放生成中'), findsOneWidget);
+    expect(find.text('回放生成中'), findsNothing);
     expect(find.textContaining('23:30'), findsOneWidget);
     expect(find.textContaining('00:15'), findsNothing);
     expect(tester.takeException(), isNull);
@@ -395,7 +455,8 @@ void main() {
       theme: ShuYoThemes.all.first.themeData(),
       home: Scaffold(
           body: MediaQuery(
-        data: const MediaQueryData(textScaler: TextScaler.linear(1.3)),
+        data: const MediaQueryData(
+            disableAnimations: true, textScaler: TextScaler.linear(1.3)),
         child: SizedBox(
             height: 80,
             child: RecordingEpisodeTile(
@@ -408,7 +469,7 @@ void main() {
             )),
       )),
     ));
-    expect(find.text('回放生成中'), findsOneWidget);
+    expect(find.text('回放生成中'), findsNothing);
     expect(tester.takeException(), isNull);
   });
 }

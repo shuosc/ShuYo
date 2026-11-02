@@ -441,7 +441,8 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('recordings can open while unavailable live lessons stay grey',
+  testWidgets(
+      'generating recordings and unavailable live lessons stay disabled',
       (tester) async {
     final selected = <RecordingTimetableEntry>[];
     final playable = _lesson(1, 21);
@@ -463,6 +464,7 @@ void main() {
         _lesson(3, 21, hour: 12, playable: false),
         unavailableLive,
       ]),
+      disableAnimations: true,
       onLessonSelected: selected.add,
     );
 
@@ -475,7 +477,7 @@ void main() {
             of: _entry(1), matching: find.byIcon(Icons.chevron_right)),
         findsOneWidget);
     _expectCompactMetadata(_entry(1));
-    for (final lessonId in [2, 3]) {
+    for (final lessonId in [3]) {
       final entry = _entry(lessonId);
       final row = tester.widget<ListTile>(entry);
       expect(row.onTap, isNotNull);
@@ -487,8 +489,8 @@ void main() {
       _expectCompactMetadata(entry);
       await tester.tap(entry);
     }
-    expect(selected.map((entry) => entry.lesson.id), [1, 2, 3]);
-    for (final lessonId in [4]) {
+    expect(selected.map((entry) => entry.lesson.id), [1, 3]);
+    for (final lessonId in [2, 4]) {
       final entry = _entry(lessonId);
       final row = tester.widget<ListTile>(entry);
       expect(row.onTap, isNull);
@@ -501,9 +503,9 @@ void main() {
       _expectCompactMetadata(entry);
       await tester.tap(entry);
     }
-    expect(selected, hasLength(3));
+    expect(selected, hasLength(2));
     expect(find.descendant(of: _entry(2), matching: find.byType(ColorFiltered)),
-        findsNothing);
+        findsOneWidget);
     final colors = tester.element(_entry(4)).shuyoColors;
     final disabledTitle = tester.widget<ColorFiltered>(
         find.descendant(of: _entry(4), matching: find.byType(ColorFiltered)));
@@ -794,6 +796,7 @@ void main() {
           _lesson(1, 21),
           _lesson(2, 21, hour: 12, playable: false, generating: true),
         ]),
+        disableAnimations: true,
         textScale: 2);
     await tester.pumpAndSettle();
 

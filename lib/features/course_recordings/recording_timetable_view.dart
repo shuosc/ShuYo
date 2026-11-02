@@ -4,6 +4,7 @@ import '../../shared/shuyo_text_styles.dart';
 import '../../shared/theme/shuyo_theme.dart';
 import '../../shared/widgets/schedule_week_switcher.dart';
 import 'recording_course_title.dart';
+import 'recording_lesson_selection.dart';
 import 'recording_status_icon.dart';
 import 'recording_timetable_data.dart';
 import 'recording_timetable_slot.dart';
@@ -490,7 +491,7 @@ class _TimetableEntryTile extends StatelessWidget {
     final colors = context.shuyoColors;
     final primary = Theme.of(context).colorScheme.primary;
     final lesson = entry.lesson;
-    final enabled = lesson.canPlay && onTap != null;
+    final enabled = recordingLessonCanSelect(lesson) && onTap != null;
     final secondary = enabled ? colors.textSecondary : colors.textMuted;
     final classroom = lesson.classroom.trim();
     final section = lesson.sectionLabel.trim();
@@ -530,6 +531,7 @@ class _TimetableEntryTile extends StatelessWidget {
       enabled: enabled,
       leading: RecordingStatusIcon(
           isLive: lesson.isLive,
+          isGenerating: recordingLessonIsGenerating(lesson),
           enabled: enabled,
           disabledColor: colors.textMuted),
       title: enabled

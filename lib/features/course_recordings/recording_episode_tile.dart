@@ -4,6 +4,7 @@ import '../../data/models/course_recording.dart';
 import '../../shared/shuyo_text_styles.dart';
 import '../../shared/theme/shuyo_theme.dart';
 import 'recording_episode_metadata.dart';
+import 'recording_lesson_selection.dart';
 import 'recording_status_icon.dart';
 
 class RecordingEpisodeTile extends StatelessWidget {
@@ -30,7 +31,8 @@ class RecordingEpisodeTile extends StatelessWidget {
   Widget build(BuildContext context) {
     final colors = context.shuyoColors;
     final primary = Theme.of(context).colorScheme.primary;
-    final enabled = lesson.canPlay;
+    final generating = recordingLessonIsGenerating(lesson);
+    final enabled = recordingLessonCanSelect(lesson);
     final unavailableColor = dark ? Colors.white38 : colors.textMuted;
     final titleColor = !enabled
         ? unavailableColor
@@ -49,9 +51,7 @@ class RecordingEpisodeTile extends StatelessWidget {
     final classroom = text.classroom;
     final dateAndTime = text.dateAndTime;
     final status =
-        lesson.isLive || !enabled || (lesson.isGenerating && !lesson.isPlayable)
-            ? lesson.statusLabel
-            : null;
+        !lesson.isLive && !generating && !enabled ? lesson.statusLabel : null;
     return ListTile(
       key: tileKey,
       contentPadding: const EdgeInsets.symmetric(horizontal: 16),
@@ -65,8 +65,10 @@ class RecordingEpisodeTile extends StatelessWidget {
         child: Row(mainAxisSize: MainAxisSize.min, children: [
           RecordingStatusIcon(
               isLive: lesson.isLive,
+              isGenerating: generating,
               enabled: enabled,
-              disabledColor: unavailableColor),
+              disabledColor: unavailableColor,
+              backgroundColor: dark ? Colors.black : colors.surface),
           const SizedBox(width: 8),
           Semantics(
             label: '第 $number 集',
@@ -114,7 +116,7 @@ class RecordingEpisodeTile extends StatelessWidget {
                             color: enabled ? primary : secondaryColor)),
                 ])
           : null,
-      onTap: onTap,
+      onTap: enabled ? onTap : null,
     );
   }
 }
