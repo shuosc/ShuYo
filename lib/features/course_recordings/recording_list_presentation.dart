@@ -2,9 +2,12 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 
+import '../../core/background_work_gate.dart';
+
 /// Coalesces business notifications at the viewport boundary. Requests continue
-/// independently. Scrolling batches updates briefly, while route transitions
-/// defer them until the page becomes active again.
+/// independently. Moving viewports freeze the current snapshot; a quiet pause
+/// can publish results even if a gesture remains held. Route transitions defer
+/// updates until the page becomes active again.
 class RecordingListPresentation extends StatefulWidget {
   const RecordingListPresentation({
     super.key,
@@ -30,8 +33,8 @@ class _RecordingListPresentationState extends State<RecordingListPresentation> {
   final _scrollingContexts = <BuildContext?>{};
   bool _dirty = true;
   bool _scheduled = false;
-  bool _scrollUpdateDue = false;
-  Timer? _scrollUpdateTimer;
+  bool _scrollQuiet = false;
+  Timer? _quietTimer;
   Widget? _content;
 
   @override
@@ -80,7 +83,7 @@ class _RecordingListPresentationState extends State<RecordingListPresentation> {
   bool get _ready =>
       _navigationReady &&
       (_scrollingContexts.isEmpty ||
-          _scrollUpdateDue ||
+          _scrollQuiet ||
           (widget.shouldUpdateImmediately?.call() ?? false));
 
   void _animationChanged(AnimationStatus _) => _schedule();
@@ -92,19 +95,27 @@ class _RecordingListPresentationState extends State<RecordingListPresentation> {
   }
 
   void _schedule() {
+    _scrollingContexts
+        .removeWhere((context) => context != null && !context.mounted);
+    if ((_route?.isCurrent ?? true) &&
+        (!_navigationReady || _scrollingContexts.isNotEmpty)) {
+      BackgroundWorkGate.hold(this);
+    } else {
+      BackgroundWorkGate.release(this);
+    }
     if (!_dirty || _scheduled) return;
     if (!_ready) {
       if (_navigationReady && _scrollingContexts.isNotEmpty) {
-        _scrollUpdateTimer ??= Timer(const Duration(milliseconds: 300), () {
-          _scrollUpdateTimer = null;
-          _scrollUpdateDue = true;
+        _quietTimer ??= Timer(const Duration(milliseconds: 300), () {
+          _quietTimer = null;
+          _scrollQuiet = true;
           _schedule();
         });
       }
       return;
     }
-    _scrollUpdateTimer?.cancel();
-    _scrollUpdateTimer = null;
+    _quietTimer?.cancel();
+    _quietTimer = null;
     _scheduled = true;
     WidgetsBinding.instance.scheduleFrameCallback((_) {
       _scheduled = false;
@@ -120,16 +131,25 @@ class _RecordingListPresentationState extends State<RecordingListPresentation> {
   bool _scrollChanged(ScrollNotification notification) {
     if (notification is ScrollStartNotification) {
       _scrollingContexts.add(notification.context);
+      _scrollQuiet = false;
     } else if (notification is ScrollEndNotification) {
       _scrollingContexts.remove(notification.context);
-      _schedule();
+    } else if (notification is ScrollUpdateNotification ||
+        notification is OverscrollNotification) {
+      // Debounce actual motion, rather than forcing a rebuild every 300ms in
+      // the middle of a drag/fling.
+      _scrollQuiet = false;
+      _quietTimer?.cancel();
+      _quietTimer = null;
     }
+    _schedule();
     return false;
   }
 
   @override
   void dispose() {
-    _scrollUpdateTimer?.cancel();
+    _quietTimer?.cancel();
+    BackgroundWorkGate.release(this);
     widget.changes.removeListener(_changed);
     _route?.animation?.removeStatusListener(_animationChanged);
     _route?.secondaryAnimation?.removeStatusListener(_animationChanged);
@@ -140,13 +160,17 @@ class _RecordingListPresentationState extends State<RecordingListPresentation> {
   @override
   Widget build(BuildContext context) {
     if (_content == null || _dirty && _ready) {
+      if (widget.shouldUpdateImmediately?.call() ?? false) {
+        _scrollingContexts.clear();
+        BackgroundWorkGate.release(this);
+      }
       _content = widget.builder(context);
       _dirty = false;
-      _scrollUpdateDue = false;
+      _scrollQuiet = false;
     }
     return NotificationListener<ScrollNotification>(
       onNotification: _scrollChanged,
-      child: _content!,
+      child: RepaintBoundary(child: _content!),
     );
   }
 }

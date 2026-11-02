@@ -3,7 +3,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:shuyo/features/course_recordings/recording_list_presentation.dart';
 
 void main() {
-  testWidgets('scroll starting after a scheduled update still flushes',
+  testWidgets('a scheduled update waits until scrolling actually ends',
       (tester) async {
     final updates = ValueNotifier(0);
     addTearDown(updates.dispose);
@@ -31,7 +31,15 @@ void main() {
         .dispatch(childContext);
     await tester.pump();
     expect(find.text('items 0'), findsOneWidget);
-    await tester.pump(const Duration(milliseconds: 350));
+    await tester.pump(const Duration(milliseconds: 200));
+    ScrollUpdateNotification(
+            metrics: metrics, context: childContext, scrollDelta: 12)
+        .dispatch(childContext);
+    await tester.pump(const Duration(milliseconds: 150));
+    await tester.pump();
+    expect(find.text('items 0'), findsOneWidget);
+    ScrollEndNotification(metrics: metrics, context: childContext)
+        .dispatch(childContext);
     await tester.pump();
     expect(find.text('items 1'), findsOneWidget);
     expect(tester.takeException(), isNull);

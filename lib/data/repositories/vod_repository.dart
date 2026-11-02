@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/foundation.dart' show visibleForTesting;
 
 import '../../core/vod_url_resolver.dart';
+import '../../core/background_work_gate.dart';
 import '../models/course_recording.dart';
 import '../models/vod_ppt.dart';
 import '../models/vod_search_result.dart';
@@ -61,6 +62,7 @@ class VodRepository {
   static Duration warmingFailureTtl = const Duration(minutes: 2);
   static DateTime? _nextWarmStart;
   static Timer? _warmingTimer;
+  static bool _waitingForInteraction = false;
   final _warmingPending = <String, Future<void>>{};
   int _forceWarmSequence = 0;
   int _probeSequence = 0;
@@ -1183,6 +1185,16 @@ class VodRepository {
       request.owner._finishWarmingRequest(request);
     }
     if (_activeWarmRequests != 0) return;
+    if (BackgroundWorkGate.isBusy) {
+      if (!_waitingForInteraction) {
+        _waitingForInteraction = true;
+        unawaited(BackgroundWorkGate.idle.then((_) {
+          _waitingForInteraction = false;
+          _drainWarmingQueue();
+        }));
+      }
+      return;
+    }
     while (_warmingQueue.isNotEmpty) {
       final request = _warmingQueue.first;
       final owner = request.owner;
