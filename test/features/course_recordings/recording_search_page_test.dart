@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:shuyo/data/models/course_recording.dart';
 import 'package:shuyo/data/models/vod_search_result.dart';
 import 'package:shuyo/data/repositories/vod_repository.dart';
@@ -277,6 +278,8 @@ void _expectSingleLessonCount(WidgetTester tester, Finder row, String count) {
 }
 
 void main() {
+  setUp(() => SharedPreferences.setMockInitialValues({}));
+
   for (final previewFailure in [false, true]) {
     for (final error in [
       const VodWebVpnSessionExpiredException(),

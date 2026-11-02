@@ -142,6 +142,7 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
   RecordingPlayerPreferences _playerPreferences =
       const RecordingPlayerPreferences();
   Future<void> _preferencesQueue = Future<void>.value();
+  late final Future<void> _playerPreferencesReady;
   int _preferencesRevision = 0;
   bool _collapsedMenuOpen = false;
   final _systemUi = RecordingPlayerSystemUi();
@@ -157,7 +158,10 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
   Timer? _heartbeatTimer;
   Timer? _liveEndTimer;
   bool _foreground = true;
-  bool _resumeLive = false;
+  bool _resumePlayback = false;
+  bool _lifecycleResumePending = false;
+  int? _resumeRecordingRevision;
+  Future<void> _lifecycleQueue = Future<void>.value();
   bool _heartbeatPending = false;
   bool _catalogLoading = false;
   bool _catalogPullRefreshing = false;
@@ -210,6 +214,7 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
   bool _secondarySyncPending = false;
   String _aspect = '自动';
   VodLiveProtocol _liveProtocol = VodLiveProtocol.hls;
+  bool _liveProtocolSelected = false;
   List<VodWebRtcSession> _rtcSessions = [];
   StreamSubscription<double>? _rtcVolumeSubscription;
   Future<void> _rtcSwapQueue = Future<void>.value();
@@ -220,6 +225,18 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
       _viewIndex < _rtcSessions.length &&
       _rtcSessions[_viewIndex].state.value == VodWebRtcState.playing;
 
+  Widget? _webRtcResolutionLabel() {
+    if (!_isWebRtc || _viewIndex >= _rtcSessions.length) return null;
+    final renderer = _rtcSessions[_viewIndex].renderer;
+    return ValueListenableBuilder(
+      valueListenable: renderer,
+      builder: (context, value, child) => RecordingVideoResolutionLabel(
+        width: renderer.videoWidth,
+        height: renderer.videoHeight,
+      ),
+    );
+  }
+
   Future<List<RecordingPlaybackInfoEntry>> _readPlaybackInformation() async {
     final view = _playback?.views.elementAtOrNull(_viewIndex);
     if (_isWebRtc && _viewIndex < _rtcSessions.length) {
@@ -228,8 +245,10 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
       return [
         (
           title: 'Resolution',
-          value:
-              '${session.renderer.videoWidth}x${session.renderer.videoHeight}'
+          value: session.renderer.videoWidth > 0 &&
+                  session.renderer.videoHeight > 0
+              ? '${session.renderer.videoWidth}x${session.renderer.videoHeight}'
+              : '不可用'
         ),
         (title: 'VideoParams', value: details['VideoParams'] ?? '不可用'),
         (title: 'AudioParams', value: details['AudioParams'] ?? '不可用'),
@@ -270,7 +289,12 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
     final revision = _preferencesRevision;
     final preferences = await RecordingPlayerPreferences.load();
     if (!mounted || revision != _preferencesRevision) return;
-    _publish(() => _playerPreferences = preferences);
+    _publish(() {
+      _playerPreferences = preferences;
+      if (!_liveProtocolSelected) {
+        _liveProtocol = preferences.defaultLiveProtocol;
+      }
+    });
     if (preferences.secondaryView) _warmSecondaryWhenEnabled(true);
   }
 
@@ -337,7 +361,7 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
           : null,
     );
     WidgetsBinding.instance.addObserver(this);
-    unawaited(_loadPlayerPreferences());
+    _playerPreferencesReady = _loadPlayerPreferences();
     if (_isMobile) _systemUi.lockPortrait();
     var initial = widget.initialLesson ?? widget.course.liveLesson;
     if ((widget.skipInitialCatalogLoad ||
@@ -527,6 +551,33 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
     _liveEndTimer = null;
   }
 
+  void _startLiveTimers(int revision) {
+    _stopLiveTimers();
+    final playback = _playback;
+    if (!_foreground ||
+        !_lesson.isLive ||
+        playback == null ||
+        _failure != null ||
+        revision != _loadRevision) {
+      return;
+    }
+    unawaited(_heartbeat(revision));
+    _heartbeatTimer = Timer.periodic(
+        const Duration(seconds: 60), (_) => unawaited(_heartbeat(revision)));
+    final end = playback.liveEndTime ?? _lesson.liveEndTime ?? _lesson.endTime;
+    if (end == null) return;
+    final remaining = end.difference(DateTime.now());
+    _liveEndTimer = Timer(remaining.isNegative ? Duration.zero : remaining, () {
+      if (!mounted || revision != _loadRevision) return;
+      _stopLiveTimers();
+      unawaited(_player?.pause());
+      unawaited(_secondaryPlayer?.pause());
+      unawaited(_pauseRtc());
+      _publish(() => _failure = _PlaybackFailure.unavailable);
+      unawaited(_loadCatalog(forceRefresh: true));
+    });
+  }
+
   Future<void> _heartbeat(int revision) async {
     if (!_foreground ||
         revision != _loadRevision ||
@@ -562,23 +613,74 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    _foreground = state == AppLifecycleState.resumed;
-    if (!_foreground) {
-      _resumeLive = _resumeLive ||
-          _lesson.isLive &&
-              _failure == null &&
-              (_loading ||
-                  (_isWebRtc
-                      ? _rtcPlaying
-                      : (_player?.state.playing ?? false)));
+    // Losing window focus (notification shade, system dialogs, split screen)
+    // does not mean the video is hidden. Only suspend on a real background
+    // transition, and do not resume on the intermediate hidden -> inactive.
+    if (state == AppLifecycleState.inactive) return;
+    final foreground = state == AppLifecycleState.resumed;
+    if (foreground == _foreground) return;
+    if (!foreground) {
+      _resumePlayback = _failure == null &&
+          (_lifecycleResumePending ||
+              _loading ||
+              (_isWebRtc
+                  ? _rtcPlaying
+                  : ((_timelinePlayer ?? _player)?.state.playing ?? false)));
+      _foreground = false;
       _stopLiveTimers();
-      unawaited(_player?.pause());
-      unawaited(_secondaryPlayer?.pause());
-      unawaited(_pauseRtc());
-    } else if (_resumeLive) {
-      _resumeLive = false;
-      unawaited(_loadLesson(_lesson));
+      final players = [_player, _secondaryPlayer].whereType<Player>().toList();
+      final sessions = _rtcSessions.toList();
+      final revision = _loadRevision;
+      _enqueueLifecycle(() async {
+        if (revision != _loadRevision) return;
+        await Future.wait([
+          for (final player in players) player.pause(),
+          for (final session in sessions) session.pause(),
+        ]);
+      });
+      return;
     }
+    _foreground = true;
+    final resume = _resumePlayback;
+    _resumePlayback = false;
+    if (!resume) {
+      // A manually paused live stream stays paused, but its later manual play
+      // still needs keepalives and the authoritative stream expiry timer.
+      _startLiveTimers(_loadRevision);
+      return;
+    }
+    _lifecycleResumePending = true;
+    final revision = _loadRevision;
+    final lesson = _lesson;
+    if (!lesson.isLive) _resumeRecordingRevision = revision;
+    _enqueueLifecycle(() async {
+      if (!mounted ||
+          !_foreground ||
+          revision != _loadRevision ||
+          _failure != null) {
+        return;
+      }
+      if (lesson.isLive) {
+        // Source loading has its own transport queue. Do not hold lifecycle
+        // commands behind a network request or an outstanding native open.
+        unawaited(_loadLesson(lesson));
+      } else if (!_loading) {
+        await (_timelinePlayer ?? _player)?.play();
+        if (!mounted || !_foreground || revision != _loadRevision) return;
+        _resumeRecordingRevision = null;
+        _lifecycleResumePending = false;
+        await _alignSecondary();
+      }
+    });
+  }
+
+  void _enqueueLifecycle(Future<void> Function() action) {
+    // Serialize pause/resume so a late native pause cannot undo a quick return.
+    _lifecycleQueue = _lifecycleQueue.then((_) async {
+      if (mounted) await action();
+    }).catchError((Object error) {
+      debugPrint('ShuYoVOD lifecycle update failed: ${error.runtimeType}');
+    });
   }
 
   @override
@@ -644,6 +746,14 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
 
   Future<void> _loadLesson(VodLesson lesson, {bool resume = false}) async {
     final revision = ++_loadRevision;
+    final enteringLive =
+        lesson.isLive && (!_lesson.isLive || lesson.id != _lesson.id);
+    if (enteringLive) {
+      _liveProtocolSelected = false;
+      _liveProtocol = _playerPreferences.defaultLiveProtocol;
+    }
+    _resumeRecordingRevision = null;
+    _lifecycleResumePending = false;
     final drainLive = lesson.isLive || _lesson.isLive;
     _viewAudioRevision++;
     _resetSeekSynchronization();
@@ -663,6 +773,8 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
     });
     unawaited(_loadNotes(lesson));
     final preparation = _transport.prepare(() async {
+      if (!mounted || revision != _loadRevision) return;
+      await _lifecycleQueue;
       if (!mounted || revision != _loadRevision) return;
       await _disposeRtc();
       if (!mounted || revision != _loadRevision) return;
@@ -715,6 +827,11 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
     }
     try {
       await _player?.pause();
+      if (lesson.isLive) await _playerPreferencesReady;
+      if (!mounted || revision != _loadRevision) return;
+      if (enteringLive && !_liveProtocolSelected) {
+        _liveProtocol = _playerPreferences.defaultLiveProtocol;
+      }
       final playback = await (lesson.isLive &&
               _liveProtocol != VodLiveProtocol.hls &&
               widget.repository != null
@@ -897,7 +1014,9 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
         if (!mounted || revision != _loadRevision) return;
         if (_viewVolumeInitialized) await player.setVolume(_viewVolume);
         if (!mounted || revision != _loadRevision) return;
-        final nativeOpen = player.open(
+        final openedPlayer = player;
+        final nativeOpen = openedPlayer
+            .open(
           Media(
             mediaUrl.toString(),
             httpHeaders: playback.isLive && _liveProxy != null
@@ -907,7 +1026,19 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
                 position != null && position > Duration.zero ? position : null,
           ),
           play: play && _foreground,
-        );
+        )
+            .then((_) async {
+          // Keep this attached to the native operation itself: it may finish
+          // after the UI's timeout, while a background pause has already run.
+          if (!mounted || revision != _loadRevision) return;
+          if (!_foreground || _failure != null) {
+            await openedPlayer.pause();
+          } else if (play && _resumeRecordingRevision == revision) {
+            await openedPlayer.play();
+            _resumeRecordingRevision = null;
+            _lifecycleResumePending = false;
+          }
+        });
         _transport.trackOpen(nativeOpen, secondary: false);
         await nativeOpen.timeout(const Duration(seconds: 25));
         if (_openingMediaRevision == revision) _openingMediaRevision = null;
@@ -915,27 +1046,7 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
         if (playback.isLive || rate != 1) {
           await player.setRate(playback.isLive ? 1 : rate);
         }
-        if (playback.isLive && _foreground) {
-          unawaited(_heartbeat(revision));
-          _heartbeatTimer = Timer.periodic(const Duration(seconds: 60),
-              (_) => unawaited(_heartbeat(revision)));
-          final end =
-              playback.liveEndTime ?? _lesson.liveEndTime ?? _lesson.endTime;
-          if (end != null) {
-            _liveEndTimer = Timer(
-                end.difference(DateTime.now()).isNegative
-                    ? Duration.zero
-                    : end.difference(DateTime.now()), () {
-              _stopLiveTimers();
-              unawaited(_player?.pause());
-              unawaited(_secondaryPlayer?.pause());
-              if (mounted) {
-                _publish(() => _failure = _PlaybackFailure.unavailable);
-              }
-              unawaited(_loadCatalog(forceRefresh: true));
-            });
-          }
-        }
+        if (playback.isLive) _startLiveTimers(revision);
         _publish(() {
           _loadedLessonId = playback.lessonId;
           _loading = false;
@@ -998,6 +1109,7 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
   }
 
   Future<void> _shutdownTransports() => _transport.prepare(() async {
+        await _lifecycleQueue;
         Object? rtcError;
         StackTrace? rtcStack;
         try {
@@ -1166,20 +1278,7 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
     }
     if (!_foreground) await _pauseRtc();
     if (!mounted || revision != _loadRevision) return;
-    unawaited(_heartbeat(revision));
-    _heartbeatTimer = Timer.periodic(
-        const Duration(seconds: 60), (_) => unawaited(_heartbeat(revision)));
-    final end = playback.liveEndTime ?? _lesson.liveEndTime ?? _lesson.endTime;
-    if (end != null) {
-      final remaining = end.difference(DateTime.now());
-      _liveEndTimer =
-          Timer(remaining.isNegative ? Duration.zero : remaining, () {
-        _stopLiveTimers();
-        unawaited(_pauseRtc());
-        if (mounted) _publish(() => _failure = _PlaybackFailure.unavailable);
-        unawaited(_loadCatalog(forceRefresh: true));
-      });
-    }
+    _startLiveTimers(revision);
   }
 
   void _requestRtcSwap() {
@@ -1736,13 +1835,21 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
             ? await _liveProxy!.open(view.url)
             : view.url;
         if (!mounted || revision != _secondaryRevision) return;
-        final nativeOpen = secondary.open(
-            Media(url.toString(),
-                httpHeaders: playback.isLive && _liveProxy != null
-                    ? const {}
-                    : view.httpHeaders,
-                start: playback.isLive ? null : _player?.state.position),
-            play: _foreground && (_player?.state.playing ?? false));
+        final openedPlayer = secondary;
+        final nativeOpen = openedPlayer
+            .open(
+                Media(url.toString(),
+                    httpHeaders: playback.isLive && _liveProxy != null
+                        ? const {}
+                        : view.httpHeaders,
+                    start: playback.isLive ? null : _player?.state.position),
+                play: _foreground && (_player?.state.playing ?? false))
+            .then((_) async {
+          if (!mounted || revision != _secondaryRevision) return;
+          if (!_foreground || _secondaryFailed || _failure != null) {
+            await openedPlayer.pause();
+          }
+        });
         _transport.trackOpen(nativeOpen, secondary: true);
         await nativeOpen.timeout(const Duration(seconds: 25));
         if (!mounted || revision != _secondaryRevision) return;
@@ -1886,6 +1993,8 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
                       : Video(
                           key: _videoKey,
                           controller: _hostVideoController!,
+                          pauseUponEnteringBackgroundMode: false,
+                          resumeUponEnteringForegroundMode: false,
                           aspectRatio: switch (_aspect) {
                             '4:3' => 4 / 3,
                             '16:9' => 16 / 9,
@@ -1982,11 +2091,15 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
                                   ? () => unawaited(_toggleRtcPlayback())
                                   : null,
                               liveProtocol: _liveProtocol,
+                              liveResolutionLabel: _webRtcResolutionLabel(),
                               onLiveProtocolChanged: widget.repository == null
                                   ? null
                                   : (protocol) {
                                       if (protocol == _liveProtocol) return;
-                                      _publish(() => _liveProtocol = protocol);
+                                      _publish(() {
+                                        _liveProtocolSelected = true;
+                                        _liveProtocol = protocol;
+                                      });
                                       unawaited(_loadLesson(_lesson));
                                     },
                               onReconnect: () =>

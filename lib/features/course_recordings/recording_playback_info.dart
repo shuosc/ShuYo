@@ -24,7 +24,7 @@ Future<List<RecordingPlaybackInfoEntry>> readRecordingPlaybackInfo(
   return [
     (
       title: 'Resolution',
-      value: state.width != null && state.height != null
+      value: (state.width ?? 0) > 0 && (state.height ?? 0) > 0
           ? '${state.width}x${state.height}'
           : '不可用'
     ),

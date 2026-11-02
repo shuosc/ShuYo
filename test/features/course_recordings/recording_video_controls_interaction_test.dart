@@ -18,6 +18,12 @@ class _InteractionPlayer extends PlatformPlayer {
   final rates = <double>[];
   Completer<void>? rateGate;
 
+  void emitResolution(int? width, int? height) {
+    state = state.copyWith(width: width, height: height);
+    widthController.add(width);
+    heightController.add(height);
+  }
+
   @override
   Future<void> playOrPause() async {
     toggles++;
@@ -47,6 +53,8 @@ Widget _controls(
   Player player, {
   bool fullscreen = false,
   bool isLive = false,
+  VodLiveProtocol liveProtocol = VodLiveProtocol.hls,
+  bool loading = false,
   bool dualEnabled = false,
   VoidCallback? onSwapViews,
   ValueChanged<String>? onAspectChanged,
@@ -54,18 +62,22 @@ Widget _controls(
   Widget? failure,
   bool? livePlaying,
   VoidCallback? onLiveTogglePlayback,
+  VoidCallback? onReconnect,
+  List<VodLesson> lessons = const [],
   EdgeInsets safeInsets = EdgeInsets.zero,
+  TextScaler textScaler = TextScaler.noScaling,
+  Widget? liveResolutionLabel,
   VodLesson? selectedLesson,
 }) =>
     MaterialApp(
       home: Scaffold(
         body: MediaQuery(
-          data: MediaQueryData(viewPadding: safeInsets),
+          data: MediaQueryData(viewPadding: safeInsets, textScaler: textScaler),
           child: RecordingVideoControls(
             state: _InteractionVideoState(),
             player: player,
             title: '课程录播',
-            loading: false,
+            loading: loading,
             failure: failure,
             views: dualEnabled
                 ? [
@@ -80,9 +92,13 @@ Widget _controls(
             selectedView: 0,
             fullscreen: fullscreen,
             isLive: isLive,
+            liveProtocol: liveProtocol,
             livePlaying: livePlaying,
             onLiveTogglePlayback: onLiveTogglePlayback,
+            onReconnect: onReconnect,
             onLiveProtocolChanged: onLiveProtocolChanged,
+            liveResolutionLabel: liveResolutionLabel,
+            lessons: lessons,
             selectedLesson: selectedLesson,
             dualEnabled: dualEnabled,
             secondaryView:
@@ -109,6 +125,60 @@ Future<void> _setSize(WidgetTester tester, Size size) async {
 }
 
 void main() {
+  for (final size in [
+    const Size(320, 221),
+    const Size(393, 221),
+    const Size(873, 393),
+  ]) {
+    testWidgets(
+        'live status and reconnect stay beside playback at width ${size.width}',
+        (tester) async {
+      await _setSize(tester, size);
+      final player = Player(platformPlayer: _InteractionPlayer());
+      addTearDown(player.dispose);
+      var reconnects = 0;
+      final lessons = [
+        VodLesson(id: 1, teachingClassId: 2, name: '课程', isPlayable: true),
+      ];
+      await tester.pumpWidget(_controls(player,
+          fullscreen: size.width > 600,
+          isLive: true,
+          lessons: lessons,
+          textScaler: TextScaler.linear(2),
+          onReconnect: () => reconnects++,
+          onLiveProtocolChanged: (_) {}));
+      final playback = tester.getRect(find.byTooltip('播放'));
+      final label =
+          tester.getRect(find.byKey(const ValueKey('recording-live-label')));
+      final reconnect = tester.getRect(find.byTooltip('回到直播'));
+      final previous = tester.getRect(find.byTooltip('上一集'));
+      expect(label.left, greaterThanOrEqualTo(playback.right));
+      expect(reconnect.left, greaterThanOrEqualTo(label.right));
+      expect(previous.left, greaterThanOrEqualTo(reconnect.right));
+      expect(find.text('● 直播中'), findsOneWidget);
+      await tester.tap(find.byTooltip('回到直播'));
+      expect(reconnects, 1);
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+    });
+  }
+
+  testWidgets('live reconnect remains disabled while loading', (tester) async {
+    await _setSize(tester, const Size(393, 221));
+    final player = Player(platformPlayer: _InteractionPlayer());
+    addTearDown(player.dispose);
+    var reconnects = 0;
+    await tester.pumpWidget(_controls(player,
+        isLive: true, loading: true, onReconnect: () => reconnects++));
+    final reconnect = tester.widget<IconButton>(find.ancestor(
+        of: find.byTooltip('回到直播'), matching: find.byType(IconButton)));
+    expect(reconnect.onPressed, isNull);
+    await tester.tap(find.byTooltip('回到直播'));
+    expect(reconnects, 0);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
   testWidgets('control bar uses the upstream progress and button dimensions',
       (tester) async {
     await _setSize(tester, const Size(873, 393));
@@ -157,10 +227,11 @@ void main() {
   });
 
   testWidgets(
-      'quality label is noninteractive and only shown for fullscreen recordings',
+      'quality label uses decoded resolution tiers for recordings and live',
       (tester) async {
     await _setSize(tester, const Size(873, 393));
-    final player = Player(platformPlayer: _InteractionPlayer());
+    final platform = _InteractionPlayer()..emitResolution(1920, 1080);
+    final player = Player(platformPlayer: platform);
     addTearDown(player.dispose);
     await tester.pumpWidget(_controls(player, fullscreen: true));
     final label = find.byKey(const ValueKey('recording-quality-label'));
@@ -179,7 +250,123 @@ void main() {
     await tester.pumpWidget(_controls(player));
     expect(label, findsNothing);
     await tester.pumpWidget(_controls(player, fullscreen: true, isLive: true));
+    expect(find.text('1080P'), findsOneWidget);
+    final bottomControls = tester
+        .widget<Row>(find.byKey(const ValueKey('recording-bottom-controls')));
+    platform.emitResolution(1280, 720);
+    await tester.pump();
+    expect(find.text('720P'), findsOneWidget);
+    expect(find.text('1080P'), findsNothing);
+    expect(
+        tester.widget<Row>(
+            find.byKey(const ValueKey('recording-bottom-controls'))),
+        same(bottomControls));
+    platform.emitResolution(0, 0);
+    await tester.pump();
     expect(label, findsNothing);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets(
+      'resolution tier ranges are rotation invariant and never round up',
+      (tester) async {
+    final samples = <(int, int, String)>[
+      (256, 144, '144P'),
+      (426, 240, '240P'),
+      (640, 359, '240P'),
+      (640, 360, '360P'),
+      (854, 479, '360P'),
+      (854, 480, '480P'),
+      (1280, 719, '480P'),
+      (1280, 720, '720P'),
+      (1920, 1079, '720P'),
+      (1920, 1080, '1080P'),
+      (2560, 1080, '1080P'),
+      (2560, 1439, '1080P'),
+      (2560, 1440, '2K'),
+      (3840, 2159, '2K'),
+      (3840, 2160, '4K'),
+      (7680, 4319, '4K'),
+      (7680, 4320, '8K'),
+    ];
+    for (final (width, height, expected) in samples) {
+      for (final rotated in [false, true]) {
+        await tester.pumpWidget(MaterialApp(
+          home: RecordingVideoResolutionLabel(
+            width: rotated ? height : width,
+            height: rotated ? width : height,
+          ),
+        ));
+        expect(find.text(expected), findsOneWidget,
+            reason: '$width x $height, rotated=$rotated');
+      }
+    }
+    for (final (width, height) in <(int?, int?)>[
+      (null, null),
+      (null, 720),
+      (1280, null),
+      (0, 720),
+      (1280, 0),
+      (-1280, 720),
+      (1280, -720),
+    ]) {
+      await tester.pumpWidget(MaterialApp(
+        home: RecordingVideoResolutionLabel(width: width, height: height),
+      ));
+      expect(
+          find.byKey(const ValueKey('recording-quality-label')), findsNothing);
+    }
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('resolution follows the visible player after a view switch',
+      (tester) async {
+    await _setSize(tester, const Size(873, 393));
+    final first = _InteractionPlayer()..emitResolution(1920, 1080);
+    final second = _InteractionPlayer()..emitResolution(1280, 720);
+    final firstPlayer = Player(platformPlayer: first);
+    final secondPlayer = Player(platformPlayer: second);
+    addTearDown(firstPlayer.dispose);
+    addTearDown(secondPlayer.dispose);
+    await tester.pumpWidget(_controls(firstPlayer, fullscreen: true));
+    expect(find.text('1080P'), findsOneWidget);
+    await tester.pumpWidget(_controls(secondPlayer, fullscreen: true));
+    expect(find.text('720P'), findsOneWidget);
+    first.emitResolution(640, 360);
+    await tester.pump();
+    expect(find.text('360P'), findsNothing);
+    expect(find.text('720P'), findsOneWidget);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('WebRTC uses renderer dimensions and never idle media dimensions',
+      (tester) async {
+    await _setSize(tester, const Size(320, 221));
+    final platform = _InteractionPlayer()..emitResolution(1920, 1080);
+    final player = Player(platformPlayer: platform);
+    addTearDown(player.dispose);
+    final resolution = ValueNotifier<Size?>(null);
+    addTearDown(resolution.dispose);
+    await tester.pumpWidget(_controls(player,
+        fullscreen: true,
+        isLive: true,
+        liveProtocol: VodLiveProtocol.webRtc,
+        textScaler: TextScaler.linear(2),
+        liveResolutionLabel: ValueListenableBuilder<Size?>(
+          valueListenable: resolution,
+          builder: (_, size, __) => RecordingVideoResolutionLabel(
+              width: size?.width.toInt(), height: size?.height.toInt()),
+        )));
+    final label = find.byKey(const ValueKey('recording-quality-label'));
+    expect(label, findsNothing);
+    resolution.value = const Size(1280, 720);
+    await tester.pump();
+    expect(find.text('720P'), findsOneWidget);
+    expect(find.text('1080P'), findsNothing);
+    resolution.value = null;
+    await tester.pump();
+    expect(label, findsNothing);
+    expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox.shrink());
   });
 

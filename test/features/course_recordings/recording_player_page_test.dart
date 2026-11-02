@@ -8,6 +8,7 @@ import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:shuyo/data/models/course_recording.dart';
 import 'package:shuyo/data/models/vod_ppt.dart';
 import 'package:shuyo/data/repositories/vod_repository.dart';
@@ -46,6 +47,7 @@ class _PlatformPlayer extends PlatformPlayer {
   Completer<void>? seekGate;
   Completer<void>? volumeGate;
   Completer<void>? stopGate;
+  Completer<void>? pauseGate;
   bool failStop = false;
   bool failNextVolume = false;
   bool publishSeekPosition = true;
@@ -92,6 +94,7 @@ class _PlatformPlayer extends PlatformPlayer {
   @override
   Future<void> pause() async {
     pauses++;
+    await pauseGate?.future;
     state = state.copyWith(playing: false);
     playingController.add(false);
   }
@@ -352,9 +355,12 @@ class _CatalogRepository extends VodRepository {
 class _ProtocolRepository extends VodRepository {
   final requested = <VodLiveProtocol>[];
   bool allowPlayback = false;
+  int heartbeats = 0;
 
   @override
-  Future<void> keepLiveAlive(VodCourse course, VodLesson lesson) async {}
+  Future<void> keepLiveAlive(VodCourse course, VodLesson lesson) async {
+    heartbeats++;
+  }
 
   @override
   Future<VodPlayback> prepareLivePlaybackWithProtocol({
@@ -387,6 +393,7 @@ class _ProtocolRepository extends VodRepository {
 class _FakeRtcSession extends VodWebRtcSession {
   _FakeRtcSession(super.source);
   int starts = 0;
+  int pauses = 0;
   bool disposed = false;
   bool failDisposal = false;
   Completer<void>? disposalGate;
@@ -408,6 +415,17 @@ class _FakeRtcSession extends VodWebRtcSession {
 
   @override
   Future<void> setVolume(double volume) async => volumes.add(volume);
+
+  @override
+  Future<void> pause() async {
+    pauses++;
+    if (!disposed) state.value = VodWebRtcState.paused;
+  }
+
+  @override
+  Future<void> play() async {
+    if (!disposed) state.value = VodWebRtcState.playing;
+  }
 
   @override
   Future<void> dispose() async {
@@ -440,6 +458,7 @@ class _FakeLiveProxy extends VodLiveStreamProxy {
 }
 
 void main() {
+  setUp(() => SharedPreferences.setMockInitialValues({}));
   const course = VodCourse(
     teachingClassId: 10,
     termId: 7,
@@ -1885,6 +1904,391 @@ void main() {
     expect(find.text('恢复连接'), findsNothing);
     expect(recoveryCalls, 0);
     expect(tester.takeException(), isNull);
+  });
+
+  for (final protocol in VodLiveProtocol.values) {
+    testWidgets('saved ${protocol.name} is used for the first live request',
+        (tester) async {
+      prepareNotesPortrait(tester);
+      SharedPreferences.setMockInitialValues({
+        'vod.player.defaultLiveProtocol': protocol.name,
+      });
+      final harness = _PlaybackHarness();
+      final repository = _ProtocolRepository()..allowPlayback = true;
+      final lesson = VodLesson(
+          id: 106,
+          teachingClassId: 10,
+          name: course.name,
+          isLive: true,
+          isPlayable: true);
+      var hlsRequests = 0;
+      await tester.pumpWidget(page(
+        initial: lesson,
+        lessons: [lesson],
+        harness: harness,
+        repository: repository,
+        webRtcSessionFactory: _FakeRtcSession.new,
+        loadNotes: (_) async => [],
+        load: (selected) async {
+          hlsRequests++;
+          return playback(selected);
+        },
+      ));
+      await tester.pumpAndSettle();
+      var controls = tester
+          .widget<RecordingVideoControls>(find.byType(RecordingVideoControls));
+      expect(controls.liveProtocol, protocol);
+      expect(hlsRequests, protocol == VodLiveProtocol.hls ? 1 : 0);
+      expect(repository.requested,
+          protocol == VodLiveProtocol.hls ? isEmpty : [protocol]);
+      final next = VodLiveProtocol.values[(protocol.index + 1) % 3];
+      controls.onPreferencesChanged!(
+          controls.preferences.copyWith(defaultLiveProtocol: next));
+      await tester.pumpAndSettle();
+      controls = tester
+          .widget<RecordingVideoControls>(find.byType(RecordingVideoControls));
+      expect(controls.liveProtocol, protocol,
+          reason: 'Changing a default must not interrupt the active stream');
+      expect(hlsRequests + repository.requested.length, 1);
+      expect(
+          (await SharedPreferences.getInstance())
+              .getString('vod.player.defaultLiveProtocol'),
+          next.name);
+      await tester.pumpWidget(const SizedBox.shrink());
+    });
+  }
+
+  for (final protocol in <VodLiveProtocol?>[null, ...VodLiveProtocol.values]) {
+    final label = protocol?.name ?? 'recording';
+    testWidgets(
+        '$label ignores visible focus loss and suspends once in background',
+        (tester) async {
+      prepareNotesPortrait(tester);
+      SharedPreferences.setMockInitialValues({
+        'vod.player.defaultLiveProtocol': protocol?.name ?? 'hls',
+      });
+      final harness = _PlaybackHarness();
+      final repository = _ProtocolRepository()..allowPlayback = true;
+      final sessions = <_FakeRtcSession>[];
+      final lesson = protocol == null
+          ? first
+          : VodLesson(
+              id: 106,
+              teachingClassId: 10,
+              name: course.name,
+              isLive: true,
+              isPlayable: true);
+      var requests = 0;
+      await tester.pumpWidget(page(
+        initial: lesson,
+        lessons: [lesson],
+        harness: harness,
+        repository: protocol == null ? null : repository,
+        webRtcSessionFactory: (source) {
+          final session = _FakeRtcSession(source);
+          sessions.add(session);
+          return session;
+        },
+        loadNotes: (_) async => [],
+        load: (selected) async {
+          requests++;
+          return playback(selected);
+        },
+      ));
+      await tester.pumpAndSettle();
+      final video = tester.widget<Video>(find.byType(Video).first);
+      expect(video.pauseUponEnteringBackgroundMode, isFalse);
+      expect(video.resumeUponEnteringForegroundMode, isFalse);
+      final beforePauses = harness.platforms.map((p) => p.pauses).toList();
+      final observer = tester.state(find.byType(RecordingPlayerPage))
+          as WidgetsBindingObserver;
+      final initialRequests = requests + repository.requested.length;
+      observer.didChangeAppLifecycleState(AppLifecycleState.inactive);
+      await tester.pump();
+      observer.didChangeAppLifecycleState(AppLifecycleState.resumed);
+      await tester.pumpAndSettle();
+      expect(harness.platforms.map((p) => p.pauses), beforePauses);
+      expect(sessions.every((s) => s.pauses == 0), isTrue);
+      expect(requests + repository.requested.length, initialRequests);
+      for (final state in [
+        AppLifecycleState.hidden,
+        AppLifecycleState.paused,
+        AppLifecycleState.hidden,
+        AppLifecycleState.inactive
+      ]) {
+        observer.didChangeAppLifecycleState(state);
+        await tester.pump();
+      }
+      expect(harness.platforms.map((p) => p.pauses),
+          beforePauses.map((count) => count + 1));
+      expect(sessions.every((s) => s.pauses == 1), isTrue);
+      expect(requests + repository.requested.length, initialRequests);
+      expect(harness.platforms.every((p) => !p.state.playing), isTrue);
+      observer.didChangeAppLifecycleState(AppLifecycleState.resumed);
+      observer.didChangeAppLifecycleState(AppLifecycleState.resumed);
+      await tester.pumpAndSettle();
+      expect(requests + repository.requested.length,
+          initialRequests + (protocol == null ? 0 : 1));
+      if (protocol == null) {
+        expect(harness.platforms.every((p) => p.state.playing), isTrue);
+        expect(harness.platforms.every((p) => p.opened.length == 1), isTrue);
+      } else if (protocol == VodLiveProtocol.webRtc) {
+        expect(sessions.first.disposed, isTrue);
+        expect(sessions.last.state.value, VodWebRtcState.playing);
+      }
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+    });
+  }
+
+  for (final protocol in VodLiveProtocol.values) {
+    testWidgets(
+        '${protocol.name} resumes after repeated returns and a late pause',
+        (tester) async {
+      prepareNotesPortrait(tester);
+      SharedPreferences.setMockInitialValues({
+        'vod.player.defaultLiveProtocol': protocol.name,
+      });
+      final harness = _PlaybackHarness();
+      final repository = _ProtocolRepository()..allowPlayback = true;
+      final lesson = VodLesson(
+          id: 106,
+          teachingClassId: 10,
+          name: course.name,
+          isLive: true,
+          isPlayable: true);
+      var hlsRequests = 0;
+      await tester.pumpWidget(page(
+        initial: lesson,
+        lessons: [lesson],
+        harness: harness,
+        repository: repository,
+        loadNotes: (_) async => [],
+        webRtcSessionFactory: _FakeRtcSession.new,
+        load: (selected) async {
+          hlsRequests++;
+          return playback(selected);
+        },
+      ));
+      await tester.pumpAndSettle();
+      final gate = Completer<void>();
+      for (final platform in harness.platforms) {
+        platform.pauseGate = gate;
+      }
+      final observer = tester.state(find.byType(RecordingPlayerPage))
+          as WidgetsBindingObserver;
+      for (var i = 0; i < 3; i++) {
+        observer.didChangeAppLifecycleState(AppLifecycleState.hidden);
+        observer.didChangeAppLifecycleState(AppLifecycleState.resumed);
+        await tester.pump();
+      }
+      gate.complete();
+      await tester.pumpAndSettle();
+      final controls = tester
+          .widget<RecordingVideoControls>(find.byType(RecordingVideoControls));
+      expect(controls.failure, isNull);
+      expect(
+          protocol == VodLiveProtocol.webRtc
+              ? controls.livePlaying
+              : harness.platforms.first.state.playing,
+          isTrue);
+      expect(hlsRequests + repository.requested.length, 2,
+          reason: 'Only the final return may reconnect this stream');
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+    });
+  }
+
+  testWidgets('a default changed on a recording applies when entering live',
+      (tester) async {
+    prepareNotesPortrait(tester);
+    final harness = _PlaybackHarness();
+    final repository = _ProtocolRepository()..allowPlayback = true;
+    final live = VodLesson(
+        id: 106,
+        teachingClassId: 10,
+        name: course.name,
+        isLive: true,
+        isPlayable: true);
+    await tester.pumpWidget(page(
+      initial: first,
+      lessons: [first, live],
+      harness: harness,
+      repository: repository,
+      loadNotes: (_) async => [],
+      load: (selected) async => playback(selected),
+    ));
+    await tester.pumpAndSettle();
+    var controls = tester
+        .widget<RecordingVideoControls>(find.byType(RecordingVideoControls));
+    controls.onPreferencesChanged!(controls.preferences
+        .copyWith(defaultLiveProtocol: VodLiveProtocol.flv));
+    await tester.pumpAndSettle();
+    controls = tester
+        .widget<RecordingVideoControls>(find.byType(RecordingVideoControls));
+    controls.onLessonSelected!(live);
+    await tester.pumpAndSettle();
+    expect(repository.requested, [VodLiveProtocol.flv]);
+    expect(
+        tester
+            .widget<RecordingVideoControls>(find.byType(RecordingVideoControls))
+            .liveProtocol,
+        VodLiveProtocol.flv);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  for (final secondary in [false, true]) {
+    testWidgets(
+        'late ${secondary ? 'secondary' : 'primary'} open after timeout '
+        'cannot restart in the background', (tester) async {
+      prepareNotesPortrait(tester);
+      final gate = Completer<void>();
+      final harness = _PlaybackHarness(
+          primaryOpen: secondary ? null : gate,
+          secondaryOpen: secondary ? gate : null);
+      await tester.pumpWidget(
+          page(harness: harness, load: (selected) async => playback(selected)));
+      for (var i = 0; i < 20; i++) {
+        await tester.pump();
+      }
+      final opening = harness.platforms[secondary ? 1 : 0];
+      expect(opening.opened, hasLength(1));
+      await tester.pump(const Duration(seconds: 26));
+      await tester.pump();
+      final observer = tester.state(find.byType(RecordingPlayerPage))
+          as WidgetsBindingObserver;
+      observer.didChangeAppLifecycleState(AppLifecycleState.hidden);
+      await tester.pump();
+      gate.complete();
+      await tester.pumpAndSettle();
+      expect(opening.state.playing, isFalse);
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+    });
+  }
+
+  testWidgets(
+      'manual live pause survives return and later play keeps heartbeats',
+      (tester) async {
+    prepareNotesPortrait(tester);
+    final harness = _PlaybackHarness();
+    final repository = _ProtocolRepository()..allowPlayback = true;
+    final lesson = VodLesson(
+        id: 106,
+        teachingClassId: 10,
+        name: course.name,
+        isLive: true,
+        isPlayable: true);
+    await tester.pumpWidget(page(
+      initial: lesson,
+      lessons: [lesson],
+      harness: harness,
+      repository: repository,
+      loadNotes: (_) async => [],
+      load: (selected) async => playback(selected),
+    ));
+    await tester.pumpAndSettle();
+    await harness.platforms.first.pause();
+    await tester.pumpAndSettle();
+    final requests = repository.heartbeats;
+    final observer = tester.state(find.byType(RecordingPlayerPage))
+        as WidgetsBindingObserver;
+    observer.didChangeAppLifecycleState(AppLifecycleState.hidden);
+    observer.didChangeAppLifecycleState(AppLifecycleState.resumed);
+    await tester.pumpAndSettle();
+    expect(harness.platforms.first.state.playing, isFalse);
+    expect(repository.heartbeats, requests);
+    await harness.platforms.first.play();
+    await tester.pump(const Duration(seconds: 60));
+    await tester.pump();
+    expect(repository.heartbeats, requests + 1);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('recording resumes after a slow pause and repeated quick returns',
+      (tester) async {
+    prepareNotesPortrait(tester);
+    final harness = _PlaybackHarness();
+    await tester.pumpWidget(
+        page(harness: harness, load: (selected) async => playback(selected)));
+    await tester.pumpAndSettle();
+    final main = harness.platforms.first;
+    final originalPosition = main.state.position;
+    await main.setRate(1.5);
+    await tester.pumpAndSettle();
+    final pauseGate = Completer<void>();
+    for (final player in harness.platforms) {
+      player.pauseGate = pauseGate;
+    }
+    final observer = tester.state(find.byType(RecordingPlayerPage))
+        as WidgetsBindingObserver;
+    for (var i = 0; i < 3; i++) {
+      observer.didChangeAppLifecycleState(AppLifecycleState.hidden);
+      observer.didChangeAppLifecycleState(AppLifecycleState.resumed);
+      await tester.pump();
+    }
+    pauseGate.complete();
+    await tester.pumpAndSettle();
+    expect(harness.platforms.every((p) => p.state.playing), isTrue);
+    expect(main.state.position, originalPosition);
+    expect(main.state.rate, 1.5);
+    expect(harness.platforms.every((p) => p.opened.length == 1), isTrue);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  for (final returnBeforeOpen in [false, true]) {
+    testWidgets(
+        'recording native open respects background and return '
+        'beforeOpen=$returnBeforeOpen', (tester) async {
+      prepareNotesPortrait(tester);
+      final openGate = Completer<void>();
+      final harness = _PlaybackHarness(primaryOpen: openGate);
+      await tester.pumpWidget(
+          page(harness: harness, load: (selected) async => playback(selected)));
+      for (var i = 0; i < 20; i++) {
+        await tester.pump();
+      }
+      expect(harness.platforms.first.opened, hasLength(1));
+      final observer = tester.state(find.byType(RecordingPlayerPage))
+          as WidgetsBindingObserver;
+      observer.didChangeAppLifecycleState(AppLifecycleState.hidden);
+      await tester.pump();
+      if (returnBeforeOpen) {
+        observer.didChangeAppLifecycleState(AppLifecycleState.resumed);
+        await tester.pump();
+      }
+      openGate.complete();
+      await tester.pumpAndSettle();
+      expect(harness.platforms.first.state.playing, returnBeforeOpen);
+      if (!returnBeforeOpen) {
+        observer.didChangeAppLifecycleState(AppLifecycleState.resumed);
+        await tester.pumpAndSettle();
+      }
+      expect(harness.platforms.every((p) => p.state.playing), isTrue);
+      expect(harness.platforms.every((p) => p.opened.length == 1), isTrue);
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+    });
+  }
+
+  testWidgets('manually paused recording stays paused after returning',
+      (tester) async {
+    prepareNotesPortrait(tester);
+    final harness = _PlaybackHarness();
+    await tester.pumpWidget(
+        page(harness: harness, load: (selected) async => playback(selected)));
+    await tester.pumpAndSettle();
+    await harness.platforms.first.pause();
+    await tester.pumpAndSettle();
+    final observer = tester.state(find.byType(RecordingPlayerPage))
+        as WidgetsBindingObserver;
+    observer.didChangeAppLifecycleState(AppLifecycleState.hidden);
+    observer.didChangeAppLifecycleState(AppLifecycleState.resumed);
+    await tester.pumpAndSettle();
+    expect(harness.platforms.every((p) => !p.state.playing), isTrue);
+    expect(harness.platforms.every((p) => p.opened.length == 1), isTrue);
+    await tester.pumpWidget(const SizedBox.shrink());
   });
 
   for (final live in [false, true]) {
@@ -5893,7 +6297,7 @@ void main() {
     await tester.pump();
     expect(find.byType(Slider), findsNothing);
     expect(find.byTooltip('播放速度'), findsNothing);
-    expect(find.text('● 直播'), findsOneWidget);
+    expect(find.text('● 直播中'), findsOneWidget);
     await tester.tap(find.byTooltip('回到直播'));
     await tester.pump(const Duration(milliseconds: 350));
     expect(reconnects, 1);

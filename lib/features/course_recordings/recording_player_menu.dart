@@ -75,6 +75,54 @@ Future<void> showRecordingPlayerMenu({
                   ? null
                   : (value) => update(current.copyWith(secondaryView: value)),
             ),
+            LayoutBuilder(builder: (context, constraints) {
+              return ListTile(
+                dense: fullscreen,
+                title: Text('默认直播流', style: itemStyle),
+                subtitle: const Text('新打开直播时使用'),
+                trailing: ConstrainedBox(
+                  constraints: BoxConstraints(
+                      maxWidth: math.max(0, constraints.maxWidth - 128)),
+                  child: FittedBox(
+                    fit: BoxFit.scaleDown,
+                    alignment: Alignment.centerRight,
+                    child: Row(
+                      key: const ValueKey('recording-default-live-protocol'),
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        for (final protocol in VodLiveProtocol.values) ...[
+                          if (protocol != VodLiveProtocol.values.first)
+                            const SizedBox(width: 4),
+                          ChoiceChip(
+                            key: ValueKey(
+                                'recording-default-live-protocol-${protocol.name}'),
+                            label: Text(protocol == VodLiveProtocol.webRtc
+                                ? 'WebRTC'
+                                : protocol.name.toUpperCase()),
+                            selected: protocol == current.defaultLiveProtocol,
+                            showCheckmark: false,
+                            visualDensity: VisualDensity.compact,
+                            materialTapTargetSize:
+                                MaterialTapTargetSize.shrinkWrap,
+                            labelPadding:
+                                const EdgeInsets.symmetric(horizontal: 2),
+                            onSelected: onPreferencesChanged == null
+                                ? null
+                                : (_) {
+                                    if (protocol !=
+                                        current.defaultLiveProtocol) {
+                                      update(current.copyWith(
+                                          defaultLiveProtocol: protocol));
+                                    }
+                                  },
+                          ),
+                        ],
+                      ],
+                    ),
+                  ),
+                ),
+              );
+            }),
             if (!fullscreen)
               Padding(
                 padding: const EdgeInsets.fromLTRB(12, 6, 12, 4),

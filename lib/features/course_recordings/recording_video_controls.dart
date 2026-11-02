@@ -80,6 +80,7 @@ class RecordingVideoControls extends StatefulWidget {
     this.informationLoader,
     this.livePlaying,
     this.onLiveTogglePlayback,
+    this.liveResolutionLabel,
   });
 
   final VideoState state;
@@ -124,6 +125,7 @@ class RecordingVideoControls extends StatefulWidget {
   final Future<List<RecordingPlaybackInfoEntry>> Function()? informationLoader;
   final bool? livePlaying;
   final VoidCallback? onLiveTogglePlayback;
+  final Widget? liveResolutionLabel;
 
   @override
   State<RecordingVideoControls> createState() => _RecordingVideoControlsState();
@@ -1556,18 +1558,11 @@ class _RecordingVideoControlsState extends State<RecordingVideoControls>
           ),
         if (widget.isLive && widget.onLiveProtocolChanged != null)
           _liveProtocolMenu(),
-        if (widget.isLive)
-          iconButton(
-              tooltip: '回到直播',
-              onPressed: widget.loading ? null : widget.onReconnect,
-              icon: Icons.refresh),
-        if (fullscreen && !widget.isLive)
-          const Padding(
-            padding: EdgeInsets.symmetric(horizontal: 8),
-            child: Text('1080P',
-                key: ValueKey('recording-quality-label'),
-                style: TextStyle(color: Colors.white, fontSize: 13)),
-          ),
+        if (fullscreen && !widget.loading && widget.failure == null)
+          if (widget.isLive && widget.liveProtocol == VodLiveProtocol.webRtc)
+            widget.liveResolutionLabel ?? const SizedBox.shrink()
+          else
+            _RecordingPlayerResolutionLabel(player: widget.player),
         iconButton(
             tooltip: fullscreen ? '退出全屏' : '全屏',
             onPressed: widget.loading
@@ -1632,6 +1627,24 @@ class _RecordingVideoControlsState extends State<RecordingVideoControls>
                     height: 34),
               ),
               if (!widget.isLive) time,
+              if (widget.isLive) ...[
+                ConstrainedBox(
+                  constraints: BoxConstraints(maxWidth: narrow ? 64 : 88),
+                  child: FittedBox(
+                    fit: BoxFit.scaleDown,
+                    child: Text('● 直播中',
+                        key: const ValueKey('recording-live-label'),
+                        maxLines: 1,
+                        style: TextStyle(
+                            color: Theme.of(context).colorScheme.primary,
+                            fontSize: 12)),
+                  ),
+                ),
+                iconButton(
+                    tooltip: '回到直播',
+                    onPressed: widget.loading ? null : widget.onReconnect,
+                    icon: Icons.refresh),
+              ],
               if (widget.lessons.isNotEmpty) ...[
                 iconButton(
                     tooltip: '上一集',
@@ -1646,11 +1659,6 @@ class _RecordingVideoControlsState extends State<RecordingVideoControls>
                         : () => widget.onLessonSelected?.call(newer),
                     icon: Icons.skip_next),
               ],
-              if (widget.isLive)
-                Text('● 直播',
-                    style: TextStyle(
-                        color: Theme.of(context).colorScheme.primary,
-                        fontSize: 12)),
               Expanded(
                   child: Align(
                       alignment: Alignment.centerRight,
@@ -1664,6 +1672,113 @@ class _RecordingVideoControlsState extends State<RecordingVideoControls>
           ]));
     });
   }
+}
+
+/// Shows a quality tier derived from the decoded frame's shorter edge.
+///
+/// Uses PiliPlus-style short labels, with local pixel thresholds because VOD
+/// does not provide a platform quality ID. Rotating a video keeps its tier.
+/// WebRTC renderers and media players share this presentation.
+class RecordingVideoResolutionLabel extends StatelessWidget {
+  const RecordingVideoResolutionLabel({
+    super.key,
+    required this.width,
+    required this.height,
+  });
+
+  final int? width;
+  final int? height;
+
+  @override
+  Widget build(BuildContext context) {
+    final width = this.width;
+    final height = this.height;
+    if (width == null || height == null || width <= 0 || height <= 0) {
+      return const SizedBox.shrink();
+    }
+    final shortEdge = math.min(width, height);
+    final label = switch (shortEdge) {
+      >= 4320 => '8K',
+      >= 2160 => '4K',
+      >= 1440 => '2K',
+      >= 1080 => '1080P',
+      >= 720 => '720P',
+      >= 480 => '480P',
+      >= 360 => '360P',
+      >= 240 => '240P',
+      _ => '${shortEdge}P',
+    };
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 8),
+      child: Text(label,
+          key: const ValueKey('recording-quality-label'),
+          maxLines: 1,
+          style: const TextStyle(color: Colors.white, fontSize: 13)),
+    );
+  }
+}
+
+class _RecordingPlayerResolutionLabel extends StatefulWidget {
+  const _RecordingPlayerResolutionLabel({required this.player});
+
+  final Player player;
+
+  @override
+  State<_RecordingPlayerResolutionLabel> createState() =>
+      _RecordingPlayerResolutionLabelState();
+}
+
+class _RecordingPlayerResolutionLabelState
+    extends State<_RecordingPlayerResolutionLabel> {
+  final _subscriptions = <StreamSubscription<int?>>[];
+  int? _width;
+  int? _height;
+  int _revision = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    _bind();
+  }
+
+  void _bind() {
+    final revision = ++_revision;
+    for (final subscription in _subscriptions) {
+      unawaited(subscription.cancel());
+    }
+    _subscriptions.clear();
+    _width = widget.player.state.width;
+    _height = widget.player.state.height;
+    _subscriptions.add(widget.player.stream.width.listen((width) {
+      if (mounted && revision == _revision && width != _width) {
+        setState(() => _width = width);
+      }
+    }));
+    _subscriptions.add(widget.player.stream.height.listen((height) {
+      if (mounted && revision == _revision && height != _height) {
+        setState(() => _height = height);
+      }
+    }));
+  }
+
+  @override
+  void didUpdateWidget(covariant _RecordingPlayerResolutionLabel oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.player != widget.player) _bind();
+  }
+
+  @override
+  void dispose() {
+    _revision++;
+    for (final subscription in _subscriptions) {
+      unawaited(subscription.cancel());
+    }
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) =>
+      RecordingVideoResolutionLabel(width: _width, height: _height);
 }
 
 String _durationText(Duration duration) {
