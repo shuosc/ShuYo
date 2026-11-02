@@ -94,7 +94,8 @@ class _LocalAuth extends AcademicAuthService {
 
 class _LocalUnifiedAccount extends UnifiedAccountService {
   @override
-  Future<WebVpnRecoveryOutcome> recoverWebVpn() async =>
+  Future<WebVpnRecoveryOutcome> recoverWebVpn(
+          {bool forceRefresh = false}) async =>
       WebVpnRecoveryOutcome.unavailable;
 
   @override

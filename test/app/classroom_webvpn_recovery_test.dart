@@ -16,7 +16,7 @@ class _PendingAccount extends UnifiedAccountService {
   int recoveries = 0;
 
   @override
-  Future<WebVpnRecoveryOutcome> recoverWebVpn() {
+  Future<WebVpnRecoveryOutcome> recoverWebVpn({bool forceRefresh = false}) {
     recoveries++;
     return recovery.future;
   }
