@@ -54,8 +54,9 @@ class VodSearchResult {
               id: intValue(json['id']),
               teachingClassId: course.teachingClassId,
               name: name,
-              // Permit a detail lookup without inventing the absent VOD flags.
-              isPlayable: !recording.isGenerating || recording.isPlayable,
+              // Search is discovery metadata. Missing VOD flags are not proof
+              // that a recording exists; resolve the viewer catalog/details.
+              isPlayable: recording.isPlayable,
               isGenerating: recording.isGenerating,
               isListed: recording.isListed,
               beginTime: vodDateValue(json['courBeginTime']),

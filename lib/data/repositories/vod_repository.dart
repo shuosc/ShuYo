@@ -8,6 +8,7 @@ import '../models/vod_ppt.dart';
 import '../models/vod_search_result.dart';
 import '../services/academic_account_store.dart';
 import '../services/vod_api_client.dart';
+import '../services/vod_auth_exception.dart';
 import '../services/vod_recording_cache.dart';
 
 /// Availability of the server-provided recording URLs, not media playback.
@@ -38,6 +39,9 @@ class VodRepository {
   final _courses = <int, _Cached<List<VodCourse>>>{};
   final _lessons = <int, _Cached<List<VodLesson>>>{};
   final _previewLessons = <String, _Cached<List<VodLesson>>>{};
+  final _generatingLessons = <String, _Cached<List<VodLesson>>>{};
+  final _liveSearchPlayback = <String, (_Cached<VodPlayback>, String?)>{};
+  final _searchDirectories = <String, _Cached<List<VodSearchResult>>>{};
   final _pptSlides = <int, _Cached<List<VodPptSlide>>>{};
   final _cachedPlaybackAvailability = <String, _Cached<Set<String>>>{};
   final _catalog = <int, _Cached<List<VodCourse>>>{};
@@ -334,9 +338,7 @@ class VodRepository {
     }
     return _run('search:$termId:$query', () async {
       final client = _client;
-      if (!RegExp(r'^[a-zA-Z0-9._/-]+$').hasMatch(query)) {
-        return client.searchLessons(termId: termId, keyword: query);
-      }
+      final isCode = RegExp(r'^[a-zA-Z0-9._/-]+$').hasMatch(query);
 
       Future<(List<VodSearchResult>?, Object?, StackTrace?)> attempt(
         Future<List<VodSearchResult>> Function() load,
@@ -350,15 +352,14 @@ class VodRepository {
 
       final responses = await Future.wait([
         attempt(() => client.searchLessons(termId: termId, keyword: query)),
-        attempt(
-            () => client.searchCoursesByCode(termId: termId, keyword: query)),
+        attempt(() => _loadSearchDirectory(termId, query, isCode: isCode)
+            .timeout(const Duration(seconds: 2),
+                onTimeout: () => throw const VodNetworkException())),
       ]);
-      for (final response in responses) {
-        final error = response.$2;
-        if (error is VodSessionExpiredException ||
-            (error is VodApiException && error.statusCode == 401)) {
-          Error.throwWithStackTrace(error!, response.$3!);
-        }
+      final primaryError = responses[0].$2;
+      if (primaryError is VodSessionExpiredException ||
+          (primaryError is VodApiException && primaryError.statusCode == 401)) {
+        Error.throwWithStackTrace(primaryError!, responses[0].$3!);
       }
       final source = responses[0].$1 ?? const <VodSearchResult>[];
       final identifier = responses[1].$1 ?? const <VodSearchResult>[];
@@ -377,8 +378,9 @@ class VodRepository {
       final merged = <VodSearchResult>[
         ...source,
         for (final item in identifier)
-          if (matchingClasses
-              .add((item.course.termId, item.course.teachingClassId)))
+          if (matches(item) &&
+              matchingClasses
+                  .add((item.course.termId, item.course.teachingClassId)))
             item,
       ];
       if (!merged.any(matches)) {
@@ -389,6 +391,28 @@ class VodRepository {
         }
       }
       return List.unmodifiable(merged);
+    });
+  }
+
+  /// Teaching-class metadata changes slowly. Cache only this supplement while
+  /// querying the lesson source afresh so live state never inherits its TTL.
+  Future<List<VodSearchResult>> _loadSearchDirectory(int termId, String query,
+      {required bool isCode}) {
+    final key = '$termId:${query.toLowerCase()}';
+    final cached = _searchDirectories[key];
+    if (cached != null && _isFresh(cached)) return Future.value(cached.value);
+    final generation = _generation;
+    return _run('search-directory:$key', () async {
+      final result = isCode
+          ? await _client.searchCoursesByCode(termId: termId, keyword: query)
+          : await _client.searchCoursesByKeyword(
+              termId: termId, keyword: query);
+      _checkGeneration(generation);
+      if (_searchDirectories.length >= 32) {
+        _searchDirectories.remove(_searchDirectories.keys.first);
+      }
+      _searchDirectories[key] = _Cached(result);
+      return result;
     });
   }
 
@@ -446,6 +470,58 @@ class VodRepository {
   Future<List<VodLesson>> loadPreviewLessons(
     VodCourse course, {
     bool forceRefresh = false,
+  }) =>
+      _loadPreviewCatalog(course, forceRefresh: forceRefresh);
+
+  /// Search uses a separate catalog because it includes generating recordings.
+  Future<List<VodLesson>> loadSearchLessons(
+    VodCourse course, {
+    bool forceRefresh = false,
+  }) =>
+      _loadPreviewCatalog(course,
+          forceRefresh: forceRefresh, searchCatalog: true);
+
+  /// Independently cached optional metadata; failures never change playback
+  /// eligibility or the shared login session. Not persisted as a viewer list.
+  Future<List<VodLesson>> loadGeneratingLessons(VodCourse course,
+      {bool forceRefresh = false}) async {
+    final generation = _generation;
+    final accountEpoch = AcademicAccountStore.sessionEpoch;
+    final transportRevision = VodUrlResolver.revision;
+    final account = await _cacheAccount();
+    _checkGeneration(generation);
+    final vpn = _client.useWebVpn;
+    final key = '$accountEpoch:$transportRevision:'
+        '${Uri.encodeComponent(account ?? '')}:$vpn:'
+        '${course.termId}:${course.teachingClassId}';
+    final cached = _generatingLessons[key];
+    if (!forceRefresh &&
+        cached != null &&
+        DateTime.now().difference(cached.createdAt) <
+            const Duration(seconds: 15)) {
+      return cached.value;
+    }
+    return _run('generating:$key', () async {
+      try {
+        final lessons = await _client.fetchGeneratingLessons(course);
+        _checkGeneration(generation);
+        if (!_canContinueWarming(generation, accountEpoch, transportRevision) ||
+            account != await _cacheAccount()) {
+          throw const VodSessionExpiredException('账号已改变，请重新加载录播课程');
+        }
+        _generatingLessons[key] = _Cached(lessons);
+        return lessons;
+      } on Object {
+        _checkGeneration(generation);
+        return const <VodLesson>[];
+      }
+    });
+  }
+
+  Future<List<VodLesson>> _loadPreviewCatalog(
+    VodCourse course, {
+    required bool forceRefresh,
+    bool searchCatalog = false,
   }) async {
     if (course.termId <= 0 || course.teachingClassId <= 0) {
       throw const VodInvalidResponseException();
@@ -454,7 +530,8 @@ class VodRepository {
     final account = await _cacheAccount();
     _checkGeneration(generation);
     final vpn = _client.useWebVpn;
-    final key = 'preview:${course.termId}:${course.teachingClassId}';
+    final key = '${searchCatalog ? 'search-catalog' : 'preview'}:'
+        '${course.termId}:${course.teachingClassId}';
     final scopedKey =
         '${Uri.encodeComponent(account ?? '')}:${vpn ? 'webvpn' : 'direct'}:$key';
     if (forceRefresh) {
@@ -473,7 +550,9 @@ class VodRepository {
             throw const VodSessionExpiredException('账号已改变，请重新加载录播课程');
           }
           _checkGeneration(generation);
-          final lessons = await _client.fetchPreviewLessons(course);
+          final lessons = searchCatalog
+              ? await _client.fetchSearchLessons(course)
+              : await _client.fetchPreviewLessons(course);
           _checkGeneration(generation);
           if (account != await _cacheAccount()) {
             throw const VodSessionExpiredException('账号已改变，请重新加载录播课程');
@@ -508,10 +587,62 @@ class VodRepository {
   }) =>
       _preparePlayback(course: course, lesson: lesson);
 
-  /// Adds current live search hits to a class's existing preview catalog.
-  /// Preview metadata owns recording/generation state; a fresh live hit wins
-  /// over its same-ID recording placeholder until the live window ends.
+  /// A schedule's current-live state does not prove a device is publishing.
+  /// Validate only playback metadata, then briefly reuse it for the first tap.
+  Future<bool> verifyLiveSearchLesson(
+      VodCourse course, VodLesson lesson) async {
+    if (!lesson.isLiveAvailable) return false;
+    final generation = _generation;
+    final epoch = AcademicAccountStore.sessionEpoch;
+    final revision = VodUrlResolver.revision;
+    final account = await _cacheAccount();
+    final key = '${course.termId}:'
+        '${_playbackRequestKey(course, lesson, VodLiveProtocol.hls)}';
+    try {
+      final playback = await _run<VodPlayback>(
+          'live-preflight:${Uri.encodeComponent(account ?? '')}:$key',
+          () => _client.fetchLivePlayback(
+              course: course, lesson: lesson, protocol: VodLiveProtocol.hls));
+      if (!_canContinueWarming(generation, epoch, revision) ||
+          account != await _cacheAccount() ||
+          !lesson.isLiveAvailable ||
+          playback.views.isEmpty ||
+          (playback.liveEndTime != null &&
+              !DateTime.now().isBefore(playback.liveEndTime!))) {
+        return false;
+      }
+      if (_liveSearchPlayback.length >= 64) {
+        _liveSearchPlayback.remove(_liveSearchPlayback.keys.first);
+      }
+      _liveSearchPlayback[key] = (_Cached(playback), account);
+      return true;
+    } on Object {
+      return false;
+    }
+  }
+
+  /// Combines validated search hits with a class's existing preview catalog.
+  /// Preview metadata owns recording/generation state. Recording search hits
+  /// without viewer evidence are candidates, not catalog entries. A fresh live
+  /// hit wins over its same-ID placeholder until the live window ends.
   static List<VodLesson> mergeSearchLessons(
+    VodCourse course,
+    Iterable<VodLesson> searchLessons,
+    Iterable<VodLesson> previewLessons,
+  ) {
+    final sorted =
+        _mergeSearchLessonEntries(course, searchLessons, previewLessons)
+            .values
+            .toList()
+          ..sort((first, second) {
+            final byTime = (second.beginTime?.millisecondsSinceEpoch ?? 0)
+                .compareTo(first.beginTime?.millisecondsSinceEpoch ?? 0);
+            return byTime == 0 ? second.id.compareTo(first.id) : byTime;
+          });
+    return List.unmodifiable(sorted);
+  }
+
+  static Map<int, VodLesson> _mergeSearchLessonEntries(
     VodCourse course,
     Iterable<VodLesson> searchLessons,
     Iterable<VodLesson> previewLessons,
@@ -527,13 +658,57 @@ class VodRepository {
           lesson.id: lesson,
       for (final lesson in searchLessons)
         if (belongs(lesson) && lesson.isLiveAvailable) lesson.id: lesson,
-    }.values.toList()
-      ..sort((first, second) {
-        final byTime = (second.beginTime?.millisecondsSinceEpoch ?? 0)
-            .compareTo(first.beginTime?.millisecondsSinceEpoch ?? 0);
-        return byTime == 0 ? second.id.compareTo(first.id) : byTime;
+    };
+    return merged;
+  }
+
+  /// Resolve only source recordings absent from the viewer catalog. This uses
+  /// the existing bounded metadata queue and never downloads media. Unknown or
+  /// denied candidates must not manufacture a selectable one-lesson course.
+  Future<List<VodLesson>> resolveSearchLessons(
+      VodCourse course, List<VodLesson> seeds,
+      {bool forceRefresh = false,
+      List<VodLesson>? previewCatalog,
+      required bool Function() isCurrent}) async {
+    List<VodLesson> preview;
+    try {
+      preview = previewCatalog ??
+          await loadSearchLessons(course, forceRefresh: forceRefresh);
+    } on VodSessionExpiredException {
+      rethrow;
+    } on VodWebVpnAuthRequiredException {
+      rethrow;
+    } on VodCampusAuthRequiredException {
+      rethrow;
+    } on Object {
+      preview = const [];
+    }
+    if (!isCurrent()) return const [];
+    final listed = {for (final lesson in preview) lesson.id};
+    final candidates = [
+      for (final lesson in seeds)
+        if (!lesson.isLive &&
+            !lesson.isGenerating &&
+            lesson.id > 0 &&
+            lesson.teachingClassId == course.teachingClassId &&
+            !listed.contains(lesson.id))
+          lesson,
+    ];
+    final available = <int>{};
+    if (candidates.isNotEmpty) {
+      await verifyCourseRecordings(course, candidates,
+          fresh: true,
+          forceRefresh: forceRefresh,
+          isCurrent: isCurrent, onResult: (id, status) {
+        if (status == VodRecordingAvailability.available) available.add(id);
       });
-    return List.unmodifiable(merged);
+    }
+    if (!isCurrent()) return const [];
+    return mergeSearchLessons(course, seeds, [
+      ...preview,
+      for (final lesson in candidates)
+        if (available.contains(lesson.id)) lesson,
+    ]);
   }
 
   /// Silently refreshes recording links for every valid lesson of a class.
@@ -562,13 +737,22 @@ class VodRepository {
         if (!_canContinueWarming(generation, accountEpoch, transportRevision)) {
           throw const VodSessionExpiredException('账号已改变，请重新加载录播课程');
         }
-        preview = await loadPreviewLessons(course, forceRefresh: forceRefresh);
+        final catalog =
+            await loadSearchLessons(course, forceRefresh: forceRefresh);
+        preview = await resolveSearchLessons(course, initialLessons,
+            previewCatalog: catalog,
+            forceRefresh: forceRefresh,
+            isCurrent: () => _canContinueWarming(
+                generation, accountEpoch, transportRevision));
         if (!_canContinueWarming(generation, accountEpoch, transportRevision) ||
             account != await _cacheAccount() ||
             !_canContinueWarming(generation, accountEpoch, transportRevision)) {
           throw const VodSessionExpiredException('账号已改变，请重新加载录播课程');
         }
-        result.complete(mergeSearchLessons(course, initialLessons, preview));
+        final generating =
+            await loadGeneratingLessons(course, forceRefresh: forceRefresh);
+        result.complete(mergeSearchLessons(
+            course, [...initialLessons, ...generating], preview));
       } on Object catch (error, stack) {
         result.completeError(error, stack);
       }
@@ -583,21 +767,12 @@ class VodRepository {
               lesson.isLiveAvailable)
             lesson.id,
       };
-      final lessons = <int, VodLesson>{
-        for (final lesson in initialLessons)
-          if (lesson.id > 0 &&
-              !lesson.isLive &&
-              !liveIds.contains(lesson.id) &&
-              lesson.teachingClassId == course.teachingClassId)
-            lesson.id: lesson,
-        for (final lesson in preview ?? <VodLesson>[])
-          if (lesson.id > 0 &&
-              !lesson.isLive &&
-              !liveIds.contains(lesson.id) &&
-              lesson.teachingClassId == course.teachingClassId)
-            lesson.id: lesson,
-      };
-      await _warmCourseRecordings(course, lessons.values.toList(),
+      final lessons = _mergeSearchLessonEntries(
+              course, initialLessons, preview ?? const <VodLesson>[])
+          .values
+          .where((lesson) => !lesson.isLive && !liveIds.contains(lesson.id))
+          .toList();
+      await _warmCourseRecordings(course, lessons,
           forceRefresh: forceRefresh,
           scope: (
             generation: generation,
@@ -1157,6 +1332,17 @@ class VodRepository {
     final result = await _run<_PlaybackResult>(
         _playbackRequestKey(course, lesson, protocol), () async {
       if (lesson.isLive) {
+        final key = '${course.termId}:'
+            '${_playbackRequestKey(course, lesson, protocol)}';
+        final preflight = _liveSearchPlayback.remove(key);
+        if (preflight != null &&
+            preflight.$2 == await _cacheAccount() &&
+            DateTime.now().difference(preflight.$1.createdAt) <
+                const Duration(seconds: 5) &&
+            (preflight.$1.value.liveEndTime == null ||
+                DateTime.now().isBefore(preflight.$1.value.liveEndTime!))) {
+          return _PlaybackResult(preflight.$1.value, true);
+        }
         final playback = await _client.fetchLivePlayback(
             course: course, lesson: lesson, protocol: protocol);
         return _PlaybackResult(playback, true);
@@ -1500,6 +1686,9 @@ class VodRepository {
     _liveGrants.clear();
     _lessons.clear();
     _previewLessons.clear();
+    _generatingLessons.clear();
+    _liveSearchPlayback.clear();
+    _searchDirectories.clear();
     _pptSlides.clear();
     _cachedPlaybackAvailability.clear();
     _apiClient?.dispose();

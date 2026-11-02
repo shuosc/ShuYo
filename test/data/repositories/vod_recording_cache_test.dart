@@ -1,4 +1,4 @@
- import 'dart:async';
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -139,6 +139,13 @@ class _CacheClient extends VodApiClient {
     _checkFailure();
     return [const VodSearchResult(course: _course, lesson: _lesson)];
   }
+
+  @override
+  Future<List<VodSearchResult>> searchCoursesByKeyword({
+    required int termId,
+    required String keyword,
+  }) async =>
+      const [];
 
   @override
   Future<VodPlayback> fetchPlayback({

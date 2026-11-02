@@ -46,7 +46,7 @@ void main() {
         () => result.course.teacherNames.add('新增教师'), throwsUnsupportedError);
   });
 
-  test('search candidates may request details without invented VOD flags', () {
+  test('search metadata alone does not claim recording availability', () {
     final result = VodSearchResult.fromJson({
       'id': 123,
       'teclId': 42,
@@ -56,7 +56,7 @@ void main() {
       'hasPrivilege': false,
     });
 
-    expect(result.lesson.isPlayable, isTrue);
+    expect(result.lesson.isPlayable, isFalse);
     expect(result.lesson.isListed, isFalse);
     expect(result.lesson.isGenerating, isFalse);
     expect(result.lesson.isLive, isFalse);

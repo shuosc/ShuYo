@@ -27,6 +27,66 @@ import 'vod_auth_service.dart';
   }
 }
 
+// Selector pages are independent; the caller still validates duplicate IDs
+// across pages and the server's pagination metadata on the main isolate.
+(List<int>, List<VodSearchResult>) _parseTeachingClassPage(
+  ({List<dynamic> values, int termId, String code, bool identifiersOnly}) input,
+) {
+  final ids = <int>[];
+  final matches = <VodSearchResult>[];
+  final seen = <int>{};
+  for (final record in input.values.cast<JsonMap>()) {
+    final id = VodApiClient._searchIdentifier(record['id']);
+    final recordTerm = VodApiClient._searchIdentifier(record['acteId']);
+    if (id == null || recordTerm == null || !seen.add(id)) {
+      throw const VodInvalidResponseException('课程列表分页异常，请刷新重试');
+    }
+    ids.add(id);
+    if (recordTerm != input.termId) continue;
+    final subjectCode = stringValue(record['subjCode']).trim();
+    final courseNo = stringValue(record['courseNo']).trim();
+    final subjectName = stringValue(record['subjName']).trim();
+    final className = stringValue(record['teclName']).trim();
+    final name = subjectName.isEmpty ? className : subjectName;
+    if (name.isEmpty) throw const VodInvalidResponseException();
+    final teachers = record['teacherList'];
+    final teacherNames = List<String>.unmodifiable(teachers is List
+        ? teachers
+            .whereType<JsonMap>()
+            .map((teacher) => stringValue(teacher['userName']).trim())
+            .where((name) => name.isNotEmpty)
+            .toSet()
+        : const <String>{});
+    final candidates = <String>[
+      subjectCode,
+      courseNo,
+      if (!input.identifiersOnly) ...[name, className, ...teacherNames],
+    ];
+    if (!candidates.any((value) => value.toLowerCase().contains(input.code))) {
+      continue;
+    }
+    final course = VodCourse(
+      teachingClassId: id,
+      termId: recordTerm,
+      name: name,
+      teachingClassName: className,
+      code: subjectCode,
+      teacherNames: teacherNames,
+    );
+    matches.add(VodSearchResult(
+      course: course,
+      courseNumber: courseNo,
+      lesson: VodLesson(
+        id: 0,
+        teachingClassId: id,
+        name: name,
+        isPlayable: false,
+      ),
+    ));
+  }
+  return (ids, matches);
+}
+
 class VodApiException implements Exception {
   const VodApiException(this.message, {this.statusCode});
 
@@ -53,6 +113,39 @@ class VodWebVpnSessionExpiredException extends VodSessionExpiredException {
 
 class _VodBusinessSessionExpired implements Exception {
   const _VodBusinessSessionExpired();
+}
+
+/// Keeps the optional request budget occupied until the original HTTP future
+/// settles. A Future timeout only stops waiting; it does not cancel the socket.
+class _VodOptionalRequestLease {
+  _VodOptionalRequestLease(this.release);
+  final void Function() release;
+  int _pending = 0;
+  bool _finished = false;
+  bool _released = false;
+
+  void track(Future<Object?> work) {
+    _pending++;
+    unawaited(work.then<void>((_) => _settled(),
+        onError: (Object _, StackTrace __) => _settled()));
+  }
+
+  void _settled() {
+    _pending--;
+    _releaseWhenSettled();
+  }
+
+  void finish() {
+    _finished = true;
+    _releaseWhenSettled();
+  }
+
+  void _releaseWhenSettled() {
+    if (_finished && _pending == 0 && !_released) {
+      _released = true;
+      release();
+    }
+  }
 }
 
 bool _isWebVpnGatewayRedirect(Uri source, String? location) {
@@ -107,7 +200,9 @@ class VodApiClient {
     Uri Function(String url)? mediaUrlResolver,
     bool? useWebVpn,
     this.pageSize = 100,
+    this.selectorPageSize = 1000,
   })  : assert(pageSize > 0 && pageSize <= 1000),
+        assert(selectorPageSize > 0 && selectorPageSize <= 1000),
         _authService = authService ?? VodAuthService(),
         _ownsAuthService = authService == null,
         _httpClient = httpClient ?? IOClient(HttpClient()),
@@ -127,11 +222,13 @@ class VodApiClient {
   final VodUriResolver? _providedUriResolver;
   final Uri Function(String url)? _providedMediaUrlResolver;
   final int pageSize;
+  final int selectorPageSize;
 
   /// Frozen for this client so a settings switch cannot mix two sessions.
   final bool useWebVpn;
   bool _disposed = false;
   final _termsById = <int, VodTerm>{};
+  var _activeGeneratingRequests = 0;
 
   Future<List<VodTerm>> fetchTerms() async {
     final decoded = await _get('/v1/list/termYear');
@@ -275,24 +372,55 @@ class VodApiClient {
   Future<List<VodSearchResult>> searchCoursesByCode({
     required int termId,
     required String keyword,
+  }) =>
+      _searchTeachingClasses(
+        termId: termId,
+        keyword: keyword,
+        identifiersOnly: true,
+      );
+
+  /// Supplements the capped source search with matching teaching classes.
+  /// Classes still need a real viewer preview before becoming playable.
+  Future<List<VodSearchResult>> searchCoursesByKeyword({
+    required int termId,
+    required String keyword,
+  }) =>
+      _searchTeachingClasses(
+        termId: termId,
+        keyword: keyword,
+        identifiersOnly: false,
+      );
+
+  Future<List<VodSearchResult>> _searchTeachingClasses({
+    required int termId,
+    required String keyword,
+    required bool identifiersOnly,
   }) async {
     if (termId <= 0) throw const VodInvalidResponseException('请选择有效学期');
     final code = keyword.trim().toLowerCase();
     if (code.runes.length < 2) {
-      throw const VodApiException('请输入至少 2 个字符的课程号');
+      throw VodApiException(
+          identifiersOnly ? '请输入至少 2 个字符的课程号' : '请输入至少 2 个字符的课程或教师关键词');
     }
     final courses = <VodSearchResult>[];
     final seen = <int>{};
     var rowsRead = 0;
     int? expectedTotal;
     for (var page = 1; page <= 1000; page++) {
-      final data = _dataMap(await _get('/v1/teachingclass/list', {
-        'allType': '1',
-        'type': '1',
-        'condition': keyword.trim(),
-        'pageIndex': '$page',
-        'pageSize': '$pageSize',
-      }));
+      final data = _dataMap(await _get(
+        '/v1/teachingclass/list',
+        {
+          'allType': '1',
+          'type': '1',
+          'condition': keyword.trim(),
+          'pageIndex': '$page',
+          'pageSize': '$selectorPageSize',
+        },
+        null,
+        false,
+      ));
+      // A disposed client must not parse a late page or start another one.
+      _checkNotDisposed();
       final values = data['list'];
       final total = intValue(data['totalCount'], -1);
       final pages = intValue(data['totalPage'], -1);
@@ -305,52 +433,26 @@ class VodApiClient {
         throw const VodInvalidResponseException('课程列表分页异常，请刷新重试');
       }
       expectedTotal = total;
-      for (final record in values.cast<JsonMap>()) {
-        final id = _searchIdentifier(record['id']);
-        final recordTerm = _searchIdentifier(record['acteId']);
-        if (id == null || recordTerm == null || !seen.add(id)) {
+      // Parsing large selector pages can involve hundreds of teachers and
+      // course names. Run the validation and model construction off the UI
+      // isolate, not only the initial JSON decoding.
+      final input = (
+        values: values,
+        termId: termId,
+        code: code,
+        identifiersOnly: identifiersOnly,
+      );
+      final (ids, matches) = values.length >= 64
+          ? await compute(_parseTeachingClassPage, input)
+          : _parseTeachingClassPage(input);
+      _checkNotDisposed();
+      for (final id in ids) {
+        if (!seen.add(id)) {
           throw const VodInvalidResponseException('课程列表分页异常，请刷新重试');
         }
-        rowsRead++;
-        final subjectCode = stringValue(record['subjCode']).trim();
-        final courseNo = stringValue(record['courseNo']).trim();
-        if (recordTerm != termId ||
-            (!subjectCode.toLowerCase().contains(code) &&
-                !courseNo.toLowerCase().contains(code))) {
-          continue;
-        }
-        final subjectName = stringValue(record['subjName']).trim();
-        final className = stringValue(record['teclName']).trim();
-        final name = subjectName.isEmpty ? className : subjectName;
-        if (name.isEmpty) throw const VodInvalidResponseException();
-        final teachers = record['teacherList'];
-        final course = VodCourse(
-          teachingClassId: id,
-          termId: recordTerm,
-          name: name,
-          teachingClassName: className,
-          code: subjectCode,
-          teacherNames: List.unmodifiable(teachers is List
-              ? teachers
-                  .whereType<JsonMap>()
-                  .map((teacher) => stringValue(teacher['userName']).trim())
-                  .where((name) => name.isNotEmpty)
-                  .toSet()
-              : const <String>{}),
-        );
-        courses.add(VodSearchResult(
-          course: course,
-          courseNumber: courseNo,
-          // The selector describes classes, not lessons. Fetch a real lesson
-          // from the preview catalog before allowing playback.
-          lesson: VodLesson(
-            id: 0,
-            teachingClassId: id,
-            name: name,
-            isPlayable: false,
-          ),
-        ));
       }
+      rowsRead += ids.length;
+      courses.addAll(matches);
       final complete = pages > 0 ? page >= pages : rowsRead >= total;
       if (complete) {
         if (rowsRead != total) {
@@ -431,6 +533,85 @@ class VodApiClient {
     return List.unmodifiable(lessons);
   }
 
+  /// The independently usable viewer catalog never waits for status checks.
+  Future<List<VodLesson>> fetchSearchLessons(VodCourse course) =>
+      fetchPreviewLessons(course);
+
+  /// Optional generation metadata. It can only add missing generating entries;
+  /// it never owns the ordinary viewer catalog or refreshes the shared session.
+  Future<List<VodLesson>> fetchGeneratingLessons(VodCourse course) async {
+    if (course.termId <= 0 || course.teachingClassId <= 0) {
+      throw const VodInvalidResponseException();
+    }
+    // A busy budget is not a successful empty catalog: callers must not cache
+    // it and hide a subsequent retry after the old requests have settled.
+    if (_activeGeneratingRequests >= 3) throw const VodNetworkException();
+    _activeGeneratingRequests++;
+    final lease = _VodOptionalRequestLease(() => _activeGeneratingRequests--);
+    try {
+      final lessons = <VodLesson>[];
+      final seen = <int>{};
+      int? expectedTotal;
+      var read = 0;
+      for (var page = 1; page <= 1000; page++) {
+        final data = _dataMap(await _get(
+            '/v1/vod/monitor',
+            const {},
+            {
+              'teclId': course.teachingClassId,
+              'vodStatusList': <int>[],
+              'vodDeleteStatus': 0,
+              'page': {
+                'pageIndex': page,
+                'pageSize': 1000,
+                'orders': [
+                  {'field': 'courBeginTime', 'asc': true},
+                ],
+              },
+            },
+            false,
+            lease));
+        final records = data['records'];
+        final total = intValue(data['rowCount'], -1);
+        final pages = intValue(data['pageCount']);
+        if (records is! List ||
+            total < 0 ||
+            (expectedTotal != null && total != expectedTotal) ||
+            (data['pageIndex'] != null &&
+                intValue(data['pageIndex']) != page)) {
+          throw const VodInvalidResponseException();
+        }
+        expectedTotal = total;
+        for (final record in records) {
+          if (record is! JsonMap) throw const VodInvalidResponseException();
+          final lesson = VodLesson.fromJson(record);
+          if (lesson.id <= 0 ||
+              !seen.add(lesson.id) ||
+              lesson.teachingClassId != course.teachingClassId ||
+              (record['acteId'] != null &&
+                  intValue(record['acteId']) != course.termId)) {
+            throw const VodInvalidResponseException();
+          }
+          read++;
+          if (intValue(record['vodStatusShow'], -1) == 4 &&
+              lesson.isGenerating) {
+            lessons.add(lesson);
+          }
+        }
+        if (pages > 0 ? page >= pages : read >= total) {
+          if (read != total) throw const VodInvalidResponseException();
+          return List.unmodifiable(lessons);
+        }
+        if (records.isEmpty || read >= total) {
+          throw const VodInvalidResponseException();
+        }
+      }
+      throw const VodInvalidResponseException();
+    } finally {
+      lease.finish();
+    }
+  }
+
   Future<List<VodLesson>> fetchLiveLessons({
     required int termId,
     int? teachingClassId,
@@ -487,14 +668,18 @@ class VodApiClient {
         lesson.teachingClassId != course.teachingClassId) {
       throw const VodPermissionException('这节课当前没有可观看的直播');
     }
-    final response = await _get('/v1/course_vod_videoinfos', {
-      'courseId': '${lesson.id}',
-      'playType': switch (protocol) {
-        VodLiveProtocol.hls => '3',
-        VodLiveProtocol.flv => '2',
-        VodLiveProtocol.webRtc => '1',
-      },
-    });
+    final response = await _get(
+        '/v1/course_vod_videoinfos',
+        {
+          'courseId': '${lesson.id}',
+          'playType': switch (protocol) {
+            VodLiveProtocol.hls => '3',
+            VodLiveProtocol.flv => '2',
+            VodLiveProtocol.webRtc => '1',
+          },
+        },
+        null,
+        false);
     final data = _dataMap(response);
     debugPrint(
         'ShuYoVOD live detail: permission=${data['lvcrLiveStatus']}, views=${data['courseDeviceViewDtoList'] is List ? (data['courseDeviceViewDtoList'] as List).length : -1}, start=${data['liveStartTime'] != null}, end=${data['liveEndTime'] != null}');
@@ -774,6 +959,8 @@ class VodApiClient {
     final data = _dataMap(await _get(
       '/v1/course_vod_urls_new',
       {'courseId': '${lesson.id}'},
+      null,
+      includeMediaHeaders,
     ));
     if (intValue(data['id']) != lesson.id ||
         intValue(data['teclId']) != course.teachingClassId) {
@@ -850,6 +1037,7 @@ class VodApiClient {
         'page.orders[0].field': orderBy,
         'page.orders[0].asc': '$ascending',
       }));
+      _checkNotDisposed();
       final values = data['records'];
       if (values is! List || values.any((value) => value is! JsonMap)) {
         throw const VodInvalidResponseException();
@@ -892,15 +1080,19 @@ class VodApiClient {
     String path, [
     Map<String, String> params = const {},
     JsonMap? body,
+    bool refreshSessionOnRejection = true,
+    _VodOptionalRequestLease? optionalRequest,
   ]) async {
     if (_disposed) throw const VodSessionExpiredException();
     final ownsAuthentication = _providedHeadersLoader == null;
     if (ownsAuthentication) await _ensureSession();
     for (var attempt = 0; attempt < 2; attempt++) {
       try {
-        return await _getOnce(path, params, body);
+        return await _getOnce(path, params, body, optionalRequest);
       } on _VodBusinessSessionExpired {
-        if (!ownsAuthentication) throw const VodSessionExpiredException();
+        if (!ownsAuthentication || !refreshSessionOnRejection) {
+          throw const VodSessionExpiredException();
+        }
         if (attempt == 1) {
           // An expired business JWT is not proof that the campus SSO expired.
           throw const VodApiException('暂时无法建立录播会话，请稍后重试', statusCode: 401);
@@ -956,6 +1148,7 @@ class VodApiClient {
     String path,
     Map<String, String> params,
     JsonMap? body,
+    _VodOptionalRequestLease? optionalRequest,
   ) async {
     if (_disposed) throw const VodSessionExpiredException();
     final uri = _providedUriResolver?.call(path, params) ??
@@ -975,12 +1168,20 @@ class VodApiClient {
         request.headers['Content-Type'] = 'application/json';
         request.body = jsonEncode(body);
       }
-      response = await HttpTimeout.request(
-        http.Response.fromStream(await HttpTimeout.request(
-          _httpClient.send(request),
-        )),
-        message: '录播平台请求超时，请稍后重试',
-      );
+      if (optionalRequest == null) {
+        response = await HttpTimeout.request(
+          http.Response.fromStream(await HttpTimeout.request(
+            _httpClient.send(request),
+          )),
+          message: '录播平台请求超时，请稍后重试',
+        );
+      } else {
+        final rawResponse =
+            _httpClient.send(request).then(http.Response.fromStream);
+        optionalRequest.track(rawResponse);
+        response =
+            await HttpTimeout.request(rawResponse, message: '录播平台请求超时，请稍后重试');
+      }
     } on TimeoutException {
       debugPrint(
           'ShuYoVOD request: vpn=$useWebVpn path=$path timeout elapsedMs=${requestTime.elapsedMilliseconds}');
@@ -1061,6 +1262,10 @@ class VodApiClient {
       throw const VodInvalidResponseException();
     }
     return result['data'] as JsonMap;
+  }
+
+  void _checkNotDisposed() {
+    if (_disposed) throw const VodSessionExpiredException();
   }
 
   void dispose() {

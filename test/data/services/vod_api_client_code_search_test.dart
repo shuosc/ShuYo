@@ -13,7 +13,7 @@ http.Response _response(Object data) => http.Response(
 
 VodApiClient _client(Future<http.Response> Function(http.Request) handler) =>
     VodApiClient(
-      pageSize: 2,
+      selectorPageSize: 2,
       httpClient: MockClient(handler),
       headersLoader: (_) async => {},
       uriResolver: (path, parameters) =>

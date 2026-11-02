@@ -134,7 +134,8 @@ void main() {
     expect(results.map((result) => result.lesson.id), [120, 123, 125, 126]);
     expect(results.map((result) => result.lesson.isLive),
         [true, false, true, false]);
-    expect(results.every((result) => result.lesson.isPlayable), isTrue);
+    expect(results.map((result) => result.lesson.isPlayable),
+        [true, false, true, false]);
     expect(requests, 1);
   });
 

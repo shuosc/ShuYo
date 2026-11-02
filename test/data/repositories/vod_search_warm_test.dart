@@ -26,6 +26,19 @@ class _Client extends VodApiClient {
   }
 
   @override
+  Future<void> checkPlaybackUrls(
+          {required VodCourse course, required VodLesson lesson}) async =>
+      throw const VodNoPlaybackException();
+
+  @override
+  Future<List<VodLesson>> fetchGeneratingLessons(VodCourse course) async =>
+      const [];
+
+  @override
+  Future<List<VodLesson>> fetchSearchLessons(VodCourse course) =>
+      fetchPreviewLessons(course);
+
+  @override
   Future<VodPlayback> fetchPlayback(
       {required VodCourse course, required VodLesson lesson}) {
     requested.add(lesson.id);
@@ -79,7 +92,7 @@ void main() {
           VodView(viewNumber: 1, url: Uri.parse('https://example.com/1'))
         ]));
     await waiting;
-    expect(client.requested, [1, 2]);
+    expect(client.requested, [2]);
   });
 
   test('search live seed survives cached preview without warming its VOD URL',
@@ -103,7 +116,7 @@ void main() {
         apiClient: client, studentIdLoader: () async => 'warm-search-live');
     addTearDown(repository.dispose);
     // The search list has already fetched this preview for its lesson count.
-    await repository.loadPreviewLessons(_course);
+    await repository.loadSearchLessons(_course);
 
     final result = await repository.loadAndWarmSearchLessons(_course, [live]);
     await repository.waitForBackgroundWarming();
@@ -114,7 +127,7 @@ void main() {
     expect(client.requested, [13]);
     // Live seeds are combined per request rather than saved into the preview.
     expect(
-        (await repository.loadPreviewLessons(_course)).first, same(generating));
+        (await repository.loadSearchLessons(_course)).first, same(generating));
   });
 
   test('expired search live seed does not hide a generated preview recording',
@@ -170,7 +183,7 @@ void main() {
     expect(client.requested, [16, 15]);
   });
 
-  test('preview failure reaches caller while valid seed is warmed', () async {
+  test('preview failure does not warm unverified search candidates', () async {
     final client = _Client()
       ..onPreview = () => Future.error(const VodNetworkException());
     final repository = VodRepository(
@@ -180,7 +193,7 @@ void main() {
         repository.loadAndWarmSearchLessons(_course, [_lesson(4)]),
         throwsA(isA<VodNetworkException>()));
     await repository.waitForBackgroundWarming();
-    expect(client.requested, [4]);
+    expect(client.requested, isEmpty);
   });
 
   test('account change during preview prevents warming either account',
@@ -276,5 +289,44 @@ void main() {
     await repository.waitForBackgroundWarming();
     expect(client.previews, 2);
     expect(client.requested, [2, 2]);
+  });
+
+  test('search catalog shares pending requests and refreshes generation',
+      () async {
+    const generating = VodLesson(
+        id: 15,
+        teachingClassId: 42,
+        name: '回放生成中',
+        isPlayable: false,
+        isGenerating: true);
+    const ready =
+        VodLesson(id: 15, teachingClassId: 42, name: '录播', isPlayable: true);
+    final pending = Completer<List<VodLesson>>();
+    final client = _Client()..onPreview = () => pending.future;
+    final repository = VodRepository(
+        apiClient: client, studentIdLoader: () async => 'search-shared');
+    addTearDown(repository.dispose);
+
+    final search = repository.loadSearchLessons(_course);
+    final player = repository.loadAndWarmSearchLessons(_course, []);
+    while (client.previews == 0) {
+      await Future<void>.delayed(Duration.zero);
+    }
+    expect(client.previews, 1);
+    pending.complete([generating]);
+    expect((await search).single.isGenerating, isTrue);
+    expect((await player).single.isGenerating, isTrue);
+    await repository.waitForBackgroundWarming();
+    expect(client.requested, isEmpty);
+
+    client.onPreview = () async => [ready];
+    expect((await repository.loadSearchLessons(_course)).single.isGenerating,
+        isTrue);
+    expect(
+        (await repository.loadSearchLessons(_course, forceRefresh: true))
+            .single
+            .isPlayable,
+        isTrue);
+    expect(client.previews, 2);
   });
 }

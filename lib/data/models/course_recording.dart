@@ -166,6 +166,9 @@ class VodLesson {
   factory VodLesson.fromJson(JsonMap json) {
     final section = intValue(json['letiNumber']);
     final generated = intValue(json['vodStatus'], -1) == 5;
+    final completed = generated &&
+        intValue(json['vodEnable'], -1) == 1 &&
+        intValue(json['vodDeleteStatus'], -1) == 0;
     return VodLesson(
       id: intValue(json['id']),
       teachingClassId: intValue(json['teclId']),
@@ -182,9 +185,7 @@ class VodLesson {
           intValue(json['vodDeleteStatus'], -1) == 0 &&
           (intValue(json['vodDisplayStatus']) == 1 ||
               intValue(json['vodStatusShow']) == 4),
-      isPlayable: generated &&
-          intValue(json['vodEnable'], -1) == 1 &&
-          intValue(json['vodDeleteStatus'], -1) == 0,
+      isPlayable: completed,
     );
   }
 
@@ -229,6 +230,7 @@ class VodLesson {
   final bool isLive;
   final bool isGenerating;
   final bool isListed;
+
   final DateTime? liveStartTime;
   final DateTime? liveEndTime;
   final VodCourse? catalogCourse;
