@@ -49,7 +49,6 @@ _PreparedSearch _prepareSearch((List<VodSearchResult>, String) input) {
     results.add(result);
     groups.putIfAbsent(key, () => []).add(result);
   }
-  final liveCourses = <_CourseKey, VodCourse>{};
   final liveCandidates = <_LiveCandidate>[];
   for (final key in groups.keys) {
     final course = preferred[key]!.course;
@@ -58,18 +57,12 @@ _PreparedSearch _prepareSearch((List<VodSearchResult>, String) input) {
     final live = catalog.where((lesson) => lesson.isLiveAvailable).firstOrNull;
     if (live != null) {
       liveCandidates.add((key, course, live));
-      liveCourses[key] = course;
     }
   }
   return _PreparedSearch(
       results,
       groups,
-      [
-        for (final key in groups.keys)
-          if (liveCourses.containsKey(key)) liveCourses[key]!,
-        for (final key in groups.keys)
-          if (!liveCourses.containsKey(key)) preferred[key]!.course,
-      ],
+      [for (final key in groups.keys) preferred[key]!.course],
       liveCandidates,
       {
         for (final entry in preferred.entries)
@@ -229,16 +222,44 @@ class RecordingSearchController extends ChangeNotifier {
       for (final key in groups.keys) {
         _pendingLivePreviews[key] = Completer<List<VodLesson>>();
       }
-      // Keep the service ranking within each group, but put active live
-      // courses first so their preview requests are not stuck behind VODs.
+      // Hints prioritize requests only; visible order changes once a live
+      // source has been confirmed. Both partitions preserve source ranking.
       final liveCandidates = prepared.liveCandidates;
       courses = List.unmodifiable(prepared.courses);
+      final sourceOrder = prepared.courses;
+      final currentCourses = <_CourseKey, VodCourse>{
+        for (final course in sourceOrder)
+          (course.termId, course.teachingClassId): course,
+      };
+      final confirmedLive = <_CourseKey>{};
+      void setLive(_CourseKey key, VodLesson live) {
+        currentCourses[key] = currentCourses[key]!.withLiveLesson(live);
+        confirmedLive.add(key);
+        courses = List.unmodifiable([
+          for (final course in sourceOrder)
+            if (confirmedLive.contains((course.termId, course.teachingClassId)))
+              currentCourses[(course.termId, course.teachingClassId)]!,
+          for (final course in sourceOrder)
+            if (!confirmedLive
+                .contains((course.termId, course.teachingClassId)))
+              currentCourses[(course.termId, course.teachingClassId)]!,
+        ]);
+      }
+
       visibleCourseCount = 0;
       extraMatches.addAll(prepared.extraMatches);
       searching = false;
       loadingCourses = courses.isNotEmpty;
       _publish();
-      final pending = courses;
+      final liveHintKeys = {for (final (key, _, _) in liveCandidates) key};
+      final pending = [
+        for (final course in sourceOrder)
+          if (liveHintKeys.contains((course.termId, course.teachingClassId)))
+            course,
+        for (final course in sourceOrder)
+          if (!liveHintKeys.contains((course.termId, course.teachingClassId)))
+            course,
+      ];
       var nextCourse = 0;
       final previewReady = <(int, int)>{};
       final generatingReady = <(int, int)>{};
@@ -269,13 +290,7 @@ class RecordingSearchController extends ChangeNotifier {
           courseLessons[key] = VodRepository.mergeSearchLessons(
               course, seedsFor(key), courseLessons[key] ?? const []);
           if (!wasAvailable) availableCourseCount++;
-          courses = List.unmodifiable([
-            for (final item in courses)
-              if ((item.termId, item.teachingClassId) == key)
-                item.withLiveLesson(live)
-              else
-                item,
-          ]);
+          setLive(key, live);
           visibleCourseCount = courseLessons.length;
           _publish();
           final yieldTask = yieldIfBusy();
@@ -353,14 +368,7 @@ class RecordingSearchController extends ChangeNotifier {
           final live =
               catalog.where((lesson) => lesson.isLiveAvailable).firstOrNull;
           if (live != null) {
-            courses = List.unmodifiable([
-              for (final currentCourse in courses)
-                if ((currentCourse.termId, currentCourse.teachingClassId) ==
-                    key)
-                  currentCourse.withLiveLesson(live)
-                else
-                  currentCourse,
-            ]);
+            setLive(key, live);
           }
           final isAvailable = catalog.any(recordingLessonCanSelect);
           if (!wasAvailable && isAvailable) availableCourseCount++;
