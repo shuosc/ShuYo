@@ -110,22 +110,88 @@ void main() {
     expect(() => results.add(results.first), throwsUnsupportedError);
   });
 
-  test('search only returns recordings without treating privileges as denial',
-      () async {
-    final client = _client((request) async => _response({
-          'courseSourceList': [
-            _record(id: 120, courseStatus: 0),
-            _record(id: 121, courseStatus: 1),
-            {..._record(id: 122), 'courseStatus': null},
-            _record(),
-            _record(id: 124, courseStatus: 99),
-          ],
-        }));
+  test('search returns current live and recordings in one request', () async {
+    var requests = 0;
+    final client = _client((request) async {
+      requests++;
+      return _response({
+        'courseSourceList': [
+          _record(id: 120, courseStatus: 0),
+          _record(id: 121, courseStatus: 1),
+          {..._record(id: 122), 'courseStatus': null},
+          _record(),
+          _record(id: 124, courseStatus: 99),
+          {..._record(id: 125), 'courseStatus': '0'},
+          {..._record(id: 126), 'courseStatus': '2'},
+          {..._record(id: 127), 'courseStatus': 0.5},
+          {..._record(id: 128), 'courseStatus': false},
+        ],
+      });
+    });
     addTearDown(client.dispose);
 
     final results = await client.searchLessons(termId: 7, keyword: '程序');
-    expect(results.map((result) => result.lesson.id), [123]);
-    expect(results.single.lesson.isPlayable, isTrue);
+    expect(results.map((result) => result.lesson.id), [120, 123, 125, 126]);
+    expect(results.map((result) => result.lesson.isLive),
+        [true, false, true, false]);
+    expect(results.every((result) => result.lesson.isPlayable), isTrue);
+    expect(requests, 1);
+  });
+
+  test('duplicate lesson keeps current live regardless of response order',
+      () async {
+    var requests = 0;
+    final client = _client((request) async {
+      requests++;
+      return _response({
+        'courseSourceList': [
+          _record(id: 123),
+          _record(id: 124, courseStatus: 0),
+          _record(id: 123, courseStatus: 0),
+          _record(id: 124),
+        ],
+      });
+    });
+    addTearDown(client.dispose);
+
+    final results = await client.searchLessons(termId: 7, keyword: '程序');
+    expect(results.map((result) => result.lesson.id), [123, 124]);
+    expect(results.every((result) => result.lesson.isLiveAvailable), isTrue);
+    expect(requests, 1);
+  });
+
+  test('live search uses already loaded term metadata without extra requests',
+      () async {
+    final requests = <String>[];
+    final client = _client((request) async {
+      requests.add(request.url.path);
+      if (request.url.path == '/v1/list/termYear') {
+        return http.Response(
+            jsonEncode([
+              {
+                'id': 7,
+                'acyeCode': '2026-2027',
+                'acteTerm': 1,
+                'acteBeginDate': '2026-09-14',
+              },
+            ]),
+            200);
+      }
+      return _response({
+        'courseSourceList': [
+          {
+            ..._record(courseStatus: 0),
+            'courBeginTime': '2026-11-02 13:00:00',
+          },
+        ],
+      });
+    });
+    addTearDown(client.dispose);
+    await client.fetchTerms();
+    final result =
+        (await client.searchLessons(termId: 7, keyword: '程序')).single;
+    expect(result.lesson.weekNumber, 8);
+    expect(requests, ['/v1/list/termYear', '/v1/course/source/search']);
   });
 
   final invalidRecords = <String, JsonMap>{

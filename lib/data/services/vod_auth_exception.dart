@@ -12,6 +12,10 @@ class VodAuthUnavailableException extends VodAuthException {
   const VodAuthUnavailableException() : super('暂时无法确认录播登录状态，请稍后重试');
 }
 
+class VodWebVpnAuthRequiredException extends VodAuthException {
+  const VodWebVpnAuthRequiredException() : super('WebVPN 连接已失效，请恢复连接后重试');
+}
+
 /// Campus authentication is the sole interactive login for recordings.
 class VodCampusAuthRequiredException extends VodAuthException {
   const VodCampusAuthRequiredException({this.ssoExpired = false})

@@ -21,8 +21,8 @@ class VodTerm {
       academicYear: year,
       termNumber: number,
       isCurrent: json['currentTerm'] == true,
-      startDate: vodDateValue(json['acteBeginDate']),
-      endDate: vodDateValue(json['acteEndDate']),
+      startDate: _vodTermDateValue(json['acteBeginDate']),
+      endDate: _vodTermDateValue(json['acteEndDate']),
     );
   }
 
@@ -188,8 +188,11 @@ class VodLesson {
     );
   }
 
-  factory VodLesson.fromLiveJson(JsonMap json) {
+  factory VodLesson.fromLiveJson(JsonMap json, {VodTerm? term}) {
     final section = intValue(json['letiNumber']);
+    final beginTime = vodDateValue(json['courBeginTime']);
+    final weekNo = intValue(json['weekNo']);
+    final weekNumber = weekNo > 0 ? weekNo : intValue(json['weekNumber']);
     return VodLesson(
       id: intValue(json['id']),
       teachingClassId: intValue(json['teclId']),
@@ -200,11 +203,14 @@ class VodLesson {
           intValue(json['liveEnable'], -1) != 0 &&
           intValue(json['courLiveOpen'], -1) != 0 &&
           intValue(json['livevodEnable'], -1) != 0,
-      beginTime: vodDateValue(json['courBeginTime']),
+      beginTime: beginTime,
       endTime: vodDateValue(json['courEndTime']),
       liveStartTime: vodDateValue(json['liveStartTime']),
       liveEndTime: vodDateValue(json['liveEndTime']),
-      weekNumber: intValue(json['weekNo'], intValue(json['weekNumber'])),
+      // The live catalog returns null for both teaching-week fields. Reuse
+      // the selected term's Monday anchor, as the recording timetable does.
+      weekNumber:
+          weekNumber > 0 ? weekNumber : _liveTeachingWeek(beginTime, term),
       sectionLabel: section > 0 ? '第$section节' : '',
       classroom: stringValue(json['clroName']),
     );
@@ -226,6 +232,25 @@ class VodLesson {
   final DateTime? liveStartTime;
   final DateTime? liveEndTime;
   final VodCourse? catalogCourse;
+
+  VodLesson withLiveEndTime(DateTime value) => VodLesson(
+        id: id,
+        teachingClassId: teachingClassId,
+        name: name,
+        isPlayable: isPlayable,
+        beginTime: beginTime,
+        endTime: endTime,
+        weekNumber: weekNumber,
+        sectionLabel: sectionLabel,
+        classroom: classroom,
+        watchPercent: watchPercent,
+        isLive: isLive,
+        isGenerating: isGenerating,
+        isListed: isListed,
+        liveStartTime: liveStartTime,
+        liveEndTime: value,
+        catalogCourse: catalogCourse,
+      );
 
   bool get isLiveAvailable =>
       isLive &&
@@ -312,6 +337,7 @@ class VodPlayback {
     this.lastPosition = Duration.zero,
     this.voiceChannel,
     this.isLive = false,
+    this.liveEndTime,
     this.description = '',
   });
 
@@ -322,6 +348,9 @@ class VodPlayback {
   final Duration lastPosition;
   final int? voiceChannel;
   final bool isLive;
+
+  /// Authoritative broadcast cutoff returned by the live playback detail.
+  final DateTime? liveEndTime;
   final String description;
 }
 
@@ -333,6 +362,26 @@ DateTime? vodDateValue(Object? value) {
     return DateTime.tryParse(value);
   }
   return null;
+}
+
+DateTime? _vodTermDateValue(Object? value) => value is num
+    ? DateTime.fromMillisecondsSinceEpoch(value.toInt(), isUtc: true)
+    : vodDateValue(value);
+
+int _liveTeachingWeek(DateTime? beginTime, VodTerm? term) {
+  final start = term?.startDate;
+  if (beginTime == null || start == null) return 0;
+  DateTime schoolDate(DateTime date) {
+    final time = date.isUtc ? date.add(const Duration(hours: 8)) : date;
+    return DateTime.utc(time.year, time.month, time.day);
+  }
+
+  final startDate = schoolDate(start);
+  final monday = startDate.subtract(Duration(days: startDate.weekday - 1));
+  final week =
+      (schoolDate(beginTime).difference(monday).inDays / 7).floor() + 1;
+  final count = term?.teachingWeekCount;
+  return week >= 1 && (count == null || week <= count) ? week : 0;
 }
 
 String? _optionalString(Object? value) {

@@ -5,6 +5,7 @@ import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
+import 'package:shuyo/core/vod_url_resolver.dart';
 import 'package:shuyo/data/models/course_recording.dart';
 import 'package:shuyo/data/services/vod_api_client.dart';
 import 'package:shuyo/data/services/vod_auth_service.dart';
@@ -852,6 +853,115 @@ void main() {
     expect(requests, 0);
     expect(auth.ensureCalls, [false]);
   });
+
+  for (final duringRenewal in [false, true]) {
+    test(
+        'WebVPN recovery remains distinct ${duringRenewal ? 'during renewal' : 'before a request'}',
+        () async {
+      final auth = _SessionAuth(onEnsure: (forceRefresh) async {
+        if (!duringRenewal || forceRefresh) {
+          throw const VodWebVpnAuthRequiredException();
+        }
+      });
+      var requests = 0;
+      final client = VodApiClient(
+        useWebVpn: true,
+        authService: auth,
+        httpClient: MockClient((_) async {
+          requests++;
+          return http.Response('', 401);
+        }),
+      );
+      addTearDown(client.dispose);
+      addTearDown(auth.dispose);
+      await expectLater(
+          client.fetchTerms(),
+          throwsA(isA<VodWebVpnSessionExpiredException>()
+              .having(
+                  (error) => error.message, 'message', 'WebVPN 连接已失效，请恢复连接后重试')
+              .having((error) => error.ssoExpired, 'ssoExpired', isFalse)
+              .having((error) => error.statusCode, 'statusCode', isNull)));
+      expect(requests, duringRenewal ? 1 : 0);
+      expect(auth.ensureCalls, duringRenewal ? [false, true] : [false]);
+      expect(auth.clears, 0);
+    });
+  }
+
+  test('WebVPN gateway redirect preserves the business session', () async {
+    final auth = _SessionAuth();
+    var requests = 0;
+    final client = VodApiClient(
+      useWebVpn: true,
+      authService: auth,
+      httpClient: MockClient((request) async {
+        requests++;
+        expect(request.followRedirects, isFalse);
+        return http.Response('', 302,
+            headers: {'location': 'https://webvpn.shu.edu.cn:443/auth/login'});
+      }),
+    );
+    addTearDown(client.dispose);
+    addTearDown(auth.dispose);
+    await expectLater(
+        client.fetchTerms(), throwsA(isA<VodWebVpnSessionExpiredException>()));
+    expect(requests, 1);
+    expect(auth.ensureCalls, [false]);
+    expect(auth.clears, 0);
+  });
+
+  test('direct mode keeps the existing redirect renewal policy', () async {
+    final auth = _SessionAuth();
+    var requests = 0;
+    final client = VodApiClient(
+      useWebVpn: false,
+      authService: auth,
+      httpClient: MockClient((request) async {
+        requests++;
+        expect(request.followRedirects, isFalse);
+        return requests == 1
+            ? http.Response('', 302,
+                headers: {'location': 'https://webvpn.shu.edu.cn/auth/login'})
+            : http.Response('[]', 200);
+      }),
+    );
+    addTearDown(client.dispose);
+    addTearDown(auth.dispose);
+    expect(await client.fetchTerms(), isEmpty);
+    expect(requests, 2);
+    expect(auth.ensureCalls, [false, true]);
+    expect(auth.clears, 0);
+  });
+
+  for (final location in [
+    '/login',
+    'https://webvpn.shu.edu.cn.evil.example/auth/login',
+    'https://evil.example@webvpn.shu.edu.cn/auth/login',
+    'https://webvpn.shu.edu.cn:444/auth/login',
+    'http://webvpn.shu.edu.cn/auth/login',
+  ]) {
+    test('non-gateway redirect follows existing renewal policy: $location',
+        () async {
+      final auth = _SessionAuth();
+      final hosts = <String>[];
+      final client = VodApiClient(
+        useWebVpn: true,
+        authService: auth,
+        httpClient: MockClient((request) async {
+          hosts.add(request.url.host);
+          expect(request.followRedirects, isFalse);
+          return hosts.length == 1
+              ? http.Response('', 302, headers: {'location': location})
+              : http.Response('[]', 200);
+        }),
+      );
+      addTearDown(client.dispose);
+      addTearDown(auth.dispose);
+      expect(await client.fetchTerms(), isEmpty);
+      expect(auth.ensureCalls, [false, true]);
+      expect(auth.clears, 0);
+      expect(hosts, [VodUrlResolver.webVpnHost, VodUrlResolver.webVpnHost]);
+    });
+  }
 
   test('ordinary auth exchange failure remains a safe API error', () async {
     final auth = _SessionAuth(onEnsure: (_) async {

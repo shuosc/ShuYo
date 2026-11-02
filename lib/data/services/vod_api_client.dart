@@ -47,8 +47,25 @@ class VodSessionExpiredException extends VodApiException {
   final bool ssoExpired;
 }
 
+class VodWebVpnSessionExpiredException extends VodSessionExpiredException {
+  const VodWebVpnSessionExpiredException() : super('WebVPN 连接已失效，请恢复连接后重试');
+}
+
 class _VodBusinessSessionExpired implements Exception {
   const _VodBusinessSessionExpired();
+}
+
+bool _isWebVpnGatewayRedirect(Uri source, String? location) {
+  if (location == null || location.isEmpty) return false;
+  try {
+    final target = source.resolve(location);
+    return target.scheme == 'https' &&
+        target.host == 'webvpn.shu.edu.cn' &&
+        target.port == 443 &&
+        target.userInfo.isEmpty;
+  } on FormatException {
+    return false;
+  }
 }
 
 class VodPermissionException extends VodApiException {
@@ -114,6 +131,7 @@ class VodApiClient {
   /// Frozen for this client so a settings switch cannot mix two sessions.
   final bool useWebVpn;
   bool _disposed = false;
+  final _termsById = <int, VodTerm>{};
 
   Future<List<VodTerm>> fetchTerms() async {
     final decoded = await _get('/v1/list/termYear');
@@ -133,6 +151,9 @@ class VodApiClient {
         if (a.isCurrent != b.isCurrent) return a.isCurrent ? -1 : 1;
         return b.id.compareTo(a.id);
       });
+    _termsById
+      ..clear()
+      ..addEntries(terms.map((term) => MapEntry(term.id, term)));
     return List.unmodifiable(terms);
   }
 
@@ -180,8 +201,8 @@ class VodApiClient {
   /// Searches course and teacher keywords together, preserving server ranking.
   ///
   /// The endpoint has no pagination and currently returns at most 50 lessons.
-  /// Results are playback candidates; the viewer endpoint checks availability
-  /// when the user opens one, because search omits the usual VOD status flags.
+  /// Results include current live lessons and recording candidates. The viewer
+  /// checks availability when opened, because search omits media status flags.
   Future<List<VodSearchResult>> searchLessons({
     required int termId,
     required String keyword,
@@ -201,6 +222,7 @@ class VodApiClient {
     if (records is! List) throw const VodInvalidResponseException();
     final results = <VodSearchResult>[];
     final seenClasses = <int, int>{};
+    final resultIndexes = <int, int>{};
     for (final record in records) {
       if (record is! JsonMap) throw const VodInvalidResponseException();
       final id = _searchIdentifier(record['id']);
@@ -215,17 +237,24 @@ class VodApiClient {
       if (previousClass != null && previousClass != classId) {
         throw const VodInvalidResponseException('搜索结果课次与教学班不一致，请刷新重试');
       }
-      // Search also returns current/upcoming live lessons. This page only
-      // presents recordings, and missing/unknown status is not a recording.
-      if (record['courseStatus'] != 2 && record['courseStatus'] != '2') {
+      // Upcoming, missing and unknown states must not become playable VODs.
+      if (!const {0, '0', 2, '2'}.contains(record['courseStatus'])) {
         continue;
       }
-      if (previousClass != null) continue;
-      final result = VodSearchResult.fromJson(record);
+      final result = VodSearchResult.fromJson(record, term: _termsById[termId]);
       if (result.course.name.isEmpty) {
         throw const VodInvalidResponseException();
       }
+      if (previousClass != null) {
+        final index = resultIndexes[id]!;
+        if (result.lesson.isLiveAvailable &&
+            !results[index].lesson.isLiveAvailable) {
+          results[index] = result;
+        }
+        continue;
+      }
       seenClasses[id] = classId;
+      resultIndexes[id] = results.length;
       results.add(result);
     }
     return List.unmodifiable(results);
@@ -429,7 +458,8 @@ class VodApiClient {
       ascending: false,
       onProgress: (records) {
         for (final record in records.skip(parsed)) {
-          final lesson = VodLesson.fromLiveJson(record);
+          final lesson =
+              VodLesson.fromLiveJson(record, term: _termsById[termId]);
           if (intValue(record['acteId']) != termId ||
               lesson.id <= 0 ||
               lesson.teachingClassId <= 0 ||
@@ -571,6 +601,7 @@ class VodApiClient {
       title: stringValue(data['courName'], course.name),
       views: List.unmodifiable(views),
       isLive: true,
+      liveEndTime: end,
       description: stringValue(
           data['description'], stringValue(data['teclDescription'])),
     );
@@ -590,6 +621,8 @@ class VodApiClient {
 
   Uri _resolveWebRtcSignalingUri(String source) {
     final uri = Uri.tryParse(source);
+    debugPrint(
+        'ShuYoVOD WebRTC source: scheme=${uri?.scheme}, host=${uri?.host}, port=${uri?.port}, explicitPort=${uri?.hasPort}');
     if (uri == null ||
         !const {'ws', 'wss'}.contains(uri.scheme) ||
         uri.host.isEmpty ||
@@ -597,11 +630,22 @@ class VodApiClient {
         uri.hasFragment) {
       throw const VodInvalidResponseException('暂不支持此直播信令地址');
     }
-    final target = uri.replace(scheme: 'https', port: uri.port);
+    // Uri does not infer the default port for wss. Passing uri.port for an
+    // already proxied address without an explicit port would turn it into
+    // https://...:0 and incorrectly reject the WebVPN endpoint.
+    final target = uri.replace(
+        scheme: 'https',
+        port: uri.hasPort ? uri.port : (uri.scheme == 'wss' ? 443 : 80));
     if (!VodUrlResolver.isKnownMediaUri(target)) {
       throw const VodInvalidResponseException('暂不支持此直播信令地址');
     }
-    final mapped = VodUrlResolver.mapServiceUri(target, useWebVpn: useWebVpn);
+    var mapped = VodUrlResolver.mapServiceUri(target, useWebVpn: useWebVpn);
+    // The gateway rewrites JSON URLs to wss-rtc-..., but that virtual host
+    // returns a normal HTTP 200. Its HTTPS media host supports the actual
+    // WebSocket upgrade; retain wss transport and use that proven tunnel.
+    if (useWebVpn && mapped.host == VodUrlResolver.liveWebRtcVpnHost) {
+      mapped = mapped.replace(host: VodUrlResolver.liveWebVpnHost);
+    }
     if (useWebVpn && !VodUrlResolver.isProxiedMediaUri(mapped) ||
         !useWebVpn && VodUrlResolver.isProxiedMediaUri(mapped)) {
       throw const VodInvalidResponseException('直播信令地址与当前连接方式不一致');
@@ -883,10 +927,19 @@ class VodApiClient {
         forceRefresh: forceRefresh,
       );
     } on VodCampusAuthRequiredException catch (error) {
+      debugPrint(
+          'ShuYoVOD session: vpn=$useWebVpn campusRequired ssoExpired=${error.ssoExpired}');
       throw VodSessionExpiredException.campus(ssoExpired: error.ssoExpired);
     } on VodAuthUnavailableException {
+      debugPrint('ShuYoVOD session: vpn=$useWebVpn unavailable');
       throw const VodNetworkException();
+    } on VodWebVpnAuthRequiredException {
+      debugPrint('ShuYoVOD session: vpn=$useWebVpn webVpnRequired');
+      throw const VodWebVpnSessionExpiredException();
     } on VodAuthException catch (error) {
+      // Auth messages are app-owned descriptions, never upstream bodies,
+      // credentials, redirect URLs, or account identifiers.
+      debugPrint('ShuYoVOD session: vpn=$useWebVpn ${error.message}');
       throw VodApiException(error.message, statusCode: 401);
     } on TimeoutException {
       throw const VodNetworkException('录播平台请求超时，请稍后重试');
@@ -913,6 +966,7 @@ class VodApiClient {
         );
     final headers = await _headers(uri);
     final http.Response response;
+    final requestTime = Stopwatch()..start();
     try {
       final request = http.Request(body == null ? 'GET' : 'POST', uri)
         ..followRedirects = false
@@ -928,16 +982,29 @@ class VodApiClient {
         message: '录播平台请求超时，请稍后重试',
       );
     } on TimeoutException {
+      debugPrint(
+          'ShuYoVOD request: vpn=$useWebVpn path=$path timeout elapsedMs=${requestTime.elapsedMilliseconds}');
       throw const VodNetworkException('录播平台请求超时，请稍后重试');
-    } on SocketException {
+    } on SocketException catch (error) {
+      debugPrint(
+          'ShuYoVOD request: vpn=$useWebVpn path=$path socketError=${error.osError?.errorCode} elapsedMs=${requestTime.elapsedMilliseconds}');
       throw const VodNetworkException();
-    } on http.ClientException {
+    } on http.ClientException catch (error) {
+      final tlsFailure = error.message.contains('CERTIFICATE_VERIFY_FAILED');
+      debugPrint(
+          'ShuYoVOD request: vpn=$useWebVpn path=$path clientError tlsFailure=$tlsFailure elapsedMs=${requestTime.elapsedMilliseconds}');
       throw const VodNetworkException();
     }
+    debugPrint(
+        'ShuYoVOD request: vpn=$useWebVpn path=$path status=${response.statusCode} elapsedMs=${requestTime.elapsedMilliseconds}');
     if (response.statusCode == 401) throw const _VodBusinessSessionExpired();
     if (response.statusCode == 403) throw const VodPermissionException();
     if (response.statusCode >= 300 && response.statusCode < 400) {
       // Never forward the platform JWT through an identity-provider redirect.
+      if (useWebVpn &&
+          _isWebVpnGatewayRedirect(uri, response.headers['location'])) {
+        throw const VodWebVpnSessionExpiredException();
+      }
       throw const _VodBusinessSessionExpired();
     }
     if (response.statusCode < 200 || response.statusCode >= 300) {

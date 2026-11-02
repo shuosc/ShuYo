@@ -68,6 +68,36 @@ void main() {
         isTrue);
   });
 
+  test('preview retains generating lessons without fetching their details',
+      () async {
+    var requests = 0;
+    final api = client((request) async {
+      requests++;
+      expect(request.url.path, '/v1/subject_vod_list/preview');
+      return page(
+          1,
+          [
+            {
+              'id': 1,
+              'teclId': 42,
+              'acteId': 7,
+              'vodEnable': 1,
+              'vodDeleteStatus': 0,
+              'vodStatus': 3,
+              'vodDisplayStatus': 1,
+            },
+          ],
+          total: 1,
+          pages: 1);
+    });
+    addTearDown(api.dispose);
+    final lessons = await api.fetchPreviewLessons(course);
+    expect(lessons.single.isGenerating, isTrue);
+    expect(lessons.single.isPlayable, isFalse);
+    expect(lessons.single.isLive, isFalse);
+    expect(requests, 1);
+  });
+
   for (final record in [
     {'id': 1, 'teclId': 43, 'acteId': 7},
     {'id': 1, 'teclId': 42, 'acteId': 8},

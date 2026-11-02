@@ -5,15 +5,15 @@ import 'course_recording.dart';
 
 /// A lesson returned by the recording platform's keyword search.
 ///
-/// Search has no recording generation/deletion flags. [lesson] is a candidate
-/// that may request playback details; it does not prove a video is available.
-/// The playback endpoint remains responsible for validating its identity and
-/// returning playable media when the user opens the result.
+/// Search usually omits recording generation/deletion flags. [lesson] is a
+/// playback candidate whose live or recording status comes from the search
+/// response. The viewer endpoint still validates its identity and availability
+/// when the user opens the result.
 class VodSearchResult {
   const VodSearchResult(
       {required this.course, required this.lesson, this.courseNumber = ''});
 
-  factory VodSearchResult.fromJson(JsonMap json) {
+  factory VodSearchResult.fromJson(JsonMap json, {VodTerm? term}) {
     final className = _plainText(json['teclName']);
     final subjectName = _plainText(json['subjName']);
     final name = subjectName.isNotEmpty ? subjectName : className;
@@ -30,21 +30,40 @@ class VodSearchResult {
       code: _plainText(json['subjCode']),
       teacherNames: List.unmodifiable(teachers),
     );
+    final recording = VodLesson.fromJson(json);
+    final status = json['courseStatus'];
+    final isLive = const {0, '0', 1, '1'}.contains(status);
     return VodSearchResult(
       course: course,
       courseNumber: _plainText(json['courseNo']),
-      lesson: VodLesson(
-        id: intValue(json['id']),
-        teachingClassId: course.teachingClassId,
-        name: name,
-        // Permit a detail lookup without inventing the absent VOD flags.
-        isPlayable: true,
-        beginTime: vodDateValue(json['courBeginTime']),
-        endTime: vodDateValue(json['courEndTime']),
-        weekNumber: intValue(json['weekNumber']),
-        sectionLabel: section > 0 ? '第$section节' : '',
-        classroom: _plainText(json['clroName']),
-      ),
+      lesson: isLive
+          ? VodLesson.fromLiveJson({
+              // Keep the supplied live window independent from the timetable;
+              // the actual broadcast may continue beyond the lesson end.
+              ...json,
+              'subjName': name,
+              'teclName': className,
+              'subjCode': course.code,
+              'teacNames': course.teacherNames,
+              // Search's current-live state maps to the live catalog enum.
+              // Explicit enable/disable flags, when supplied, still apply.
+              'liveType': status == 0 || status == '0' ? 0 : 1,
+              'clroName': _plainText(json['clroName']),
+            }, term: term)
+          : VodLesson(
+              id: intValue(json['id']),
+              teachingClassId: course.teachingClassId,
+              name: name,
+              // Permit a detail lookup without inventing the absent VOD flags.
+              isPlayable: !recording.isGenerating || recording.isPlayable,
+              isGenerating: recording.isGenerating,
+              isListed: recording.isListed,
+              beginTime: vodDateValue(json['courBeginTime']),
+              endTime: vodDateValue(json['courEndTime']),
+              weekNumber: recording.weekNumber,
+              sectionLabel: section > 0 ? '第$section节' : '',
+              classroom: _plainText(json['clroName']),
+            ),
     );
   }
 

@@ -82,6 +82,94 @@ void main() {
     expect(client.requested, [1, 2]);
   });
 
+  test('search live seed survives cached preview without warming its VOD URL',
+      () async {
+    final live = VodLesson(
+        id: 12,
+        teachingClassId: 42,
+        name: '正在直播',
+        isLive: true,
+        isPlayable: true,
+        liveEndTime: DateTime.now().add(const Duration(hours: 1)));
+    final generating = VodLesson(
+        id: 12,
+        teachingClassId: 42,
+        name: '同一课次',
+        isPlayable: false,
+        isGenerating: true);
+    final recording = _lesson(13);
+    final client = _Client()..onPreview = () async => [generating, recording];
+    final repository = VodRepository(
+        apiClient: client, studentIdLoader: () async => 'warm-search-live');
+    addTearDown(repository.dispose);
+    // The search list has already fetched this preview for its lesson count.
+    await repository.loadPreviewLessons(_course);
+
+    final result = await repository.loadAndWarmSearchLessons(_course, [live]);
+    await repository.waitForBackgroundWarming();
+
+    expect(result.where((lesson) => lesson.id == 12).single, same(live));
+    expect(result, hasLength(2));
+    expect(client.previews, 1);
+    expect(client.requested, [13]);
+    // Live seeds are combined per request rather than saved into the preview.
+    expect(
+        (await repository.loadPreviewLessons(_course)).first, same(generating));
+  });
+
+  test('expired search live seed does not hide a generated preview recording',
+      () async {
+    final live = VodLesson(
+        id: 14,
+        teachingClassId: 42,
+        name: '直播已结束',
+        isLive: true,
+        isPlayable: true,
+        liveEndTime: DateTime.now().subtract(const Duration(minutes: 1)));
+    final recording = _lesson(14);
+    final client = _Client()..onPreview = () async => [recording];
+    final repository = VodRepository(
+        apiClient: client,
+        studentIdLoader: () async => 'warm-search-live-expired');
+    addTearDown(repository.dispose);
+
+    final result = await repository.loadAndWarmSearchLessons(_course, [live]);
+    await repository.waitForBackgroundWarming();
+
+    expect(result, [recording]);
+    expect(client.previews, 1);
+    expect(client.requested, [14]);
+  });
+
+  test('warming skips generating lessons but still requests unknown recordings',
+      () async {
+    const generating = VodLesson(
+        id: 15,
+        teachingClassId: 42,
+        name: '回放生成中',
+        isPlayable: false,
+        isGenerating: true);
+    final unknown = _lesson(16);
+    final client = _Client()..onPreview = () async => [generating, unknown];
+    final repository = VodRepository(
+        apiClient: client,
+        studentIdLoader: () async => 'warm-search-generation');
+    addTearDown(repository.dispose);
+
+    final result = await repository.loadAndWarmSearchLessons(_course, []);
+    await repository.waitForBackgroundWarming();
+    expect(result, contains(generating));
+    expect(client.previews, 1);
+    expect(client.requested, [16]);
+
+    await repository.warmCourseRecordings(_course, [generating],
+        forceRefresh: true);
+    expect(client.requested, [16]);
+    // Skipping a known generation state must not cache an unavailable result.
+    await repository.warmCourseRecordings(_course, [_lesson(15)]);
+    expect(client.requested, [16, 15]);
+  });
+
   test('preview failure reaches caller while valid seed is warmed', () async {
     final client = _Client()
       ..onPreview = () => Future.error(const VodNetworkException());

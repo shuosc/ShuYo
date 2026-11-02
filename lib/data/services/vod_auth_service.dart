@@ -47,6 +47,7 @@ class VodAuthService {
   static final _validated =
       <bool, ({String owner, String token, int? generation, DateTime until})>{};
   static final _pending = <String, ({Future<void> future, bool force})>{};
+  static final _reportedCookieScopeConflicts = <String>{};
 
   @visibleForTesting
   static void resetInMemoryStateForTesting() {
@@ -55,6 +56,7 @@ class VodAuthService {
     _blocked.clear();
     _validated.clear();
     _pending.clear();
+    _reportedCookieScopeConflicts.clear();
   }
 
   String _key(bool vpn) =>
@@ -234,10 +236,17 @@ class VodAuthService {
   Future<Map<String, String>> _cookieHeaders(Uri uri, bool vpn,
       {bool gatewayOnly = false}) async {
     final values = <String, String>{};
+    String? targetToken;
+    String? portalToken;
     for (final cookie in await _jar.getCookies(domain: uri)) {
       if (gatewayOnly && cookie.name != 'webvpn-token') continue;
       if (cookie.name.isNotEmpty && cookie.value.isNotEmpty) {
         values[cookie.name] = cookie.value;
+        if (vpn &&
+            cookie.name == 'webvpn-token' &&
+            cookie.domain.toLowerCase() == uri.host.toLowerCase()) {
+          targetToken = cookie.value;
+        }
       }
     }
     if (vpn) {
@@ -245,8 +254,19 @@ class VodAuthService {
           domain: Uri.parse('https://webvpn.shu.edu.cn/'))) {
         if (cookie.name == 'webvpn-token' && cookie.value.isNotEmpty) {
           values[cookie.name] = cookie.value;
+          if (cookie.domain.toLowerCase() == 'webvpn.shu.edu.cn') {
+            portalToken = cookie.value;
+          }
         }
       }
+    }
+    if (kDebugMode &&
+        targetToken != null &&
+        portalToken != null &&
+        targetToken != portalToken &&
+        _reportedCookieScopeConflicts.add(uri.host)) {
+      debugPrint('ShuYoVOD WebVPN cookie scopes: host=${uri.host} '
+          'targetPresent=true portalPresent=true unequal=true');
     }
     return {
       if (values.isNotEmpty)

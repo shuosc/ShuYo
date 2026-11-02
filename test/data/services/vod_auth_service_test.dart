@@ -195,6 +195,56 @@ void main() {
     native.dispose();
   });
 
+  test('WebRTC gateway receives only its scoped gateway credential', () async {
+    const host = VodUrlResolver.liveWebRtcVpnHost;
+    final jar = SessionCookieJar();
+    for (final cookie in const [
+      SessionCookie(
+          name: 'webvpn-token',
+          value: 'gateway-grant',
+          domain: 'webvpn.shu.edu.cn'),
+      SessionCookie(name: 'JSESSIONID', value: 'business-cookie', domain: host),
+      SessionCookie(
+          name: 'jwt-token',
+          value: 'cookie-jwt-must-stay-private',
+          domain: host),
+    ]) {
+      await jar.setCookie(cookie);
+    }
+    final native = _Native();
+    final auth = service(_Store(), native, jar: jar);
+    addTearDown(auth.dispose);
+    addTearDown(native.dispose);
+    await auth.ensureSession(useWebVpn: false);
+    await auth.ensureSession(useWebVpn: true);
+    expect(
+        (await auth.headersFor(
+            VodUrlResolver.apiUri('/v1/currentuser', useWebVpn: true),
+            useWebVpn: true))['jwt-token'],
+        'vpn-token');
+
+    for (final authority in [host, '$host:443']) {
+      final target = Uri.parse('https://$authority/signal');
+      expect(await auth.mediaHeadersFor(target, useWebVpn: true),
+          {'Cookie': 'webvpn-token=gateway-grant'});
+      expect(await auth.mediaHeadersFor(target, useWebVpn: false), isEmpty);
+      expect(await auth.headersFor(target, useWebVpn: true), isEmpty);
+    }
+    for (final value in [
+      'http://$host/signal',
+      'wss://$host/signal',
+      'https://$host:444/signal',
+      'https://user:pass@$host/signal',
+      'https://$host.evil.example/signal',
+      'https://evil.$host/signal',
+      'https://wss-rtc-cc-shu-edu-cn-32002.webvpn.shu.edu.cn/signal',
+    ]) {
+      expect(await auth.mediaHeadersFor(Uri.parse(value), useWebVpn: true),
+          isEmpty,
+          reason: value);
+    }
+  });
+
   test('account switching hides a previously bound JWT', () async {
     var owner = 'A001';
     final native = _Native();

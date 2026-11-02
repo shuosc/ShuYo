@@ -619,4 +619,48 @@ void main() {
               .having((error) => error.ssoExpired, 'ssoExpired', isTrue),
         ));
   });
+
+  test('missing WebVPN token requires WebVPN recovery without touching SSO',
+      () async {
+    final jar = await _identityJar();
+    var requests = 0;
+    final service = VodNativeSessionService(
+      cookieJar: jar,
+      client: MockClient((_) async {
+        requests++;
+        return http.Response('', 500);
+      }),
+    );
+    addTearDown(service.dispose);
+    await expectLater(
+        service.authorize(useWebVpn: true, expectedStudentId: '25120000'),
+        throwsA(isA<VodWebVpnAuthRequiredException>()));
+    expect(requests, 0);
+    expect(
+        (await jar.getCookies(domain: Uri.parse('https://newsso.shu.edu.cn/')))
+            .any((cookie) => cookie.name == 'SHU_OAUTH2'),
+        isTrue);
+  });
+
+  test('gateway redirect requires WebVPN recovery without touching SSO',
+      () async {
+    final jar = await _identityJar(gateway: true);
+    var requests = 0;
+    final service = VodNativeSessionService(
+      cookieJar: jar,
+      client: MockClient((_) async {
+        requests++;
+        return _redirect('https://webvpn.shu.edu.cn/auth/login');
+      }),
+    );
+    addTearDown(service.dispose);
+    await expectLater(
+        service.authorize(useWebVpn: true, expectedStudentId: '25120000'),
+        throwsA(isA<VodWebVpnAuthRequiredException>()));
+    expect(requests, 1);
+    expect(
+        (await jar.getCookies(domain: Uri.parse('https://newsso.shu.edu.cn/')))
+            .any((cookie) => cookie.name == 'SHU_OAUTH2'),
+        isTrue);
+  });
 }

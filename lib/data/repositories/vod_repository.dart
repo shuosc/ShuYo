@@ -508,6 +508,34 @@ class VodRepository {
   }) =>
       _preparePlayback(course: course, lesson: lesson);
 
+  /// Adds current live search hits to a class's existing preview catalog.
+  /// Preview metadata owns recording/generation state; a fresh live hit wins
+  /// over its same-ID recording placeholder until the live window ends.
+  static List<VodLesson> mergeSearchLessons(
+    VodCourse course,
+    Iterable<VodLesson> searchLessons,
+    Iterable<VodLesson> previewLessons,
+  ) {
+    bool belongs(VodLesson lesson) =>
+        lesson.id > 0 && lesson.teachingClassId == course.teachingClassId;
+    final merged = <int, VodLesson>{
+      for (final lesson in searchLessons)
+        if (belongs(lesson) && !lesson.isLive && lesson.isGenerating)
+          lesson.id: lesson,
+      for (final lesson in previewLessons)
+        if (belongs(lesson) && (!lesson.isLive || lesson.isLiveAvailable))
+          lesson.id: lesson,
+      for (final lesson in searchLessons)
+        if (belongs(lesson) && lesson.isLiveAvailable) lesson.id: lesson,
+    }.values.toList()
+      ..sort((first, second) {
+        final byTime = (second.beginTime?.millisecondsSinceEpoch ?? 0)
+            .compareTo(first.beginTime?.millisecondsSinceEpoch ?? 0);
+        return byTime == 0 ? second.id.compareTo(first.id) : byTime;
+      });
+    return List.unmodifiable(merged);
+  }
+
   /// Silently refreshes recording links for every valid lesson of a class.
   /// This never waits for a video player and individual failures are ignored.
   Future<void> warmCourseRecordings(VodCourse course, List<VodLesson> lessons,
@@ -540,7 +568,7 @@ class VodRepository {
             !_canContinueWarming(generation, accountEpoch, transportRevision)) {
           throw const VodSessionExpiredException('账号已改变，请重新加载录播课程');
         }
-        result.complete(preview);
+        result.complete(mergeSearchLessons(course, initialLessons, preview));
       } on Object catch (error, stack) {
         result.completeError(error, stack);
       }
@@ -549,15 +577,23 @@ class VodRepository {
               generation, accountEpoch, transportRevision, account)) {
         return;
       }
+      final liveIds = {
+        for (final lesson in initialLessons)
+          if (lesson.teachingClassId == course.teachingClassId &&
+              lesson.isLiveAvailable)
+            lesson.id,
+      };
       final lessons = <int, VodLesson>{
         for (final lesson in initialLessons)
           if (lesson.id > 0 &&
               !lesson.isLive &&
+              !liveIds.contains(lesson.id) &&
               lesson.teachingClassId == course.teachingClassId)
             lesson.id: lesson,
         for (final lesson in preview ?? <VodLesson>[])
           if (lesson.id > 0 &&
               !lesson.isLive &&
+              !liveIds.contains(lesson.id) &&
               lesson.teachingClassId == course.teachingClassId)
             lesson.id: lesson,
       };
@@ -766,6 +802,7 @@ class VodRepository {
     final seen = <int>{};
     for (final lesson in lessons) {
       if (lesson.isLive ||
+          lesson.isGenerating ||
           lesson.id <= 0 ||
           lesson.teachingClassId != course.teachingClassId ||
           !seen.add(lesson.id)) {

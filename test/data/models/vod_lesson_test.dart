@@ -11,6 +11,75 @@ const _generatedLessonJson = <String, dynamic>{
 };
 
 void main() {
+  final liveTerm = VodTerm.fromJson({
+    'id': 7,
+    'acyeCode': '2026-2027',
+    'acteTerm': 1,
+    // The actual term begins at midnight on September 14 in Shanghai.
+    'acteBeginDate': 1789315200000,
+  });
+  const liveJson = <String, dynamic>{
+    'id': 84,
+    'teclId': 10,
+    'acteId': 7,
+    'liveType': 0,
+    'courBeginTime': '2026-11-02 10:55:00',
+    'week': null,
+    'weekNo': null,
+    'weekNumber': null,
+  };
+
+  test('live lessons recover absent teaching weeks from the selected term', () {
+    final lesson = VodLesson.fromLiveJson(liveJson, term: liveTerm);
+    expect(lesson.weekNumber, 8);
+    expect(lesson.beginTime, DateTime(2026, 11, 2, 10, 55));
+    expect(lesson.isLive, isTrue);
+  });
+
+  test('live teaching weeks honor school dates and Monday boundaries', () {
+    for (final entry in <String, int>{
+      '2026-11-01T15:59:59Z': 7,
+      '2026-11-01T16:00:00Z': 8,
+      '2026-11-02T00:00:00+08:00': 8,
+      '2026-11-08 23:59:59': 8,
+      '2026-11-09 00:00:00': 9,
+    }.entries) {
+      final lesson = VodLesson.fromLiveJson(
+          {...liveJson, 'courBeginTime': entry.key},
+          term: liveTerm);
+      expect(lesson.weekNumber, entry.value, reason: entry.key);
+    }
+  });
+
+  test('valid server teaching weeks take precedence over date fallback', () {
+    for (final metadata in [
+      {'weekNo': 6, 'weekNumber': 7},
+      {'weekNo': null, 'weekNumber': '6'},
+      {'weekNo': 0, 'weekNumber': 6},
+    ]) {
+      final lesson =
+          VodLesson.fromLiveJson({...liveJson, ...metadata}, term: liveTerm);
+      expect(lesson.weekNumber, 6);
+    }
+  });
+
+  test('weekday metadata is never treated as a live teaching week', () {
+    final lesson =
+        VodLesson.fromLiveJson({...liveJson, 'week': 1}, term: liveTerm);
+    expect(lesson.weekNumber, 8);
+    expect(VodLesson.fromLiveJson({...liveJson, 'week': 1}).weekNumber, 0);
+  });
+
+  test('live teaching week fallback requires an in-term lesson date', () {
+    for (final begin in [null, '2026-09-13 23:59:59', '2027-01-04 00:00:00']) {
+      final lesson = VodLesson.fromLiveJson(
+          {...liveJson, 'courBeginTime': begin},
+          term: liveTerm);
+      expect(lesson.weekNumber, 0, reason: '$begin');
+    }
+    expect(VodLesson.fromLiveJson(liveJson).weekNumber, 0);
+  });
+
   final permissionCases = <String, Map<String, dynamic>>{
     'disabled click metadata': {'vodClickEnable': 0},
     'missing click metadata': {},

@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 
 import '../../core/client_user_agent.dart';
@@ -37,6 +38,61 @@ class VodNativeSessionService {
   final bool _ownsClient;
   final SessionCookieJar _cookieJar;
   final ShuSsoSessionStore _ssoSessionStore;
+
+  String _hostKind(Uri uri) {
+    if (uri.host == 'webvpn.shu.edu.cn') return 'gateway';
+    if (uri.host == VodConstants.directHost ||
+        uri.host == VodUrlResolver.webVpnHost) {
+      return 'business';
+    }
+    if (uri.host == VodConstants.casHost ||
+        uri.host == VodUrlResolver.casWebVpnHost) {
+      return 'cas';
+    }
+    if (const {
+      'newsso.shu.edu.cn',
+      'oauth.shu.edu.cn',
+      'https-newsso-shu-edu-cn-443.webvpn.shu.edu.cn',
+      'https-oauth-shu-edu-cn-443.webvpn.shu.edu.cn',
+    }.contains(uri.host)) {
+      return 'identity';
+    }
+    return 'other';
+  }
+
+  String _pathKind(Uri uri) {
+    final path = uri.path;
+    if (path.endsWith('/authority/me')) return 'authority';
+    if (path.endsWith('/oauth2/token')) return 'token';
+    if (VodConstants.isCasCallbackPath(path)) return 'callback';
+    if (path.endsWith('/authorize')) return 'authorize';
+    return 'other';
+  }
+
+  String _redirectHostKind(Uri uri, String? location) {
+    if (location == null || location.isEmpty) return 'none';
+    try {
+      return _hostKind(uri.resolve(location));
+    } on Object {
+      return 'other';
+    }
+  }
+
+  void _debugRequest(Uri uri, {int? status, String? redirect, Object? error}) {
+    if (!kDebugMode) return;
+    if (error != null) {
+      final tlsFailure = error is TlsException ||
+          error is http.ClientException &&
+              error.message.contains('CERTIFICATE_VERIFY_FAILED');
+      debugPrint('ShuYoVOD native auth: host=${_hostKind(uri)} '
+          'stage=${_pathKind(uri)} error=${error.runtimeType} '
+          'tlsFailure=$tlsFailure');
+      return;
+    }
+    debugPrint('ShuYoVOD native auth: host=${_hostKind(uri)} '
+        'stage=${_pathKind(uri)} status=$status '
+        'redirectHost=${_redirectHostKind(uri, redirect)}');
+  }
 
   Future<VodNativeSession> authorize({
     required bool useWebVpn,
@@ -76,7 +132,7 @@ class VodNativeSessionService {
         ]);
       }
       if (cookies.headerFor(gateway).isEmpty) {
-        throw const VodAuthException('WebVPN 连接已失效，请恢复连接后重试');
+        throw const VodWebVpnAuthRequiredException();
       }
     }
     try {
@@ -222,7 +278,7 @@ class VodNativeSessionService {
       return;
     }
     if (uri.host == 'webvpn.shu.edu.cn') {
-      throw const VodAuthException('WebVPN 连接已失效，请恢复连接后重试');
+      throw const VodWebVpnAuthRequiredException();
     }
     throw const VodAuthException('录播认证返回了不支持的跳转地址');
   }
@@ -237,8 +293,25 @@ class VodNativeSessionService {
         'User-Agent': ClientUserAgent.mobileBrowser,
         if (header.isNotEmpty) 'Cookie': header,
       });
-    final response = await HttpTimeout.request(http.Response.fromStream(
-        await HttpTimeout.request(_client.send(request))));
+    final http.Response response;
+    try {
+      response = await HttpTimeout.request(http.Response.fromStream(
+          await HttpTimeout.request(_client.send(request))));
+    } on TimeoutException catch (error) {
+      _debugRequest(uri, error: error);
+      rethrow;
+    } on SocketException catch (error) {
+      _debugRequest(uri, error: error);
+      rethrow;
+    } on TlsException catch (error) {
+      _debugRequest(uri, error: error);
+      rethrow;
+    } on http.ClientException catch (error) {
+      _debugRequest(uri, error: error);
+      rethrow;
+    }
+    _debugRequest(uri,
+        status: response.statusCode, redirect: response.headers['location']);
     final setCookie = response.headers['set-cookie'];
     if (setCookie != null) {
       // Some deployments send `httponly` and `secure` as separate malformed

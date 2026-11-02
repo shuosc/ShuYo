@@ -67,6 +67,97 @@ Future<http.Response> _authorized(
 }
 
 void main() {
+  for (final proxyHost in [
+    VodUrlResolver.liveWebVpnHost,
+    VodUrlResolver.liveWebRtcVpnHost,
+  ]) {
+    test('WebRTC accepts $proxyHost without an explicit port', () async {
+      final detail = _detail();
+      detail['courseDeviceViewDtoList'] = [
+        {
+          'deviceStatus': 1,
+          'deviViewNum': 1,
+          'chanNameMainPlayUrl': 'wss://$proxyHost/signal',
+          'chanGbidMain': 'device',
+          'mainTokenStr': 'synthetic-token',
+        },
+      ];
+      final client = VodApiClient(
+        httpClient: MockClient((request) async =>
+            request.url.path.endsWith('/setting/stun')
+                ? _response({'stunConfig': {}})
+                : _response(detail)),
+        useWebVpn: true,
+        headersLoader: (_) async => {},
+        mediaHeadersLoader: (target) async {
+          expect(target.scheme, 'https');
+          expect(target.port, 443);
+          return {'Cookie': 'synthetic-vpn'};
+        },
+        uriResolver: (path, query) => Uri.https('vod.example', path, query),
+      );
+      addTearDown(client.dispose);
+      final playback = await client.fetchLivePlayback(
+          course: _course, lesson: _lesson, protocol: VodLiveProtocol.webRtc);
+      final source = playback.views.single.webRtcSource!;
+      expect(source.signalingUri.host, VodUrlResolver.liveWebVpnHost);
+      expect(source.headers, {'Cookie': 'synthetic-vpn'});
+    });
+  }
+
+  for (final vpn in [false, true]) {
+    test(
+        'live catalog restores missing weeks with ${vpn ? 'WebVPN' : 'direct'}',
+        () async {
+      final requests = <String>[];
+      final client = VodApiClient(
+        httpClient: MockClient((request) async {
+          requests.add(request.url.path);
+          if (request.url.path == '/v1/list/termYear') {
+            return http.Response(
+                jsonEncode([
+                  {
+                    'id': 7,
+                    'acyeCode': '2026-2027',
+                    'acteTerm': 1,
+                    'acteBeginDate': 1789315200000,
+                  },
+                ]),
+                200);
+          }
+          expect(request.url.path, '/v1/vod_live/t-1');
+          return _response({
+            'rowCount': 1,
+            'pageCount': 1,
+            'records': [
+              {
+                'id': 123,
+                'teclId': 42,
+                'acteId': 7,
+                'liveType': 0,
+                'subjName': '直播课程',
+                'courBeginTime': '2026-11-02 10:55:00',
+                'weekNo': null,
+                'weekNumber': null,
+              },
+            ],
+          });
+        }),
+        useWebVpn: vpn,
+        headersLoader: (_) async => {},
+        uriResolver: (path, query) => Uri.https('vod.example', path, query),
+      );
+      addTearDown(client.dispose);
+      await client.fetchTerms();
+      final snapshots = <List<VodLesson>>[];
+      final lessons = await client.fetchLiveLessons(
+          termId: 7, teachingClassId: 42, onProgress: snapshots.add);
+      expect(lessons.single.weekNumber, 8);
+      expect(snapshots.first.single.weekNumber, 8);
+      expect(requests, ['/v1/list/termYear', '/v1/vod_live/t-1']);
+    });
+  }
+
   for (final vpn in [false, true]) {
     test(
         'WebRTC gets authorized sources and STUN with ${vpn ? 'WebVPN' : 'direct'}',
@@ -246,6 +337,7 @@ void main() {
         await client.fetchLivePlayback(course: _course, lesson: _lesson);
     expect(paths, ['/v1/course_vod_videoinfos']);
     expect(playback.isLive, isTrue);
+    expect(playback.liveEndTime, _now.add(const Duration(hours: 1)));
     expect(playback.lastPosition, Duration.zero);
     expect(playback.views, hasLength(1));
     expect(playback.views.single.url.toString(), contains('grant=one%2Btwo'));
@@ -253,6 +345,28 @@ void main() {
         'opaque+token');
     expect(playback.views.single.httpHeaders, {'Cookie': 'media-cookie'});
     expect(playback.views.single.label, '直播视角 1');
+  });
+
+  test('live detail supplies its own cutoff after the scheduled class ends',
+      () async {
+    var requests = 0;
+    final client = _client((request) {
+      requests++;
+      return _authorized(request, _detail());
+    });
+    addTearDown(client.dispose);
+    final lesson = VodLesson(
+      id: 123,
+      teachingClassId: 42,
+      name: '直播课程',
+      isPlayable: true,
+      isLive: true,
+      endTime: _now.subtract(const Duration(minutes: 3)),
+    );
+    final playback =
+        await client.fetchLivePlayback(course: _course, lesson: lesson);
+    expect(playback.liveEndTime, _now.add(const Duration(hours: 1)));
+    expect(requests, 1);
   });
 
   test('live playback accepts usable views despite a zero metadata ACL',
