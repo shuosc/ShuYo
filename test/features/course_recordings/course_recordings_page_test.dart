@@ -494,14 +494,16 @@ void main() {
         .dispatch(context);
     final refresh =
         tester.widget<RefreshIndicator>(find.byType(RefreshIndicator));
-    await refresh.onRefresh();
-    await tester.pump();
+    final refreshing = refresh.onRefresh();
+    for (var i = 0; i < 20; i++) {
+      await tester.pump(const Duration(microseconds: 1));
+    }
+    await refreshing;
     final row = find.byKey(const ValueKey('vod-course:20'));
     await tester.scrollUntilVisible(row, 600,
         scrollable: find.descendant(
             of: find.byKey(const ValueKey('vod-courses:7')),
             matching: find.byType(Scrollable)));
-    await tester.pumpAndSettle();
     expect(tester.widget<ListTile>(row).onTap, isNotNull);
     expect(
         tester
@@ -516,6 +518,35 @@ void main() {
     expect(
         find.byKey(const ValueKey('vod-course-lesson-count:20')), findsNothing);
     expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('scrolling into later courses does not start entrance animations',
+      (tester) async {
+    final courses = [
+      for (var id = 1; id <= 40; id++)
+        VodCourse(teachingClassId: id, termId: 7, name: '程序设计 $id')
+    ];
+    final repository = _Repository()
+      ..coursesLoader = ((_, __) async => courses)
+      ..lessonsLoader = (course, _) async => [
+            VodLesson(
+                id: course.teachingClassId,
+                teachingClassId: course.teachingClassId,
+                name: '回放',
+                isPlayable: true)
+          ];
+    await _mount(tester, repository);
+    await tester.pumpAndSettle();
+    final row = find.byKey(const ValueKey('vod-course:30'));
+    await tester.scrollUntilVisible(row, 600,
+        scrollable: find.descendant(
+            of: find.byKey(const ValueKey('vod-courses:7')),
+            matching: find.byType(Scrollable)));
+    expect(
+        find.descendant(
+            of: find.byKey(const ValueKey(30)),
+            matching: find.byType(SlideTransition)),
+        findsNothing);
   });
 
   testWidgets(
@@ -1847,6 +1878,40 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets('app bar progress updates while list presentation is deferred',
+      (tester) async {
+    final pending = Completer<List<VodLesson>>();
+    final repository = _Repository()
+      ..coursesLoader = ((_, __) async => [_programming])
+      ..lessonsLoader = ((_, __) => pending.future);
+    await _mount(tester, repository);
+    await tester.pump();
+    await tester.pump();
+    final context =
+        tester.element(find.byKey(const ValueKey('vod-course-summary')));
+    final metrics = FixedScrollMetrics(
+        minScrollExtent: 0,
+        maxScrollExtent: 1000,
+        pixels: 0,
+        viewportDimension: 600,
+        axisDirection: AxisDirection.down,
+        devicePixelRatio: 1);
+    ScrollStartNotification(metrics: metrics, context: context)
+        .dispatch(context);
+    expect(find.byKey(const ValueKey('vod-loading-progress')), findsOneWidget);
+
+    pending.complete(const []);
+    await tester.pump();
+    await tester.pump();
+    expect(find.byKey(const ValueKey('vod-loading-progress')), findsNothing);
+    expect(find.byKey(const ValueKey('vod-course:101')), findsNothing);
+
+    ScrollEndNotification(metrics: metrics, context: context).dispatch(context);
+    await tester.pump();
+    await tester.pump();
+    expect(find.byKey(const ValueKey('vod-course:101')), findsOneWidget);
+  });
+
   testWidgets('rows appear on success or failure while progress waits for all',
       (tester) async {
     final first = Completer<List<VodLesson>>();
@@ -1867,9 +1932,11 @@ void main() {
     expect(find.byKey(const ValueKey('vod-course:101')), findsNothing);
     expect(find.byKey(const ValueKey('vod-course:102')), findsNothing);
     expect(find.byKey(const ValueKey('vod-course:103')), findsNothing);
+    final initialAppBar = tester.widget<AppBar>(find.byType(AppBar));
     second.completeError(StateError('offline'));
     await tester.pump();
     await tester.pump();
+    expect(tester.widget<AppBar>(find.byType(AppBar)), same(initialAppBar));
     expect(find.byKey(const ValueKey('vod-course:102')), findsOneWidget);
     expect(find.byTooltip('课次统计暂不可用，下拉刷新重试'), findsOneWidget);
     expect(progress, findsOneWidget);

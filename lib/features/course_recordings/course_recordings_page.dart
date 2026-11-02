@@ -20,6 +20,7 @@ import 'recording_player_page.dart';
 import 'recording_search_page.dart';
 import 'recording_status_icon.dart';
 import 'recording_term_menu.dart';
+import 'recording_timetable_data.dart';
 import 'recording_timetable_view.dart';
 
 /// The ordinary account catalog.
@@ -60,6 +61,7 @@ class _CourseRecordingsPageState extends State<CourseRecordingsPage> {
       );
   final _collapsedTermYears = <String>{};
   final _presentedCourseIds = <int>{};
+  final _courseScrollController = ScrollController();
   late final _catalog = RecordingCatalogController(_repository,
       onSessionInvalidated: (expired) =>
           _campusAuthRequired(ssoExpired: expired));
@@ -83,6 +85,8 @@ class _CourseRecordingsPageState extends State<CourseRecordingsPage> {
   bool _openingCourse = false;
   bool _recoveringWebVpn = false;
   bool _timetableMode = false;
+  bool get _courseScrolling => _courseScrollController.positions
+      .any((position) => position.isScrollingNotifier.value);
 
   bool get _showLoadingProgress =>
       _checkingSession || _recoveringWebVpn || _view.showLoadingProgress;
@@ -98,6 +102,7 @@ class _CourseRecordingsPageState extends State<CourseRecordingsPage> {
 
   @override
   void dispose() {
+    _courseScrollController.dispose();
     _catalog.dispose();
     if (widget.repository == null) {
       final repository = _repository;
@@ -311,8 +316,8 @@ class _CourseRecordingsPageState extends State<CourseRecordingsPage> {
   Future<void> _chooseTerm() async {
     final termId = await showRecordingTermMenu(
       context,
-      terms: _terms,
-      selectedTermId: _selectedTermId,
+      terms: _catalog.terms,
+      selectedTermId: _catalog.selectedTermId,
       collapsedYears: _collapsedTermYears,
       onExpansionChanged: (year, expanded) {
         if (expanded) {
@@ -325,19 +330,19 @@ class _CourseRecordingsPageState extends State<CourseRecordingsPage> {
     if (!mounted ||
         !_authenticated ||
         termId == null ||
-        termId == _selectedTermId) {
+        termId == _catalog.selectedTermId) {
       return;
     }
     await _load(termId: termId);
   }
 
   Future<void> _openSearch() async {
-    final termId = _selectedTermId;
+    final termId = _catalog.selectedTermId;
     if (!_authenticated || termId == null) return;
     await Navigator.of(context).push<void>(shuyoRoute(
       builder: (_) => RecordingSearchPage(
         repository: _repository,
-        terms: _terms,
+        terms: _catalog.terms,
         selectedTermId: termId,
         onSessionInvalidated: (ssoExpired) =>
             _campusAuthRequired(ssoExpired: ssoExpired),
@@ -365,19 +370,7 @@ class _CourseRecordingsPageState extends State<CourseRecordingsPage> {
   }
 
   @override
-  Widget build(BuildContext context) => RecordingListPresentation(
-      changes: _catalog,
-      builder: (context) {
-        _view = RecordingCatalogViewData(_catalog);
-        if (_presentedTermId != _selectedTermId) {
-          _presentedTermId = _selectedTermId;
-          _presentedCourseIds.clear();
-          _courseRows.clear();
-          _timetableCreated = _timetableMode;
-          _cachedTimetable = null;
-        }
-        return _buildScaffold();
-      });
+  Widget build(BuildContext context) => _buildScaffold();
 
   @override
   void didChangeDependencies() {
@@ -387,58 +380,77 @@ class _CourseRecordingsPageState extends State<CourseRecordingsPage> {
 
   Widget _buildScaffold() {
     return Scaffold(
-      appBar: AppBar(
-        title: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Flexible(
-              child: Text('课程录播', maxLines: 1, overflow: TextOverflow.ellipsis),
-            ),
-            Transform.translate(
-              offset: const Offset(-3, -0.5),
-              child: Opacity(
-                opacity: 0.65,
-                child: IconButton(
-                  tooltip: '课程录播信息说明',
-                  visualDensity: VisualDensity.compact,
-                  padding: EdgeInsets.zero,
-                  constraints:
-                      const BoxConstraints(minWidth: 28, minHeight: 28),
-                  icon: const Icon(Icons.info_outline, size: 18),
-                  onPressed: _showDataInfo,
+      appBar: _CatalogAppBar(
+        catalog: _catalog,
+        builder: (context) => AppBar(
+          title: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Flexible(
+                child:
+                    Text('课程录播', maxLines: 1, overflow: TextOverflow.ellipsis),
+              ),
+              Transform.translate(
+                offset: const Offset(-3, -0.5),
+                child: Opacity(
+                  opacity: 0.65,
+                  child: IconButton(
+                    tooltip: '课程录播信息说明',
+                    visualDensity: VisualDensity.compact,
+                    padding: EdgeInsets.zero,
+                    constraints:
+                        const BoxConstraints(minWidth: 28, minHeight: 28),
+                    icon: const Icon(Icons.info_outline, size: 18),
+                    onPressed: _showDataInfo,
+                  ),
                 ),
               ),
-            ),
+            ],
+          ),
+          actions: [
+            if (_authenticated) ...[
+              IconButton(
+                key: const ValueKey('vod-search'),
+                tooltip: '搜索录播',
+                onPressed: _catalog.selectedTermId == null ? null : _openSearch,
+                icon: const Icon(Icons.search),
+              ),
+              IconButton(
+                key: const ValueKey('vod-term-filter'),
+                tooltip: '选择学期',
+                onPressed: _catalog.terms.isEmpty ? null : _chooseTerm,
+                icon: const Icon(Icons.format_list_bulleted),
+              ),
+            ],
           ],
-        ),
-        actions: [
-          if (_authenticated) ...[
-            IconButton(
-              key: const ValueKey('vod-search'),
-              tooltip: '搜索录播',
-              onPressed: _selectedTermId == null ? null : _openSearch,
-              icon: const Icon(Icons.search),
+          bottom: PreferredSize(
+            preferredSize: const Size.fromHeight(2),
+            child: SizedBox(
+              height: 2,
+              child: _checkingSession ||
+                      _recoveringWebVpn ||
+                      _catalog.showLoadingProgress
+                  ? const LinearProgressIndicator(
+                      key: ValueKey('vod-loading-progress'), minHeight: 2)
+                  : null,
             ),
-            IconButton(
-              key: const ValueKey('vod-term-filter'),
-              tooltip: '选择学期',
-              onPressed: _terms.isEmpty ? null : _chooseTerm,
-              icon: const Icon(Icons.format_list_bulleted),
-            ),
-          ],
-        ],
-        bottom: PreferredSize(
-          preferredSize: const Size.fromHeight(2),
-          child: SizedBox(
-            height: 2,
-            child: _showLoadingProgress
-                ? const LinearProgressIndicator(
-                    key: ValueKey('vod-loading-progress'), minHeight: 2)
-                : null,
           ),
         ),
       ),
-      body: _body(),
+      body: RecordingListPresentation(
+        changes: _catalog,
+        builder: (context) {
+          _view = RecordingCatalogViewData(_catalog);
+          if (_presentedTermId != _selectedTermId) {
+            _presentedTermId = _selectedTermId;
+            _presentedCourseIds.clear();
+            _courseRows.clear();
+            _timetableCreated = _timetableMode;
+            _cachedTimetable = null;
+          }
+          return _body();
+        },
+      ),
     );
   }
 
@@ -601,6 +613,7 @@ class _CourseRecordingsPageState extends State<CourseRecordingsPage> {
                               builder: (context, constraints) => ListView(
                                     key: ValueKey(
                                         'vod-courses:$_selectedTermId'),
+                                    controller: _courseScrollController,
                                     physics:
                                         const AlwaysScrollableScrollPhysics(),
                                     children: [
@@ -619,6 +632,7 @@ class _CourseRecordingsPageState extends State<CourseRecordingsPage> {
                                   ))
                           : ListView.separated(
                               key: ValueKey('vod-courses:$_selectedTermId'),
+                              controller: _courseScrollController,
                               physics: const AlwaysScrollableScrollPhysics(),
                               padding: const EdgeInsets.only(bottom: 24),
                               itemCount: visibleCourses.length,
@@ -635,7 +649,9 @@ class _CourseRecordingsPageState extends State<CourseRecordingsPage> {
                                   key: ValueKey(course.teachingClassId),
                                   index: index,
                                   animate: _presentedCourseIds
-                                      .add(course.teachingClassId),
+                                          .add(course.teachingClassId) &&
+                                      index < 6 &&
+                                      !_courseScrolling,
                                   child: _courseTile(course, view),
                                 );
                               },
@@ -654,22 +670,37 @@ class _CourseRecordingsPageState extends State<CourseRecordingsPage> {
     if (!_timetableCreated) return const SizedBox.shrink();
     if (!_timetableMode && _cachedTimetable != null) return _cachedTimetable!;
     final view = _view;
-    return _cachedTimetable = RecordingTimetableView(
-      key: ValueKey('vod-timetable:${view.selectedTermId}'),
-      data: _catalog.timetable,
-      loading: view.loading || view.pendingLessonCounts.isNotEmpty,
-      refreshEnabled: !view.showLoadingProgress,
-      failedCourseCount: view.courses
-          .where((course) =>
-              view.failedLessonCounts.contains(course.teachingClassId))
-          .length,
-      onRefresh: () => _load(force: true, fromPull: true),
-      canSelectLesson: (entry) =>
-          view.hasCompleteAvailability(entry.course) &&
-          view.hasPlayableCourse(entry.course),
-      onLessonSelected: (entry) => unawaited(_openCourse(entry.course,
-          lesson: entry.lesson,
-          preparedLessons: view.courseLessons[entry.course.teachingClassId])),
+    return _cachedTimetable = FutureBuilder<RecordingTimetableData>(
+      // FutureBuilder retains the last completed same-term snapshot while its
+      // replacement is prepared. A new term must not inherit that snapshot.
+      key: ValueKey('vod-timetable-loader:${view.selectedTermId}'),
+      future: _catalog.loadTimetable(),
+      builder: (context, snapshot) => RecordingTimetableView(
+        key: ValueKey('vod-timetable:${view.selectedTermId}'),
+        data: snapshot.data ??
+            RecordingTimetableData(
+              term: view.terms
+                  .where((term) => term.id == view.selectedTermId)
+                  .firstOrNull,
+              courses: const [],
+              lessonsByCourse: const {},
+            ),
+        loading: snapshot.connectionState != ConnectionState.done ||
+            view.loading ||
+            view.pendingLessonCounts.isNotEmpty,
+        refreshEnabled: !view.showLoadingProgress,
+        failedCourseCount: view.courses
+            .where((course) =>
+                view.failedLessonCounts.contains(course.teachingClassId))
+            .length,
+        onRefresh: () => _load(force: true, fromPull: true),
+        canSelectLesson: (entry) =>
+            view.hasCompleteAvailability(entry.course) &&
+            view.hasPlayableCourse(entry.course),
+        onLessonSelected: (entry) => unawaited(_openCourse(entry.course,
+            lesson: entry.lesson,
+            preparedLessons: view.courseLessons[entry.course.teachingClassId])),
+      ),
     );
   }
 
@@ -782,6 +813,63 @@ class _CourseRecordingsPageState extends State<CourseRecordingsPage> {
   }
 }
 
+// Catalog lesson counts may arrive in bursts. The app bar only depends on
+// selection, term availability and loading, so ignore unrelated completions.
+class _CatalogAppBar extends StatefulWidget implements PreferredSizeWidget {
+  const _CatalogAppBar({required this.catalog, required this.builder});
+
+  final RecordingCatalogController catalog;
+  final WidgetBuilder builder;
+
+  @override
+  Size get preferredSize => const Size.fromHeight(kToolbarHeight + 2);
+
+  @override
+  State<_CatalogAppBar> createState() => _CatalogAppBarState();
+}
+
+class _CatalogAppBarState extends State<_CatalogAppBar> {
+  late (int?, bool, bool) _value;
+
+  (int?, bool, bool) _project() => (
+        widget.catalog.selectedTermId,
+        widget.catalog.terms.isNotEmpty,
+        widget.catalog.showLoadingProgress,
+      );
+
+  @override
+  void initState() {
+    super.initState();
+    _value = _project();
+    widget.catalog.addListener(_changed);
+  }
+
+  @override
+  void didUpdateWidget(covariant _CatalogAppBar oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.catalog != widget.catalog) {
+      oldWidget.catalog.removeListener(_changed);
+      widget.catalog.addListener(_changed);
+    }
+    _value = _project();
+  }
+
+  void _changed() {
+    final next = _project();
+    if (next == _value) return;
+    setState(() => _value = next);
+  }
+
+  @override
+  void dispose() {
+    widget.catalog.removeListener(_changed);
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => widget.builder(context);
+}
+
 class _CourseEntrance extends StatefulWidget {
   const _CourseEntrance({
     super.key,
@@ -800,13 +888,14 @@ class _CourseEntrance extends StatefulWidget {
 
 class _CourseEntranceState extends State<_CourseEntrance>
     with SingleTickerProviderStateMixin {
-  late final AnimationController _entrance = AnimationController(
-    vsync: this,
-    duration: const Duration(milliseconds: 280),
-    value: widget.animate ? 0 : 1,
-  );
-  late final Animation<Offset> _position = _entrance
-      .drive(CurveTween(curve: Curves.easeOutCubic))
+  late final AnimationController? _entrance = widget.animate
+      ? AnimationController(
+          vsync: this,
+          duration: const Duration(milliseconds: 280),
+        )
+      : null;
+  late final Animation<Offset>? _position = _entrance
+      ?.drive(CurveTween(curve: Curves.easeOutCubic))
       .drive(Tween(begin: const Offset(0.12, 0), end: Offset.zero));
   Timer? _timer;
   bool _started = false;
@@ -814,15 +903,17 @@ class _CourseEntranceState extends State<_CourseEntrance>
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
+    final entrance = _entrance;
+    if (entrance == null) return;
     if (MediaQuery.disableAnimationsOf(context)) {
       _timer?.cancel();
-      _entrance.value = 1;
+      entrance.value = 1;
       _started = true;
     } else if (!_started) {
       _started = true;
       if (widget.animate) {
         _timer = Timer(Duration(milliseconds: (widget.index % 6) * 55), () {
-          if (mounted) _entrance.forward();
+          if (mounted) entrance.forward();
         });
       }
     }
@@ -831,13 +922,17 @@ class _CourseEntranceState extends State<_CourseEntrance>
   @override
   void dispose() {
     _timer?.cancel();
-    _entrance.dispose();
+    _entrance?.dispose();
     super.dispose();
   }
 
   @override
-  Widget build(BuildContext context) => SlideTransition(
-        position: _position,
-        child: FadeTransition(opacity: _entrance, child: widget.child),
-      );
+  Widget build(BuildContext context) {
+    final entrance = _entrance;
+    if (entrance == null) return widget.child;
+    return SlideTransition(
+      position: _position!,
+      child: FadeTransition(opacity: entrance, child: widget.child),
+    );
+  }
 }

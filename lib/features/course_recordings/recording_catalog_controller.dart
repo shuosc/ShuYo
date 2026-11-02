@@ -63,14 +63,23 @@ class RecordingCatalogViewData {
 /// indexing is lazy so the hidden timetable never competes with list scrolling.
 class RecordingCatalogController extends ChangeNotifier {
   RecordingCatalogController(this.repository,
-      {required this.onSessionInvalidated});
+      {required this.onSessionInvalidated,
+      Future<RecordingTimetableData> Function(RecordingTimetableInput)
+          timetableLoader = loadRecordingTimetable})
+      : _timetableLoader = timetableLoader;
 
   final VodRepository repository;
   final Future<void> Function(bool ssoExpired) onSessionInvalidated;
+  final Future<RecordingTimetableData> Function(RecordingTimetableInput)
+      _timetableLoader;
   List<VodTerm> terms = const [];
   List<VodCourse> courses = const [];
-  List<VodCourse> visibleCourses = const [];
-  Map<int, int> visibleIndexes = const {};
+  List<VodCourse> _visibleCourses = const [];
+  Map<int, int> _visibleIndexes = const {};
+  bool _visibleDirty = false;
+  bool _publishScheduled = false;
+  Timer? _drainTimer;
+  int _completionsSinceYield = 0;
   final lessonCounts = <int, RecordingCourseCount>{};
   final courseLessons = <int, List<VodLesson>>{};
   final failedLessonCounts = <int>{};
@@ -87,13 +96,101 @@ class RecordingCatalogController extends ChangeNotifier {
   bool pullRefreshing = false;
   Completer<void>? _completion;
   RecordingTimetableData? _timetable;
+  Future<RecordingTimetableData>? _timetableFuture;
+  Future<RecordingTimetableData>? _timetableWork;
+  int? _timetableWorkTermId;
+  int _dataRevision = 0;
 
   bool get isLoading => loading || pendingLessonCounts.isNotEmpty;
   bool get showLoadingProgress => isLoading && !pullRefreshing;
   VodTerm? get selectedTerm =>
       terms.where((term) => term.id == selectedTermId).firstOrNull;
+  List<VodCourse> get visibleCourses {
+    _updateVisibleCourses();
+    return _visibleCourses;
+  }
+
+  Map<int, int> get visibleIndexes {
+    _updateVisibleCourses();
+    return _visibleIndexes;
+  }
+
+  void _updateVisibleCourses() {
+    if (!_visibleDirty) return;
+    _visibleDirty = false;
+    _visibleCourses = List.unmodifiable(courses.where((course) =>
+        lessonCounts.containsKey(course.teachingClassId) ||
+        failedLessonCounts.contains(course.teachingClassId)));
+    _visibleIndexes = Map.unmodifiable({
+      for (var index = 0; index < _visibleCourses.length; index++)
+        _visibleCourses[index].teachingClassId: index,
+    });
+  }
+
   RecordingTimetableData get timetable => _timetable ??= RecordingTimetableData(
       term: selectedTerm, courses: courses, lessonsByCourse: courseLessons);
+
+  /// Reuse one future for a catalog revision. A newer catalog may supersede a
+  /// worker without allowing its eventual result to replace the current cache.
+  /// Superseded queued reads settle with a previous same-term snapshot; the
+  /// viewport observes the latest future instead of starting obsolete workers.
+  Future<RecordingTimetableData> loadTimetable() {
+    final pending = _timetableFuture;
+    if (pending != null) return pending;
+    final cached = _timetable;
+    if (cached != null) {
+      return _timetableFuture = SynchronousFuture(cached);
+    }
+    final revision = _dataRevision;
+    final input = RecordingTimetableInput(
+      term: selectedTerm,
+      courses: courses,
+      lessonsByCourse: courseLessons,
+    );
+    final active = _timetableWork;
+    final activeTermId = _timetableWorkTermId;
+    // Sorting cannot be cancelled once handed to another isolate. Wait for the
+    // single in-flight worker, then start only the newest requested revision.
+    return _timetableFuture = active == null
+        ? _loadTimetable(input, revision)
+        : active.then(
+            (data) => _loadTimetable(input, revision,
+                obsoleteFallback: activeTermId == input.term?.id ? data : null),
+            onError: (Object _, StackTrace __) =>
+                _loadTimetable(input, revision));
+  }
+
+  Future<RecordingTimetableData> _loadTimetable(
+      RecordingTimetableInput input, int revision,
+      {RecordingTimetableData? obsoleteFallback}) {
+    if (_disposed || revision != _dataRevision) {
+      // The corresponding viewport has already moved on. Settle its old future
+      // without sorting obsolete lessons or exposing another term's snapshot.
+      return SynchronousFuture(obsoleteFallback ??
+          RecordingTimetableData(
+              term: input.term, courses: const [], lessonsByCourse: const {}));
+    }
+    RecordingTimetableData cache(RecordingTimetableData data) {
+      if (!_disposed && revision == _dataRevision) _timetable = data;
+      return data;
+    }
+
+    final loading = _timetableLoader(input);
+    if (loading is SynchronousFuture<RecordingTimetableData>) {
+      return loading.then(cache);
+    }
+    late final Future<RecordingTimetableData> work;
+    work = loading.then((data) {
+      if (identical(_timetableWork, work)) _timetableWork = null;
+      return cache(data);
+    }, onError: (Object error, StackTrace stack) {
+      if (identical(_timetableWork, work)) _timetableWork = null;
+      Error.throwWithStackTrace(error, stack);
+    });
+    _timetableWork = work;
+    _timetableWorkTermId = input.term?.id;
+    return work;
+  }
 
   bool _isCurrent(int revision) => !_disposed && revision == _revision;
 
@@ -101,19 +198,24 @@ class RecordingCatalogController extends ChangeNotifier {
     if (_disposed) return;
     if (dataChanged) {
       _timetable = null;
-      visibleCourses = List.unmodifiable(courses.where((course) =>
-          lessonCounts.containsKey(course.teachingClassId) ||
-          failedLessonCounts.contains(course.teachingClassId)));
-      visibleIndexes = Map.unmodifiable({
-        for (var index = 0; index < visibleCourses.length; index++)
-          visibleCourses[index].teachingClassId: index,
+      _timetableFuture = null;
+      _dataRevision++;
+      _visibleDirty = true;
+    }
+    // A warm cache can finish many course requests in the same event turn.
+    // Publish once for that batch and build the index only when it is read.
+    if (!_publishScheduled) {
+      _publishScheduled = true;
+      scheduleMicrotask(() {
+        _publishScheduled = false;
+        if (!_disposed) notifyListeners();
       });
     }
-    notifyListeners();
   }
 
   void clear({bool clearTerms = true}) {
     _revision++;
+    _cancelDrain();
     _complete(force: true);
     loading = false;
     error = null;
@@ -138,6 +240,7 @@ class RecordingCatalogController extends ChangeNotifier {
     final completion = Completer<void>();
     _completion = completion;
     final revision = ++_revision;
+    _cancelDrain();
     loading = true;
     pullRefreshing = fromPull;
     error = null;
@@ -234,6 +337,7 @@ class RecordingCatalogController extends ChangeNotifier {
   }
 
   void _drain() {
+    if (_drainTimer != null) return;
     while (!_disposed && _active < 3 && _queue.isNotEmpty) {
       final next = _queue.indexWhere((request) => !_activeKeys.contains((
             termId: request.course.termId,
@@ -297,7 +401,15 @@ class RecordingCatalogController extends ChangeNotifier {
         _complete();
         _publish(dataChanged: true);
       }
-      _drain();
+      if (++_completionsSinceYield >= 8 && _queue.isNotEmpty) {
+        _completionsSinceYield = 0;
+        _drainTimer ??= Timer(Duration.zero, () {
+          _drainTimer = null;
+          _drain();
+        });
+      } else {
+        _drain();
+      }
     }
   }
 
@@ -310,10 +422,17 @@ class RecordingCatalogController extends ChangeNotifier {
       lessonCounts[course.teachingClassId]?.lessonIds.isNotEmpty == true ||
       course.liveLesson?.isLiveAvailable == true && course.liveLesson!.id > 0;
 
+  void _cancelDrain() {
+    _drainTimer?.cancel();
+    _drainTimer = null;
+    _completionsSinceYield = 0;
+  }
+
   @override
   void dispose() {
     _disposed = true;
     _revision++;
+    _cancelDrain();
     _queue.clear();
     _complete(force: true);
     super.dispose();

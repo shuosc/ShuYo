@@ -1,4 +1,43 @@
+import 'package:flutter/foundation.dart';
+
 import '../../data/models/course_recording.dart';
+
+/// A detached input for timetable aggregation. Lesson lists in the catalog are
+/// immutable, so only the containing collections need to be copied here.
+class RecordingTimetableInput {
+  RecordingTimetableInput({
+    required this.term,
+    required List<VodCourse> courses,
+    required Map<int, List<VodLesson>> lessonsByCourse,
+    this.now,
+  })  : courses = List.unmodifiable(courses),
+        lessonsByCourse = Map.unmodifiable(lessonsByCourse);
+
+  final VodTerm? term;
+  final List<VodCourse> courses;
+  final Map<int, List<VodLesson>> lessonsByCourse;
+  final DateTime? now;
+}
+
+/// Small catalogs finish synchronously without an empty loading frame. Larger
+/// catalogs aggregate and sort away from the native UI isolate.
+Future<RecordingTimetableData> loadRecordingTimetable(
+    RecordingTimetableInput input) {
+  final lessonCount = input.lessonsByCourse.values
+      .fold(0, (count, lessons) => count + lessons.length);
+  if (input.courses.length > 40 || lessonCount > 200) {
+    return compute(_buildTimetable, input, debugLabel: 'vod-timetable');
+  }
+  return SynchronousFuture(_buildTimetable(input));
+}
+
+RecordingTimetableData _buildTimetable(RecordingTimetableInput input) =>
+    RecordingTimetableData(
+      term: input.term,
+      courses: input.courses,
+      lessonsByCourse: input.lessonsByCourse,
+      now: input.now,
+    );
 
 class RecordingTimetableEntry {
   const RecordingTimetableEntry({

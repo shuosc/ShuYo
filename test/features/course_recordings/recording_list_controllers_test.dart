@@ -697,4 +697,24 @@ void main() {
     expect(repository.counts, [1, 2, 3]);
     expect(controller.courseLessons, isEmpty);
   });
+
+  test('cached catalog yields and stops queued work when cleared', () async {
+    final repository = _Repository()
+      ..courses = [for (var id = 1; id <= 70; id++) _course(id)];
+    final controller = RecordingCatalogController(repository,
+        onSessionInvalidated: (_) async {});
+    addTearDown(controller.dispose);
+    addTearDown(repository.dispose);
+
+    final load = controller.load();
+    await Future<void>.delayed(Duration.zero);
+    expect(repository.counts, isNotEmpty);
+    expect(repository.counts.length, lessThan(70));
+    controller.clear();
+    final requestsAtClear = repository.counts.length;
+    await load;
+    await Future<void>.delayed(Duration.zero);
+    expect(repository.counts.length, requestsAtClear);
+    expect(controller.visibleCourses, isEmpty);
+  });
 }
