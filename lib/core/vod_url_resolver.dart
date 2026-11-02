@@ -13,6 +13,8 @@ class VodUrlResolver {
   static const livePort = 32001;
   static const liveWebVpnHost =
       'https-rtc-cc-shu-edu-cn-32001.webvpn.shu.edu.cn';
+  static const liveWebRtcVpnHost =
+      'wss-rtc-cc-shu-edu-cn-32001.webvpn.shu.edu.cn';
 
   static bool _usesWebVpn = false;
   static bool get usesWebVpn => _usesWebVpn;
@@ -130,7 +132,8 @@ class VodUrlResolver {
     if (!vpn &&
         (uri.host == webVpnHost ||
             uri.host == mediaWebVpnHost ||
-            uri.host == liveWebVpnHost)) {
+            uri.host == liveWebVpnHost ||
+            uri.host == liveWebRtcVpnHost)) {
       throw const FormatException('录播媒体地址与当前连接方式不一致');
     }
     return mapServiceUri(uri, useWebVpn: vpn);
@@ -144,12 +147,14 @@ class VodUrlResolver {
         (uri.host == liveHost && uri.port == livePort) ||
         (uri.host == webVpnHost && uri.port == 443) ||
         (uri.host == mediaWebVpnHost && uri.port == 443) ||
-        (uri.host == liveWebVpnHost && uri.port == 443);
+        (uri.host == liveWebVpnHost && uri.port == 443) ||
+        (uri.host == liveWebRtcVpnHost && uri.port == 443);
   }
 
   static bool isProxiedMediaUri(Uri uri) =>
       isKnownMediaUri(uri) &&
       (uri.host == webVpnHost ||
           uri.host == mediaWebVpnHost ||
-          uri.host == liveWebVpnHost);
+          uri.host == liveWebVpnHost ||
+          uri.host == liveWebRtcVpnHost);
 }

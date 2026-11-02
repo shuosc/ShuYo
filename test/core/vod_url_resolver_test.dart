@@ -107,4 +107,39 @@ void main() {
           () => VodUrlResolver.resolveMediaUrl(source), throwsFormatException);
     }
   });
+
+  test('WebRTC gateway accepts only its exact HTTPS media origin', () {
+    const host = VodUrlResolver.liveWebRtcVpnHost;
+    for (final authority in [host, '$host:443']) {
+      final uri = Uri.parse('https://$authority/signal?grant=a%2Bb&x=1&x=2');
+      expect(uri.port, 443);
+      expect(VodUrlResolver.isKnownMediaUri(uri), isTrue);
+      expect(VodUrlResolver.isProxiedMediaUri(uri), isTrue);
+      expect(
+          VodUrlResolver.resolveMediaUrl(uri.toString(), useWebVpn: true), uri);
+      expect(
+          () =>
+              VodUrlResolver.resolveMediaUrl(uri.toString(), useWebVpn: false),
+          throwsFormatException);
+      expect(VodUrlResolver.isBusinessUri(uri, useWebVpn: true), isFalse);
+      expect(VodUrlResolver.isPlatformPage(uri, useWebVpn: true), isFalse);
+    }
+    for (final value in [
+      'http://$host/signal',
+      'wss://$host/signal',
+      'https://$host:444/signal',
+      'https://$host:32001/signal',
+      'https://user:pass@$host/signal',
+      'https://$host.evil.example/signal',
+      'https://evil.$host/signal',
+      'https://wss-rtc-cc-shu-edu-cn-32002.webvpn.shu.edu.cn/signal',
+    ]) {
+      final uri = Uri.parse(value);
+      expect(VodUrlResolver.isKnownMediaUri(uri), isFalse, reason: value);
+      expect(VodUrlResolver.isProxiedMediaUri(uri), isFalse, reason: value);
+      expect(() => VodUrlResolver.resolveMediaUrl(value, useWebVpn: true),
+          throwsFormatException,
+          reason: value);
+    }
+  });
 }

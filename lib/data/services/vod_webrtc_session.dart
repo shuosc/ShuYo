@@ -6,14 +6,39 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 
 import '../models/course_recording.dart';
+import 'vod_webrtc_signaling.dart';
 
 enum VodWebRtcState { idle, connecting, playing, paused, failed, disposed }
 
+@visibleForTesting
+Map<String, dynamic> buildVodWebRtcSignalingMessage({
+  required String command,
+  required String request,
+  required String accountToken,
+  required String sessionId,
+  required String requestId,
+  Map<String, dynamic>? fields,
+}) =>
+    {
+      'cmd_type': command,
+      'request_type': request,
+      'account_token': accountToken,
+      if (sessionId.isNotEmpty) 'session_id': sessionId,
+      'request_id': requestId,
+      ...?fields,
+    };
+
 class VodWebRtcSession {
-  VodWebRtcSession(this.source);
+  VodWebRtcSession(
+    this.source, {
+    RTCVideoRenderer? renderer,
+    Future<RTCPeerConnection> Function(Map<String, dynamic>)? peerFactory,
+  })  : renderer = renderer ?? RTCVideoRenderer(),
+        _peerFactory = peerFactory ?? createPeerConnection;
 
   final VodWebRtcSource source;
-  final RTCVideoRenderer renderer = RTCVideoRenderer();
+  final RTCVideoRenderer renderer;
+  final Future<RTCPeerConnection> Function(Map<String, dynamic>) _peerFactory;
   final ValueNotifier<VodWebRtcState> state =
       ValueNotifier(VodWebRtcState.idle);
 
@@ -32,6 +57,7 @@ class VodWebRtcSession {
   bool _audioEnabled = true;
   double _volume = 100;
   bool _resetting = false;
+  bool _hasFirstFrame = false;
   int _generation = 0;
   Future<void>? _rendererInitialization;
   Future<void> _offerQueue = Future.value();
@@ -46,10 +72,8 @@ class VodWebRtcSession {
     error = null;
     final generation = ++_generation;
     state.value = VodWebRtcState.connecting;
+    var stage = 'renderer';
     try {
-      if (source.useWebVpn) {
-        throw StateError('WebVPN 尚未提供可验证的 WebRTC 媒体中继，请使用 HLS 或 FLV');
-      }
       if (!_initialized) {
         _rendererInitialization ??= renderer.initialize();
         await _rendererInitialization;
@@ -58,17 +82,18 @@ class VodWebRtcSession {
       if (_disposed || generation != _generation) return;
       await _closeConnection();
       if (_disposed || generation != _generation) return;
+      stage = 'peer';
       await _createPeer(generation);
       if (_disposed || generation != _generation) return;
-      final socket = await WebSocket.connect(
-        source.signalingUri.toString(),
-        headers: source.headers,
-      ).timeout(const Duration(seconds: 15));
+      stage = 'signaling';
+      final socket = await connectVodWebRtcSignaling(source.signalingUri,
+          headers: source.headers);
       if (_disposed || generation != _generation) {
         await socket.close();
         return;
       }
       _socket = socket;
+      debugPrint('ShuYoVOD WebRTC signaling connected');
       _subscription = socket.listen(
         _onMessage,
         onError: (Object _) => _fail('WebRTC 信令连接失败'),
@@ -86,15 +111,12 @@ class VodWebRtcSession {
       _heartbeat = Timer.periodic(const Duration(seconds: 20), (_) {
         _send('detect', 'heartbeat', {'request_id': 'heartbeat'});
       });
-      _connectionTimeout = Timer(const Duration(seconds: 30), () {
-        if (state.value == VodWebRtcState.connecting) {
-          _fail('WebRTC 连接超时，请重试或切换线路');
-        }
-      });
-    } catch (_) {
+      _waitForFirstFrame(generation);
+    } catch (cause) {
+      _logFailure(stage, cause);
       if (!_disposed && generation == _generation) {
         error = source.useWebVpn
-            ? 'WebVPN 尚未提供可验证的 WebRTC 媒体中继，请使用 HLS 或 FLV'
+            ? 'WebVPN 下的 WebRTC 连接失败，请重试或切换线路'
             : 'WebRTC 连接失败，请重试或切换线路';
         state.value = VodWebRtcState.failed;
         await _closeConnection();
@@ -103,9 +125,35 @@ class VodWebRtcSession {
     }
   }
 
+  void _waitForFirstFrame(int generation) {
+    _connectionTimeout?.cancel();
+    _connectionTimeout = Timer(const Duration(seconds: 30), () {
+      if (!_disposed && generation == _generation && !_hasFirstFrame) {
+        _fail(source.useWebVpn
+            ? 'WebVPN 下的 WebRTC 未收到画面，请重试或切换 HLS / FLV'
+            : 'WebRTC 连接超时，请重试或切换线路');
+      }
+    });
+  }
+
+  void _logFailure(String stage, Object cause) {
+    var detail = '';
+    if (cause is WebSocketException) {
+      detail = cause.message
+          .replaceAll(RegExp(r'(?:wss?|https?)://[^\s]+'), '<signaling>');
+    } else if (cause is HandshakeException) {
+      detail = cause.message
+          .replaceAll(RegExp(r'(?:wss?|https?)://[^\s]+'), '<signaling>');
+    } else if (cause is SocketException) {
+      detail = 'osError=${cause.osError?.errorCode}';
+    }
+    debugPrint(
+        'ShuYoVOD WebRTC failure: stage=$stage, type=${cause.runtimeType}, $detail');
+  }
+
   Future<void> _createPeer(int generation) async {
     final stun = source.stunServer.trim();
-    final peer = await createPeerConnection({
+    final peer = await _peerFactory({
       'iceServers': stun.isEmpty
           ? <Map<String, String>>[]
           : [
@@ -119,6 +167,14 @@ class VodWebRtcSession {
       return;
     }
     _peer = peer;
+    _hasFirstFrame = false;
+    renderer.onFirstFrameRendered = () {
+      if (_disposed || generation != _generation || _peer != peer) return;
+      _hasFirstFrame = true;
+      _connectionTimeout?.cancel();
+      debugPrint('ShuYoVOD WebRTC first frame rendered');
+      state.value = _playing ? VodWebRtcState.playing : VodWebRtcState.paused;
+    };
     peer.onIceCandidate = (candidate) {
       if (_disposed || generation != _generation || _peer != peer) return;
       if (candidate.candidate != null && candidate.candidate!.isNotEmpty) {
@@ -134,11 +190,10 @@ class VodWebRtcSession {
       _stream = event.streams.first;
       renderer.srcObject = _stream;
       unawaited(_applyPlaybackState());
-      _connectionTimeout?.cancel();
-      state.value = _playing ? VodWebRtcState.playing : VodWebRtcState.paused;
     };
     peer.onConnectionState = (connectionState) {
       if (_disposed || generation != _generation || _peer != peer) return;
+      debugPrint('ShuYoVOD WebRTC media state: ${connectionState.name}');
       if (connectionState ==
           RTCPeerConnectionState.RTCPeerConnectionStateFailed) {
         _fail('WebRTC 媒体连接失败，请重试或切换线路');
@@ -151,15 +206,14 @@ class VodWebRtcSession {
     if (_disposed || socket == null || socket.readyState != WebSocket.open) {
       return;
     }
-    socket.add(jsonEncode({
-      'cmd_type': command,
-      'request_type': request,
-      'account_token': source.accountToken,
-      'session_id': _sessionId,
-      'request_id':
-          '${DateTime.now().microsecondsSinceEpoch}-${_requestNumber++}',
-      ...?fields,
-    }));
+    socket.add(jsonEncode(buildVodWebRtcSignalingMessage(
+      command: command,
+      request: request,
+      accountToken: source.accountToken,
+      sessionId: _sessionId,
+      requestId: '${DateTime.now().microsecondsSinceEpoch}-${_requestNumber++}',
+      fields: fields,
+    )));
   }
 
   void _onMessage(dynamic message) {
@@ -171,6 +225,8 @@ class VodWebRtcSession {
       if (sessionId != null) _sessionId = sessionId.toString();
       final serverError = decoded['error'];
       if (serverError != null && serverError.toString() != '0') {
+        debugPrint(
+            'ShuYoVOD WebRTC server error: code=${int.tryParse(serverError.toString())}');
         _fail('WebRTC 服务器拒绝连接，请重试或切换线路');
         return;
       }
@@ -180,6 +236,7 @@ class VodWebRtcSession {
       } else if ((command == 'ice' || command == 'reset') &&
           decoded['request_type'] == 'offer' &&
           decoded['sdp'] is String) {
+        debugPrint('ShuYoVOD WebRTC offer received');
         final offer = decoded['sdp'] as String;
         final generation = _generation;
         _offerQueue = _offerQueue.then((_) async {
@@ -188,7 +245,8 @@ class VodWebRtcSession {
           }
         });
       }
-    } catch (_) {
+    } catch (cause) {
+      _logFailure('message', cause);
       _fail('WebRTC 信令数据无效');
     }
   }
@@ -203,6 +261,10 @@ class VodWebRtcSession {
         await previousPeer?.dispose();
         if (_disposed || generation != _generation) return;
         await _createPeer(generation);
+        if (!_disposed && generation == _generation) {
+          state.value = VodWebRtcState.connecting;
+          _waitForFirstFrame(generation);
+        }
       }
       final peer = _peer;
       if (peer == null || _disposed || generation != _generation) return;
@@ -213,7 +275,8 @@ class VodWebRtcSession {
       if (answer.sdp != null) {
         _send(reset ? 'reset' : 'ice', 'answer', {'sdp': answer.sdp});
       }
-    } catch (_) {
+    } catch (cause) {
+      _logFailure('negotiation', cause);
       if (generation == _generation) {
         _fail('WebRTC 媒体协商失败，请重试或切换线路');
       }
@@ -223,7 +286,7 @@ class VodWebRtcSession {
   Future<void> play() async {
     _playing = true;
     await _applyPlaybackState();
-    if (!_disposed && _stream != null && state.value != VodWebRtcState.failed) {
+    if (!_disposed && _hasFirstFrame && state.value != VodWebRtcState.failed) {
       state.value = VodWebRtcState.playing;
     }
   }
@@ -231,7 +294,7 @@ class VodWebRtcSession {
   Future<void> pause() async {
     _playing = false;
     await _applyPlaybackState();
-    if (!_disposed && _stream != null && state.value != VodWebRtcState.failed) {
+    if (!_disposed && _hasFirstFrame && state.value != VodWebRtcState.failed) {
       state.value = VodWebRtcState.paused;
     }
   }
@@ -323,6 +386,8 @@ class VodWebRtcSession {
     _socket = null;
     final peer = _peer;
     _peer = null;
+    renderer.onFirstFrameRendered = null;
+    _hasFirstFrame = false;
     if (_initialized) renderer.srcObject = null;
     _stream = null;
     _sessionId = '';
