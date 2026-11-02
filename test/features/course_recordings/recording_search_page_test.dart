@@ -107,7 +107,7 @@ class _Repository extends VodRepository {
   }
 
   @override
-  Future<List<VodLesson>> loadPreviewLessons(VodCourse course,
+  Future<List<VodLesson>> loadSearchLessons(VodCourse course,
       {bool forceRefresh = false}) async {
     previewRequests++;
     activePreviews++;
@@ -138,8 +138,7 @@ class _Repository extends VodRepository {
     List<VodLesson> seeds, {
     bool forceRefresh = false,
   }) async {
-    final lessons =
-        await loadPreviewLessons(course, forceRefresh: forceRefresh);
+    final lessons = await loadSearchLessons(course, forceRefresh: forceRefresh);
     final merged = <(int, bool), VodLesson>{
       for (final lesson in seeds) (lesson.id, lesson.isLive): lesson,
       for (final lesson in lessons) (lesson.id, lesson.isLive): lesson,
@@ -147,6 +146,16 @@ class _Repository extends VodRepository {
     await warmCourseRecordings(course, merged, forceRefresh: forceRefresh);
     return lessons;
   }
+
+  @override
+  Future<bool> verifyLiveSearchLesson(
+          VodCourse course, VodLesson lesson) async =>
+      true;
+
+  @override
+  Future<List<VodLesson>> loadGeneratingLessons(VodCourse course,
+          {bool forceRefresh = false}) async =>
+      const [];
 
   @override
   Future<void> verifyCourseRecordings(VodCourse course, List<VodLesson> lessons,
@@ -430,8 +439,16 @@ void main() {
         [101, 102, 103, 104, 105]);
     expect(repository.maxActivePreviews, 3);
     await tester.pump();
-    // Completed later results cannot jump ahead of the pending first result.
-    expect(find.byType(ListTile), findsNothing);
+    // Completed rows appear immediately in their source order, without
+    // waiting for an unrelated earlier preview.
+    expect(
+        tester
+            .widgetList<ListTile>(find.byType(ListTile))
+            .map((row) => row.key),
+        [
+          const ValueKey('vod-search-course:7:102'),
+          const ValueKey('vod-search-course:7:103'),
+        ]);
     expect(
         tester
             .widget<Text>(find.byKey(const ValueKey('vod-search-loaded-count')))
@@ -568,7 +585,7 @@ void main() {
     responses[103]!.complete([_result(3, classId: 103).lesson]);
     responses[104]!.complete([_result(4, classId: 104).lesson]);
     await tester.pump();
-    await tester.pump(const Duration(milliseconds: 350));
+    await tester.pump(const Duration(milliseconds: 100));
 
     expectStableChrome();
     expect(tester.widget<Padding>(summary), same(frozenSummary));
@@ -626,7 +643,7 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('empty and failed previews reveal disabled rows and continue',
+  testWidgets('empty and failed previews retain searchable lesson candidates',
       (tester) async {
     final repository = _Repository()
       ..searchLoader = ((_, __) async => [
@@ -648,13 +665,8 @@ void main() {
         repository.previewCalls.map((call) => call.classId), [101, 102, 103]);
     for (final id in [101, 102]) {
       final row = find.byKey(ValueKey('vod-search-course:7:$id'));
-      expect(tester.widget<ListTile>(row).enabled, isFalse);
-      expect(tester.widget<ListTile>(row).onTap, isNull);
-      expect(find.descendant(of: row, matching: find.byIcon(Icons.block)),
-          findsOneWidget);
-      _expectNoCourseLessonCount(row);
-      expect(
-          find.byKey(ValueKey('vod-search-lesson-count:7:$id')), findsNothing);
+      expect(tester.widget<ListTile>(row).enabled, isTrue);
+      expect(tester.widget<ListTile>(row).onTap, isNotNull);
     }
     expect(
         tester
@@ -669,12 +681,15 @@ void main() {
         tester
             .widget<Text>(find.byKey(const ValueKey('vod-search-loaded-count')))
             .data,
-        '1');
+        '3');
     expect(
         tester
             .widget<Text>(find.byKey(const ValueKey('vod-search-total-count')))
             .data,
         '3');
+    await tester.tap(find.byKey(const ValueKey('vod-search-course:7:101')));
+    await tester.pumpAndSettle();
+    expect(repository.playbackRequests.single.id, 1);
   });
 
   testWidgets('clearing a pending preview discards it and stops the queue',
@@ -714,7 +729,13 @@ void main() {
   testWidgets('pull refresh retries a disabled course with a fresh preview',
       (tester) async {
     final repository = _Repository()
-      ..searchLoader = ((_, __) async => [_result(1)])
+      ..searchLoader = ((_, __) async => [
+            const VodSearchResult(
+              course: _course,
+              lesson: VodLesson(
+                  id: 0, teachingClassId: 101, name: '程序设计', isPlayable: false),
+            ),
+          ])
       ..previewLoader = (_, force) async => force ? [_result(1).lesson] : [];
     await _mount(tester, repository);
     await _submit(tester, '程序');
@@ -1024,12 +1045,7 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('generating-only search uses the existing disabled episode',
-      (tester) async {
-    tester.view.physicalSize = const Size(600, 1200);
-    tester.view.devicePixelRatio = 1;
-    addTearDown(tester.view.resetPhysicalSize);
-    addTearDown(tester.view.resetDevicePixelRatio);
+  testWidgets('generating-only search course remains disabled', (tester) async {
     final pending = _result(2, playable: false);
     final repository = _Repository()
       ..searchLoader = ((_, __) async => [pending])
@@ -1038,24 +1054,46 @@ void main() {
     await _submit(tester, '程序');
     await tester.pumpAndSettle();
     final row = find.byKey(const ValueKey('vod-search-course:7:101'));
-    _expectSingleLessonCount(tester, row, '1');
-    expect(tester.widget<ListTile>(row).enabled, isTrue);
-    await tester.tap(row);
-    await tester.pumpAndSettle();
-    final player =
-        tester.widget<RecordingPlayerPage>(find.byType(RecordingPlayerPage));
-    expect(player.initialLesson, isNull);
-    expect(player.lessons, [pending.lesson]);
+    expect(tester.widget<ListTile>(row).enabled, isFalse);
+    expect(tester.widget<ListTile>(row).onTap, isNull);
+    expect(find.byType(RecordingPlayerPage), findsNothing);
     expect(repository.playbackRequests, isEmpty);
+    expect(repository.verificationRequests, isEmpty);
     expect(repository.warmedCourses, isEmpty);
     expect(repository.previewCalls, hasLength(1));
-    final episode = tester
-        .widget<ListTile>(find.byKey(const ValueKey('recording-lesson-2')));
-    expect(episode.enabled, isFalse);
-    expect(episode.onTap, isNull);
-    expect(find.text('回放生成中，生成后可观看'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
+
+  for (final availability in [
+    VodRecordingAvailability.unavailable,
+    VodRecordingAvailability.unknown,
+  ]) {
+    testWidgets('one source candidate with $availability URLs is disabled',
+        (tester) async {
+      final repository = _Repository()
+        ..searchLoader = ((_, __) async => [_result(1)])
+        ..previewLoader = ((_, __) async => [])
+        ..availabilityLoader = (_, __) async => availability;
+      await _mount(tester, repository, disableAnimations: true);
+      await _submit(tester, '程序');
+      await tester.pumpAndSettle();
+      final row = find.byKey(const ValueKey('vod-search-course:7:101'));
+      expect(tester.widget<ListTile>(row).enabled, isFalse);
+      expect(tester.widget<ListTile>(row).onTap, isNull);
+      expect(find.byKey(const ValueKey('vod-search-lesson-count:7:101')),
+          findsNothing);
+      expect(
+          tester
+              .widget<Text>(
+                  find.byKey(const ValueKey('vod-search-loaded-count')))
+              .data,
+          '0');
+      expect(repository.verificationRequests, hasLength(1));
+      expect(repository.verificationRequests.single.fresh, isTrue);
+      expect(repository.playbackRequests, isEmpty);
+      expect(find.byType(RecordingPlayerPage), findsNothing);
+    });
+  }
 
   testWidgets(
       'filters classes before preview and keeps all matching class seeds',

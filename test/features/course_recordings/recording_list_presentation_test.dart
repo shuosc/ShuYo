@@ -3,6 +3,40 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:shuyo/features/course_recordings/recording_list_presentation.dart';
 
 void main() {
+  testWidgets('scroll starting after a scheduled update still flushes',
+      (tester) async {
+    final updates = ValueNotifier(0);
+    addTearDown(updates.dispose);
+    late BuildContext childContext;
+    await tester.pumpWidget(MaterialApp(
+      home: RecordingListPresentation(
+        changes: updates,
+        builder: (context) => Builder(builder: (context) {
+          childContext = context;
+          return Text('items ${updates.value}');
+        }),
+      ),
+    ));
+    await tester.pumpAndSettle();
+    updates.value = 1;
+    final metrics = FixedScrollMetrics(
+      minScrollExtent: 0,
+      maxScrollExtent: 3000,
+      pixels: 0,
+      viewportDimension: 600,
+      axisDirection: AxisDirection.down,
+      devicePixelRatio: 1,
+    );
+    ScrollStartNotification(metrics: metrics, context: childContext)
+        .dispatch(childContext);
+    await tester.pump();
+    expect(find.text('items 0'), findsOneWidget);
+    await tester.pump(const Duration(milliseconds: 350));
+    await tester.pump();
+    expect(find.text('items 1'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets(
       'an interactive back gesture defers updates even without an animating controller',
       (tester) async {

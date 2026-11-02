@@ -28,6 +28,11 @@ class _Repository extends VodRepository {
   Future<List<VodSearchResult>> Function(int term, String keyword)? search;
   Future<List<VodTerm>> Function()? termsLoader;
   Future<List<VodCourse>> Function()? catalogLoader;
+  VodRecordingAvailability candidateAvailability =
+      VodRecordingAvailability.available;
+  final verifiedCandidates = <int>[];
+  final generating = <int, Completer<List<VodLesson>>>{};
+  bool liveAvailable = true;
   List<VodCourse> courses = [for (var id = 1; id <= 5; id++) _course(id)];
 
   @override
@@ -54,11 +59,33 @@ class _Repository extends VodRepository {
   }
 
   @override
-  Future<List<VodLesson>> loadPreviewLessons(VodCourse course,
+  Future<List<VodLesson>> loadSearchLessons(VodCourse course,
       {bool forceRefresh = false}) async {
     previews.add(course.teachingClassId);
     return await pending[course.teachingClassId]?.future ??
         [_lesson(course.teachingClassId)];
+  }
+
+  @override
+  Future<bool> verifyLiveSearchLesson(
+          VodCourse course, VodLesson lesson) async =>
+      liveAvailable;
+
+  @override
+  Future<List<VodLesson>> loadGeneratingLessons(VodCourse course,
+          {bool forceRefresh = false}) async =>
+      await generating[course.teachingClassId]?.future ?? const [];
+
+  @override
+  Future<void> verifyCourseRecordings(VodCourse course, List<VodLesson> lessons,
+      {required void Function(int, VodRecordingAvailability) onResult,
+      required bool Function() isCurrent,
+      bool fresh = false,
+      bool forceRefresh = false}) async {
+    for (final lesson in lessons) {
+      verifiedCandidates.add(lesson.id);
+      if (isCurrent()) onResult(lesson.id, candidateAvailability);
+    }
   }
 
   @override
@@ -80,6 +107,155 @@ Future<void> _drain() async {
 }
 
 void main() {
+  test('source live with no devices does not come back as a one-lesson seed',
+      () async {
+    final hit = VodSearchResult.fromJson({
+      'id': 283850,
+      'teclId': 1,
+      'acteId': 7,
+      'subjName': '程序设计 1',
+      'courseStatus': 0,
+    });
+    final repository = _Repository()
+      ..liveAvailable = false
+      ..search = ((_, __) async => [hit])
+      ..pending[1] = (Completer<List<VodLesson>>()..complete([]));
+    final controller = RecordingSearchController(repository, selectedTermId: 7);
+    addTearDown(controller.dispose);
+    addTearDown(repository.dispose);
+    await controller.search('程序');
+    expect(controller.courseLessons[(7, 1)], isEmpty);
+    expect(controller.availableCourseCount, 0);
+    expect(controller.courses.single.isLive, isFalse);
+    expect(repository.verifiedCandidates, isEmpty);
+  });
+
+  test('generation is published before an unrelated earlier preview completes',
+      () async {
+    final repository = _Repository()
+      ..courses = [_course(1), _course(2)]
+      ..pending[1] = Completer<List<VodLesson>>()
+      ..pending[2] = Completer<List<VodLesson>>()
+      ..generating[1] = Completer<List<VodLesson>>()
+      ..generating[2] = Completer<List<VodLesson>>();
+    final controller = RecordingSearchController(repository, selectedTermId: 7);
+    addTearDown(controller.dispose);
+    addTearDown(repository.dispose);
+    final searching = controller.search('程序');
+    await _drain();
+    const generating = VodLesson(
+        id: 281778,
+        teachingClassId: 2,
+        name: '程序设计 2',
+        isPlayable: false,
+        isGenerating: true);
+    repository.generating[2]!.complete([generating]);
+    await _drain();
+    expect(controller.courseLessons[(7, 2)], [generating]);
+    expect(controller.courseLessons.containsKey((7, 1)), isFalse);
+    expect(
+        RecordingSearchViewData(controller).courses.single.teachingClassId, 2);
+    expect(controller.visibleCourseCount, 1);
+    repository.pending[2]!.complete([_lesson(2)]);
+    await _drain();
+    expect(controller.courseLessons[(7, 2)], contains(generating));
+    repository.pending[1]!.complete([_lesson(1)]);
+    repository.generating[1]!.complete([]);
+    await searching;
+  });
+
+  test('late generation cannot disable a preview recording and clear drops it',
+      () async {
+    final repository = _Repository()
+      ..courses = [_course(1)]
+      ..generating[1] = Completer<List<VodLesson>>();
+    final controller = RecordingSearchController(repository, selectedTermId: 7);
+    addTearDown(controller.dispose);
+    addTearDown(repository.dispose);
+    final searching = controller.search('程序');
+    await _drain();
+    expect(controller.courseLessons[(7, 1)]!.single.isPlayable, isTrue);
+    repository.generating[1]!.complete([
+      const VodLesson(
+          id: 1,
+          teachingClassId: 1,
+          name: '程序设计',
+          isPlayable: false,
+          isGenerating: true),
+    ]);
+    await searching;
+    expect(controller.courseLessons[(7, 1)]!.single.isGenerating, isFalse);
+    final pending = Completer<List<VodLesson>>();
+    repository.generating[1] = pending;
+    final nextSearch = controller.search('程序');
+    await _drain();
+    controller.clear();
+    pending.complete([
+      const VodLesson(
+          id: 2,
+          teachingClassId: 1,
+          name: '程序设计',
+          isPlayable: false,
+          isGenerating: true),
+    ]);
+    await nextSearch;
+    expect(controller.courseLessons, isEmpty);
+  });
+
+  test('recording search hit needs verified URLs when its preview is empty',
+      () async {
+    final hit = VodSearchResult.fromJson({
+      'id': 19,
+      'teclId': 1,
+      'acteId': 7,
+      'subjName': '程序设计 1',
+      'courseStatus': 2,
+    });
+    final repository = _Repository()
+      ..search = ((_, __) async => [hit])
+      ..pending[1] = (Completer<List<VodLesson>>()..complete([]));
+    final controller = RecordingSearchController(repository, selectedTermId: 7);
+    addTearDown(controller.dispose);
+    addTearDown(repository.dispose);
+
+    await controller.search('程序');
+
+    expect(controller.courseLessons[(7, 1)], [hit.lesson]);
+    expect(controller.courseLessons[(7, 1)]!.single.canPlay, isTrue);
+    expect(controller.visibleCourseCount, 1);
+    expect(controller.availableCourseCount, 1);
+    expect(repository.verifiedCandidates, [19]);
+  });
+
+  for (final availability in [
+    VodRecordingAvailability.unavailable,
+    VodRecordingAvailability.unknown,
+  ]) {
+    test('empty preview plus $availability source does not invent one lesson',
+        () async {
+      final hit = VodSearchResult.fromJson({
+        'id': 19,
+        'teclId': 1,
+        'acteId': 7,
+        'subjName': '程序设计 1',
+        'courseStatus': 2,
+      });
+      final repository = _Repository()
+        ..candidateAvailability = availability
+        ..search = ((_, __) async => [hit])
+        ..pending[1] = (Completer<List<VodLesson>>()..complete([]));
+      final controller =
+          RecordingSearchController(repository, selectedTermId: 7);
+      addTearDown(controller.dispose);
+      addTearDown(repository.dispose);
+      await controller.search('程序');
+      expect(controller.courseLessons[(7, 1)], isEmpty);
+      expect(controller.availableCourseCount, 0);
+      expect(controller.visibleCourseCount, 1);
+      expect(repository.verifiedCandidates, [19]);
+    });
+  }
+
   test('live courses start preview first and are revealed before VODs',
       () async {
     final live = VodLesson(
@@ -109,7 +285,7 @@ void main() {
         [5, 1, 2, 3, 4]);
     expect(controller.visibleCourseCount, 1);
     expect(controller.courses.first.isLive, isTrue);
-    expect(controller.courseLessons[(7, 5)], [live]);
+    expect(controller.courseLessons[(7, 5)]!.map((lesson) => lesson.id), [50]);
     final pendingLive = controller.pendingLivePreview((7, 5));
     expect(pendingLive, isNotNull);
 
@@ -215,7 +391,7 @@ void main() {
 
     expect(controller.courseLessons[(7, 1)], [generating]);
     expect(controller.courses.single.isLive, isFalse);
-    expect(controller.availableCourseCount, 1);
+    expect(controller.availableCourseCount, 0);
     expect(repository.previews, [1]);
     expect(repository.counts, isEmpty);
   });
@@ -274,7 +450,7 @@ void main() {
       expect(controller.courseLessons[(7, 1)],
           [previewContainsRecording ? recording : generating]);
       expect(controller.visibleCourseCount, 1);
-      expect(controller.availableCourseCount, 1);
+      expect(controller.availableCourseCount, previewContainsRecording ? 1 : 0);
       expect(repository.previews, [1]);
       expect(repository.counts, isEmpty);
     });
@@ -371,19 +547,19 @@ void main() {
     repository.pending[2]!.complete([_lesson(2)]);
     await _drain();
     expect(repository.previews, [1, 2, 3, 4]);
-    expect(controller.visibleCourseCount, 0);
+    expect(controller.visibleCourseCount, 1);
     expect(controller.availableCourseCount, 1);
     repository.pending[1]!.complete([_lesson(1)]);
     repository.pending[3]!.complete([]);
     await _drain();
     expect(controller.visibleCourseCount, 3);
-    expect(controller.availableCourseCount, 2);
+    expect(controller.availableCourseCount, 3);
     repository.pending[4]!.completeError(const VodNetworkException());
     repository.pending[5]!.complete([_lesson(5)]);
     await search;
     expect(controller.visibleCourseCount, 5);
-    expect(controller.availableCourseCount, 3);
-    expect(controller.courseLessons[(7, 4)], isEmpty);
+    expect(controller.availableCourseCount, 5);
+    expect(controller.courseLessons[(7, 4)]!.single.id, 4);
     expect(controller.loadingCourses, isFalse);
   });
 
@@ -431,6 +607,40 @@ void main() {
     expect(controller.availableCourseCount, 1);
     expect(controller.activeKeyword, '程序');
     expect(repository.previews, [2]);
+  });
+
+  test('cached search yields to events and stops its remaining queue on clear',
+      () async {
+    final repository = _Repository()
+      ..courses = [for (var id = 1; id <= 70; id++) _course(id)];
+    final controller = RecordingSearchController(repository, selectedTermId: 7);
+    addTearDown(controller.dispose);
+    addTearDown(repository.dispose);
+
+    final search = controller.search('程序');
+    await Future<void>.delayed(Duration.zero);
+    expect(repository.previews, isNotEmpty);
+    expect(repository.previews.length, lessThan(70));
+    controller.clear();
+    final requestsAtClear = repository.previews.length;
+    await search;
+    expect(repository.previews.length, requestsAtClear);
+    expect(controller.courses, isEmpty);
+    expect(controller.courseLessons, isEmpty);
+  });
+
+  test('large search groups on a worker and keeps all matching courses',
+      () async {
+    final repository = _Repository()
+      ..courses = [for (var id = 1; id <= 100; id++) _course(id)];
+    final controller = RecordingSearchController(repository, selectedTermId: 7);
+    addTearDown(controller.dispose);
+    addTearDown(repository.dispose);
+
+    await controller.search('程序');
+    expect(controller.courses.length, 100);
+    expect(controller.visibleCourseCount, 100);
+    expect(controller.availableCourseCount, 100);
   });
 
   test(

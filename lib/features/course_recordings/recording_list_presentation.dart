@@ -1,17 +1,23 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 /// Coalesces business notifications at the viewport boundary. Requests continue
-/// independently, but list insertions wait for scrolling and route transitions
-/// to finish instead of relaying every response into an in-flight gesture.
+/// independently. Scrolling batches updates briefly, while route transitions
+/// defer them until the page becomes active again.
 class RecordingListPresentation extends StatefulWidget {
   const RecordingListPresentation({
     super.key,
     required this.changes,
     required this.builder,
+    this.shouldUpdateImmediately,
   });
 
   final Listenable changes;
   final WidgetBuilder builder;
+
+  /// Invalidating an old search must not wait for a long scroll to end.
+  final bool Function()? shouldUpdateImmediately;
 
   @override
   State<RecordingListPresentation> createState() =>
@@ -24,6 +30,8 @@ class _RecordingListPresentationState extends State<RecordingListPresentation> {
   final _scrollingContexts = <BuildContext?>{};
   bool _dirty = true;
   bool _scheduled = false;
+  bool _scrollUpdateDue = false;
+  Timer? _scrollUpdateTimer;
   Widget? _content;
 
   @override
@@ -63,12 +71,17 @@ class _RecordingListPresentationState extends State<RecordingListPresentation> {
     _changed();
   }
 
-  bool get _ready =>
-      _scrollingContexts.isEmpty &&
+  bool get _navigationReady =>
       !(_navigator?.userGestureInProgress ?? false) &&
       (_route?.isCurrent ?? true) &&
       !(_route?.animation?.isAnimating ?? false) &&
       !(_route?.secondaryAnimation?.isAnimating ?? false);
+
+  bool get _ready =>
+      _navigationReady &&
+      (_scrollingContexts.isEmpty ||
+          _scrollUpdateDue ||
+          (widget.shouldUpdateImmediately?.call() ?? false));
 
   void _animationChanged(AnimationStatus _) => _schedule();
   void _gestureChanged() => _schedule();
@@ -79,11 +92,27 @@ class _RecordingListPresentationState extends State<RecordingListPresentation> {
   }
 
   void _schedule() {
-    if (!_dirty || _scheduled || !_ready) return;
+    if (!_dirty || _scheduled) return;
+    if (!_ready) {
+      if (_navigationReady && _scrollingContexts.isNotEmpty) {
+        _scrollUpdateTimer ??= Timer(const Duration(milliseconds: 300), () {
+          _scrollUpdateTimer = null;
+          _scrollUpdateDue = true;
+          _schedule();
+        });
+      }
+      return;
+    }
+    _scrollUpdateTimer?.cancel();
+    _scrollUpdateTimer = null;
     _scheduled = true;
     WidgetsBinding.instance.scheduleFrameCallback((_) {
       _scheduled = false;
-      if (!mounted || !_dirty || !_ready) return;
+      if (!mounted || !_dirty) return;
+      if (!_ready) {
+        _schedule();
+        return;
+      }
       setState(() {});
     });
   }
@@ -100,6 +129,7 @@ class _RecordingListPresentationState extends State<RecordingListPresentation> {
 
   @override
   void dispose() {
+    _scrollUpdateTimer?.cancel();
     widget.changes.removeListener(_changed);
     _route?.animation?.removeStatusListener(_animationChanged);
     _route?.secondaryAnimation?.removeStatusListener(_animationChanged);
@@ -112,6 +142,7 @@ class _RecordingListPresentationState extends State<RecordingListPresentation> {
     if (_content == null || _dirty && _ready) {
       _content = widget.builder(context);
       _dirty = false;
+      _scrollUpdateDue = false;
     }
     return NotificationListener<ScrollNotification>(
       onNotification: _scrollChanged,

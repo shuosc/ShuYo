@@ -58,7 +58,6 @@ class _RecordingSearchPageState extends State<RecordingSearchPage> {
   final _animatedCourses = <(int, int)>{};
   int _renderedRevision = -1;
   int get _selectedTermId => _view.selectedTermId;
-  List<VodCourse> get _courses => _view.courses;
   int get _visibleCourseCount => _view.visibleCourseCount;
   int get _availableCourseCount => _view.availableCourseCount;
   String? get _activeKeyword => _view.activeKeyword;
@@ -208,6 +207,7 @@ class _RecordingSearchPageState extends State<RecordingSearchPage> {
                 .where((lesson) => !lesson.isLive && lesson.isPlayable)
                 .firstOrNull ??
             selectable.firstOrNull;
+    if (initial == null) return;
     _openingLesson = true;
     final recordings = lessons
         .where((lesson) => !lesson.isLive && !lesson.isGenerating)
@@ -342,6 +342,7 @@ class _RecordingSearchPageState extends State<RecordingSearchPage> {
         Expanded(
           child: RecordingListPresentation(
             changes: _searchController,
+            shouldUpdateImmediately: () => _renderedRevision != _revision,
             builder: (context) {
               // One frozen revision drives both the summary and lazy rows.
               // Business completions never rebuild the AppBar or search input.
@@ -443,7 +444,7 @@ class _RecordingSearchPageState extends State<RecordingSearchPage> {
                               color: colors.textPrimary,
                               fontSize: 18,
                               fontWeight: FontWeight.w600)),
-                      number('vod-search-total-count', _courses.length,
+                      number('vod-search-total-count', _view.totalCourseCount,
                           colors.textPrimary, 18),
                     ],
                   ),
@@ -459,6 +460,15 @@ class _RecordingSearchPageState extends State<RecordingSearchPage> {
   Widget _buildResults() {
     final view = _view;
     final courses = view.courses;
+    // A preview can insert a course before rows that are already on screen.
+    // Let the sliver relocate their keyed elements instead of disposing their
+    // entrance animations and rebuilding the rows at their new indexes.
+    late final courseIndices = <Key, int>{
+      for (var i = 0; i < courses.length; i++)
+        ValueKey(
+                (view.revision, courses[i].termId, courses[i].teachingClassId)):
+            i * 2,
+    };
     Widget? state;
     if (_needsLogin) {
       state = EmptyState(
@@ -529,6 +539,7 @@ class _RecordingSearchPageState extends State<RecordingSearchPage> {
               else ...[
                 const SliverToBoxAdapter(child: SizedBox(height: 8)),
                 SliverList.builder(
+                  findChildIndexCallback: (key) => courseIndices[key],
                   itemCount: _visibleCourseCount == 0
                       ? 0
                       : _visibleCourseCount * 2 - 1,
@@ -547,8 +558,11 @@ class _RecordingSearchPageState extends State<RecordingSearchPage> {
                         : _courseTile(course, view);
                     _courseRows[key] = (course, lessons, row);
                     return _SearchCourseEntrance(
-                      key: ValueKey(
-                          'vod-search-entrance:${view.revision}:${course.termId}:${course.teachingClassId}'),
+                      key: ValueKey((
+                        view.revision,
+                        course.termId,
+                        course.teachingClassId
+                      )),
                       animate: _animatedCourses.add(key),
                       child: row,
                     );
@@ -566,8 +580,11 @@ class _RecordingSearchPageState extends State<RecordingSearchPage> {
   Widget _courseTile(VodCourse course, RecordingSearchViewData view) {
     final key = (course.termId, course.teachingClassId);
     final lessons = view.courseLessons[key] ?? const <VodLesson>[];
-    final enabled = lessons.isNotEmpty;
+    final enabled = lessons.any(recordingLessonCanSelect);
     final description = view.extraMatches[key] ?? '';
+    // Rows are cached across incremental updates. Capture just the revision,
+    // not the entire immutable snapshot and all of its course/lesson maps.
+    final revision = view.revision;
     return ListTile(
       key: ValueKey(
           'vod-search-course:${course.termId}:${course.teachingClassId}'),
@@ -605,8 +622,7 @@ class _RecordingSearchPageState extends State<RecordingSearchPage> {
             )
           : Icon(Icons.block, color: Theme.of(context).disabledColor),
       onTap: enabled
-          ? () =>
-              unawaited(_openCourse(course, lessons, revision: view.revision))
+          ? () => unawaited(_openCourse(course, lessons, revision: revision))
           : null,
     );
   }
