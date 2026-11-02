@@ -8,6 +8,7 @@ import 'package:shuyo/data/services/vod_api_client.dart';
 import 'package:shuyo/data/services/academic_account_store.dart';
 import 'package:shuyo/data/services/secure_app_store.dart';
 import 'package:shuyo/data/services/vod_recording_cache.dart';
+import '../../support/recording_storage_fixture.dart';
 
 const _term = VodTerm(id: 7, name: '第一学期');
 const _otherTerm = VodTerm(id: 8, name: '第二学期');
@@ -121,6 +122,7 @@ class _CountingStore extends SecureAppStore {
 }
 
 void main() {
+  useRecordingStorageFixture();
   setUp(() {
     SharedPreferences.setMockInitialValues({});
     VodRepository.warmingRequestSpacing = Duration.zero;

@@ -10,6 +10,7 @@ import 'package:shuyo/data/repositories/vod_repository.dart';
 import 'package:shuyo/data/services/academic_account_store.dart';
 import 'package:shuyo/data/services/vod_api_client.dart';
 import 'package:shuyo/data/services/vod_recording_cache.dart';
+import 'package:shuyo/data/services/secure_app_store.dart';
 
 const _term = VodTerm(
   id: 7,
@@ -191,6 +192,8 @@ Future<String?> _storedJson() async => (await SharedPreferences.getInstance())
     .getString(VodRecordingCache.storageKey);
 
 void main() {
+  setUp(() => VodRecordingCache.legacyStoreFactory = SecureAppStore.new);
+  tearDown(() => VodRecordingCache.legacyStoreFactory = null);
   setUp(() => SharedPreferences.setMockInitialValues({
         AcademicAccountStore.studentIdKey: 'student-a',
       }));

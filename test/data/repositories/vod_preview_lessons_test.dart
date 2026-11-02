@@ -1,5 +1,7 @@
 import 'dart:async';
 
+import '../../support/recording_storage_fixture.dart';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:shuyo/core/vod_url_resolver.dart';
@@ -62,6 +64,7 @@ class DelayedPreviewCache extends VodRecordingCache {
 }
 
 void main() {
+  useRecordingStorageFixture();
   setUp(() {
     SharedPreferences.setMockInitialValues({});
     VodUrlResolver.configure(useWebVpn: false);

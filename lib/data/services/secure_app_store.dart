@@ -28,6 +28,7 @@ class SecureAppStore {
     'vod.auth.session.direct.v1',
     'vod.auth.session.webvpn.v1',
     'vod.recording.cache.v1',
+    'vod.recording.encryption.v2',
   ];
   static Future<void>? _mobileInitialization;
 

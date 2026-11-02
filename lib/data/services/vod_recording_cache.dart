@@ -3,21 +3,35 @@ import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 
+import '../../core/background_work_gate.dart';
 import '../models/course_recording.dart';
 import 'secure_app_store.dart';
+import 'vod_recording_storage.dart';
 
 /// Persistent recording links and the metadata needed to reach them during an
 /// API outage. Credentials and live streams are deliberately excluded.
 class VodRecordingCache {
   VodRecordingCache({
     SecureAppStore? store,
+    VodRecordingStorage? storage,
     this.backgroundWriteDelay = const Duration(seconds: 2),
-  }) : _store = store ?? SecureAppStore();
+  })  : assert(store == null || storage == null),
+        _store = store ?? legacyStoreFactory?.call(),
+        _storage = storage;
 
+  /// The old key is retained only for automatic import and injected v1 stores.
   static const storageKey = 'vod.recording.cache.v1';
+  @visibleForTesting
+  static SecureAppStore Function()? legacyStoreFactory;
+  @visibleForTesting
+  static Future<VodRecordingStorage> Function()? storageFactory;
   static Future<void> _writes = Future<void>.value();
   static final _pendingBatches = <_CacheWriteBatch>{};
-  final SecureAppStore _store;
+  final SecureAppStore? _store;
+  final VodRecordingStorage? _storage;
+  Future<VodRecordingStorage> get _disk async =>
+      _storage ??
+      await (storageFactory?.call() ?? VodRecordingStorage.shared());
   @visibleForTesting
   final Duration backgroundWriteDelay;
   _CacheWriteBatch? _batch;
@@ -31,12 +45,80 @@ class VodRecordingCache {
     }
   }
 
+  /// Waits for durability when a lifecycle owner explicitly needs to drain.
+  /// Ordinary reads use the pending overlay and never force this operation.
+  static Future<void> flush() {
+    _flushPendingBatches();
+    return _writes;
+  }
+
   String _scope(String account, bool vpn) =>
       '${Uri.encodeComponent(account)}:${vpn ? 'webvpn' : 'direct'}';
+
+  bool _sharesStorage(VodRecordingCache other) =>
+      identical(_store, other._store) && identical(_storage, other._storage);
+
+  Future<Map<String, Object?>> _overlay(String scope,
+      {String? key, bool playbackOnly = false}) async {
+    final accepted = <_CacheWrite>[];
+    for (final batch in _pendingBatches.toList(growable: false)) {
+      if (!_sharesStorage(batch.owner)) continue;
+      for (final entry in batch.entries.toList(growable: false)) {
+        if (entry.scope != scope || key != null && entry.key != key) continue;
+        if (playbackOnly && !entry.key.startsWith('playback:')) continue;
+        if (entry.canWrite != null && !await entry.canWrite!()) continue;
+        accepted.add(entry);
+      }
+    }
+    final entries = <String, _CacheWrite>{};
+    for (final entry in accepted) {
+      if (entry.canCommit != null && !entry.canCommit!()) continue;
+      final previous = entries[entry.key];
+      if (previous?.version != null &&
+          entry.version != null &&
+          previous!.version! > entry.version!) {
+        continue;
+      }
+      entries[entry.key] = entry;
+    }
+    if (entries.isEmpty) return const {};
+    final copy = await compute(_copyOverlay,
+        {for (final entry in entries.values) entry.key: entry.value},
+        debugLabel: 'vodCachePendingRead');
+    for (final entry in entries.values) {
+      if (entry.canWrite != null && !await entry.canWrite!()) {
+        copy.remove(entry.key);
+      }
+    }
+    copy.removeWhere((key, _) {
+      final guard = entries[key]!.canCommit;
+      return guard != null && !guard();
+    });
+    return copy;
+  }
 
   Future<List<Map<String, dynamic>>> savedLessons(
       String account, bool vpn, int? termId) async {
     try {
+      if (_store == null) {
+        final scope = _scope(account, vpn);
+        final values = await (await _disk).savedLessons(scope, termId);
+        final pending = await _overlay(scope, playbackOnly: true);
+        final merged = Map<String, Map<String, dynamic>>.of(values);
+        for (final entry in pending.entries) {
+          final value = entry.value;
+          if (!entry.key.startsWith('playback:') ||
+              value is! Map<String, dynamic>) {
+            continue;
+          }
+          if (termId != null &&
+              (value['course'] as Map?)?['acteId'] != termId) {
+            continue;
+          }
+          merged[entry.key] = value;
+        }
+        return merged.values.toList(growable: false);
+      }
       _flushPendingBatches();
       await _writes;
       final raw = await _store.read(storageKey);
@@ -55,6 +137,22 @@ class VodRecordingCache {
   /// and signed media URL from the worker back into the UI isolate.
   Future<bool> hasSavedLessons(String account, bool vpn) async {
     try {
+      if (_store == null) {
+        final scope = _scope(account, vpn);
+        for (final batch in _pendingBatches.toList(growable: false)) {
+          if (!_sharesStorage(batch.owner)) continue;
+          for (final entry in batch.entries.toList(growable: false)) {
+            if (entry.scope != scope ||
+                !entry.key.startsWith('playback:') ||
+                entry.value is! Map<String, dynamic>) {
+              continue;
+            }
+            if (entry.canWrite != null && !await entry.canWrite!()) continue;
+            if (entry.canCommit == null || entry.canCommit!()) return true;
+          }
+        }
+        return await (await _disk).hasSavedLessons(scope);
+      }
       _flushPendingBatches();
       await _writes;
       final raw = await _store.read(storageKey);
@@ -71,6 +169,12 @@ class VodRecordingCache {
 
   Future<Object?> load(String account, bool vpn, String key) async {
     try {
+      if (_store == null) {
+        final scope = _scope(account, vpn);
+        final value = await (await _disk).load(scope, key);
+        final pending = await _overlay(scope, key: key);
+        return pending.containsKey(key) ? pending[key] : value;
+      }
       _flushPendingBatches();
       await _writes;
       final raw = await _store.read(storageKey);
@@ -94,7 +198,7 @@ class VodRecordingCache {
     if (!background) _flushPendingBatches();
     var batch = _batch;
     if (batch == null) {
-      batch = _CacheWriteBatch();
+      batch = _CacheWriteBatch(this, background);
       _batch = batch;
       final scheduled = batch;
       _pendingBatches.add(scheduled);
@@ -104,9 +208,15 @@ class VodRecordingCache {
       final operation = _writes.then((_) async {
         // The first request bounds the wait; further writes do not postpone it.
         await scheduled.ready.future;
-        _pendingBatches.remove(scheduled);
         if (identical(_batch, scheduled)) _batch = null;
-        await _flush(scheduled.entries);
+        try {
+          if (scheduled.background && _store == null) {
+            await BackgroundWorkGate.idle;
+          }
+          await _flush(scheduled.entries, background: scheduled.background);
+        } finally {
+          _pendingBatches.remove(scheduled);
+        }
       });
       // A storage failure must neither fail playback nor poison later writes.
       _writes =
@@ -118,11 +228,13 @@ class VodRecordingCache {
     return batch.done;
   }
 
-  Future<void> _flush(List<_CacheWrite> entries) async {
-    // Send the persisted string straight to the worker. Returning its decoded
-    // tree here and sending it back for encoding would copy the entire cache
-    // twice, even when this batch only adds one course's lesson metadata.
-    final original = await _store.read(storageKey);
+  Future<void> _flush(List<_CacheWrite> entries,
+      {required bool background}) async {
+    // Injected v1 stores keep their original adapter. The production worker
+    // receives only record deltas, and owns all serialization and disk I/O.
+    final store = _store;
+    final disk = store == null ? await _disk : null;
+    final original = await store?.read(storageKey);
     var pending = entries;
     while (pending.isNotEmpty) {
       final accepted = <_CacheWrite>[];
@@ -136,45 +248,63 @@ class VodRecordingCache {
       // One course entry can contain hundreds of lessons, so entry count is
       // not a useful size threshold. Decode, merge, compare and encode the
       // bounded batch together outside the UI isolate for every cache size.
-      final encoded = await compute(
-        _mergeCacheJson,
-        (
-          raw: original,
-          entries: [
-            for (final entry in accepted)
+      final records = [
+        for (final entry in accepted)
+          (
+            scope: entry.scope,
+            key: entry.key,
+            value: entry.value,
+            version: entry.version
+          ),
+      ];
+      final token = disk == null ? null : await disk.prepare(records);
+      final encoded = disk != null
+          ? null
+          : await compute(
+              _mergeCacheJson,
               (
-                scope: entry.scope,
-                key: entry.key,
-                value: entry.value,
-                version: entry.version,
+                raw: original,
+                entries: [
+                  for (final entry in accepted)
+                    (
+                      scope: entry.scope,
+                      key: entry.key,
+                      value: entry.value,
+                      version: entry.version,
+                    ),
+                ],
               ),
-          ],
-        ),
-        debugLabel: 'vodCacheWrite',
-      );
-      // Encoding may yield to an isolate; an account can change while it is
-      // running. Rebuild without invalid entries before touching the store.
-      final stillValid = <_CacheWrite>[];
-      for (final entry in accepted) {
-        if (entry.canWrite == null || await entry.canWrite!()) {
-          stillValid.add(entry);
+              debugLabel: 'vodCacheWrite',
+            );
+      try {
+        if (background && disk != null) await BackgroundWorkGate.idle;
+        // Encoding may yield to an isolate; an account can change while it is
+        // running. Rebuild without invalid entries before touching the store.
+        final stillValid = <_CacheWrite>[];
+        for (final entry in accepted) {
+          if (entry.canWrite == null || await entry.canWrite!()) {
+            stillValid.add(entry);
+          }
         }
+        // No asynchronous gap is allowed between the final validity check and
+        // starting the write. Another entry's account lookup may have yielded
+        // after an earlier entry was checked.
+        final ready = stillValid
+            .where((entry) => entry.canCommit == null || entry.canCommit!())
+            .toList();
+        if (ready.length != accepted.length) {
+          pending = ready;
+          continue;
+        }
+        if (token != null) await disk!.commit(token);
+        if (encoded != null) await store!.write(storageKey, encoded);
+        for (final entry in ready) {
+          entry.onCommitted?.call();
+        }
+        return;
+      } finally {
+        if (token != null) await disk!.discard(token);
       }
-      // No asynchronous gap is allowed between the final validity check and
-      // starting the write. Another entry's account lookup may have yielded
-      // after an earlier entry was checked.
-      final ready = stillValid
-          .where((entry) => entry.canCommit == null || entry.canCommit!())
-          .toList();
-      if (ready.length != accepted.length) {
-        pending = ready;
-        continue;
-      }
-      if (encoded != null) await _store.write(storageKey, encoded);
-      for (final entry in ready) {
-        entry.onCommitted?.call();
-      }
-      return;
     }
   }
 
@@ -315,6 +445,9 @@ String? _mergeCacheJson(
 }
 
 class _CacheWriteBatch {
+  _CacheWriteBatch(this.owner, this.background);
+  final VodRecordingCache owner;
+  final bool background;
   final entries = <_CacheWrite>[];
   final ready = Completer<void>();
   Timer? timer;
@@ -325,6 +458,9 @@ class _CacheWriteBatch {
     if (!ready.isCompleted) ready.complete();
   }
 }
+
+Map<String, Object?> _copyOverlay(Map<String, Object> values) =>
+    (jsonDecode(jsonEncode(values)) as Map).cast<String, Object?>();
 
 class _CacheWrite {
   _CacheWrite(this.scope, this.key, this.value, this.canWrite, this.canCommit,
