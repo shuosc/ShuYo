@@ -9,6 +9,7 @@ import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 
 import '../../data/models/course_recording.dart';
+import '../../core/background_work_gate.dart';
 import '../../data/models/vod_ppt.dart';
 import '../../data/repositories/vod_repository.dart';
 import '../../data/services/vod_api_client.dart';
@@ -132,6 +133,8 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
 
   final _videoKey = GlobalKey<VideoState>();
   final _entryWork = RecordingRouteWorkGate();
+  bool _entryContentReady = true;
+  bool _entryContentScheduled = false;
   final _controlsRevision = ValueNotifier(0);
   late final TabController _tabController;
   late final RecordingNotesController _notesController;
@@ -686,7 +689,26 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
-    _entryWork.attach(ModalRoute.of(context)?.animation);
+    final route = ModalRoute.of(context);
+    final animation = route?.animation;
+    _entryWork.attach(animation);
+    // A newly pushed route can briefly expose the completed placeholder proxy
+    // before its real forward animation is attached in this frame.
+    if (!_entryContentScheduled &&
+        animation != null &&
+        (animation.status != AnimationStatus.completed ||
+            !route!.isFirst && route.transitionDuration > Duration.zero)) {
+      _entryContentReady = false;
+      _entryContentScheduled = true;
+      WidgetsBinding.instance.addPostFrameCallback((_) async {
+        if (!mounted || !await _entryWork.ready || !mounted) return;
+        setState(() {
+          _entryContentReady = true;
+          _portraitBodyCache = null;
+          _lessonListCache.clear();
+        });
+      });
+    }
   }
 
   @override
@@ -1372,6 +1394,8 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
     }
     if (!mounted || revision != _loadRevision) return;
     _publish(() => _secondaryWaitingForMain = false);
+    await BackgroundWorkGate.idle;
+    if (!mounted || revision != _loadRevision) return;
     await _openSecondary();
   }
 
@@ -2386,6 +2410,10 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
   }
 
   Widget _lessonList(ShuYoColors colors, {required bool nested}) {
+    // First layout of the overview and month slivers must not compete with
+    // every frame of the push animation. The video shell stays responsive;
+    // this stable route's contents are built once the transition has settled.
+    if (!_entryContentReady) return const SizedBox.expand();
     final episodeKeys = nested ? _episodeKeys : _landscapeEpisodeKeys;
     final headingKey =
         nested ? _episodeHeadingKey : _landscapeEpisodeHeadingKey;

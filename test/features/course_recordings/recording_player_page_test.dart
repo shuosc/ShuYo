@@ -1235,7 +1235,7 @@ void main() {
         .home!;
     await tester.pumpWidget(MaterialApp(
       builder: (context, child) => MediaQuery(
-          data: MediaQuery.of(context).copyWith(disableAnimations: true),
+          data: MediaQuery.of(context).copyWith(disableAnimations: false),
           child: child!),
       home: Builder(
           builder: (context) => Scaffold(
@@ -1243,7 +1243,11 @@ void main() {
                   onPressed: () =>
                       Navigator.of(context).push(PageRouteBuilder<void>(
                     transitionDuration: const Duration(milliseconds: 400),
-                    pageBuilder: (_, animation, secondary) => content,
+                    pageBuilder: (context, animation, secondary) => MediaQuery(
+                      data: MediaQuery.of(context)
+                          .copyWith(disableAnimations: true),
+                      child: content,
+                    ),
                     transitionsBuilder: (_, animation, secondary, child) =>
                         SlideTransition(
                       position: animation.drive(Tween<Offset>(
@@ -1260,9 +1264,12 @@ void main() {
     await tester.pump(const Duration(milliseconds: 150));
     expect(playbackRequests, 1);
     expect(harness.platforms, isEmpty);
+    expect(find.byKey(const ValueKey('course-player-episodes')), findsNothing);
     await tester.pump(const Duration(milliseconds: 250));
     await tester.pumpAndSettle();
     expect(harness.platforms, isNotEmpty);
+    expect(
+        find.byKey(const ValueKey('course-player-episodes')), findsOneWidget);
     expect(
         harness.platforms.every((player) => player.opened.length == 1), isTrue);
     expect(tester.takeException(), isNull);
