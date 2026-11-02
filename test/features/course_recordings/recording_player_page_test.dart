@@ -1441,6 +1441,42 @@ void main() {
     await tester.pumpWidget(const SizedBox.shrink());
   });
 
+  testWidgets(
+      'live notes show zero and explain that live streams have no notes',
+      (tester) async {
+    prepareNotesPortrait(tester);
+    var noteRequests = 0;
+    final live = VodLesson(
+        id: first.id,
+        teachingClassId: course.teachingClassId,
+        name: '直播课次',
+        isLive: true,
+        isPlayable: true);
+    await tester.pumpWidget(page(
+      initial: live,
+      lessons: [live],
+      load: (_) async => throw const VodNetworkException(),
+      loadNotes: (_) async {
+        noteRequests++;
+        return [note];
+      },
+    ));
+    await tester.pumpAndSettle();
+    expect(notesTabLabel(tester), '笔记 0');
+    await tester.tap(find.byKey(const ValueKey('recording-notes-tab-label')));
+    await tester.pumpAndSettle();
+    expect(find.text('直播没有笔记'), findsOneWidget);
+    expect(find.byKey(const ValueKey('recording-notes-empty')), findsOneWidget);
+    expect(find.byKey(const ValueKey('recording-notes-error')), findsNothing);
+    expect(find.byKey(const ValueKey('recording-notes-loading')), findsNothing);
+    await tester.drag(find.byKey(const ValueKey('recording-notes-scroll')),
+        const Offset(0, 250));
+    await tester.pumpAndSettle();
+    expect(noteRequests, 0);
+    expect(notesTabLabel(tester), '笔记 0');
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
   testWidgets('empty notes show zero while failed notes omit unknown count',
       (tester) async {
     prepareNotesPortrait(tester);

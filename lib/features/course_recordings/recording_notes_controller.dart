@@ -18,19 +18,23 @@ class RecordingNotesState {
     this.slides = const [],
     this.loading = false,
     this.error,
+    this.isLive = false,
   });
 
   final int? lessonId;
   final List<VodPptSlide> slides;
   final bool loading;
   final String? error;
+  final bool isLive;
 
-  /// A confirmed empty response is zero; loading and failures remain unknown.
-  int? get count => slides.isNotEmpty
-      ? slides.length
-      : lessonId != null && !loading && error == null
-          ? 0
-          : null;
+  /// Live lessons are always zero. Recording loads and failures remain unknown.
+  int? get count => isLive
+      ? 0
+      : slides.isNotEmpty
+          ? slides.length
+          : lessonId != null && !loading && error == null
+              ? 0
+              : null;
 }
 
 /// Owns asynchronous note loading without rebuilding the player route.
@@ -56,23 +60,28 @@ class RecordingNotesController extends ValueNotifier<RecordingNotesState> {
 
   /// Returns a message only when retained content needs a non-blocking warning.
   Future<String?> load(VodLesson lesson, {bool forceRefresh = false}) async {
-    if (_disposed || !forceRefresh && value.lessonId == lesson.id) return null;
+    if (_disposed ||
+        !forceRefresh &&
+            value.lessonId == lesson.id &&
+            value.isLive == lesson.isLive) {
+      return null;
+    }
     final revision = ++_revision;
+    if (lesson.isLive) {
+      value = RecordingNotesState(lessonId: lesson.id, isLive: true);
+      return null;
+    }
     final previous = value;
     final pullRefresh =
-        forceRefresh && previous.lessonId == lesson.id && !previous.loading;
-    final supported = lesson.id > 0 &&
-        !lesson.isLive &&
-        lesson.teachingClassId == teachingClassId;
+        forceRefresh && previous.lessonId == lesson.id &&
+        !previous.isLive && !previous.loading;
+    final supported =
+        lesson.id > 0 && lesson.teachingClassId == teachingClassId;
     final canLoad = supported && loader != null;
     if (!canLoad) {
       value = RecordingNotesState(
         lessonId: lesson.id,
-        error: lesson.isLive
-            ? '直播课次暂不支持 PPT 笔记'
-            : supported
-                ? '暂时无法加载这节课的 PPT 笔记，请稍后下拉重试'
-                : '请先选择课次，再查看 PPT 笔记',
+        error: supported ? '暂时无法加载这节课的 PPT 笔记，请稍后下拉重试' : '请先选择课次，再查看 PPT 笔记',
       );
       return null;
     }

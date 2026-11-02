@@ -15,6 +15,57 @@ void main() {
   const note = VodPptSlide(
       id: 'one', imageUrl: null, position: Duration.zero, text: '识别内容');
 
+  test(
+      'live notes are confirmed zero and never call the loader even on refresh',
+      () async {
+    var requests = 0;
+    final controller = RecordingNotesController(
+        teachingClassId: 10,
+        loader: (id, {required forceRefresh}) async {
+          requests++;
+          return [note];
+        });
+    addTearDown(controller.dispose);
+    const live =
+        VodLesson(id: 3, teachingClassId: 10, name: '直播', isLive: true, isPlayable: true);
+    await controller.load(live);
+    await controller.load(live, forceRefresh: true);
+    expect(requests, 0);
+    expect(controller.value.count, 0);
+    expect(controller.value.isLive, isTrue);
+    expect(controller.value.loading, isFalse);
+    expect(controller.value.error, isNull);
+    expect(controller.value.slides, isEmpty);
+  });
+
+  test(
+      'live and recording with the same ID remain distinct and reject late notes',
+      () async {
+    final pending = Completer<List<VodPptSlide>>();
+    var requests = 0;
+    final controller = RecordingNotesController(
+        teachingClassId: 10,
+        loader: (id, {required forceRefresh}) {
+          requests++;
+          return requests == 1 ? pending.future : Future.value([note]);
+        });
+    addTearDown(controller.dispose);
+    final recording = controller.load(first);
+    const live =
+        VodLesson(id: 1, teachingClassId: 10, name: '直播', isLive: true, isPlayable: true);
+    await controller.load(live);
+    pending.complete([note]);
+    await recording;
+    expect(controller.value.isLive, isTrue);
+    expect(controller.value.count, 0);
+    expect(controller.value.slides, isEmpty);
+    await controller.load(first);
+    expect(requests, 2);
+    expect(controller.value.isLive, isFalse);
+    expect(controller.value.slides, [note]);
+    expect(controller.value.count, 1);
+  });
+
   test('late completions never replace the selected lesson notes', () async {
     final pending = <int, Completer<List<VodPptSlide>>>{};
     final controller = RecordingNotesController(

@@ -2288,6 +2288,7 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
             builder: (context, notes, _) => RecordingNotesPanel(
               key: ValueKey('recording-notes:${_lesson.id}'),
               nested: true,
+              isLive: _lesson.isLive,
               slides: notes.slides,
               loading:
                   notes.loading || notes.lessonId == null && _catalogLoading,
@@ -2318,7 +2319,7 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
           valueListenable: _notesController,
           builder: (context, notes, _) => RecordingPlayerTabs(
             controller: _tabController,
-            noteCount: notes.count,
+            noteCount: _lesson.isLive ? 0 : notes.count,
           ),
         ),
       );

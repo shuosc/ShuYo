@@ -154,13 +154,32 @@ void main() {
     ));
     expect(find.text('按时间排序'), findsNothing);
     expect(find.text('文字由录播平台自动识别，点击笔记查看全文。'), findsNothing);
-    expect(find.text('PPT 第 1 页'), findsOneWidget);
+    expect(find.text('1/2 页  01:00'), findsOneWidget);
     expect(find.byType(SelectableText), findsNothing);
-    expect(find.text('01:00'), findsOneWidget);
-    expect(find.text('1:02:03'), findsOneWidget);
+    expect(find.text('PPT 第 1 页'), findsNothing);
+    expect(find.text('2/2 页  1:02:03'), findsOneWidget);
     await tester.tap(find.byKey(const ValueKey('recording-note-open-long')));
     await tester.pumpAndSettle();
-    expect(find.text('笔记详情'), findsOneWidget);
+    expect(find.byKey(const ValueKey('recording-note-detail-position')),
+        findsOneWidget);
+    final detailPosition = tester.widget<Text>(
+        find.byKey(const ValueKey('recording-note-detail-position')));
+    expect(detailPosition.textSpan!.toPlainText(), '笔记详情  2/2 页  1:02:03');
+    final detailSpans = (detailPosition.textSpan! as TextSpan).children!;
+    final detailContext = tester
+        .element(find.byKey(const ValueKey('recording-note-detail-position')));
+    expect(detailSpans[0].toPlainText(), '笔记详情  ');
+    expect(detailSpans[0].style!.color, detailContext.shuyoColors.textPrimary);
+    expect(detailSpans[1].toPlainText(), '2');
+    expect(detailSpans[1].style!.color,
+        Theme.of(detailContext).colorScheme.primary);
+    expect(detailSpans[2].toPlainText(), '/2 页  ');
+    expect(detailSpans[2].style!.color, detailContext.shuyoColors.textPrimary);
+    for (final span in detailSpans.sublist(1, 3)) {
+      expect(span.style!.fontWeight, FontWeight.w600);
+      expect(span.style!.fontSize, detailPosition.style!.fontSize! + 1);
+    }
+    expect(detailSpans[3].style!.color, detailContext.shuyoColors.textTertiary);
     expect(find.byType(SelectableText), findsOneWidget);
     expect(
         tester
@@ -171,10 +190,12 @@ void main() {
     await tester.tap(find.byKey(const ValueKey('recording-note-seek-long')));
     await tester.pumpAndSettle();
     expect(positions, [const Duration(hours: 1, minutes: 2, seconds: 3)]);
-    expect(find.text('笔记详情'), findsOneWidget);
+    expect(find.byKey(const ValueKey('recording-note-detail-position')),
+        findsOneWidget);
     await tester.tap(find.byTooltip('关闭'));
     await tester.pumpAndSettle();
-    expect(find.text('笔记详情'), findsNothing);
+    expect(find.byKey(const ValueKey('recording-note-detail-position')),
+        findsNothing);
     expect(tester.takeException(), isNull);
   });
 
@@ -199,7 +220,8 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(positions, [note.position]);
-    expect(find.text('笔记详情'), findsOneWidget);
+    expect(find.byKey(const ValueKey('recording-note-detail-position')),
+        findsOneWidget);
     expect(
         tester.state<ScrollableState>(
             find.descendant(of: body, matching: find.byType(Scrollable)).first),
@@ -211,7 +233,8 @@ void main() {
         before);
     await tester.tap(find.byTooltip('关闭'));
     await tester.pumpAndSettle();
-    expect(find.text('笔记详情'), findsNothing);
+    expect(find.byKey(const ValueKey('recording-note-detail-position')),
+        findsNothing);
     expect(find.byKey(const ValueKey('recording-note-open-1')), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
@@ -231,6 +254,23 @@ void main() {
         .getRect(find.byKey(const ValueKey('recording-note-thumbnail-1')));
     final text =
         tester.getRect(find.byKey(const ValueKey('recording-note-summary-1')));
+    final position = find.byKey(const ValueKey('recording-note-position-1'));
+    expect(tester.getRect(position).bottom, lessThan(image.top));
+    final positionText = tester.widget<Text>(position);
+    expect(positionText.textSpan!.toPlainText(), '1/1 页  01:00');
+    final positionSpans = (positionText.textSpan! as TextSpan).children!;
+    expect(positionSpans[0].toPlainText(), '1');
+    expect(positionSpans[0].style!.color,
+        Theme.of(tester.element(position)).colorScheme.primary);
+    expect(positionSpans[1].toPlainText(), '/1 页  ');
+    expect(positionSpans[1].style!.color,
+        tester.element(position).shuyoColors.textPrimary);
+    for (final span in positionSpans.take(2)) {
+      expect(span.style!.fontWeight, FontWeight.w600);
+      expect(span.style!.fontSize, positionText.style!.fontSize! + 1);
+    }
+    expect(positionSpans[2].style!.color,
+        tester.element(position).shuyoColors.textTertiary);
     expect(image.left, 16);
     expect(text.left - image.right, 12);
     expect(text.right, 393 - 16);
@@ -267,7 +307,10 @@ void main() {
     await tester.pumpAndSettle();
     final toolbar = tester
         .getRect(find.byKey(const ValueKey('recording-note-detail-toolbar')));
-    final titleStyle = tester.widget<Text>(find.text('笔记详情')).style!;
+    final titleStyle = tester
+        .widget<Text>(
+            find.byKey(const ValueKey('recording-note-detail-position')))
+        .style!;
     expect(titleStyle.fontSize, 13);
     expect(titleStyle.fontWeight, FontWeight.w500);
     expect(titleStyle.height, 1.43);
@@ -289,7 +332,8 @@ void main() {
         find.byKey(const ValueKey('recording-note-detail-scroll-1')),
         const Offset(0, 180));
     await tester.pumpAndSettle();
-    expect(find.text('笔记详情'), findsOneWidget);
+    expect(find.byKey(const ValueKey('recording-note-detail-position')),
+        findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 
@@ -338,7 +382,8 @@ void main() {
       final tabStyle = tester.widget<TabBar>(find.byType(TabBar)).labelStyle!;
       await tester.tap(find.byKey(const ValueKey('recording-note-open-1')));
       await tester.pumpAndSettle();
-      final title = find.text('笔记详情');
+      final title =
+          find.byKey(const ValueKey('recording-note-detail-position'));
       final context = tester.element(title);
       final titleStyle = tester.widget<Text>(title).style!;
       expect(titleStyle,
@@ -546,7 +591,7 @@ void main() {
         ),
       ],
     ));
-    expect(find.text('1:02:03'), findsOneWidget);
+    expect(find.text('1/1 页  1:02:03'), findsOneWidget);
     expect(tester.takeException(), isNull);
     await tester.tap(find.byKey(const ValueKey('recording-note-open-long')));
     await tester.pumpAndSettle();

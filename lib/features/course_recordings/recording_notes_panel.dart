@@ -23,6 +23,7 @@ class RecordingNotesPanel extends StatefulWidget {
     this.headersLoader,
     this.nested = false,
     this.canSeek = true,
+    this.isLive = false,
   });
 
   final List<VodPptSlide> slides;
@@ -33,6 +34,7 @@ class RecordingNotesPanel extends StatefulWidget {
   final Future<Map<String, String>> Function(Uri)? headersLoader;
   final bool nested;
   final bool canSeek;
+  final bool isLive;
 
   @override
   State<RecordingNotesPanel> createState() => _RecordingNotesPanelState();
@@ -62,78 +64,78 @@ class _RecordingNotesPanelState extends State<RecordingNotesPanel> {
 
   @override
   Widget build(BuildContext context) {
-    final panel = RefreshIndicator(
-      onRefresh: _refresh,
-      child: CustomScrollView(
-        key: const ValueKey('recording-notes-scroll'),
-        physics: const AlwaysScrollableScrollPhysics(),
-        // Prepare nearby rows before they enter the viewport without loading
-        // every attachment; resolved headers survive rows leaving the viewport.
-        scrollCacheExtent: const ScrollCacheExtent.pixels(300),
-        slivers: [
-          if (widget.nested)
-            SliverLayoutBuilder(
-              builder: (context, constraints) => SliverOverlapInjector(
-                handle:
-                    NestedScrollView.sliverOverlapAbsorberHandleFor(context),
-              ),
+    final scroll = CustomScrollView(
+      key: const ValueKey('recording-notes-scroll'),
+      physics: const AlwaysScrollableScrollPhysics(),
+      // Prepare nearby rows before they enter the viewport without loading
+      // every attachment; resolved headers survive rows leaving the viewport.
+      scrollCacheExtent: const ScrollCacheExtent.pixels(300),
+      slivers: [
+        if (widget.nested)
+          SliverLayoutBuilder(
+            builder: (context, constraints) => SliverOverlapInjector(
+              handle: NestedScrollView.sliverOverlapAbsorberHandleFor(context),
             ),
-          if (widget.loading)
-            const SliverFillRemaining(
-              hasScrollBody: false,
-              child: Center(
-                key: ValueKey('recording-notes-loading'),
-                child: Column(mainAxisSize: MainAxisSize.min, children: [
-                  CircularProgressIndicator(),
-                  SizedBox(height: 16),
-                  Text('正在获取 PPT 笔记'),
-                ]),
-              ),
-            )
-          else if (widget.error != null)
-            SliverFillRemaining(
-              hasScrollBody: false,
-              child: EmptyState(
-                key: const ValueKey('recording-notes-error'),
-                icon: Icons.cloud_off_outlined,
-                title: 'PPT 笔记加载失败',
-                message: widget.error!,
-              ),
-            )
-          else if (widget.slides.isEmpty)
-            const SliverFillRemaining(
-              hasScrollBody: false,
-              child: EmptyState(
-                key: ValueKey('recording-notes-empty'),
-                icon: Icons.article_outlined,
-                title: '当前课次暂无 PPT 笔记',
-                message: '录播平台尚未提供这节课的 PPT 识别内容',
-              ),
-            )
-          else ...[
-            SliverPadding(
-              padding: EdgeInsets.fromLTRB(
-                  16, 0, 16, MediaQuery.paddingOf(context).bottom + 24),
-              sliver: SliverList.builder(
-                // Rows already own their keyed paint boundary below.
-                addRepaintBoundaries: false,
-                itemCount: widget.slides.length,
-                itemBuilder: (context, index) => RepaintBoundary(
-                  key: ValueKey('recording-note-${widget.slides[index].id}'),
-                  child: _NoteEntry(
-                    slide: widget.slides[index],
-                    index: index,
-                    onSeek: widget.onSeek,
-                    canSeek: widget.canSeek,
-                    imageHeaders: _imageHeaders,
-                  ),
+          ),
+        if (widget.loading && !widget.isLive)
+          const SliverFillRemaining(
+            hasScrollBody: false,
+            child: Center(
+              key: ValueKey('recording-notes-loading'),
+              child: Column(mainAxisSize: MainAxisSize.min, children: [
+                CircularProgressIndicator(),
+                SizedBox(height: 16),
+                Text('正在获取 PPT 笔记'),
+              ]),
+            ),
+          )
+        else if (widget.error != null && !widget.isLive)
+          SliverFillRemaining(
+            hasScrollBody: false,
+            child: EmptyState(
+              key: const ValueKey('recording-notes-error'),
+              icon: Icons.cloud_off_outlined,
+              title: 'PPT 笔记加载失败',
+              message: widget.error!,
+            ),
+          )
+        else if (widget.slides.isEmpty || widget.isLive)
+          SliverFillRemaining(
+            hasScrollBody: false,
+            child: EmptyState(
+              key: const ValueKey('recording-notes-empty'),
+              icon: Icons.article_outlined,
+              title: '当前课次暂无 PPT 笔记',
+              message: widget.isLive ? '直播没有笔记' : '录播平台尚未提供这节课的 PPT 识别内容',
+            ),
+          )
+        else ...[
+          SliverPadding(
+            padding: EdgeInsets.fromLTRB(
+                16, 0, 16, MediaQuery.paddingOf(context).bottom + 24),
+            sliver: SliverList.builder(
+              // Rows already own their keyed paint boundary below.
+              addRepaintBoundaries: false,
+              itemCount: widget.slides.length,
+              itemBuilder: (context, index) => RepaintBoundary(
+                key: ValueKey('recording-note-${widget.slides[index].id}'),
+                child: _NoteEntry(
+                  slide: widget.slides[index],
+                  index: index,
+                  total: widget.slides.length,
+                  onSeek: widget.onSeek,
+                  canSeek: widget.canSeek,
+                  imageHeaders: _imageHeaders,
                 ),
               ),
             ),
-          ],
+          ),
         ],
-      ),
+      ],
     );
+    final panel = widget.isLive
+        ? scroll
+        : RefreshIndicator(onRefresh: _refresh, child: scroll);
     return RecordingDetailSheet.maybeOf(context) == null
         ? RecordingDetailSheetHost(topInset: 0, child: panel)
         : panel;
@@ -144,6 +146,7 @@ class _NoteEntry extends StatelessWidget {
   const _NoteEntry({
     required this.slide,
     required this.index,
+    required this.total,
     required this.onSeek,
     required this.canSeek,
     required this.imageHeaders,
@@ -151,6 +154,7 @@ class _NoteEntry extends StatelessWidget {
 
   final VodPptSlide slide;
   final int index;
+  final int total;
   final ValueChanged<Duration> onSeek;
   final bool canSeek;
   final _PptImageHeaders imageHeaders;
@@ -171,41 +175,50 @@ class _NoteEntry extends StatelessWidget {
             onTap: () => _showDetails(context),
             child: Padding(
               padding: const EdgeInsets.symmetric(vertical: 16),
-              child: Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  SizedBox(
-                    key: ValueKey('recording-note-thumbnail-${slide.id}'),
-                    width: 104,
-                    child: AspectRatio(
-                      aspectRatio: 16 / 9,
-                      child: ClipRRect(
-                        borderRadius: BorderRadius.circular(8),
-                        child: ColoredBox(
-                          color: colors.surfaceMuted,
-                          child: switch (slide.imageUrl) {
-                            final url? => _PptImage(
-                                url: url,
-                                imageHeaders: imageHeaders,
-                                cacheWidth: 312,
-                                compact: true,
-                              ),
-                            null => Semantics(
-                                label: '本条笔记暂无 PPT 截图',
-                                child: Icon(Icons.slideshow_outlined,
-                                    color: colors.textMuted, size: 28),
-                              ),
-                          },
+                  _NotePositionLabel(
+                    labelKey: ValueKey('recording-note-position-${slide.id}'),
+                    index: index,
+                    total: total,
+                    position: _position,
+                    style: ShuYoTextStyles.meta(
+                        color: colors.textSecondary, size: 12),
+                  ),
+                  const SizedBox(height: 8),
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      SizedBox(
+                        key: ValueKey('recording-note-thumbnail-${slide.id}'),
+                        width: 104,
+                        child: AspectRatio(
+                          aspectRatio: 16 / 9,
+                          child: ClipRRect(
+                            borderRadius: BorderRadius.circular(8),
+                            child: ColoredBox(
+                              color: colors.surfaceMuted,
+                              child: switch (slide.imageUrl) {
+                                final url? => _PptImage(
+                                    url: url,
+                                    imageHeaders: imageHeaders,
+                                    cacheWidth: 312,
+                                    compact: true,
+                                  ),
+                                null => Semantics(
+                                    label: '本条笔记暂无 PPT 截图',
+                                    child: Icon(Icons.slideshow_outlined,
+                                        color: colors.textMuted, size: 28),
+                                  ),
+                              },
+                            ),
+                          ),
                         ),
                       ),
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.stretch,
-                      children: [
-                        Text(
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Text(
                           _preview(slide.text),
                           key: ValueKey('recording-note-summary-${slide.id}'),
                           maxLines: 3,
@@ -216,21 +229,8 @@ class _NoteEntry extends StatelessWidget {
                             height: 1.5,
                           ),
                         ),
-                        const SizedBox(height: 8),
-                        Wrap(
-                          spacing: 10,
-                          runSpacing: 4,
-                          children: [
-                            Text('PPT 第 ${index + 1} 页',
-                                style: ShuYoTextStyles.meta(
-                                    color: colors.textSecondary, size: 12)),
-                            Text(_timestamp(_position),
-                                style: ShuYoTextStyles.meta(
-                                    color: colors.textTertiary, size: 12)),
-                          ],
-                        ),
-                      ],
-                    ),
+                      ),
+                    ],
                   ),
                 ],
               ),
@@ -246,6 +246,7 @@ class _NoteEntry extends StatelessWidget {
     RecordingDetailSheet.of(context).show((close) => _NoteDetails(
           slide: slide,
           index: index,
+          total: total,
           position: _position,
           imageHeaders: imageHeaders,
           onClose: close,
@@ -262,6 +263,7 @@ class _NoteDetails extends StatelessWidget {
   const _NoteDetails({
     required this.slide,
     required this.index,
+    required this.total,
     required this.position,
     required this.imageHeaders,
     required this.onSeek,
@@ -270,6 +272,7 @@ class _NoteDetails extends StatelessWidget {
 
   final VodPptSlide slide;
   final int index;
+  final int total;
   final Duration position;
   final _PptImageHeaders imageHeaders;
   final VoidCallback? onSeek;
@@ -300,9 +303,13 @@ class _NoteDetails extends StatelessWidget {
               child: Row(
                 children: [
                   Expanded(
-                    child: Text('笔记详情',
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
+                    child: _NotePositionLabel(
+                        labelKey:
+                            const ValueKey('recording-note-detail-position'),
+                        index: index,
+                        total: total,
+                        position: position,
+                        prefix: '笔记详情  ',
                         style:
                             RecordingPlayerTabs.labelStyleOf(context).copyWith(
                           color: colors.textPrimary,
@@ -338,10 +345,6 @@ class _NoteDetails extends StatelessWidget {
                     padding: const EdgeInsets.all(16),
                     sliver: SliverList.list(
                       children: [
-                        Text('PPT 第 ${index + 1} 页 · ${_timestamp(position)}',
-                            style: ShuYoTextStyles.meta(
-                                color: colors.textSecondary)),
-                        const SizedBox(height: 12),
                         SelectableText(
                           slide.text.isEmpty ? '这页暂未识别出文字' : slide.text,
                           key: ValueKey('recording-note-text-${slide.id}'),
@@ -401,6 +404,58 @@ class _NoteDetails extends StatelessWidget {
         ),
       ),
     );
+  }
+}
+
+class _NotePositionLabel extends StatelessWidget {
+  const _NotePositionLabel({
+    required this.labelKey,
+    required this.index,
+    required this.total,
+    required this.position,
+    required this.style,
+    this.prefix = '',
+  });
+
+  final Key labelKey;
+  final int index;
+  final int total;
+  final Duration position;
+  final TextStyle style;
+  final String prefix;
+
+  @override
+  Widget build(BuildContext context) {
+    final pageStyle = style.copyWith(
+      fontSize: (style.fontSize ?? 12) + 1,
+      fontWeight: FontWeight.w600,
+    );
+    return FittedBox(
+        fit: BoxFit.scaleDown,
+        alignment: Alignment.centerLeft,
+        child: Text.rich(
+          TextSpan(children: [
+            if (prefix.isNotEmpty)
+              TextSpan(
+                  text: prefix,
+                  style: TextStyle(color: context.shuyoColors.textPrimary)),
+            TextSpan(
+                text: '${index + 1}',
+                style: pageStyle.copyWith(
+                    color: Theme.of(context).colorScheme.primary)),
+            TextSpan(
+                text: '/$total 页  ',
+                style: pageStyle.copyWith(color: context.shuyoColors.textPrimary)),
+            TextSpan(
+                text: _timestamp(position),
+                style: TextStyle(color: context.shuyoColors.textTertiary)),
+          ]),
+          key: labelKey,
+          maxLines: 1,
+          softWrap: false,
+          style: style,
+        ),
+      );
   }
 }
 
