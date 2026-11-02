@@ -50,20 +50,19 @@ void main() {
 
   void expectLiveProtocolRow(WidgetTester tester) {
     final heading = tester.getRect(find.text('默认直播流'));
-    final description = tester.getRect(find.text('新打开直播时使用'));
+    expect(find.text('新打开直播时使用'), findsNothing);
     final bounds = <Rect>[
       for (final protocol in VodLiveProtocol.values)
         tester.getRect(find.byKey(
             ValueKey('recording-default-live-protocol-${protocol.name}'))),
     ];
     expect(heading.right, lessThanOrEqualTo(bounds.first.left));
-    expect(description.right, lessThanOrEqualTo(bounds.first.left));
     for (var index = 1; index < bounds.length; index++) {
       expect(bounds[index - 1].right, lessThanOrEqualTo(bounds[index].left));
       expect(bounds[index].center.dy, closeTo(bounds.first.center.dy, .01));
     }
     expect(bounds.first.bottom, greaterThan(heading.top));
-    expect(bounds.first.top, lessThan(description.bottom));
+    expect(bounds.first.top, lessThan(heading.bottom));
     final viewport = tester.view.physicalSize / tester.view.devicePixelRatio;
     for (final bound in bounds) {
       expect(bound.left, greaterThanOrEqualTo(0));
@@ -76,8 +75,11 @@ void main() {
       (protocol: VodLiveProtocol.flv, label: 'FLV'),
       (protocol: VodLiveProtocol.webRtc, label: 'WebRTC'),
     ]) {
-      final chip = tester.widget<ChoiceChip>(find.byKey(
-          ValueKey('recording-default-live-protocol-${entry.protocol.name}')));
+      final chipFinder = find.byKey(
+          ValueKey('recording-default-live-protocol-${entry.protocol.name}'));
+      final chip = tester.widget<ChoiceChip>(chipFinder);
+      expect(Theme.of(tester.element(chipFinder)).useMaterial3, isTrue);
+      expect(chip.showCheckmark, isTrue);
       expect(
           chip.label,
           isA<Text>()
@@ -135,11 +137,16 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('教室'), findsOneWidget);
     expect(find.text('PPT'), findsOneWidget);
+    expect(find.byTooltip('关闭'), findsNothing);
     expect(find.textContaining('音视频流'), findsNothing);
     final link = find.byKey(const ValueKey('recording-playback-link-1'));
     final address =
         find.text('https://example.test/classroom.mp4?auth_key=synthetic');
-    expect(tester.getCenter(find.text('教室')).dx, tester.getCenter(link).dx);
+    expect(
+        tester.getTopLeft(find.text('教室')).dx, tester.getTopLeft(address).dx);
+    for (final label in ['教室', 'PPT']) {
+      expect(tester.widget<Text>(find.text(label)).style, isNull);
+    }
     expect(tester.getBottomLeft(find.text('教室')).dy,
         lessThan(tester.getTopLeft(address).dy));
     expect(tester.widget<Text>(address).style?.color,
@@ -147,6 +154,9 @@ void main() {
     await tester.tap(link);
     await tester.pump();
     expect(copied, 'https://example.test/classroom.mp4?auth_key=synthetic');
+    await tester.tapAt(const Offset(100, 180));
+    await tester.pumpAndSettle();
+    expect(link, findsNothing);
     expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox.shrink());
   });
@@ -183,8 +193,10 @@ void main() {
 
       void expectSelected(VodLiveProtocol selected) {
         for (final protocol in VodLiveProtocol.values) {
-          expect(tester.widget<ChoiceChip>(protocolChip(protocol)).selected,
-              protocol == selected);
+          final chip = tester.widget<RawChip>(find.descendant(
+              of: protocolChip(protocol), matching: find.byType(RawChip)));
+          expect(chip.showCheckmark, isTrue);
+          expect(chip.selected, protocol == selected);
         }
       }
 
@@ -213,6 +225,12 @@ void main() {
         expectSelected(protocol);
       }
       expect(changes, hasLength(3));
+      if (fullscreen) {
+        expect(find.byTooltip('关闭'), findsNothing);
+        await tester.tapAt(const Offset(100, 180));
+        await tester.pumpAndSettle();
+        expect(selector, findsNothing);
+      }
       expect(tester.takeException(), isNull);
       await tester.pumpWidget(const SizedBox.shrink());
     });
@@ -280,22 +298,30 @@ void main() {
     });
   }
 
-  testWidgets('fullscreen playback information uses the diagnostic dialog',
+  testWidgets(
+      'fullscreen playback information uses the dismissible right panel',
       (tester) async {
+    tester.view.physicalSize = const Size(873, 393);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
     await tester.pumpWidget(harness(fullscreen: true));
     await tester.tap(find.text('更多'));
     await tester.pumpAndSettle();
     await tester.tap(find.text('播放信息'));
     await tester.pumpAndSettle();
-    expect(find.byType(AlertDialog), findsOneWidget);
+    expect(find.byType(AlertDialog), findsNothing);
+    expect(find.byType(BottomSheet), findsNothing);
+    expect(find.byTooltip('关闭'), findsNothing);
+    expect(find.text('确定'), findsNothing);
     expect(find.text('1920x1080'), findsOneWidget);
     expect(find.text('mediacodec'), findsOneWidget);
-    final confirmContext = tester.element(find.text('确定'));
-    expect(DefaultTextStyle.of(confirmContext).style.color,
-        Theme.of(confirmContext).colorScheme.primary);
-    await tester.tap(find.text('确定'));
+    for (final label in ['播放信息', '1920x1080', 'mediacodec']) {
+      expect(tester.getTopLeft(find.text(label)).dx, greaterThan(873 / 2));
+    }
+    await tester.tapAt(const Offset(100, 180));
     await tester.pumpAndSettle();
-    expect(find.byType(AlertDialog), findsNothing);
+    expect(find.text('1920x1080'), findsNothing);
   });
 
   test('player display settings persist independently of media links',

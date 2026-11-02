@@ -58,7 +58,7 @@ Future<void> showRecordingPlayerMenu({
           }
 
           return Column(mainAxisSize: MainAxisSize.min, children: [
-            _panelHeading(context, '播放设置', fullscreen),
+            _panelHeading(context, '播放设置'),
             SwitchListTile(
               dense: fullscreen,
               title: Text('显示现实时间', style: itemStyle),
@@ -79,7 +79,6 @@ Future<void> showRecordingPlayerMenu({
               return ListTile(
                 dense: fullscreen,
                 title: Text('默认直播流', style: itemStyle),
-                subtitle: const Text('新打开直播时使用'),
                 trailing: ConstrainedBox(
                   constraints: BoxConstraints(
                       maxWidth: math.max(0, constraints.maxWidth - 128)),
@@ -100,7 +99,7 @@ Future<void> showRecordingPlayerMenu({
                                 ? 'WebRTC'
                                 : protocol.name.toUpperCase()),
                             selected: protocol == current.defaultLiveProtocol,
-                            showCheckmark: false,
+                            showCheckmark: true,
                             visualDensity: VisualDensity.compact,
                             materialTapTargetSize:
                                 MaterialTapTargetSize.shrinkWrap,
@@ -164,36 +163,15 @@ Future<void> showRecordingPlayerMenu({
               ]);
             },
           );
-      if (fullscreen) {
-        await showDialog<void>(
-            context: context,
-            builder: (context) => AlertDialog(
-                  title: const Text('播放信息'),
-                  contentPadding: const EdgeInsets.only(top: 16),
-                  content: Material(
-                      type: MaterialType.transparency,
-                      child: ListTileTheme(
-                          contentPadding:
-                              const EdgeInsets.symmetric(horizontal: 24),
-                          child: SingleChildScrollView(
-                              child: information(context)))),
-                  actions: [
-                    TextButton(
-                        onPressed: () => Navigator.of(context).pop(),
-                        child: const Text('确定'))
-                  ],
-                ));
-      } else {
-        await _showPanel<void>(context,
-            fullscreen: false,
-            builder: (context) => Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    _panelHeading(context, '播放信息', false),
-                    information(context)
-                  ],
-                ));
-      }
+      await _showPanel<void>(context,
+          fullscreen: fullscreen,
+          builder: (context) => Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  _panelHeading(context, '播放信息'),
+                  information(context)
+                ],
+              ));
     case _PlayerMenuAction.links:
       await _showPanel<void>(context,
           fullscreen: fullscreen,
@@ -201,19 +179,14 @@ Future<void> showRecordingPlayerMenu({
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  _panelHeading(context, '播放链接', fullscreen),
+                  _panelHeading(context, '播放链接'),
                   if (views.isEmpty)
                     const Padding(
                         padding: EdgeInsets.all(24), child: Text('暂无可用的播放链接')),
                   for (final view in views) ...[
                     Padding(
                       padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
-                      child: Center(
-                          child: Text(view.label,
-                              style: TextStyle(
-                                  color: context.shuyoColors.textPrimary,
-                                  fontSize: fullscreen ? 14 : 16,
-                                  fontWeight: FontWeight.w600))),
+                      child: Text(view.label),
                     ),
                     ListTile(
                       key: ValueKey(
@@ -243,8 +216,7 @@ Future<void> showRecordingPlayerMenu({
   }
 }
 
-Widget _panelHeading(BuildContext context, String title, bool fullscreen) =>
-    Padding(
+Widget _panelHeading(BuildContext context, String title) => Padding(
       padding: const EdgeInsets.fromLTRB(12, 10, 12, 4),
       child: Row(children: [
         Expanded(
@@ -253,11 +225,6 @@ Widget _panelHeading(BuildContext context, String title, bool fullscreen) =>
                     color: context.shuyoColors.textPrimary,
                     fontSize: 16.5,
                     fontWeight: FontWeight.w600))),
-        if (fullscreen)
-          IconButton(
-              tooltip: '关闭',
-              icon: const Icon(Icons.close, size: 20),
-              onPressed: () => Navigator.of(context).pop()),
       ]),
     );
 
