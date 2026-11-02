@@ -6,6 +6,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 
 import '../models/course_recording.dart';
+import 'vod_webrtc_media_audio.dart';
 import 'vod_webrtc_signaling.dart';
 
 enum VodWebRtcState { idle, connecting, playing, paused, failed, disposed }
@@ -33,12 +34,18 @@ class VodWebRtcSession {
     this.source, {
     RTCVideoRenderer? renderer,
     Future<RTCPeerConnection> Function(Map<String, dynamic>)? peerFactory,
+    Future<void> Function()? prepareAudio,
+    Future<void> Function(double, MediaStreamTrack)? setTrackVolume,
   })  : renderer = renderer ?? RTCVideoRenderer(),
-        _peerFactory = peerFactory ?? createPeerConnection;
+        _peerFactory = peerFactory ?? createPeerConnection,
+        _prepareAudio = prepareAudio ?? VodWebRtcMediaAudio.shared.prepare,
+        _setTrackVolume = setTrackVolume ?? Helper.setVolume;
 
   final VodWebRtcSource source;
   final RTCVideoRenderer renderer;
   final Future<RTCPeerConnection> Function(Map<String, dynamic>) _peerFactory;
+  final Future<void> Function() _prepareAudio;
+  final Future<void> Function(double, MediaStreamTrack) _setTrackVolume;
   final ValueNotifier<VodWebRtcState> state =
       ValueNotifier(VodWebRtcState.idle);
 
@@ -46,6 +53,7 @@ class VodWebRtcSession {
   WebSocket? _socket;
   RTCPeerConnection? _peer;
   MediaStream? _stream;
+  final _audioTracks = <String, MediaStreamTrack>{};
   StreamSubscription<dynamic>? _subscription;
   Timer? _heartbeat;
   Timer? _connectionTimeout;
@@ -60,9 +68,50 @@ class VodWebRtcSession {
   bool _hasFirstFrame = false;
   int _generation = 0;
   Future<void>? _rendererInitialization;
-  Future<void> _offerQueue = Future.value();
+  Future<void> _peerQueue = Future.value();
+  Future<void> _playbackQueue = Future.value();
+  Future<void>? _startWork;
+  Future<void>? _closeWork;
+  Future<void>? _disposeWork;
+  Object? _cleanupError;
+  StackTrace? _cleanupStack;
 
-  Future<void> start() async {
+  Future<void> _cleanup(FutureOr<void> Function() action) async {
+    try {
+      await action();
+    } on Object catch (error, stack) {
+      _cleanupError ??= error;
+      _cleanupStack ??= stack;
+    }
+  }
+
+  void _throwCleanupError() {
+    final error = _cleanupError;
+    if (error != null) Error.throwWithStackTrace(error, _cleanupStack!);
+  }
+
+  Future<void> _releasePeer(RTCPeerConnection? peer) async {
+    if (peer == null) return;
+    await _cleanup(peer.close);
+    await _cleanup(peer.dispose);
+    _throwCleanupError();
+  }
+
+  Future<void> start() {
+    if (_disposed) return Future.error(StateError('直播连接已关闭'));
+    final pending = _startWork;
+    if (pending != null) return pending;
+    final work = _start();
+    _startWork = work;
+    work.then<void>((_) {
+      if (identical(_startWork, work)) _startWork = null;
+    }, onError: (Object _, StackTrace __) {
+      if (identical(_startWork, work)) _startWork = null;
+    });
+    return work;
+  }
+
+  Future<void> _start() async {
     if (_disposed) throw StateError('直播连接已关闭');
     if (state.value == VodWebRtcState.connecting ||
         state.value == VodWebRtcState.playing ||
@@ -72,13 +121,18 @@ class VodWebRtcSession {
     error = null;
     final generation = ++_generation;
     state.value = VodWebRtcState.connecting;
-    var stage = 'renderer';
+    var stage = 'audio configuration';
     try {
+      await _prepareAudio();
+      if (_disposed || generation != _generation) return;
+      stage = 'renderer';
       if (!_initialized) {
         _rendererInitialization ??= renderer.initialize();
         await _rendererInitialization;
         _initialized = true;
       }
+      if (_disposed || generation != _generation) return;
+      await _peerQueue;
       if (_disposed || generation != _generation) return;
       await _closeConnection();
       if (_disposed || generation != _generation) return;
@@ -162,8 +216,7 @@ class VodWebRtcSession {
       'sdpSemantics': 'unified-plan',
     });
     if (_disposed || generation != _generation) {
-      await peer.close();
-      await peer.dispose();
+      await _releasePeer(peer);
       return;
     }
     _peer = peer;
@@ -184,12 +237,40 @@ class VodWebRtcSession {
       }
     };
     peer.onTrack = (event) {
-      if (_disposed || generation != _generation || event.streams.isEmpty) {
+      if (_disposed || generation != _generation || _peer != peer) {
         return;
       }
-      _stream = event.streams.first;
-      renderer.srcObject = _stream;
-      unawaited(_applyPlaybackState());
+      unawaited(_enqueuePlayback(() async {
+        if (_disposed || generation != _generation || _peer != peer) return;
+        // onTrack streams are snapshots and audio may use a separate stream,
+        // or no stream at all. Keep those tracks even when a later video
+        // snapshot omits them, and never replace visible video with audio-only.
+        if (event.track.kind == 'audio') {
+          _rememberAudioTrack(event.track);
+        }
+        for (final stream in event.streams) {
+          for (final track in stream.getAudioTracks()) {
+            _rememberAudioTrack(track);
+          }
+        }
+        final videoStream = event.streams
+            .where((stream) => stream.getVideoTracks().isNotEmpty)
+            .firstOrNull;
+        final stream = videoStream ??
+            (event.track.kind == 'video' || _stream == null
+                ? event.streams.firstOrNull
+                : null);
+        if (stream != null) {
+          _stream = stream;
+          await renderer.setSrcObject(stream: stream);
+        }
+        if (!_disposed && generation == _generation && _peer == peer) {
+          await _updatePlaybackState();
+        }
+      }).catchError((Object cause) {
+        _logFailure('playback state', cause);
+        _fail('WebRTC 播放状态更新失败，请重试或切换线路');
+      }));
     };
     peer.onConnectionState = (connectionState) {
       if (_disposed || generation != _generation || _peer != peer) return;
@@ -216,6 +297,15 @@ class VodWebRtcSession {
     )));
   }
 
+  void _sendStop() {
+    try {
+      _send('live', 'stop');
+    } on Object catch (cause) {
+      // A failed advisory message must not prevent local native teardown.
+      _logFailure('stop signaling', cause);
+    }
+  }
+
   void _onMessage(dynamic message) {
     if (_disposed || message is! String) return;
     try {
@@ -239,11 +329,11 @@ class VodWebRtcSession {
         debugPrint('ShuYoVOD WebRTC offer received');
         final offer = decoded['sdp'] as String;
         final generation = _generation;
-        _offerQueue = _offerQueue.then((_) async {
+        unawaited(_enqueuePeer(() async {
           if (!_disposed && generation == _generation) {
             await _answerOffer(offer, reset: command == 'reset');
           }
-        });
+        }));
       }
     } catch (cause) {
       _logFailure('message', cause);
@@ -257,8 +347,8 @@ class VodWebRtcSession {
       if (reset) {
         final previousPeer = _peer;
         _peer = null;
-        await previousPeer?.close();
-        await previousPeer?.dispose();
+        await _cleanup(_detachMedia);
+        await _releasePeer(previousPeer);
         if (_disposed || generation != _generation) return;
         await _createPeer(generation);
         if (!_disposed && generation == _generation) {
@@ -270,8 +360,11 @@ class VodWebRtcSession {
       if (peer == null || _disposed || generation != _generation) return;
       _resetting = reset;
       await peer.setRemoteDescription(RTCSessionDescription(offer, 'offer'));
+      if (_disposed || generation != _generation || _peer != peer) return;
       final answer = await peer.createAnswer();
+      if (_disposed || generation != _generation || _peer != peer) return;
       await peer.setLocalDescription(answer);
+      if (_disposed || generation != _generation || _peer != peer) return;
       if (answer.sdp != null) {
         _send(reset ? 'reset' : 'ice', 'answer', {'sdp': answer.sdp});
       }
@@ -309,12 +402,26 @@ class VodWebRtcSession {
     await _applyPlaybackState();
   }
 
-  Future<Map<String, String>> playbackInformation() async {
+  Future<Map<String, String>> playbackInformation() {
     final peer = _peer;
-    if (_disposed || peer == null) return const {};
+    if (_disposed || peer == null) return Future.value(const {});
+    final generation = _generation;
+    // The UI timeout must not remove the underlying native stats work from
+    // the queue observed by reset/dispose.
+    return _enqueuePeer(() => _readPlaybackInformation(peer, generation))
+        .timeout(const Duration(seconds: 2), onTimeout: () => const {});
+  }
+
+  Future<Map<String, String>> _readPlaybackInformation(
+      RTCPeerConnection peer, int generation) async {
+    if (_disposed || peer != _peer || generation != _generation) {
+      return const {};
+    }
     try {
-      final reports = await peer.getStats().timeout(const Duration(seconds: 2));
-      if (_disposed || _peer != peer) return const {};
+      final reports = await peer.getStats();
+      if (_disposed || _peer != peer || generation != _generation) {
+        return const {};
+      }
       final codecs = {
         for (final report in reports.where((report) => report.type == 'codec'))
           report.id: report.values
@@ -354,16 +461,56 @@ class VodWebRtcSession {
     }
   }
 
-  Future<void> _applyPlaybackState() async {
+  Future<void> _applyPlaybackState() {
+    return _enqueuePlayback(_updatePlaybackState);
+  }
+
+  void _rememberAudioTrack(MediaStreamTrack track) {
+    final id = track.id;
+    if (id != null && id.isNotEmpty) _audioTracks[id] = track;
+  }
+
+  Future<T> _enqueuePeer<T>(Future<T> Function() operation) {
+    final work = _peerQueue.then((_) => operation());
+    _peerQueue = work.then<void>((_) {}, onError: (Object _, StackTrace __) {});
+    return work;
+  }
+
+  Future<void> _enqueuePlayback(Future<void> Function() update) {
+    final work = _playbackQueue.then((_) => update());
+    // Later updates and teardown must still run after a failed update.
+    _playbackQueue =
+        work.then<void>((_) {}, onError: (Object _, StackTrace __) {});
+    return work;
+  }
+
+  Future<void> _updatePlaybackState() async {
     final stream = _stream;
-    if (stream == null || _disposed) return;
-    for (final track in stream.getVideoTracks()) {
+    if (_disposed) return;
+    for (final track in stream?.getVideoTracks() ?? <MediaStreamTrack>[]) {
       track.enabled = _playing;
     }
-    for (final track in stream.getAudioTracks()) {
+    final audio = _audioTracks.values.toList(growable: false);
+    for (final track in audio) {
       track.enabled = _playing && _audioEnabled;
     }
-    await renderer.setVolume(_playing && _audioEnabled ? _volume / 100 : 0);
+    final volume = _playing && _audioEnabled ? _volume / 100 : 0.0;
+    if (audio.isEmpty) {
+      if (stream != null) await renderer.setVolume(volume);
+    } else {
+      for (final track in audio) {
+        await _setTrackVolume(volume, track);
+      }
+    }
+  }
+
+  Future<void> _detachMedia() async {
+    _stream = null;
+    _audioTracks.clear();
+    renderer.onFirstFrameRendered = null;
+    _hasFirstFrame = false;
+    await _playbackQueue;
+    if (_initialized) await renderer.setSrcObject();
   }
 
   void _fail(String message) {
@@ -371,44 +518,78 @@ class VodWebRtcSession {
     _generation++;
     error = message;
     state.value = VodWebRtcState.failed;
-    unawaited(_closeConnection());
+    unawaited(_closeAfterPendingWork(_generation).catchError((Object cause) {
+      _logFailure('close', cause);
+    }));
   }
 
-  Future<void> _closeConnection() async {
+  Future<void> _closeAfterPendingWork(int generation) async {
+    try {
+      await _startWork;
+    } catch (_) {}
+    try {
+      await _peerQueue;
+    } catch (_) {}
+    if (!_disposed && generation == _generation) await _closeConnection();
+  }
+
+  Future<void> _closeConnection() {
+    final pending = _closeWork;
+    if (pending != null) return pending;
+    final work = _performClose();
+    _closeWork = work;
+    work.then<void>((_) {
+      if (identical(_closeWork, work)) _closeWork = null;
+    }, onError: (Object _, StackTrace __) {
+      if (identical(_closeWork, work)) _closeWork = null;
+    });
+    return work;
+  }
+
+  Future<void> _performClose() async {
     _heartbeat?.cancel();
     _heartbeat = null;
     _connectionTimeout?.cancel();
     _connectionTimeout = null;
-    _send('live', 'stop');
+    _sendStop();
     final subscription = _subscription;
     _subscription = null;
     final socket = _socket;
     _socket = null;
     final peer = _peer;
     _peer = null;
-    renderer.onFirstFrameRendered = null;
-    _hasFirstFrame = false;
-    if (_initialized) renderer.srcObject = null;
-    _stream = null;
+    await _cleanup(_detachMedia);
     _sessionId = '';
-    await subscription?.cancel();
-    await socket?.close();
-    await peer?.close();
-    await peer?.dispose();
+    await _cleanup(() async => subscription?.cancel());
+    await _cleanup(() async => socket?.close());
+    await _cleanup(() => _releasePeer(peer));
+    _throwCleanupError();
   }
 
-  Future<void> dispose() async {
-    if (_disposed) return;
+  Future<void> dispose() {
+    final pending = _disposeWork;
+    if (pending != null) return pending;
     _generation++;
-    _send('live', 'stop');
+    _sendStop();
     _disposed = true;
-    await _closeConnection();
+    return _disposeWork = _performDispose();
+  }
+
+  Future<void> _performDispose() async {
+    try {
+      await _startWork;
+    } catch (_) {}
+    try {
+      await _peerQueue;
+    } catch (_) {}
+    await _cleanup(_closeConnection);
     try {
       await _rendererInitialization;
       if (_rendererInitialization != null) _initialized = true;
     } catch (_) {}
-    if (_initialized) await renderer.dispose();
+    if (_initialized) await _cleanup(renderer.dispose);
     state.value = VodWebRtcState.disposed;
     state.dispose();
+    _throwCleanupError();
   }
 }

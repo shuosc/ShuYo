@@ -30,6 +30,7 @@ import 'recording_notes_panel.dart';
 import 'recording_notes_controller.dart';
 import 'recording_episode_catalog.dart';
 import 'recording_route_work_gate.dart';
+import 'recording_transport_coordinator.dart';
 import 'recording_player_cache.dart';
 import 'recording_player_layout.dart';
 import 'recording_player_tabs.dart';
@@ -63,6 +64,8 @@ class RecordingPlayerPage extends StatefulWidget {
     this.onWebVpnSessionExpired,
     this.playerFactory,
     this.videoControllerFactory,
+    this.liveProxyFactory,
+    this.webRtcSessionFactory,
   });
 
   final VodCourse course;
@@ -90,6 +93,10 @@ class RecordingPlayerPage extends StatefulWidget {
   final Player Function()? playerFactory;
   @visibleForTesting
   final VideoController Function(Player)? videoControllerFactory;
+  @visibleForTesting
+  final VodLiveStreamProxy Function(VodRepository)? liveProxyFactory;
+  @visibleForTesting
+  final VodWebRtcSession Function(VodWebRtcSource)? webRtcSessionFactory;
 
   @override
   State<RecordingPlayerPage> createState() => _RecordingPlayerPageState();
@@ -170,6 +177,7 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
   int _loadRevision = 0;
   int? _openingMediaRevision;
   Future<void> _mediaQueue = Future<void>.value();
+  final _transport = RecordingTransportCoordinator();
   bool _loading = true;
   bool _recovering = false;
   bool _fullscreenActive = false;
@@ -203,6 +211,7 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
   String _aspect = '自动';
   VodLiveProtocol _liveProtocol = VodLiveProtocol.hls;
   List<VodWebRtcSession> _rtcSessions = [];
+  StreamSubscription<double>? _rtcVolumeSubscription;
   Future<void> _rtcSwapQueue = Future<void>.value();
   int? _rtcRequestedView;
   bool get _isWebRtc =>
@@ -590,16 +599,13 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
     _secondaryViewIndex = null;
     WidgetsBinding.instance.removeObserver(this);
     _stopLiveTimers();
-    unawaited(_liveProxy?.dispose());
-    unawaited(_disposeRtc());
+    unawaited(_shutdownTransports().catchError((Object error) {
+      debugPrint('ShuYoVOD transport teardown failure: ${error.runtimeType}');
+    }));
     unawaited(_restoreOrientation());
     for (final subscription in _syncSubscriptions) {
       unawaited(subscription.cancel());
     }
-    unawaited(_releasePlayer(_secondaryPlayer, _secondaryErrorSubscription));
-    // Video owns wake lock and application lifecycle handling. The route owns
-    // Player and releases its native decoder, streams and network requests.
-    unawaited(_releasePlayer(_player, _errorSubscription));
     _controlsRevision.dispose();
     _tabController.dispose();
     super.dispose();
@@ -638,6 +644,7 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
 
   Future<void> _loadLesson(VodLesson lesson, {bool resume = false}) async {
     final revision = ++_loadRevision;
+    final drainLive = lesson.isLive || _lesson.isLive;
     _viewAudioRevision++;
     _resetSeekSynchronization();
     _openingMediaRevision = null;
@@ -655,26 +662,46 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
       _playback = null;
     });
     unawaited(_loadNotes(lesson));
-    await _disposeRtc();
-    if (!mounted || revision != _loadRevision) return;
-    unawaited(_secondaryPlayer?.pause());
-    _stopLiveTimers();
-    final oldProxy = _liveProxy;
-    _liveProxy = null;
-    if (oldProxy != null) {
-      // Stop the old live demuxers before removing their local transport.
-      // Pausing leaves network reads active and can emit connection errors
-      // into the next protocol's load after the proxy has been closed.
-      try {
-        await Future.wait([
-          if (_player != null) _player!.stop(),
-          if (_secondaryPlayer != null) _secondaryPlayer!.stop(),
-        ]);
-      } on Object catch (error) {
-        debugPrint('ShuYoVOD live stop failure: ${error.runtimeType}');
+    final preparation = _transport.prepare(() async {
+      if (!mounted || revision != _loadRevision) return;
+      await _disposeRtc();
+      if (!mounted || revision != _loadRevision) return;
+      _stopLiveTimers();
+      if (!drainLive && _liveProxy == null) {
+        await _secondaryPlayer?.pause();
       }
+      if (drainLive || _liveProxy != null) {
+        // A native open can outlive its timeout. Stop the previous demuxer
+        // before starting the next transport or removing its proxy.
+        await _transport.stopAndDrain(
+          stop: () async {
+            await Future.wait([
+              if (_player != null) _player!.stop(),
+              if (_secondaryPlayer != null) _secondaryPlayer!.stop(),
+            ]);
+          },
+          primaryQueue: _mediaQueue,
+          secondaryQueue: _secondaryQueue,
+          drain: drainLive,
+        );
+      }
+      // The old opening task may have created the proxy while stop awaited.
+      final oldProxy = _liveProxy;
+      _liveProxy = null;
+      await oldProxy?.dispose();
+    });
+    try {
+      await preparation;
+    } on Object catch (error) {
+      debugPrint('ShuYoVOD transport stop failure: ${error.runtimeType}');
+      if (mounted && revision == _loadRevision) {
+        _publish(() {
+          _loading = false;
+          _failure = _PlaybackFailure.media;
+        });
+      }
+      return;
     }
-    await oldProxy?.dispose();
     if (!mounted || revision != _loadRevision) return;
     final oldPosition = resume && _loadedLessonId == lesson.id
         ? (_timelinePlayer ?? _player)?.state.position
@@ -856,11 +883,13 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
         if (!mounted || revision != _loadRevision) return;
         var mediaUrl = view.url;
         if (playback.isLive && widget.repository != null) {
-          _liveProxy ??= VodLiveStreamProxy(
-            useWebVpn: widget.repository!.useWebVpn,
-            headersLoader: widget.repository!.mediaHeadersFor,
-          );
+          _liveProxy ??= widget.liveProxyFactory?.call(widget.repository!) ??
+              VodLiveStreamProxy(
+                useWebVpn: widget.repository!.useWebVpn,
+                headersLoader: widget.repository!.mediaHeadersFor,
+              );
           mediaUrl = await _liveProxy!.open(view.url);
+          if (!mounted || revision != _loadRevision) return;
         }
         _openingMediaRevision = revision;
         _timelinePlayer = player;
@@ -868,20 +897,19 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
         if (!mounted || revision != _loadRevision) return;
         if (_viewVolumeInitialized) await player.setVolume(_viewVolume);
         if (!mounted || revision != _loadRevision) return;
-        await player
-            .open(
-              Media(
-                mediaUrl.toString(),
-                httpHeaders: playback.isLive && _liveProxy != null
-                    ? const {}
-                    : view.httpHeaders,
-                start: position != null && position > Duration.zero
-                    ? position
-                    : null,
-              ),
-              play: play && _foreground,
-            )
-            .timeout(const Duration(seconds: 25));
+        final nativeOpen = player.open(
+          Media(
+            mediaUrl.toString(),
+            httpHeaders: playback.isLive && _liveProxy != null
+                ? const {}
+                : view.httpHeaders,
+            start:
+                position != null && position > Duration.zero ? position : null,
+          ),
+          play: play && _foreground,
+        );
+        _transport.trackOpen(nativeOpen, secondary: false);
+        await nativeOpen.timeout(const Duration(seconds: 25));
         if (_openingMediaRevision == revision) _openingMediaRevision = null;
         if (!mounted || revision != _loadRevision) return;
         if (playback.isLive || rate != 1) {
@@ -946,18 +974,62 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
     }
   }
 
-  Future<void> _disposeRtc() async {
+  Future<void> _disposeRtc({bool waitIndefinitely = false}) async {
+    _cancelRtcVolumeSubscription();
+    await _transport.waitForRtcTeardown(waitIndefinitely: waitIndefinitely);
     final sessions = _rtcSessions;
     _rtcSessions = [];
     _rtcRequestedView = null;
-    for (final session in sessions) {
-      try {
-        await session.dispose();
-      } on Object catch (error) {
-        debugPrint('ShuYoVOD WebRTC teardown failure: ${error.runtimeType}');
-      }
+    if (sessions.isEmpty) return;
+    await _transport.teardownRtc(
+      () async => Future.wait(sessions.map((session) => session.dispose())),
+      waitIndefinitely: waitIndefinitely,
+    );
+  }
+
+  void _cancelRtcVolumeSubscription() {
+    final subscription = _rtcVolumeSubscription;
+    _rtcVolumeSubscription = null;
+    if (subscription != null) {
+      // Stream cancellation owns no native RTC resources. Revision and session
+      // guards already reject late events, so it must not delay teardown.
+      unawaited(subscription.cancel().catchError((Object _) {}));
     }
   }
+
+  Future<void> _shutdownTransports() => _transport.prepare(() async {
+        Object? rtcError;
+        StackTrace? rtcStack;
+        try {
+          await _disposeRtc(waitIndefinitely: true);
+        } on Object catch (error, stack) {
+          // A failed RTC cleanup must not skip the independent media player.
+          rtcError = error;
+          rtcStack = stack;
+        }
+        await _transport.stopAndDrain(
+          stop: () async {
+            await Future.wait([
+              if (_player != null) _player!.stop(),
+              if (_secondaryPlayer != null) _secondaryPlayer!.stop(),
+            ]);
+          },
+          primaryQueue: _mediaQueue,
+          secondaryQueue: _secondaryQueue,
+          drain: true,
+          waitIndefinitely: true,
+        );
+        final proxy = _liveProxy;
+        _liveProxy = null;
+        await proxy?.dispose();
+        // The route releases its decoders only after outstanding native opens
+        // and their final stop have actually completed.
+        await Future.wait([
+          _releasePlayer(_secondaryPlayer, _secondaryErrorSubscription),
+          _releasePlayer(_player, _errorSubscription),
+        ]);
+        if (rtcError != null) Error.throwWithStackTrace(rtcError, rtcStack!);
+      });
 
   Future<void> _pauseRtc() async {
     for (final session in _rtcSessions.toList()) {
@@ -1007,9 +1079,33 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
       _watchCacheRate(player);
     }
     final sessions = playback.views
-        .map((view) => VodWebRtcSession(view.webRtcSource!))
+        .map((view) =>
+            widget.webRtcSessionFactory?.call(view.webRtcSource!) ??
+            VodWebRtcSession(view.webRtcSource!))
         .toList(growable: false);
     _rtcSessions = sessions;
+    _cancelRtcVolumeSubscription();
+    if (!_viewVolumeInitialized) {
+      _viewVolume = player.state.volume;
+      _viewVolumeInitialized = true;
+    }
+    _rtcVolumeSubscription = player.stream.volume.listen((volume) {
+      if (!mounted ||
+          revision != _loadRevision ||
+          !identical(_rtcSessions, sessions)) {
+        return;
+      }
+      _viewVolume = volume;
+      _viewVolumeInitialized = true;
+      unawaited(() async {
+        try {
+          await Future.wait(
+              sessions.map((session) => session.setVolume(volume)));
+        } on Object {
+          debugPrint('ShuYoVOD WebRTC volume update failed');
+        }
+      }());
+    });
     for (var index = 0; index < sessions.length; index++) {
       final session = sessions[index];
       session.state.addListener(() {
@@ -1056,6 +1152,8 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
         .timeout(const Duration(seconds: 20));
     if (!mounted || revision != _loadRevision) return;
     for (var index = 0; index < sessions.length; index++) {
+      if (!mounted || revision != _loadRevision) return;
+      await sessions[index].setVolume(_viewVolume);
       await sessions[index].setAudioEnabled(index == _viewIndex);
     }
     if (!mounted || revision != _loadRevision) return;
@@ -1637,15 +1735,16 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
         final url = playback.isLive && _liveProxy != null
             ? await _liveProxy!.open(view.url)
             : view.url;
-        await secondary
-            .open(
-                Media(url.toString(),
-                    httpHeaders: playback.isLive && _liveProxy != null
-                        ? const {}
-                        : view.httpHeaders,
-                    start: playback.isLive ? null : _player?.state.position),
-                play: _foreground && (_player?.state.playing ?? false))
-            .timeout(const Duration(seconds: 25));
+        if (!mounted || revision != _secondaryRevision) return;
+        final nativeOpen = secondary.open(
+            Media(url.toString(),
+                httpHeaders: playback.isLive && _liveProxy != null
+                    ? const {}
+                    : view.httpHeaders,
+                start: playback.isLive ? null : _player?.state.position),
+            play: _foreground && (_player?.state.playing ?? false));
+        _transport.trackOpen(nativeOpen, secondary: true);
+        await nativeOpen.timeout(const Duration(seconds: 25));
         if (!mounted || revision != _secondaryRevision) return;
         await secondary.setRate(_player?.state.rate ?? 1);
         await _waitForVideoOutput(_secondaryController!)

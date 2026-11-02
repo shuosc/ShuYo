@@ -12,6 +12,8 @@ import 'package:shuyo/data/models/course_recording.dart';
 import 'package:shuyo/data/models/vod_ppt.dart';
 import 'package:shuyo/data/repositories/vod_repository.dart';
 import 'package:shuyo/data/services/vod_api_client.dart';
+import 'package:shuyo/data/services/vod_live_stream_proxy.dart';
+import 'package:shuyo/data/services/vod_webrtc_session.dart';
 import 'package:shuyo/features/course_recordings/recording_episode_sort_icon.dart';
 import 'package:shuyo/features/course_recordings/recording_episode_tile.dart';
 import 'package:shuyo/features/course_recordings/recording_course_overview.dart';
@@ -35,6 +37,7 @@ class _PlatformPlayer extends PlatformPlayer {
   int toggles = 0;
   int plays = 0;
   int pauses = 0;
+  int stops = 0;
   final opened = <Playable>[];
   final seeks = <Duration>[];
   final volumes = <double>[];
@@ -42,6 +45,8 @@ class _PlatformPlayer extends PlatformPlayer {
   Completer<void>? openGate;
   Completer<void>? seekGate;
   Completer<void>? volumeGate;
+  Completer<void>? stopGate;
+  bool failStop = false;
   bool failNextVolume = false;
   bool publishSeekPosition = true;
   bool publishVolumeState = true;
@@ -87,6 +92,15 @@ class _PlatformPlayer extends PlatformPlayer {
   @override
   Future<void> pause() async {
     pauses++;
+    state = state.copyWith(playing: false);
+    playingController.add(false);
+  }
+
+  @override
+  Future<void> stop() async {
+    stops++;
+    await stopGate?.future;
+    if (failStop) throw StateError('stop failed');
     state = state.copyWith(playing: false);
     playingController.add(false);
   }
@@ -332,6 +346,96 @@ class _CatalogRepository extends VodRepository {
       {required VodCourse course, required VodLesson lesson}) async {
     requested.add(lesson);
     throw const VodPermissionException();
+  }
+}
+
+class _ProtocolRepository extends VodRepository {
+  final requested = <VodLiveProtocol>[];
+  bool allowPlayback = false;
+
+  @override
+  Future<void> keepLiveAlive(VodCourse course, VodLesson lesson) async {}
+
+  @override
+  Future<VodPlayback> prepareLivePlaybackWithProtocol({
+    required VodCourse course,
+    required VodLesson lesson,
+    required VodLiveProtocol protocol,
+  }) async {
+    requested.add(protocol);
+    if (!allowPlayback) throw const VodPermissionException();
+    final source = VodWebRtcSource(
+        signalingUri: Uri.parse('wss://example.test/live'),
+        deviceId: 'camera',
+        accountToken: 'test',
+        stunServer: '',
+        useWebVpn: false);
+    return VodPlayback(
+        lessonId: lesson.id,
+        teachingClassId: course.teachingClassId,
+        title: course.name,
+        isLive: true,
+        views: [
+          VodView(
+              viewNumber: 1,
+              url: Uri.https('media.example', '/live'),
+              webRtcSource: protocol == VodLiveProtocol.webRtc ? source : null),
+        ]);
+  }
+}
+
+class _FakeRtcSession extends VodWebRtcSession {
+  _FakeRtcSession(super.source);
+  int starts = 0;
+  bool disposed = false;
+  bool failDisposal = false;
+  Completer<void>? disposalGate;
+  final volumes = <double>[];
+  final audioEnabled = <bool>[];
+  double? initialVolume;
+  bool? initialAudioEnabled;
+
+  @override
+  Future<void> start() async {
+    starts++;
+    initialVolume = volumes.lastOrNull;
+    initialAudioEnabled = audioEnabled.lastOrNull;
+    state.value = VodWebRtcState.playing;
+  }
+
+  @override
+  Future<void> setAudioEnabled(bool enabled) async => audioEnabled.add(enabled);
+
+  @override
+  Future<void> setVolume(double volume) async => volumes.add(volume);
+
+  @override
+  Future<void> dispose() async {
+    await disposalGate?.future;
+    disposed = true;
+    state.value = VodWebRtcState.disposed;
+    state.dispose();
+    if (failDisposal) throw StateError('RTC disposal failed');
+  }
+}
+
+class _FakeLiveProxy extends VodLiveStreamProxy {
+  _FakeLiveProxy({this.openGate})
+      : super(useWebVpn: false, headersLoader: (_) async => const {});
+  final Completer<void>? openGate;
+  int opens = 0;
+  bool disposed = false;
+
+  @override
+  Future<Uri> open(Uri source) async {
+    opens++;
+    await openGate?.future;
+    return source;
+  }
+
+  @override
+  Future<void> dispose() async {
+    disposed = true;
   }
 }
 
@@ -1022,6 +1126,9 @@ void main() {
     Future<bool> Function()? webVpnRecovery,
     VodLesson? initial,
     _PlaybackHarness? harness,
+    VodRepository? repository,
+    VodLiveStreamProxy Function(VodRepository)? liveProxyFactory,
+    VodWebRtcSession Function(VodWebRtcSource)? webRtcSessionFactory,
     List<VodLesson>? lessons,
     EdgeInsets insets = EdgeInsets.zero,
   }) =>
@@ -1035,7 +1142,12 @@ void main() {
           course: course,
           lessons: lessons ?? [first, second, unavailable, unrelated],
           initialLesson: initial ?? first,
+          skipInitialCatalogLoad: repository is _ProtocolRepository,
           loadPlayback: load,
+          repository: repository,
+          liveProxyFactory: liveProxyFactory ??
+              (repository == null ? null : (_) => _FakeLiveProxy()),
+          webRtcSessionFactory: webRtcSessionFactory,
           loadNotes: loadNotes,
           onSessionExpired: login,
           onWebVpnSessionExpired: webVpnRecovery,
@@ -2755,6 +2867,514 @@ void main() {
     'Cannot seek in this stream.',
     "You can force it with '--force-seekable=yes'.",
   ];
+
+  testWidgets('switching a loading live stream waits for its native open',
+      (tester) async {
+    prepareNotesPortrait(tester);
+    final pendingOpen = Completer<void>();
+    final harness = _PlaybackHarness(primaryOpen: pendingOpen);
+    final repository = _ProtocolRepository();
+    final lesson = VodLesson(
+        id: 106,
+        teachingClassId: 10,
+        name: course.name,
+        isPlayable: true,
+        isLive: true);
+    await tester.pumpWidget(page(
+      initial: lesson,
+      lessons: [lesson],
+      harness: harness,
+      repository: repository,
+      load: (selected) async => playback(selected),
+      loadNotes: (_) async => [],
+    ));
+    for (var attempt = 0; attempt < 20; attempt++) {
+      await tester.pump();
+      if (harness.platforms.isNotEmpty &&
+          harness.platforms.first.opened.isNotEmpty) {
+        break;
+      }
+    }
+    expect(harness.platforms.first.opened, hasLength(1));
+    final controls = tester
+        .widget<RecordingVideoControls>(find.byType(RecordingVideoControls));
+    controls.onLiveProtocolChanged!(VodLiveProtocol.webRtc);
+    await tester.pump();
+    await tester.pump();
+    expect(harness.platforms.first.stops, 1);
+    expect(repository.requested, isEmpty);
+
+    pendingOpen.complete();
+    await tester.pump();
+    await tester.pump();
+    expect(repository.requested, [VodLiveProtocol.webRtc]);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('a failed media stop prevents WebRTC initialization',
+      (tester) async {
+    prepareNotesPortrait(tester);
+    final pendingOpen = Completer<void>();
+    final harness = _PlaybackHarness(primaryOpen: pendingOpen);
+    final repository = _ProtocolRepository();
+    final lesson = VodLesson(
+        id: 106,
+        teachingClassId: 10,
+        name: course.name,
+        isPlayable: true,
+        isLive: true);
+    await tester.pumpWidget(page(
+      initial: lesson,
+      lessons: [lesson],
+      harness: harness,
+      repository: repository,
+      load: (selected) async => playback(selected),
+      loadNotes: (_) async => [],
+    ));
+    for (var attempt = 0; attempt < 20; attempt++) {
+      await tester.pump();
+      if (harness.platforms.isNotEmpty &&
+          harness.platforms.first.opened.isNotEmpty) {
+        break;
+      }
+    }
+    final primary = harness.platforms.first;
+    expect(primary.opened, hasLength(1));
+    primary.failStop = true;
+    tester
+        .widget<RecordingVideoControls>(find.byType(RecordingVideoControls))
+        .onLiveProtocolChanged!(VodLiveProtocol.webRtc);
+    await tester.pump();
+    await tester.pump();
+    expect(primary.stops, 1);
+    expect(repository.requested, isEmpty);
+    expect(find.text('视频暂时无法播放，可刷新播放地址后重试。'), findsOneWidget);
+    pendingOpen.complete();
+    await tester.pump();
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('rapid protocol changes wait for the same opening stream',
+      (tester) async {
+    prepareNotesPortrait(tester);
+    final pendingOpen = Completer<void>();
+    final harness = _PlaybackHarness(primaryOpen: pendingOpen);
+    final repository = _ProtocolRepository();
+    final lesson = VodLesson(
+        id: 106,
+        teachingClassId: 10,
+        name: course.name,
+        isPlayable: true,
+        isLive: true);
+    await tester.pumpWidget(page(
+      initial: lesson,
+      lessons: [lesson],
+      harness: harness,
+      repository: repository,
+      load: (selected) async => playback(selected),
+      loadNotes: (_) async => [],
+    ));
+    for (var attempt = 0; attempt < 20; attempt++) {
+      await tester.pump();
+      if (harness.platforms.isNotEmpty &&
+          harness.platforms.first.opened.isNotEmpty) {
+        break;
+      }
+    }
+    expect(harness.platforms.first.opened, hasLength(1));
+    final change = tester
+        .widget<RecordingVideoControls>(find.byType(RecordingVideoControls))
+        .onLiveProtocolChanged!;
+    change(VodLiveProtocol.webRtc);
+    await tester.pump();
+    change(VodLiveProtocol.hls);
+    change(VodLiveProtocol.webRtc);
+    await tester.pump();
+    expect(repository.requested, isEmpty);
+    pendingOpen.complete();
+    for (var attempt = 0; attempt < 10; attempt++) {
+      await tester.pump();
+    }
+    expect(repository.requested, [VodLiveProtocol.webRtc]);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('a timed out native stop still blocks WebRTC on retry',
+      (tester) async {
+    prepareNotesPortrait(tester);
+    final pendingOpen = Completer<void>();
+    final pendingStop = Completer<void>();
+    final harness = _PlaybackHarness(primaryOpen: pendingOpen);
+    final repository = _ProtocolRepository();
+    final lesson = VodLesson(
+        id: 106,
+        teachingClassId: 10,
+        name: course.name,
+        isPlayable: true,
+        isLive: true);
+    await tester.pumpWidget(page(
+      initial: lesson,
+      lessons: [lesson],
+      harness: harness,
+      repository: repository,
+      load: (selected) async => playback(selected),
+      loadNotes: (_) async => [],
+    ));
+    for (var attempt = 0; attempt < 20; attempt++) {
+      await tester.pump();
+      if (harness.platforms.isNotEmpty &&
+          harness.platforms.first.opened.isNotEmpty) {
+        break;
+      }
+    }
+    final primary = harness.platforms.first;
+    expect(primary.opened, hasLength(1));
+    primary.stopGate = pendingStop;
+    tester
+        .widget<RecordingVideoControls>(find.byType(RecordingVideoControls))
+        .onLiveProtocolChanged!(VodLiveProtocol.webRtc);
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 9));
+    expect(repository.requested, isEmpty);
+    expect(find.text('视频暂时无法播放，可刷新播放地址后重试。'), findsOneWidget);
+    await tester.tap(find.text('重试'));
+    await tester.pump();
+    expect(primary.stops, 1);
+    expect(repository.requested, isEmpty);
+    pendingOpen.complete();
+    pendingStop.complete();
+    for (var attempt = 0; attempt < 10; attempt++) {
+      await tester.pump();
+    }
+    expect(repository.requested, [VodLiveProtocol.webRtc]);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('a stale live proxy cannot start its old decoder',
+      (tester) async {
+    prepareNotesPortrait(tester);
+    final pendingProxy = Completer<void>();
+    final proxy = _FakeLiveProxy(openGate: pendingProxy);
+    final harness = _PlaybackHarness();
+    final repository = _ProtocolRepository();
+    final lesson = VodLesson(
+        id: 106,
+        teachingClassId: 10,
+        name: course.name,
+        isPlayable: true,
+        isLive: true);
+    await tester.pumpWidget(page(
+      initial: lesson,
+      lessons: [lesson],
+      harness: harness,
+      repository: repository,
+      liveProxyFactory: (_) => proxy,
+      load: (selected) async => playback(selected),
+      loadNotes: (_) async => [],
+    ));
+    for (var attempt = 0; attempt < 20 && proxy.opens == 0; attempt++) {
+      await tester.pump();
+    }
+    expect(proxy.opens, 1);
+    await tester.pump();
+    tester
+        .widget<RecordingVideoControls>(find.byType(RecordingVideoControls))
+        .onLiveProtocolChanged!(VodLiveProtocol.webRtc);
+    await tester.pump();
+    expect(proxy.disposed, isFalse);
+    expect(repository.requested, isEmpty);
+    pendingProxy.complete();
+    for (var attempt = 0; attempt < 10; attempt++) {
+      await tester.pump();
+    }
+    expect(harness.platforms.first.opened, isEmpty);
+    expect(proxy.disposed, isTrue);
+    expect(repository.requested, [VodLiveProtocol.webRtc]);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('leaving a loading live stream drains it before closing proxy',
+      (tester) async {
+    prepareNotesPortrait(tester);
+    final pendingOpen = Completer<void>();
+    final proxy = _FakeLiveProxy();
+    final harness = _PlaybackHarness(primaryOpen: pendingOpen);
+    final repository = _ProtocolRepository();
+    final lesson = VodLesson(
+        id: 106,
+        teachingClassId: 10,
+        name: course.name,
+        isPlayable: true,
+        isLive: true);
+    await tester.pumpWidget(page(
+      initial: lesson,
+      lessons: [lesson],
+      harness: harness,
+      repository: repository,
+      liveProxyFactory: (_) => proxy,
+      load: (selected) async => playback(selected),
+      loadNotes: (_) async => [],
+    ));
+    for (var attempt = 0; attempt < 20; attempt++) {
+      await tester.pump();
+      if (harness.platforms.isNotEmpty &&
+          harness.platforms.first.opened.isNotEmpty) {
+        break;
+      }
+    }
+    final player = harness.platforms.first;
+    expect(player.opened, hasLength(1));
+    expect(proxy.opens, 1);
+
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pump();
+    expect(player.stops, greaterThanOrEqualTo(1));
+    expect(proxy.disposed, isFalse);
+    pendingOpen.complete();
+    for (var attempt = 0; attempt < 10; attempt++) {
+      await tester.pump();
+    }
+    expect(player.stops, greaterThanOrEqualTo(2));
+    expect(player.state.playing, isFalse);
+    expect(proxy.disposed, isTrue);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('all live protocol pairs can switch without changing the view',
+      (tester) async {
+    prepareNotesPortrait(tester);
+    final harness = _PlaybackHarness();
+    final repository = _ProtocolRepository()..allowPlayback = true;
+    final sessions = <_FakeRtcSession>[];
+    final lesson = VodLesson(
+        id: 106,
+        teachingClassId: 10,
+        name: course.name,
+        isPlayable: true,
+        isLive: true);
+    var hlsRequests = 0;
+    await tester.pumpWidget(page(
+      initial: lesson,
+      lessons: [lesson],
+      harness: harness,
+      repository: repository,
+      webRtcSessionFactory: (source) {
+        final session = _FakeRtcSession(source);
+        sessions.add(session);
+        return session;
+      },
+      load: (selected) async {
+        hlsRequests++;
+        return VodPlayback(
+            lessonId: selected.id,
+            teachingClassId: course.teachingClassId,
+            title: course.name,
+            isLive: true,
+            views: [
+              VodView(viewNumber: 1, url: Uri.https('media.example', '/live'))
+            ]);
+      },
+      loadNotes: (_) async => [],
+    ));
+    for (var attempt = 0; attempt < 20; attempt++) {
+      await tester.pump();
+    }
+    expect(hlsRequests, 1);
+    final sequence = [
+      VodLiveProtocol.flv,
+      VodLiveProtocol.webRtc,
+      VodLiveProtocol.hls,
+      VodLiveProtocol.webRtc,
+      VodLiveProtocol.flv,
+      VodLiveProtocol.hls,
+    ];
+    for (final protocol in sequence) {
+      tester
+          .widget<RecordingVideoControls>(find.byType(RecordingVideoControls))
+          .onLiveProtocolChanged!(protocol);
+      for (var attempt = 0; attempt < 20; attempt++) {
+        await tester.pump();
+      }
+      expect(tester.takeException(), isNull, reason: protocol.name);
+      final controls = tester
+          .widget<RecordingVideoControls>(find.byType(RecordingVideoControls));
+      expect(controls.liveProtocol, protocol);
+      expect(controls.failure, isNull,
+          reason:
+              '${protocol.name}: ${(controls.failure as RecordingPlaybackMessage?)?.message}');
+    }
+    expect(hlsRequests, 3);
+    expect(repository.requested, [
+      VodLiveProtocol.flv,
+      VodLiveProtocol.webRtc,
+      VodLiveProtocol.webRtc,
+      VodLiveProtocol.flv,
+    ]);
+    expect(sessions, hasLength(2));
+    expect(sessions.every((session) => session.starts == 1 && session.disposed),
+        isTrue);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('RTC applies media volume before first start and follows changes',
+      (tester) async {
+    prepareNotesPortrait(tester);
+    final harness = _PlaybackHarness();
+    final repository = _ProtocolRepository()..allowPlayback = true;
+    final sessions = <_FakeRtcSession>[];
+    final lesson = VodLesson(
+        id: 106,
+        teachingClassId: 10,
+        name: course.name,
+        isPlayable: true,
+        isLive: true);
+    await tester.pumpWidget(page(
+      initial: lesson,
+      lessons: [lesson],
+      harness: harness,
+      repository: repository,
+      webRtcSessionFactory: (source) {
+        final session = _FakeRtcSession(source);
+        sessions.add(session);
+        return session;
+      },
+      load: (selected) async => playback(selected),
+      loadNotes: (_) async => [],
+    ));
+    for (var attempt = 0; attempt < 20; attempt++) {
+      await tester.pump();
+    }
+    await harness.platforms.first.setVolume(37);
+    tester
+        .widget<RecordingVideoControls>(find.byType(RecordingVideoControls))
+        .onLiveProtocolChanged!(VodLiveProtocol.webRtc);
+    for (var attempt = 0; attempt < 20; attempt++) {
+      await tester.pump();
+    }
+    final session = sessions.single;
+    expect(session.initialVolume, 37);
+    expect(session.initialAudioEnabled, isTrue);
+    await harness.platforms.first.setVolume(62);
+    await tester.pump();
+    expect(session.volumes.last, 62);
+    tester
+        .widget<RecordingVideoControls>(find.byType(RecordingVideoControls))
+        .onLiveProtocolChanged!(VodLiveProtocol.flv);
+    for (var attempt = 0; attempt < 20; attempt++) {
+      await tester.pump();
+    }
+    expect(session.disposed, isTrue);
+    final applied = session.volumes.length;
+    await harness.platforms.first.setVolume(40);
+    await tester.pump();
+    expect(session.volumes.length, applied);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('failed RTC teardown does not skip player cleanup on exit',
+      (tester) async {
+    prepareNotesPortrait(tester);
+    final harness = _PlaybackHarness();
+    final repository = _ProtocolRepository()..allowPlayback = true;
+    _FakeRtcSession? session;
+    final lesson = VodLesson(
+        id: 106,
+        teachingClassId: 10,
+        name: course.name,
+        isPlayable: true,
+        isLive: true);
+    await tester.pumpWidget(page(
+      initial: lesson,
+      lessons: [lesson],
+      harness: harness,
+      repository: repository,
+      webRtcSessionFactory: (source) => session = _FakeRtcSession(source),
+      load: (selected) async => playback(selected),
+      loadNotes: (_) async => [],
+    ));
+    for (var attempt = 0; attempt < 20; attempt++) {
+      await tester.pump();
+    }
+    tester
+        .widget<RecordingVideoControls>(find.byType(RecordingVideoControls))
+        .onLiveProtocolChanged!(VodLiveProtocol.webRtc);
+    for (var attempt = 0; attempt < 20; attempt++) {
+      await tester.pump();
+    }
+    expect(session?.starts, 1);
+    session!.failDisposal = true;
+    final player = harness.platforms.first;
+    final previousStops = player.stops;
+    await tester.pumpWidget(const SizedBox.shrink());
+    for (var attempt = 0; attempt < 15; attempt++) {
+      await tester.pump();
+    }
+    expect(session!.disposed, isTrue);
+    expect(player.stops, greaterThan(previousStops));
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('a timed out RTC teardown blocks other protocols on retry',
+      (tester) async {
+    prepareNotesPortrait(tester);
+    final harness = _PlaybackHarness();
+    final repository = _ProtocolRepository()..allowPlayback = true;
+    _FakeRtcSession? session;
+    final lesson = VodLesson(
+        id: 106,
+        teachingClassId: 10,
+        name: course.name,
+        isPlayable: true,
+        isLive: true);
+    var hlsRequests = 0;
+    await tester.pumpWidget(page(
+      initial: lesson,
+      lessons: [lesson],
+      harness: harness,
+      repository: repository,
+      webRtcSessionFactory: (source) => session = _FakeRtcSession(source),
+      load: (selected) async {
+        hlsRequests++;
+        return playback(selected);
+      },
+      loadNotes: (_) async => [],
+    ));
+    for (var attempt = 0; attempt < 20; attempt++) {
+      await tester.pump();
+    }
+    tester
+        .widget<RecordingVideoControls>(find.byType(RecordingVideoControls))
+        .onLiveProtocolChanged!(VodLiveProtocol.webRtc);
+    for (var attempt = 0; attempt < 20; attempt++) {
+      await tester.pump();
+    }
+    expect(session?.starts, 1);
+    final disposal = Completer<void>();
+    session!.disposalGate = disposal;
+    tester
+        .widget<RecordingVideoControls>(find.byType(RecordingVideoControls))
+        .onLiveProtocolChanged!(VodLiveProtocol.hls);
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 9));
+    expect(hlsRequests, 1);
+    expect(find.text('视频暂时无法播放，可刷新播放地址后重试。'), findsOneWidget);
+    await tester.tap(find.text('重试'));
+    await tester.pump();
+    expect(hlsRequests, 1);
+    disposal.complete();
+    for (var attempt = 0; attempt < 20; attempt++) {
+      await tester.pump();
+    }
+    expect(hlsRequests, 2);
+    expect(session!.disposed, isTrue);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
 
   testWidgets('live surface seek warnings keep loading and both decoders alive',
       (tester) async {
