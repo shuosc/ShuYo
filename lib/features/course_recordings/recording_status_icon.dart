@@ -97,32 +97,48 @@ class _RecordingStatusIconState extends State<RecordingStatusIcon>
     }
     return Semantics(
       label: widget.enabled ? '正在直播' : '直播已结束',
-      child: SizedBox(
-        width: 24,
-        height: 24,
-        child: AnimatedBuilder(
-          animation: _animation,
-          builder: (context, child) => Row(
-            mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-            children: [
-              for (var index = 0; index < 4; index++)
-                Container(
-                  width: 3,
-                  height: 6 +
-                      15 *
-                          (.5 +
-                              .5 *
-                                  math.sin(_animation.value * math.pi * 2 +
-                                      index * 1.7)),
-                  decoration: BoxDecoration(
-                      color: color, borderRadius: BorderRadius.circular(2)),
-                ),
-            ],
+      child: RepaintBoundary(
+        child: SizedBox(
+          width: 24,
+          height: 24,
+          child: CustomPaint(
+            key: const ValueKey('recording-live-indicator'),
+            painter: _LiveIndicator(color: color, animation: _animation),
           ),
         ),
       ),
     );
   }
+}
+
+// Repaint the small icon directly instead of rebuilding and laying out four
+// changing containers on every animation frame while the list is scrolling.
+class _LiveIndicator extends CustomPainter {
+  _LiveIndicator({required this.color, required this.animation})
+      : super(repaint: animation);
+
+  final Color color;
+  final Animation<double> animation;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    const barWidth = 3.0;
+    final spacing = (size.width - barWidth * 4) / 5;
+    final paint = Paint()..color = color;
+    for (var index = 0; index < 4; index++) {
+      final height = 6 +
+          15 *
+              (.5 + .5 * math.sin(animation.value * math.pi * 2 + index * 1.7));
+      final rect = Rect.fromLTWH(spacing * (index + 1) + barWidth * index,
+          (size.height - height) / 2, barWidth, height);
+      canvas.drawRRect(
+          RRect.fromRectAndRadius(rect, const Radius.circular(2)), paint);
+    }
+  }
+
+  @override
+  bool shouldRepaint(_LiveIndicator oldDelegate) =>
+      color != oldDelegate.color || animation != oldDelegate.animation;
 }
 
 class _GenerationIndicator extends CustomPainter {
