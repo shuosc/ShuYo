@@ -8,6 +8,7 @@ import 'package:shuyo/core/classroom_url_resolver.dart';
 import 'package:shuyo/data/services/client_settings_service.dart';
 import 'package:shuyo/data/services/session_cookie_jar.dart';
 import 'package:shuyo/data/services/unified_account_service.dart';
+import 'package:shuyo/features/course_recordings/course_recordings_page.dart';
 import 'package:shuyo/features/home/empty_classroom_page.dart';
 import 'package:shuyo/features/onboarding/startup_onboarding.dart';
 
@@ -19,6 +20,18 @@ class _PendingAccount extends UnifiedAccountService {
   Future<WebVpnRecoveryOutcome> recoverWebVpn({bool forceRefresh = false}) {
     recoveries++;
     return recovery.future;
+  }
+}
+
+class _QueuedAccount extends UnifiedAccountService {
+  final calls = <bool>[];
+  final routine = Completer<WebVpnRecoveryOutcome>();
+  final forced = Completer<WebVpnRecoveryOutcome>();
+
+  @override
+  Future<WebVpnRecoveryOutcome> recoverWebVpn({bool forceRefresh = false}) {
+    calls.add(forceRefresh);
+    return forceRefresh ? forced.future : routine.future;
   }
 }
 
@@ -101,6 +114,91 @@ void main() {
       controller.dispose();
     });
   }
+
+  testWidgets('recording recovery queues and coalesces forced refreshes',
+      (tester) async {
+    final controller = StartupOnboardingController();
+    final account = _QueuedAccount();
+    final page = await _openRecordings(tester, controller, account);
+    expect(account.calls, [false]);
+
+    final first = page.onWebVpnSessionExpired!();
+    final second = page.onWebVpnSessionExpired!();
+    await tester.pump();
+    expect(account.calls, [false]);
+
+    account.routine.complete(WebVpnRecoveryOutcome.alreadyValid);
+    await tester.pump();
+    await tester.pump();
+    expect(account.calls, [false, true]);
+    var firstCompleted = false;
+    first.then((_) => firstCompleted = true);
+    await tester.pump();
+    expect(firstCompleted, isFalse);
+
+    account.forced.complete(WebVpnRecoveryOutcome.recovered);
+    await tester.pump();
+    expect(await first, isTrue);
+    expect(await second, isTrue);
+    expect(account.calls, [false, true]);
+
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pump();
+    controller.dispose();
+  });
+
+  testWidgets('queued recording refresh stops when WebVPN is disabled',
+      (tester) async {
+    final controller = StartupOnboardingController();
+    final account = _QueuedAccount();
+    final page = await _openRecordings(tester, controller, account);
+    expect(account.calls, [false]);
+
+    final forced = page.onWebVpnSessionExpired!();
+    await tester.pump();
+    expect(account.calls, [false]);
+    expect(await controller.setWebVpnEnabled(false), isTrue);
+    account.routine.complete(WebVpnRecoveryOutcome.alreadyValid);
+    await tester.pump();
+    await tester.pump();
+
+    expect(await forced, isFalse);
+    expect(account.calls, [false]);
+    expect(controller.webVpnEnabled, isFalse);
+    expect(ClassroomUrlResolver.usesWebVpn, isFalse);
+    expect(
+      (await ClientSettingsService().loadNetworkSettings()).webVpnEnabled,
+      isFalse,
+    );
+
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pump();
+    controller.dispose();
+  });
+}
+
+Future<CourseRecordingsPage> _openRecordings(WidgetTester tester,
+    StartupOnboardingController controller, _QueuedAccount account) async {
+  await tester.pumpWidget(MaterialApp(
+    home: AppShell(
+      initialWebVpnEnabled: true,
+      selectedThemeId: 'default',
+      followSystemTheme: false,
+      onThemeChanged: (_) async {},
+      onFollowSystemThemeChanged: (_) async {},
+      academicLoginSignal: 0,
+      initialHasAcademicSession: false,
+      initialAcademicStudentId: null,
+      onboardingController: controller,
+      unifiedAccountService: account,
+    ),
+  ));
+  await tester.pumpAndSettle();
+  await tester.scrollUntilVisible(find.text('课程录播'), 180);
+  await tester.tap(find.text('课程录播'));
+  await tester.pump();
+  await tester.pump(const Duration(milliseconds: 300));
+  return tester.widget<CourseRecordingsPage>(find.byType(CourseRecordingsPage));
 }
 
 Future<EmptyClassroomPage> _openClassroomDuringRecovery(

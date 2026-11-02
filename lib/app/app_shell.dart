@@ -172,6 +172,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
   ThereBookingClient? _webVpnBookingClient;
   ChaoxingBookingClient? _chaoxingBookingClient;
   Future<WebVpnRecoveryOutcome>? _webVpnRecoveryTask;
+  bool _webVpnRecoveryForced = false;
   Future<void>? _thereRecoveryTask;
   CampusCardService? _campusCardServiceInstance;
   CampusCardService get _campusCardService => _campusCardServiceInstance ??=
@@ -190,6 +191,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
     Future<bool> operation,
     int accessRevision,
     bool enableWebVpn,
+    bool forceRefresh,
   })? _webVpnFeatureRecoveryTask;
   bool _refreshingCampusCardFromHome = false;
   String _scheduleSummaryText = '正在读取课表...';
@@ -1248,6 +1250,10 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
         builder: (_) => CourseRecordingsPage(
           useWebVpn: useWebVpn,
           onWebVpnSessionRequired: () => _recoverWebVpnForFeature(),
+          onWebVpnSessionExpired: () => _recoverWebVpnForFeature(
+            enableWebVpn: false,
+            forceRefresh: true,
+          ),
           onCampusSessionExpired: _markCampusAccountExpired,
           onLoginRequested: _loginCampusAccount,
         ),
@@ -1500,12 +1506,14 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
   Future<bool> _recoverWebVpnForFeature({
     bool interactive = true,
     bool enableWebVpn = true,
+    bool forceRefresh = false,
   }) async {
     if (!enableWebVpn && !ClassroomUrlResolver.usesWebVpn) return false;
     if (!interactive) {
       return _attemptWebVpnRecovery(
         interactive: false,
         enableWebVpn: enableWebVpn,
+        forceRefresh: forceRefresh,
       );
     }
     final accessRevision = ClassroomUrlResolver.revision;
@@ -1514,17 +1522,20 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
     // result after the user has changed the connection mode.
     if (pending != null &&
         pending.accessRevision == accessRevision &&
-        pending.enableWebVpn == enableWebVpn) {
+        pending.enableWebVpn == enableWebVpn &&
+        (!forceRefresh || pending.forceRefresh)) {
       return pending.operation;
     }
     final operation = _attemptWebVpnRecovery(
       interactive: true,
       enableWebVpn: enableWebVpn,
+      forceRefresh: forceRefresh,
     );
     _webVpnFeatureRecoveryTask = (
       operation: operation,
       accessRevision: accessRevision,
       enableWebVpn: enableWebVpn,
+      forceRefresh: forceRefresh,
     );
     try {
       return await operation;
@@ -1538,6 +1549,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
   Future<bool> _attemptWebVpnRecovery({
     required bool interactive,
     required bool enableWebVpn,
+    bool forceRefresh = false,
   }) async {
     final accessRevision = ClassroomUrlResolver.revision;
     bool canRecover() =>
@@ -1545,14 +1557,14 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
         accessRevision == ClassroomUrlResolver.revision &&
         (enableWebVpn || ClassroomUrlResolver.usesWebVpn);
     if (widget.isDemo || !canRecover()) return false;
-    var outcome = await _recoverWebVpn();
+    var outcome = await _recoverWebVpn(forceRefresh: forceRefresh);
     if (!canRecover()) return false;
     if (outcome == WebVpnRecoveryOutcome.needsAuthentication) {
       if (!await _handleCampusSsoExpired(interactive: interactive) ||
           !canRecover()) {
         return false;
       }
-      outcome = await _recoverWebVpn();
+      outcome = await _recoverWebVpn(forceRefresh: forceRefresh);
       if (!canRecover()) return false;
     }
     switch (outcome) {
@@ -1609,18 +1621,45 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
     }
   }
 
-  Future<WebVpnRecoveryOutcome> _recoverWebVpn() {
+  Future<WebVpnRecoveryOutcome> _recoverWebVpn({bool forceRefresh = false}) {
     final running = _webVpnRecoveryTask;
-    if (running != null) return running;
-    final task = _runWebVpnRecovery();
+    if (running != null && (!forceRefresh || _webVpnRecoveryForced)) {
+      return running;
+    }
+    final accessRevision = ClassroomUrlResolver.revision;
+    final accountRevision = _campusCardRevision;
+    Future<WebVpnRecoveryOutcome> recover() async {
+      if (running != null) {
+        // A forced exchange must wait for a routine validation, rather than
+        // sharing its already-valid result or publishing cookies concurrently.
+        await running;
+        if (!mounted ||
+            accessRevision != ClassroomUrlResolver.revision ||
+            accountRevision != _campusCardRevision) {
+          return WebVpnRecoveryOutcome.unavailable;
+        }
+      }
+      return _runWebVpnRecovery(forceRefresh: forceRefresh);
+    }
+
+    late final Future<WebVpnRecoveryOutcome> task;
+    task = recover().whenComplete(() {
+      if (identical(_webVpnRecoveryTask, task)) {
+        _webVpnRecoveryTask = null;
+        _webVpnRecoveryForced = false;
+      }
+    });
+    _webVpnRecoveryForced = forceRefresh;
     _webVpnRecoveryTask = task;
     return task;
   }
 
-  Future<WebVpnRecoveryOutcome> _runWebVpnRecovery() async {
+  Future<WebVpnRecoveryOutcome> _runWebVpnRecovery(
+      {bool forceRefresh = false}) async {
     final revision = _campusCardRevision;
     try {
-      final outcome = await _unifiedAccountService.recoverWebVpn();
+      final outcome = await _unifiedAccountService.recoverWebVpn(
+          forceRefresh: forceRefresh);
       if (outcome == WebVpnRecoveryOutcome.needsAuthentication) {
         if (revision != _campusCardRevision && _hasAcademicSession) {
           return WebVpnRecoveryOutcome.unavailable;
@@ -1645,8 +1684,6 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
         _syncOnboardingAccountStatus();
       }
       return WebVpnRecoveryOutcome.unavailable;
-    } finally {
-      _webVpnRecoveryTask = null;
     }
   }
 

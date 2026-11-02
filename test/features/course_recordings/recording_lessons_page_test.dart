@@ -5,6 +5,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:shuyo/data/models/course_recording.dart';
 import 'package:shuyo/data/repositories/vod_repository.dart';
 import 'package:shuyo/data/services/vod_api_client.dart';
+import 'package:shuyo/data/services/vod_auth_exception.dart';
 import 'package:shuyo/features/course_recordings/recording_lessons_page.dart';
 import 'package:shuyo/features/course_recordings/recording_player_page.dart';
 
@@ -61,22 +62,98 @@ Future<void> _mount(
   WidgetTester tester,
   _Repository repository, {
   Future<bool> Function()? recover,
+  Future<bool> Function()? webVpnRecovery,
   double textScale = 1,
 }) =>
     tester.pumpWidget(MaterialApp(
       builder: (context, child) => MediaQuery(
-        data: MediaQuery.of(context)
-            .copyWith(textScaler: TextScaler.linear(textScale)),
+        data: MediaQuery.of(context).copyWith(
+            textScaler: TextScaler.linear(textScale), disableAnimations: true),
         child: child!,
       ),
       home: RecordingLessonsPage(
         repository: repository,
         course: _course,
         onSessionExpired: recover,
+        onWebVpnSessionExpired: webVpnRecovery,
       ),
     ));
 
 void main() {
+  for (final error in [
+    const VodWebVpnSessionExpiredException(),
+    const VodWebVpnAuthRequiredException(),
+  ]) {
+    testWidgets('legacy ${error.runtimeType} recovers only the WebVPN session',
+        (tester) async {
+      var restored = false;
+      var allowRecovery = false;
+      var campusRecoveries = 0;
+      var webVpnRecoveries = 0;
+      final repository = _Repository((_, __) async {
+        if (!restored) throw error;
+        return [_lesson(1, 20)];
+      });
+      await _mount(tester, repository, recover: () async {
+        campusRecoveries++;
+        return true;
+      }, webVpnRecovery: () async {
+        webVpnRecoveries++;
+        restored = allowRecovery;
+        return allowRecovery;
+      });
+      await tester.pumpAndSettle();
+      expect(find.text('WebVPN 连接已失效，请恢复连接后重试'), findsOneWidget);
+      expect(find.text('重新登录'), findsNothing);
+      expect(
+          tester
+              .widget<IconButton>(find.byWidgetPredicate(
+                  (widget) => widget is IconButton && widget.tooltip == '刷新'))
+              .onPressed,
+          isNull);
+      expect(webVpnRecoveries, 0);
+      await tester.tap(find.text('恢复连接'));
+      await tester.pumpAndSettle();
+      expect(webVpnRecoveries, 1);
+      expect(repository.requests, 1);
+      expect(repository.clears, 0);
+      expect(find.text('WebVPN 连接已失效，请恢复连接后重试'), findsOneWidget);
+      allowRecovery = true;
+      await tester.tap(find.text('恢复连接'));
+      await tester.pumpAndSettle();
+      expect(webVpnRecoveries, 2);
+      expect(campusRecoveries, 0);
+      expect(repository.clears, 1);
+      expect(repository.requests, 2);
+      expect(repository.forceRefreshes, [false, false]);
+      expect(find.byKey(const ValueKey('recording-lesson-1')), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    });
+  }
+
+  testWidgets('generating lessons stay listed but cannot open playback',
+      (tester) async {
+    const pending = VodLesson(
+        id: 2,
+        teachingClassId: 42,
+        name: '生成中',
+        isPlayable: false,
+        isGenerating: true);
+    final repository = _Repository((_, __) async => [_lesson(1, 20), pending]);
+    await _mount(tester, repository);
+    await tester.pumpAndSettle();
+    final tile = find.byKey(const ValueKey('recording-lesson-2'));
+    final row = tester.widget<ListTile>(tile);
+    expect(row.enabled, isFalse);
+    expect(row.onTap, isNull);
+    expect(find.byKey(const ValueKey('recording-generating-indicator')),
+        findsOneWidget);
+    await tester.tap(tile);
+    await tester.pump();
+    expect(find.byType(RecordingPlayerPage), findsNothing);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
   testWidgets(
       'groups dates and keeps chronological episode numbers when sorted',
       (tester) async {

@@ -23,6 +23,7 @@ import 'recording_playback_info.dart';
 import 'recording_player_preferences.dart';
 import 'recording_player_menu.dart';
 import 'recording_episode_tile.dart';
+import 'recording_lesson_selection.dart';
 import 'recording_episode_sort_icon.dart';
 import 'recording_playback_status.dart';
 import 'recording_notes_panel.dart';
@@ -54,10 +55,12 @@ class RecordingPlayerPage extends StatefulWidget {
     this.loadCourseCatalog = true,
     this.loadPreviewCatalog = false,
     this.skipInitialCatalogLoad = false,
+    this.initialPreviewCatalog,
     this.loadPlayback,
     this.loadNotes,
     this.repository,
     this.onSessionExpired,
+    this.onWebVpnSessionExpired,
     this.playerFactory,
     this.videoControllerFactory,
   });
@@ -75,10 +78,14 @@ class RecordingPlayerPage extends StatefulWidget {
 
   /// Use the supplied catalog on entry; explicit refreshes are still allowed.
   final bool skipInitialCatalogLoad;
+
+  /// A search preview already in progress, shared with the search page.
+  final Future<List<VodLesson>>? initialPreviewCatalog;
   final Future<VodPlayback> Function(VodLesson)? loadPlayback;
   final Future<List<VodPptSlide>> Function(int courseId)? loadNotes;
   final VodRepository? repository;
   final Future<bool> Function()? onSessionExpired;
+  final Future<bool> Function()? onWebVpnSessionExpired;
   @visibleForTesting
   final Player Function()? playerFactory;
   @visibleForTesting
@@ -88,7 +95,14 @@ class RecordingPlayerPage extends StatefulWidget {
   State<RecordingPlayerPage> createState() => _RecordingPlayerPageState();
 }
 
-enum _PlaybackFailure { session, permission, network, unavailable, media }
+enum _PlaybackFailure {
+  session,
+  webVpnSession,
+  permission,
+  network,
+  unavailable,
+  media
+}
 
 class _RecordingPlayerPageState extends State<RecordingPlayerPage>
     with WidgetsBindingObserver, SingleTickerProviderStateMixin {
@@ -317,21 +331,24 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
     unawaited(_loadPlayerPreferences());
     if (_isMobile) _systemUi.lockPortrait();
     var initial = widget.initialLesson ?? widget.course.liveLesson;
-    if (widget.skipInitialCatalogLoad &&
+    if ((widget.skipInitialCatalogLoad ||
+            initial != null && recordingLessonIsGenerating(initial)) &&
         (initial == null ||
-            !initial.canPlay ||
+            !recordingLessonCanSelect(initial) ||
             initial.id <= 0 ||
             initial.teachingClassId != widget.course.teachingClassId)) {
-      final candidates = _lessons.where((lesson) => lesson.id > 0).toList();
+      final candidates = _lessons
+          .where((lesson) => lesson.id > 0 && recordingLessonCanSelect(lesson))
+          .toList();
       initial =
           candidates.where((lesson) => lesson.isLiveAvailable).firstOrNull ??
               candidates
                   .where((lesson) => !lesson.isLive && lesson.isPlayable)
                   .firstOrNull ??
-              candidates.where((lesson) => lesson.canPlay).firstOrNull;
+              candidates.where(recordingLessonCanSelect).firstOrNull;
     }
     if (initial != null &&
-        initial.canPlay &&
+        recordingLessonCanSelect(initial) &&
         initial.id > 0 &&
         initial.teachingClassId == widget.course.teachingClassId) {
       final selected = initial;
@@ -344,9 +361,10 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
       if (widget.repository != null &&
           _shouldLoadCatalog &&
           !widget.skipInitialCatalogLoad) {
-        unawaited(_loadCatalog());
+        unawaited(_loadCatalog(initialPreview: widget.initialPreviewCatalog));
       }
-    } else if (widget.skipInitialCatalogLoad) {
+    } else if (widget.skipInitialCatalogLoad ||
+        widget.repository == null && !_lessons.any(recordingLessonCanSelect)) {
       _loading = false;
     } else {
       unawaited(widget.repository == null || !_shouldLoadCatalog
@@ -356,7 +374,9 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
   }
 
   Future<void> _loadCatalog(
-      {bool forceRefresh = false, bool fromPull = false}) async {
+      {bool forceRefresh = false,
+      bool fromPull = false,
+      Future<List<VodLesson>>? initialPreview}) async {
     final repository = widget.repository;
     if (repository == null ||
         !_shouldLoadCatalog ||
@@ -370,31 +390,44 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
       _catalogPullRefreshing = fromPull;
     });
     try {
+      final searchSeeds = <int, VodLesson>{
+        for (final lesson in widget.lessons) lesson.id: lesson,
+        for (final lesson in _catalog) lesson.id: lesson,
+        if (_lesson.id > 0) _lesson.id: _catalogSelection,
+      }.values.toList(growable: false);
       final lessons = widget.loadPreviewCatalog
-          ? await repository.loadAndWarmSearchLessons(
-              widget.course,
-              [
-                ...widget.lessons,
-                if (_lesson.id > 0) _lesson,
-              ],
-              forceRefresh: forceRefresh)
+          ? initialPreview != null
+              ? await initialPreview
+              : await repository.loadAndWarmSearchLessons(
+                  widget.course, searchSeeds, forceRefresh: forceRefresh)
           : await repository.loadCourseLessons(widget.course,
               forceRefresh: forceRefresh);
       if (!mounted || revision != _catalogRevision) return;
+      if (initialPreview != null) {
+        final recordings = lessons
+            .where((lesson) => !lesson.isLive && !lesson.isGenerating)
+            .toList(growable: false);
+        if (recordings.isNotEmpty) {
+          unawaited(repository.warmCourseRecordings(widget.course, recordings));
+        }
+      }
       _publish(() {
         if (widget.loadPreviewCatalog) {
           // Keep search results and the current selection even when the
           // preview omits them. A response must never switch playback.
-          final merged = <(int, bool), VodLesson>{
-            for (final lesson in widget.lessons)
-              (lesson.id, lesson.isLive): lesson,
-            if (_lesson.id > 0) (_lesson.id, _lesson.isLive): _catalogSelection,
-            for (final lesson in lessons) (lesson.id, lesson.isLive): lesson,
-          };
-          _catalog = merged.values.toList();
+          _catalog = VodRepository.mergeSearchLessons(
+            widget.course,
+            searchSeeds,
+            [
+              for (final lesson in widget.lessons)
+                if (!lesson.isLive) lesson,
+              if (_lesson.id > 0 && !_lesson.isLive) _catalogSelection,
+              ...lessons,
+            ],
+          );
         } else {
           _catalog = _loading &&
-                  _lesson.canPlay &&
+                  recordingLessonCanSelect(_lesson) &&
                   !lessons.any((lesson) =>
                       lesson.id == _lesson.id &&
                       lesson.isLive == _lesson.isLive)
@@ -411,14 +444,17 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
           .where((lesson) =>
               lesson.id == _lesson.id &&
               lesson.isLive == _lesson.isLive &&
-              lesson.canPlay)
+              recordingLessonCanSelect(lesson))
           .firstOrNull;
       final selected = current ??
           ordered.where((lesson) => lesson.isLiveAvailable).firstOrNull ??
           ordered
-              .where((lesson) => !lesson.isLive && lesson.isPlayable)
+              .where((lesson) =>
+                  !lesson.isLive &&
+                  lesson.isPlayable &&
+                  recordingLessonCanSelect(lesson))
               .firstOrNull ??
-          ordered.where((lesson) => lesson.canPlay).firstOrNull;
+          ordered.where(recordingLessonCanSelect).firstOrNull;
       if (selected != null) {
         if (current == null ||
             !_loading && (_playback == null || _failure != null)) {
@@ -436,8 +472,11 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
       }
     } on Object catch (error) {
       if (!mounted || revision != _catalogRevision) return;
-      if (widget.loadPreviewCatalog && _validLesson(_lesson) ||
-          ((_playback != null || _loading && _lesson.canPlay) &&
+      if (widget.loadPreviewCatalog &&
+              _validLesson(_lesson) &&
+              error is! VodWebVpnSessionExpiredException ||
+          ((_playback != null ||
+                  _loading && recordingLessonCanSelect(_lesson)) &&
               error is! VodSessionExpiredException &&
               (error is! VodPermissionException || !_lesson.isLive))) {
         _publish(() => _catalogLoading = false);
@@ -458,6 +497,7 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
         _catalogLoading = false;
         _loading = false;
         _failure = switch (error) {
+          VodWebVpnSessionExpiredException() => _PlaybackFailure.webVpnSession,
           VodSessionExpiredException() => _PlaybackFailure.session,
           VodPermissionException() => _PlaybackFailure.permission,
           VodNetworkException() => _PlaybackFailure.network,
@@ -488,12 +528,14 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
     _heartbeatPending = true;
     try {
       await widget.repository?.keepLiveAlive(widget.course, _lesson);
-    } on VodSessionExpiredException {
+    } on VodSessionExpiredException catch (error) {
       if (mounted && revision == _loadRevision) {
         _stopLiveTimers();
         await _player?.pause();
         await _pauseRtc();
-        _publish(() => _failure = _PlaybackFailure.session);
+        _publish(() => _failure = error is VodWebVpnSessionExpiredException
+            ? _PlaybackFailure.webVpnSession
+            : _PlaybackFailure.session);
       }
     } on VodPermissionException {
       if (mounted && revision == _loadRevision) {
@@ -515,7 +557,11 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
     if (!_foreground) {
       _resumeLive = _resumeLive ||
           _lesson.isLive &&
-              (_isWebRtc ? _rtcPlaying : (_player?.state.playing ?? false));
+              _failure == null &&
+              (_loading ||
+                  (_isWebRtc
+                      ? _rtcPlaying
+                      : (_player?.state.playing ?? false)));
       _stopLiveTimers();
       unawaited(_player?.pause());
       unawaited(_secondaryPlayer?.pause());
@@ -573,10 +619,12 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
   }
 
   bool _validLesson(VodLesson lesson) =>
-      lesson.canPlay &&
+      recordingLessonCanSelect(lesson) &&
       lesson.teachingClassId == widget.course.teachingClassId &&
       _catalog.any((item) =>
-          item.id == lesson.id && item.isLive == lesson.isLive && item.canPlay);
+          item.id == lesson.id &&
+          item.isLive == lesson.isLive &&
+          recordingLessonCanSelect(item));
 
   Future<void> _loadNotes(VodLesson lesson, {bool forceRefresh = false}) async {
     final warning =
@@ -613,6 +661,19 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
     _stopLiveTimers();
     final oldProxy = _liveProxy;
     _liveProxy = null;
+    if (oldProxy != null) {
+      // Stop the old live demuxers before removing their local transport.
+      // Pausing leaves network reads active and can emit connection errors
+      // into the next protocol's load after the proxy has been closed.
+      try {
+        await Future.wait([
+          if (_player != null) _player!.stop(),
+          if (_secondaryPlayer != null) _secondaryPlayer!.stop(),
+        ]);
+      } on Object catch (error) {
+        debugPrint('ShuYoVOD live stop failure: ${error.runtimeType}');
+      }
+    }
     await oldProxy?.dispose();
     if (!mounted || revision != _loadRevision) return;
     final oldPosition = resume && _loadedLessonId == lesson.id
@@ -682,7 +743,18 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
             lastPosition: playback.lastPosition,
             voiceChannel: playback.voiceChannel,
             isLive: playback.isLive,
+            liveEndTime: playback.liveEndTime,
             description: playback.description);
+        if (_lesson.isLive && playback.liveEndTime != null) {
+          _lesson = _lesson.withLiveEndTime(playback.liveEndTime!);
+          _catalog = [
+            for (final candidate in _catalog)
+              if (candidate.id == _lesson.id && candidate.isLive)
+                _lesson
+              else
+                candidate,
+          ];
+        }
         _viewIndex = selected < 0 ? 0 : selected;
       });
       if (!await _entryWork.ready || !mounted || revision != _loadRevision) {
@@ -709,6 +781,7 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
                 : null;
         _loading = false;
         _failure = switch (error) {
+          VodWebVpnSessionExpiredException() => _PlaybackFailure.webVpnSession,
           VodSessionExpiredException() => _PlaybackFailure.session,
           VodPermissionException() => _PlaybackFailure.permission,
           VodNetworkException() => _PlaybackFailure.network,
@@ -750,8 +823,8 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
               VideoController(player);
           _hostVideoController ??= _videoController;
           final created = player;
-          _errorSubscription =
-              player.stream.error.listen((_) => _onPlayerError(created));
+          _errorSubscription = player.stream.error
+              .listen((message) => _onPlayerError(created, message));
           _syncSubscriptions.add(player.stream.position.listen((position) {
             _observeSeekPosition(created, position);
             unawaited(_alignSecondary());
@@ -818,7 +891,8 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
           unawaited(_heartbeat(revision));
           _heartbeatTimer = Timer.periodic(const Duration(seconds: 60),
               (_) => unawaited(_heartbeat(revision)));
-          final end = _lesson.liveEndTime ?? _lesson.endTime;
+          final end =
+              playback.liveEndTime ?? _lesson.liveEndTime ?? _lesson.endTime;
           if (end != null) {
             _liveEndTimer = Timer(
                 end.difference(DateTime.now()).isNegative
@@ -916,8 +990,8 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
           VideoController(player);
       _hostVideoController ??= _videoController;
       final created = player;
-      _errorSubscription =
-          player.stream.error.listen((_) => _onPlayerError(created));
+      _errorSubscription = player.stream.error
+          .listen((message) => _onPlayerError(created, message));
       _syncSubscriptions.add(player.stream.position.listen((position) {
         _observeSeekPosition(created, position);
         unawaited(_alignSecondary());
@@ -947,7 +1021,12 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
         final state = session.state.value;
         _publish(() {
           if (index == _viewIndex) {
-            if (state == VodWebRtcState.playing ||
+            if (state == VodWebRtcState.connecting ||
+                state == VodWebRtcState.idle) {
+              _loading = true;
+              _failure = null;
+              _failureMessage = null;
+            } else if (state == VodWebRtcState.playing ||
                 state == VodWebRtcState.paused) {
               _loading = false;
               _loadedLessonId = playback.lessonId;
@@ -992,7 +1071,7 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
     unawaited(_heartbeat(revision));
     _heartbeatTimer = Timer.periodic(
         const Duration(seconds: 60), (_) => unawaited(_heartbeat(revision)));
-    final end = _lesson.liveEndTime ?? _lesson.endTime;
+    final end = playback.liveEndTime ?? _lesson.liveEndTime ?? _lesson.endTime;
     if (end != null) {
       final remaining = end.difference(DateTime.now());
       _liveEndTimer =
@@ -1235,7 +1314,21 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
     unawaited(_viewAudioQueue);
   }
 
-  void _onPlayerError(Player source) {
+  void _onPlayerError(Player source, [String? message]) {
+    if (message != null) {
+      final diagnostic =
+          message.replaceAll(RegExp(r'(?:https?|wss?)://[^\s]+'), '<media>');
+      debugPrint('ShuYoVOD native playback error: $diagnostic');
+    }
+    // Android's media_kit VideoController seeks to the current position when
+    // its Surface changes. Non-seekable live streams reject that advisory
+    // operation while continuing to decode; it is not a playback failure.
+    if (_lesson.isLive &&
+        message != null &&
+        (message.trim() == 'Cannot seek in this stream.' ||
+            message.contains("You can force it with '--force-seekable=yes'"))) {
+      return;
+    }
     if (!mounted || _isWebRtc) return;
     if (identical(source, _player) &&
         (!_loading || _openingMediaRevision == _loadRevision)) {
@@ -1349,8 +1442,11 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
   Future<void> _retry() async {
     if (_loading || _recovering) return;
     var recoveredPreviewSession = false;
-    if (_failure == _PlaybackFailure.session) {
-      final recover = widget.onSessionExpired;
+    if (_failure == _PlaybackFailure.session ||
+        _failure == _PlaybackFailure.webVpnSession) {
+      final recover = _failure == _PlaybackFailure.webVpnSession
+          ? widget.onWebVpnSessionExpired ?? widget.onSessionExpired
+          : widget.onSessionExpired;
       if (recover == null) return;
       _publish(() {
         _recovering = true;
@@ -1511,8 +1607,8 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
               widget.videoControllerFactory?.call(secondary) ??
                   VideoController(secondary);
           final created = secondary;
-          _secondaryErrorSubscription =
-              secondary.stream.error.listen((_) => _onPlayerError(created));
+          _secondaryErrorSubscription = secondary.stream.error
+              .listen((message) => _onPlayerError(created, message));
           _syncSubscriptions.add(secondary.stream.position.listen((position) {
             _observeSeekPosition(created, position);
             unawaited(_alignSecondary());
@@ -1691,6 +1787,16 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
                       : Video(
                           key: _videoKey,
                           controller: _hostVideoController!,
+                          aspectRatio: switch (_aspect) {
+                            '4:3' => 4 / 3,
+                            '16:9' => 16 / 9,
+                            _ => null,
+                          },
+                          fit: switch (_aspect) {
+                            '填充' => BoxFit.fill,
+                            '裁剪' => BoxFit.cover,
+                            _ => BoxFit.contain,
+                          },
                           onEnterFullscreen: _enterFullscreen,
                           onExitFullscreen: _exitFullscreen,
                           controls: (state) => ValueListenableBuilder<int>(
@@ -1894,6 +2000,7 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
       topInset: topInset,
       player: _lesson.isLive ? _player : _timelinePlayer ?? _player,
       playingOverride: _isWebRtc ? _rtcPlaying : null,
+      loading: _loading || _recovering,
       canResume: !_loading && _failure == null && _playback != null,
       onResume: () async {
         if (_isWebRtc) {
@@ -2004,9 +2111,11 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
               ),
       );
     }
-    final session = _failure == _PlaybackFailure.session;
-    final message = _failureMessage ??
+    final webVpnSession = _failure == _PlaybackFailure.webVpnSession;
+    final session = _failure == _PlaybackFailure.session || webVpnSession;
+    final message = (webVpnSession ? null : _failureMessage) ??
         switch (_failure) {
+          _PlaybackFailure.webVpnSession => 'WebVPN 连接已失效，请恢复连接后重试',
           _PlaybackFailure.session => '校园账户登录已失效，请重新登录。',
           _PlaybackFailure.permission =>
             _lesson.isLive ? '当前账号没有这节直播的观看权限。' : '无法获取这节录播的播放地址，请稍后重试。',
@@ -2017,12 +2126,26 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
     return RecordingPlaybackMessage(
       icon: Icons.error_outline_rounded,
       message: message,
-      action: session && widget.onSessionExpired == null
+      action: session &&
+              (webVpnSession
+                      ? widget.onWebVpnSessionExpired ?? widget.onSessionExpired
+                      : widget.onSessionExpired) ==
+                  null
           ? null
           : TextButton.icon(
               onPressed: () => unawaited(_retry()),
-              icon: Icon(session ? Icons.login : Icons.refresh, size: 18),
-              label: Text(session ? '重新登录' : '重试'),
+              icon: Icon(
+                  webVpnSession
+                      ? Icons.vpn_key_outlined
+                      : session
+                          ? Icons.login
+                          : Icons.refresh,
+                  size: 18),
+              label: Text(webVpnSession
+                  ? '恢复连接'
+                  : session
+                      ? '重新登录'
+                      : '重试'),
               style: TextButton.styleFrom(foregroundColor: Colors.white),
             ),
     );
@@ -2142,7 +2265,8 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
                           metadata: _episodeCatalog.metadataFor(lesson),
                           number: episodeNumbers[lesson.id]!,
                           selected: lesson.id == _lesson.id,
-                          onTap: !lesson.canPlay || lesson.id == _lesson.id
+                          onTap: !recordingLessonCanSelect(lesson) ||
+                                  lesson.id == _lesson.id
                               ? null
                               : () => unawaited(_loadLesson(lesson)),
                         ),

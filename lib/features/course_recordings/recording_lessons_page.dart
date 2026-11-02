@@ -5,11 +5,14 @@ import 'package:flutter/material.dart';
 import '../../data/models/course_recording.dart';
 import '../../data/repositories/vod_repository.dart';
 import '../../data/services/vod_api_client.dart';
+import '../../data/services/vod_auth_exception.dart';
 import '../../shared/navigation/shuyo_route.dart';
 import '../../shared/shuyo_text_styles.dart';
 import '../../shared/theme/shuyo_theme.dart';
 import '../../shared/widgets/empty_state.dart';
 import 'recording_player_page.dart';
+import 'recording_lesson_selection.dart';
+import 'recording_status_icon.dart';
 
 class RecordingLessonsPage extends StatefulWidget {
   const RecordingLessonsPage({
@@ -17,17 +20,19 @@ class RecordingLessonsPage extends StatefulWidget {
     required this.repository,
     required this.course,
     this.onSessionExpired,
+    this.onWebVpnSessionExpired,
   });
 
   final VodRepository repository;
   final VodCourse course;
   final Future<bool> Function()? onSessionExpired;
+  final Future<bool> Function()? onWebVpnSessionExpired;
 
   @override
   State<RecordingLessonsPage> createState() => _RecordingLessonsPageState();
 }
 
-enum _LessonFailure { session, permission, network, unavailable }
+enum _LessonFailure { session, webVpnSession, permission, network, unavailable }
 
 class _RecordingLessonsPageState extends State<RecordingLessonsPage> {
   List<VodLesson> _lessons = const [];
@@ -79,7 +84,7 @@ class _RecordingLessonsPageState extends State<RecordingLessonsPage> {
       // Guard the route as well as the repository against mixed class data.
       final unique = <int, VodLesson>{};
       for (final lesson in result) {
-        if (lesson.isPlayable &&
+        if ((lesson.isPlayable || recordingLessonIsGenerating(lesson)) &&
             lesson.teachingClassId == course.teachingClassId) {
           unique[lesson.id] = lesson;
         }
@@ -99,6 +104,9 @@ class _RecordingLessonsPageState extends State<RecordingLessonsPage> {
       setState(() {
         _loading = false;
         _failure = switch (error) {
+          VodWebVpnSessionExpiredException() ||
+          VodWebVpnAuthRequiredException() =>
+            _LessonFailure.webVpnSession,
           VodSessionExpiredException() => _LessonFailure.session,
           VodPermissionException() => _LessonFailure.permission,
           VodNetworkException() => _LessonFailure.network,
@@ -113,12 +121,19 @@ class _RecordingLessonsPageState extends State<RecordingLessonsPage> {
   }
 
   Future<void> _refresh() async {
-    if (_loading || _recovering || _failure == _LessonFailure.session) return;
+    if (_loading ||
+        _recovering ||
+        _failure == _LessonFailure.session ||
+        _failure == _LessonFailure.webVpnSession) {
+      return;
+    }
     await _load(forceRefresh: true);
   }
 
   Future<void> _recoverSession() async {
-    final recover = widget.onSessionExpired;
+    final webVpnSession = _failure == _LessonFailure.webVpnSession;
+    final recover =
+        webVpnSession ? widget.onWebVpnSessionExpired : widget.onSessionExpired;
     if (recover == null || _recovering) return;
     final revision = ++_loadRevision;
     setState(() => _recovering = true);
@@ -134,7 +149,7 @@ class _RecordingLessonsPageState extends State<RecordingLessonsPage> {
         _lessons = const [];
         _recovering = false;
       });
-      await _load(forceRefresh: true);
+      await _load(forceRefresh: !webVpnSession);
     } on Object {
       if (!mounted || revision != _loadRevision) return;
       setState(() => _recovering = false);
@@ -143,10 +158,12 @@ class _RecordingLessonsPageState extends State<RecordingLessonsPage> {
 
   Future<void> _openLesson(VodLesson lesson) async {
     if (_loading || _recovering || _opening || _failure != null) return;
+    if (!recordingLessonCanSelect(lesson)) return;
     final course = widget.course;
     final lessons = _lessons;
     final repository = widget.repository;
     final onSessionExpired = widget.onSessionExpired;
+    final onWebVpnSessionExpired = widget.onWebVpnSessionExpired;
     setState(() => _opening = true);
     try {
       await Navigator.of(context).push<void>(shuyoRoute(
@@ -160,6 +177,7 @@ class _RecordingLessonsPageState extends State<RecordingLessonsPage> {
             lesson: selected,
           ),
           onSessionExpired: onSessionExpired,
+          onWebVpnSessionExpired: onWebVpnSessionExpired,
         ),
       ));
     } finally {
@@ -191,10 +209,12 @@ class _RecordingLessonsPageState extends State<RecordingLessonsPage> {
         actions: [
           IconButton(
             tooltip: '刷新',
-            onPressed:
-                _loading || _recovering || _failure == _LessonFailure.session
-                    ? null
-                    : _refresh,
+            onPressed: _loading ||
+                    _recovering ||
+                    _failure == _LessonFailure.session ||
+                    _failure == _LessonFailure.webVpnSession
+                ? null
+                : _refresh,
             icon: const Icon(Icons.refresh),
           ),
         ],
@@ -288,7 +308,8 @@ class _RecordingLessonsPageState extends State<RecordingLessonsPage> {
                         );
                       }
                       final lesson = item as VodLesson;
-                      final canPlay = !_loading &&
+                      final canPlay = recordingLessonCanSelect(lesson) &&
+                          !_loading &&
                           !_recovering &&
                           !_opening &&
                           _failure == null;
@@ -301,9 +322,11 @@ class _RecordingLessonsPageState extends State<RecordingLessonsPage> {
                           enabled: canPlay,
                           contentPadding: const EdgeInsets.symmetric(
                               horizontal: 16, vertical: 8),
-                          leading: Icon(Icons.play_circle_outline,
-                              color:
-                                  canPlay ? colors.accent : colors.textMuted),
+                          leading: RecordingStatusIcon(
+                              isLive: lesson.isLive,
+                              isGenerating: recordingLessonIsGenerating(lesson),
+                              enabled: canPlay,
+                              disabledColor: colors.textMuted),
                           title: Text(
                               '第 ${ordinals[lesson.id]} 集 · ${_timeLabel(lesson)}'),
                           subtitle: Text([
@@ -361,6 +384,7 @@ class _RecordingLessonsPageState extends State<RecordingLessonsPage> {
   }
 
   String get _failureTitle => switch (_failure) {
+        _LessonFailure.webVpnSession => 'WebVPN 连接已失效',
         _LessonFailure.session => '校园账户登录已失效',
         _LessonFailure.permission => '暂时无法观看这门课',
         _LessonFailure.network => '无法连接录播平台',
@@ -368,6 +392,7 @@ class _RecordingLessonsPageState extends State<RecordingLessonsPage> {
       };
 
   String get _failureMessage => switch (_failure) {
+        _LessonFailure.webVpnSession => 'WebVPN 连接已失效，请恢复连接后重试',
         _LessonFailure.session => '请重新登录校园账户后查看课程回放。',
         _LessonFailure.permission => '当前账号没有这门课的观看权限，请返回课程列表刷新。',
         _LessonFailure.network => '请检查校园网、学校 VPN 或 WebVPN 连接，然后重试。',
@@ -375,6 +400,14 @@ class _RecordingLessonsPageState extends State<RecordingLessonsPage> {
       };
 
   Widget? _failureAction() {
+    if (_failure == _LessonFailure.webVpnSession) {
+      if (widget.onWebVpnSessionExpired == null) return null;
+      return TextButton.icon(
+        onPressed: _recovering ? null : _recoverSession,
+        icon: const Icon(Icons.vpn_key_outlined),
+        label: Text(_recovering ? '正在恢复…' : '恢复连接'),
+      );
+    }
     if (_failure == _LessonFailure.session) {
       if (widget.onSessionExpired == null) return null;
       return TextButton.icon(

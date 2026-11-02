@@ -18,7 +18,6 @@ import 'package:shuyo/features/course_recordings/recording_course_overview.dart'
 import 'package:shuyo/features/course_recordings/recording_playback_status.dart';
 import 'package:shuyo/features/course_recordings/recording_player_page.dart';
 import 'package:shuyo/features/course_recordings/recording_player_layout.dart';
-import 'package:shuyo/features/course_recordings/recording_secondary_video.dart';
 import 'package:shuyo/features/course_recordings/recording_status_icon.dart';
 import 'package:shuyo/shared/theme/shuyo_theme.dart';
 import 'package:shuyo/shared/widgets/course_color_label.dart';
@@ -242,6 +241,20 @@ class _DeniedCatalogRepository extends _PendingCatalogRepository {
   }
 }
 
+class _WebVpnHeartbeatRepository extends _PendingCatalogRepository {
+  bool restored = false;
+  int heartbeats = 0;
+
+  @override
+  bool get useWebVpn => true;
+
+  @override
+  Future<void> keepLiveAlive(VodCourse course, VodLesson lesson) async {
+    heartbeats++;
+    if (!restored) throw const VodWebVpnSessionExpiredException();
+  }
+}
+
 class _PendingPreviewRepository extends VodRepository {
   final catalog = Completer<List<VodLesson>>();
   Future<List<VodLesson>>? refreshCatalog;
@@ -379,6 +392,9 @@ void main() {
   }) =>
       MaterialApp(
           theme: theme,
+          builder: (context, child) => MediaQuery(
+              data: MediaQuery.of(context).copyWith(disableAnimations: true),
+              child: child!),
           home: Scaffold(
               body: RecordingVideoControls(
             state: state,
@@ -648,7 +664,7 @@ void main() {
     await tester.pumpWidget(const SizedBox.shrink());
   });
 
-  testWidgets('fullscreen navigation can select a generating recording',
+  testWidgets('fullscreen navigation skips and disables generating recordings',
       (tester) async {
     final platform = _PlatformPlayer();
     final player = Player(platformPlayer: platform);
@@ -668,19 +684,19 @@ void main() {
         isNull);
     await tester.tap(find.byTooltip('下一集'));
     await tester.pump(const Duration(milliseconds: 350));
-    expect(selected?.id, unavailable.id);
+    expect(selected?.id, second.id);
     await tester.tap(find.byTooltip('选集'));
     await tester.pump(const Duration(milliseconds: 350));
     await tester.pumpAndSettle();
     final pending = find.byKey(ValueKey('fullscreen-lesson-${unavailable.id}'));
-    expect(tester.widget<ListTile>(pending).enabled, isTrue);
+    expect(tester.widget<ListTile>(pending).enabled, isFalse);
+    expect(tester.widget<ListTile>(pending).onTap, isNull);
     await tester.tap(pending);
     await tester.pump(const Duration(milliseconds: 350));
     await tester.pumpAndSettle();
-    expect(selected?.id, unavailable.id);
-    await tester.tap(find.byTooltip('选集'));
-    await tester.pump(const Duration(milliseconds: 350));
-    await tester.pumpAndSettle();
+    expect(selected?.id, second.id);
+    expect(
+        find.byKey(const ValueKey('fullscreen-episode-list')), findsOneWidget);
     await tester.tap(find.byKey(ValueKey('fullscreen-lesson-${second.id}')));
     await tester.pump(const Duration(milliseconds: 350));
     await tester.pumpAndSettle();
@@ -1003,6 +1019,7 @@ void main() {
     required Future<VodPlayback> Function(VodLesson) load,
     Future<List<VodPptSlide>> Function(int)? loadNotes,
     Future<bool> Function()? login,
+    Future<bool> Function()? webVpnRecovery,
     VodLesson? initial,
     _PlaybackHarness? harness,
     List<VodLesson>? lessons,
@@ -1021,6 +1038,7 @@ void main() {
           loadPlayback: load,
           loadNotes: loadNotes,
           onSessionExpired: login,
+          onWebVpnSessionExpired: webVpnRecovery,
           playerFactory: harness?.createPlayer,
           videoControllerFactory: harness?.createController,
         ),
@@ -1085,6 +1103,9 @@ void main() {
     ) as MaterialApp)
         .home!;
     await tester.pumpWidget(MaterialApp(
+      builder: (context, child) => MediaQuery(
+          data: MediaQuery.of(context).copyWith(disableAnimations: true),
+          child: child!),
       home: Builder(
           builder: (context) => Scaffold(
                 body: TextButton(
@@ -1664,6 +1685,216 @@ void main() {
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 300));
     expect(tester.takeException(), isNull);
+  });
+
+  for (final webVpn in [false, true]) {
+    testWidgets(
+        '${webVpn ? 'WebVPN' : 'campus'} recovery uses its own callback and retries only once',
+        (tester) async {
+      var campusRecoveries = 0;
+      var webVpnRecoveries = 0;
+      var playbackCalls = 0;
+      var restored = false;
+      await tester.pumpWidget(page(
+        load: (_) async {
+          playbackCalls++;
+          if (webVpn) throw const VodWebVpnSessionExpiredException();
+          throw const VodSessionExpiredException();
+        },
+        login: () async {
+          campusRecoveries++;
+          return restored;
+        },
+        webVpnRecovery: () async {
+          webVpnRecoveries++;
+          return restored;
+        },
+      ));
+      await tester.pumpAndSettle();
+      final action = find.text(webVpn ? '恢复连接' : '重新登录');
+      expect(campusRecoveries, 0);
+      expect(webVpnRecoveries, 0);
+      expect(playbackCalls, 1);
+      await tester.tap(action);
+      await tester.pumpAndSettle();
+      expect(campusRecoveries, webVpn ? 0 : 1);
+      expect(webVpnRecoveries, webVpn ? 1 : 0);
+      expect(playbackCalls, 1);
+      restored = true;
+      await tester.tap(action);
+      await tester.pumpAndSettle();
+      expect(campusRecoveries, webVpn ? 0 : 2);
+      expect(webVpnRecoveries, webVpn ? 2 : 0);
+      expect(playbackCalls, 2);
+      expect(action, findsOneWidget);
+      await tester.pump(const Duration(seconds: 2));
+      expect(playbackCalls, 2);
+      expect(campusRecoveries, webVpn ? 0 : 2);
+      expect(webVpnRecoveries, webVpn ? 2 : 0);
+      expect(tester.takeException(), isNull);
+    });
+  }
+
+  testWidgets('WebVPN recovery is available without a campus login callback',
+      (tester) async {
+    var recoveryCalls = 0;
+    var playbackCalls = 0;
+    await tester.pumpWidget(page(
+      load: (_) async {
+        playbackCalls++;
+        throw const VodWebVpnSessionExpiredException();
+      },
+      webVpnRecovery: () async {
+        recoveryCalls++;
+        return true;
+      },
+    ));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('恢复连接'));
+    await tester.pumpAndSettle();
+    expect(recoveryCalls, 1);
+    expect(playbackCalls, 2);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('campus recovery never uses the WebVPN callback as a fallback',
+      (tester) async {
+    var recoveryCalls = 0;
+    await tester.pumpWidget(page(
+      load: (_) async => throw const VodSessionExpiredException(),
+      webVpnRecovery: () async {
+        recoveryCalls++;
+        return true;
+      },
+    ));
+    await tester.pumpAndSettle();
+    expect(find.text('校园账户登录已失效，请重新登录。'), findsOneWidget);
+    expect(find.text('重新登录'), findsNothing);
+    expect(find.text('恢复连接'), findsNothing);
+    expect(recoveryCalls, 0);
+    expect(tester.takeException(), isNull);
+  });
+
+  for (final live in [false, true]) {
+    testWidgets(
+        '${live ? 'live' : 'recording'} loading keeps its foreground resume intent',
+        (tester) async {
+      prepareNotesPortrait(tester);
+      final harness = _PlaybackHarness();
+      final pending = Completer<VodPlayback>();
+      final lesson = live
+          ? VodLesson(
+              id: 106,
+              teachingClassId: 10,
+              name: course.name,
+              isLive: true,
+              isPlayable: true)
+          : first;
+      var requests = 0;
+      await tester.pumpWidget(page(
+        initial: lesson,
+        harness: harness,
+        load: (selected) {
+          requests++;
+          return requests == 1
+              ? pending.future
+              : Future.value(playback(selected));
+        },
+      ));
+      await tester.pump();
+      expect(requests, 1);
+      expect(harness.platforms, isEmpty);
+      final observer = tester.state(find.byType(RecordingPlayerPage))
+          as WidgetsBindingObserver;
+      observer.didChangeAppLifecycleState(AppLifecycleState.paused);
+      observer.didChangeAppLifecycleState(AppLifecycleState.resumed);
+      await tester.pump();
+      expect(requests, live ? 2 : 1);
+
+      pending.complete(playback(lesson));
+      await tester.pumpAndSettle();
+      expect(harness.platforms, hasLength(2));
+      expect(harness.platforms.every((player) => player.opened.length == 1),
+          isTrue);
+      expect(harness.platforms.every((player) => player.state.playing), isTrue);
+      expect(requests, live ? 2 : 1);
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+    });
+  }
+
+  testWidgets('a manually paused live lesson stays paused after foregrounding',
+      (tester) async {
+    prepareNotesPortrait(tester);
+    final harness = _PlaybackHarness();
+    final lesson = VodLesson(
+        id: 106,
+        teachingClassId: 10,
+        name: course.name,
+        isLive: true,
+        isPlayable: true);
+    var requests = 0;
+    await tester.pumpWidget(page(
+      initial: lesson,
+      harness: harness,
+      load: (selected) async {
+        requests++;
+        return playback(selected);
+      },
+    ));
+    await tester.pumpAndSettle();
+    for (final platform in harness.platforms) {
+      await platform.pause();
+    }
+    await tester.pumpAndSettle();
+    final observer = tester.state(find.byType(RecordingPlayerPage))
+        as WidgetsBindingObserver;
+    observer.didChangeAppLifecycleState(AppLifecycleState.paused);
+    observer.didChangeAppLifecycleState(AppLifecycleState.resumed);
+    await tester.pumpAndSettle();
+    expect(requests, 1);
+    expect(harness.platforms.every((player) => !player.state.playing), isTrue);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('live playback uses the detail window after the lesson has ended',
+      (tester) async {
+    prepareNotesPortrait(tester);
+    final now = DateTime.now();
+    final lesson = VodLesson(
+      id: 106,
+      teachingClassId: 10,
+      name: course.name,
+      isLive: true,
+      isPlayable: true,
+      endTime: now.subtract(const Duration(minutes: 1)),
+    );
+    final harness = _PlaybackHarness();
+    var requests = 0;
+    await tester.pumpWidget(page(
+      initial: lesson,
+      lessons: [lesson],
+      harness: harness,
+      load: (selected) async {
+        requests++;
+        return VodPlayback(
+          lessonId: selected.id,
+          teachingClassId: 10,
+          title: course.name,
+          isLive: true,
+          liveEndTime: now.add(const Duration(minutes: 5)),
+          views: playback(selected).views,
+        );
+      },
+    ));
+    await tester.pumpAndSettle();
+    expect(requests, 1);
+    expect(harness.platforms, isNotEmpty);
+    expect(harness.platforms.first.state.playing, isTrue);
+    expect(find.text('这节课当前暂无可用的播放资源'), findsNothing);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
   });
 
   for (final live in [false, true]) {
@@ -2520,6 +2751,97 @@ void main() {
     await tester.pumpWidget(const SizedBox.shrink());
   });
 
+  const nonSeekableWarnings = [
+    'Cannot seek in this stream.',
+    "You can force it with '--force-seekable=yes'.",
+  ];
+
+  testWidgets('live surface seek warnings keep loading and both decoders alive',
+      (tester) async {
+    prepareNotesPortrait(tester);
+    final pendingOpen = Completer<void>();
+    final harness = _PlaybackHarness(primaryOpen: pendingOpen);
+    final lesson = VodLesson(
+        id: 106,
+        teachingClassId: 10,
+        name: course.name,
+        isPlayable: true,
+        isLive: true);
+    var loads = 0;
+    await tester.pumpWidget(page(
+      initial: lesson,
+      harness: harness,
+      load: (selected) async {
+        loads++;
+        return playback(selected);
+      },
+    ));
+    for (var attempt = 0; attempt < 10; attempt++) {
+      await tester.pump();
+      if (harness.platforms.isNotEmpty &&
+          harness.platforms.first.opened.isNotEmpty) {
+        break;
+      }
+    }
+    expect(harness.platforms, hasLength(1));
+    final primary = harness.platforms.single;
+    final controller = harness.controllers.single;
+    expect(find.byType(RecordingPlaybackLoading), findsOneWidget);
+    for (final warning in nonSeekableWarnings) {
+      primary.emitError(warning);
+      await tester.pump();
+      expect(find.text('视频暂时无法播放，可刷新播放地址后重试。'), findsNothing);
+      expect(find.byType(RecordingPlaybackLoading), findsOneWidget);
+    }
+
+    pendingOpen.complete();
+    await tester.pumpAndSettle();
+    expect(harness.platforms, hasLength(2));
+    expect(harness.platforms.first, same(primary));
+    expect(harness.controllers.first, same(controller));
+    final secondary = harness.platforms[1];
+    for (final warning in nonSeekableWarnings) {
+      secondary.emitError(warning);
+      await tester.pumpAndSettle();
+      expect(secondary.state.playing, isTrue);
+      expect(find.text('视频暂时无法播放，可刷新播放地址后重试。'), findsNothing);
+    }
+    expect(
+        harness.platforms.every((player) => player.opened.length == 1), isTrue);
+    expect(loads, 1);
+    expect(
+        tester
+            .widget<RecordingVideoControls>(find.byType(RecordingVideoControls))
+            .failure,
+        isNull);
+
+    primary.emitError('Failed to open decoder.');
+    await tester.pumpAndSettle();
+    expect(find.text('视频暂时无法播放，可刷新播放地址后重试。'), findsOneWidget);
+    expect(harness.platforms.first, same(primary));
+    expect(loads, 1);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  for (var index = 0; index < nonSeekableWarnings.length; index++) {
+    testWidgets('recording surface seek warning ${index + 1} remains a failure',
+        (tester) async {
+      prepareNotesPortrait(tester);
+      final harness = _PlaybackHarness();
+      await tester.pumpWidget(page(
+        harness: harness,
+        load: (lesson) async => playback(lesson),
+      ));
+      await tester.pumpAndSettle();
+      harness.platforms.first.emitError(nonSeekableWarnings[index]);
+      await tester.pumpAndSettle();
+      expect(find.text('视频暂时无法播放，可刷新播放地址后重试。'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+    });
+  }
+
   testWidgets('player errors during opening replace loading and can retry',
       (tester) async {
     final pendingOpen = Completer<void>();
@@ -2645,13 +2967,21 @@ void main() {
           find.descendant(of: floating, matching: find.byType(DecoratedBox)))) {
         expect((frame.decoration as BoxDecoration).boxShadow, isNull);
       }
-      final textures = [
-        for (final texture in [1, 2])
-          tester.element(find.descendant(
-              of: find.byKey(ObjectKey(harness.controllers[texture - 1])),
-              matching: find.byWidgetPredicate((widget) =>
-                  widget is Texture && widget.textureId == texture))),
-      ];
+      final hostVideo = tester.element(find.byType(Video));
+      final hostState = tester.state(find.byType(Video));
+      final hostTexture = tester.element(find.byWidgetPredicate(
+          (widget) => widget is Texture && widget.textureId == 1));
+      final secondaryTexture = tester.element(find.byWidgetPredicate(
+          (widget) => widget is Texture && widget.textureId == 2));
+      final surfaces = {
+        for (final controller in harness.controllers)
+          controller: tester.element(find.byKey(ObjectKey(controller))),
+      };
+      expect(
+          find.descendant(
+              of: find.byKey(ObjectKey(harness.controllers.first)),
+              matching: find.byType(Texture)),
+          findsNothing);
       await tester.tap(floating);
       await tester.pump(const Duration(milliseconds: 350));
       await tester.pumpAndSettle();
@@ -2665,13 +2995,16 @@ void main() {
       expect(ppt.state.playing, isFalse);
       expect([classroom.plays, ppt.plays], plays);
       expect([classroom.seeks.length, ppt.seeks.length], seeks);
-      for (var texture = 1; texture <= 2; texture++) {
-        expect(
-            tester.element(find.descendant(
-                of: find.byKey(ObjectKey(harness.controllers[texture - 1])),
-                matching: find.byWidgetPredicate((widget) =>
-                    widget is Texture && widget.textureId == texture))),
-            same(textures[texture - 1]));
+      expect(tester.element(find.byType(Video)), same(hostVideo));
+      expect(tester.state(find.byType(Video)), same(hostState));
+      expect(hostTexture.mounted, isTrue);
+      expect(
+          tester.element(find.byWidgetPredicate(
+              (widget) => widget is Texture && widget.textureId == 2)),
+          same(secondaryTexture));
+      for (final controller in harness.controllers) {
+        expect(tester.element(find.byKey(ObjectKey(controller))),
+            same(surfaces[controller]));
       }
 
       if (!live) {
@@ -2776,7 +3109,17 @@ void main() {
           .map((texture) => texture.textureId)
           .toList()
         ..sort();
-      expect(textures, [1, 1, 2]);
+      expect(textures, [1, 2]);
+      final hostVideo = tester.element(find.byType(Video));
+      final hostState = tester.state(find.byType(Video));
+      final hostTexture = tester.element(find.byWidgetPredicate(
+          (widget) => widget is Texture && widget.textureId == 1));
+      final secondaryTexture = tester.element(find.byWidgetPredicate(
+          (widget) => widget is Texture && widget.textureId == 2));
+      final surfaces = {
+        for (final controller in harness.controllers)
+          controller: tester.element(find.byKey(ObjectKey(controller))),
+      };
       var controls = tester
           .widget<RecordingVideoControls>(find.byType(RecordingVideoControls));
       classroom.state =
@@ -2822,6 +3165,17 @@ void main() {
           .toList()
         ..sort();
       expect(swappedTextures, [1, 1, 2]);
+      expect(tester.element(find.byType(Video)), same(hostVideo));
+      expect(tester.state(find.byType(Video)), same(hostState));
+      expect(hostTexture.mounted, isTrue);
+      expect(
+          tester.element(find.byWidgetPredicate(
+              (widget) => widget is Texture && widget.textureId == 2)),
+          same(secondaryTexture));
+      for (final controller in harness.controllers) {
+        expect(tester.element(find.byKey(ObjectKey(controller))),
+            same(surfaces[controller]));
+      }
       expect(classroom.seeks, isEmpty);
       expect(ppt.seeks, isEmpty);
       expect(classroom.opened, hasLength(1));
@@ -3166,10 +3520,14 @@ void main() {
     ppt.seeks.clear();
     final surfaceElements = <VideoController, Element>{
       for (final controller in harness.controllers)
-        controller: tester.element(find.byWidgetPredicate((widget) =>
-            widget is RecordingSecondaryVideo &&
-            identical(widget.controller, controller))),
+        controller: tester.element(find.byKey(ObjectKey(controller))),
     };
+    final hostVideo = tester.element(find.byType(Video));
+    final hostState = tester.state(find.byType(Video));
+    final hostTexture = tester.element(find.byWidgetPredicate(
+        (widget) => widget is Texture && widget.textureId == 1));
+    final secondaryTexture = tester.element(find.byWidgetPredicate(
+        (widget) => widget is Texture && widget.textureId == 2));
     final audibleCounts = <int>[];
     void checkExclusiveAudio() {
       audibleCounts.add(
@@ -3197,11 +3555,15 @@ void main() {
       expect(controls.selectedView, (index + 1) % 2);
       expect(identical(controls.timelinePlayer!.platform, classroom), isTrue);
       expect(tester.widget<Slider>(find.byType(Slider)).value, 30000);
+      expect(tester.element(find.byType(Video)), same(hostVideo));
+      expect(tester.state(find.byType(Video)), same(hostState));
+      expect(hostTexture.mounted, isTrue);
+      expect(
+          tester.element(find.byWidgetPredicate(
+              (widget) => widget is Texture && widget.textureId == 2)),
+          same(secondaryTexture));
       for (final controller in harness.controllers) {
-        expect(
-            tester.element(find.byWidgetPredicate((widget) =>
-                widget is RecordingSecondaryVideo &&
-                identical(widget.controller, controller))),
+        expect(tester.element(find.byKey(ObjectKey(controller))),
             same(surfaceElements[controller]));
       }
     }
@@ -4289,6 +4651,9 @@ void main() {
     addTearDown(repository.dispose);
     await tester.pumpWidget(MaterialApp(
       theme: ShuYoThemes.all.first.themeData(),
+      builder: (context, child) => MediaQuery(
+          data: MediaQuery.of(context).copyWith(disableAnimations: true),
+          child: child!),
       home: RecordingPlayerPage(
         course: course,
         term: const VodTerm(
@@ -4370,7 +4735,7 @@ void main() {
   });
 
   testWidgets(
-      'direct course page prioritizes live and permits a generating episode',
+      'direct course page prioritizes live and disables a generating episode',
       (tester) async {
     final pending = VodLesson(
         id: 105,
@@ -4398,8 +4763,8 @@ void main() {
     await tester.pumpAndSettle();
     expect(repository.requested.single.id, 106);
     final generatedRow = find.byKey(const ValueKey('recording-lesson-105'));
-    expect(tester.widget<ListTile>(generatedRow).enabled, isTrue);
-    expect(tester.widget<ListTile>(generatedRow).onTap, isNotNull);
+    expect(tester.widget<ListTile>(generatedRow).enabled, isFalse);
+    expect(tester.widget<ListTile>(generatedRow).onTap, isNull);
     final liveRow = find.byKey(const ValueKey('recording-lesson-106'));
     expect(tester.getTopLeft(generatedRow).dy,
         lessThan(tester.getTopLeft(liveRow).dy));
@@ -4410,20 +4775,74 @@ void main() {
         findsOneWidget);
     await tester.tap(generatedRow);
     await tester.pump();
-    expect(repository.requested.map((lesson) => lesson.id), [106, 105]);
+    expect(repository.requested.map((lesson) => lesson.id), [106]);
   });
 
-  testWidgets('a course containing only generating episodes requests playback',
+  testWidgets(
+      'explicit generating initial lessons cannot bypass disabled selection',
+      (tester) async {
+    prepareNotesPortrait(tester);
+    for (final isPlayable in [false, true]) {
+      final pending = VodLesson(
+          id: 105,
+          teachingClassId: 10,
+          name: course.name,
+          isPlayable: isPlayable,
+          isGenerating: true);
+      final requested = <VodLesson>[];
+      await tester.pumpWidget(page(
+        initial: pending,
+        lessons: [pending, first],
+        harness: _PlaybackHarness(),
+        load: (lesson) async {
+          requested.add(lesson);
+          return playback(lesson);
+        },
+      ));
+      await tester.pumpAndSettle();
+      expect(requested, [first]);
+      await tester.pumpWidget(const SizedBox.shrink());
+    }
+    final pending = VodLesson(
+        id: 105,
+        teachingClassId: 10,
+        name: course.name,
+        isPlayable: true,
+        isGenerating: true);
+    var requests = 0;
+    await tester.pumpWidget(page(
+        initial: pending,
+        lessons: [pending],
+        load: (lesson) async {
+          requests++;
+          return playback(lesson);
+        }));
+    await tester.pumpAndSettle();
+    expect(requests, 0);
+    expect(find.text('回放生成中，生成后可观看'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets(
+      'a course containing only generating episodes waits without playback',
       (tester) async {
     final repository = _CatalogRepository([unavailable]);
     addTearDown(repository.dispose);
     await tester.pumpWidget(MaterialApp(
       theme: ShuYoThemes.all.first.themeData(),
+      builder: (context, child) => MediaQuery(
+          data: MediaQuery.of(context).copyWith(disableAnimations: true),
+          child: child!),
       home: RecordingPlayerPage(course: course, repository: repository),
     ));
     await tester.pumpAndSettle();
-    expect(repository.requested, [unavailable]);
-    expect(find.text('无法获取这节录播的播放地址，请稍后重试。'), findsOneWidget);
+    expect(repository.requested, isEmpty);
+    expect(find.text('回放生成中，生成后可观看'), findsOneWidget);
+    final row = tester.widget<ListTile>(
+        find.byKey(ValueKey('recording-lesson-${unavailable.id}')));
+    expect(row.enabled, isFalse);
+    expect(row.onTap, isNull);
     expect(find.text('选集'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
@@ -4466,6 +4885,9 @@ void main() {
     addTearDown(repository.dispose);
     await tester.pumpWidget(MaterialApp(
       theme: ShuYoThemes.all.first.themeData(),
+      builder: (context, child) => MediaQuery(
+          data: MediaQuery.of(context).copyWith(disableAnimations: true),
+          child: child!),
       home: RecordingPlayerPage(course: course, repository: repository),
     ));
     await tester.pumpAndSettle();
@@ -4496,7 +4918,7 @@ void main() {
             .widget<ListTile>(
                 find.byKey(const ValueKey('recording-lesson-103')))
             .enabled,
-        isTrue);
+        isFalse);
     expect(find.byKey(const ValueKey('recording-lesson-104')), findsNothing);
 
     await tester.ensureVisible(find.text('重试'));
@@ -4531,6 +4953,162 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  for (final live in [false, true]) {
+    testWidgets(
+        'WebVPN ${live ? 'live' : 'recording'} failure restores before retrying playback',
+        (tester) async {
+      prepareNotesPortrait(tester);
+      final harness = _PlaybackHarness();
+      final lesson = live
+          ? VodLesson(
+              id: 106,
+              teachingClassId: 10,
+              name: course.name,
+              isPlayable: true,
+              isLive: true)
+          : first;
+      final restoration = Completer<bool>();
+      var recoveryCalls = 0;
+      var playbackCalls = 0;
+      await tester.pumpWidget(page(
+        initial: lesson,
+        harness: harness,
+        load: (selected) async {
+          playbackCalls++;
+          if (playbackCalls == 1) {
+            throw const VodWebVpnSessionExpiredException();
+          }
+          return playback(selected);
+        },
+        login: () {
+          recoveryCalls++;
+          return restoration.future;
+        },
+      ));
+      await tester.pumpAndSettle();
+      expect(find.text('WebVPN 连接已失效，请恢复连接后重试'), findsOneWidget);
+      expect(find.text('重新登录'), findsNothing);
+      expect(find.text('校园账户登录已失效，请重新登录。'), findsNothing);
+      expect(recoveryCalls, 0);
+      expect(playbackCalls, 1);
+      await tester.tap(find.text('恢复连接'));
+      await tester.pump();
+      expect(recoveryCalls, 1);
+      expect(playbackCalls, 1);
+      restoration.complete(true);
+      await tester.pumpAndSettle();
+      expect(playbackCalls, 2);
+      expect(recoveryCalls, 1);
+      expect(find.text('WebVPN 连接已失效，请恢复连接后重试'), findsNothing);
+      expect(harness.platforms.first.opened, hasLength(1));
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+    });
+  }
+
+  testWidgets(
+      'WebVPN catalog expiry exposes connection recovery and reloads lessons',
+      (tester) async {
+    prepareNotesPortrait(tester);
+    final repository = _PendingCatalogRepository()
+      ..refreshCatalog = Future.value([first]);
+    final harness = _PlaybackHarness();
+    var recoveries = 0;
+    addTearDown(repository.dispose);
+    await tester.pumpWidget(MaterialApp(
+        home: RecordingPlayerPage(
+      course: course,
+      repository: repository,
+      onSessionExpired: () async {
+        recoveries++;
+        return true;
+      },
+      loadPlayback: (lesson) async => playback(lesson),
+      playerFactory: harness.createPlayer,
+      videoControllerFactory: harness.createController,
+    )));
+    await tester.pump();
+    repository.catalog.completeError(const VodWebVpnSessionExpiredException());
+    await tester.pumpAndSettle();
+    expect(find.text('WebVPN 连接已失效，请恢复连接后重试'), findsOneWidget);
+    expect(find.text('重新登录'), findsNothing);
+    await tester.tap(find.text('恢复连接'));
+    await tester.pumpAndSettle();
+    expect(recoveries, 1);
+    expect(repository.catalogRequests, 2);
+    expect(harness.platforms.first.opened, hasLength(1));
+    expect(find.text('WebVPN 连接已失效，请恢复连接后重试'), findsNothing);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets(
+      'WebVPN heartbeat expiry uses connection recovery without campus login',
+      (tester) async {
+    prepareNotesPortrait(tester);
+    final repository = _WebVpnHeartbeatRepository();
+    final harness = _PlaybackHarness();
+    final lesson = VodLesson(
+        id: 106,
+        teachingClassId: 10,
+        name: course.name,
+        isPlayable: true,
+        isLive: true);
+    var recoveries = 0;
+    var playbackCalls = 0;
+    addTearDown(repository.dispose);
+    await tester.pumpWidget(MaterialApp(
+        builder: (context, child) => MediaQuery(
+            data: MediaQuery.of(context).copyWith(disableAnimations: true),
+            child: child!),
+        home: RecordingPlayerPage(
+          course: course,
+          repository: repository,
+          lessons: [lesson],
+          initialLesson: lesson,
+          skipInitialCatalogLoad: true,
+          onSessionExpired: () async {
+            recoveries++;
+            repository.restored = true;
+            return true;
+          },
+          loadPlayback: (selected) async {
+            playbackCalls++;
+            return VodPlayback(
+                lessonId: selected.id,
+                teachingClassId: 10,
+                title: course.name,
+                isLive: true,
+                views: [
+                  VodView(
+                      viewNumber: 1,
+                      url: Uri.parse(
+                          'https://rtc.cc.shu.edu.cn:32001/live.m3u8'))
+                ]);
+          },
+          playerFactory: harness.createPlayer,
+          videoControllerFactory: harness.createController,
+        )));
+    await tester.pumpAndSettle();
+    expect(repository.heartbeats, 1);
+    expect(find.text('WebVPN 连接已失效，请恢复连接后重试'), findsOneWidget);
+    expect(find.text('重新登录'), findsNothing);
+    await tester.tap(find.text('恢复连接'));
+    // The live relay closes a real loopback listener before reopening media.
+    for (var attempt = 0; attempt < 20 && playbackCalls < 2; attempt++) {
+      await tester.runAsync(
+          () => Future<void>.delayed(const Duration(milliseconds: 10)));
+      await tester.pump();
+    }
+    await tester.pumpAndSettle();
+    expect(recoveries, 1);
+    expect(playbackCalls, 2);
+    expect(repository.heartbeats, 2);
+    expect(find.text('WebVPN 连接已失效，请恢复连接后重试'), findsNothing);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
   testWidgets('expired sessions recover only after the login button is pressed',
       (tester) async {
     var loginCalls = 0;
@@ -4556,19 +5134,20 @@ void main() {
     expect(find.text('校园账户登录已失效，请重新登录。'), findsOneWidget);
   });
 
-  testWidgets('requests playback for an ungenerated initial lesson',
+  testWidgets('never requests playback for a generating-only initial lesson',
       (tester) async {
     var calls = 0;
     await tester.pumpWidget(page(
       initial: unavailable,
+      lessons: [unavailable],
       load: (lesson) async {
         calls++;
         throw const VodNetworkException();
       },
     ));
     await tester.pump();
-    expect(calls, 1);
-    expect(find.text('暂时无法连接录播平台，请检查网络后重试。'), findsOneWidget);
+    expect(calls, 0);
+    expect(find.text('回放生成中，生成后可观看'), findsOneWidget);
   });
 
   testWidgets('a response for a different lesson is never sent to the decoder',

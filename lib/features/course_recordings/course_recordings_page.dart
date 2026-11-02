@@ -14,6 +14,7 @@ import '../../shared/theme/shuyo_theme.dart';
 import '../../shared/widgets/empty_state.dart';
 import 'recording_catalog_controller.dart';
 import 'recording_list_presentation.dart';
+import 'recording_lesson_selection.dart';
 import 'recording_course_title.dart';
 import 'recording_player_page.dart';
 import 'recording_search_page.dart';
@@ -29,6 +30,7 @@ class CourseRecordingsPage extends StatefulWidget {
     this.authService,
     this.useWebVpn = false,
     this.onWebVpnSessionRequired,
+    this.onWebVpnSessionExpired,
     this.onCampusSessionExpired,
     this.sessionLoader,
     this.onLoginRequested,
@@ -38,6 +40,7 @@ class CourseRecordingsPage extends StatefulWidget {
   final VodAuthService? authService;
   final bool useWebVpn;
   final Future<bool> Function()? onWebVpnSessionRequired;
+  final Future<bool> Function()? onWebVpnSessionExpired;
   final Future<void> Function()? onCampusSessionExpired;
   final Future<bool> Function()? sessionLoader;
   final Future<bool> Function()? onLoginRequested;
@@ -78,10 +81,14 @@ class _CourseRecordingsPageState extends State<CourseRecordingsPage> {
   bool _expired = false;
   bool _loggingIn = false;
   bool _openingCourse = false;
+  bool _recoveringWebVpn = false;
   bool _timetableMode = false;
 
   bool get _showLoadingProgress =>
-      _checkingSession || _view.showLoadingProgress;
+      _checkingSession || _recoveringWebVpn || _view.showLoadingProgress;
+  bool get _webVpnSessionError =>
+      _error is VodWebVpnAuthRequiredException ||
+      _error is VodWebVpnSessionExpiredException;
 
   @override
   void initState() {
@@ -225,6 +232,30 @@ class _CourseRecordingsPageState extends State<CourseRecordingsPage> {
     }
   }
 
+  Future<bool> _recoverWebVpnSession() async {
+    final recover = widget.onWebVpnSessionExpired;
+    if (recover == null) return false;
+    try {
+      if (!await recover() || !mounted) return false;
+      await _auth.ensureSession(useWebVpn: widget.useWebVpn);
+      if (!mounted) return false;
+      _repository.clear();
+      return true;
+    } on Object {
+      return false;
+    }
+  }
+
+  Future<void> _retryWebVpnSession() async {
+    if (_recoveringWebVpn || _checkingSession || _loading) return;
+    setState(() => _recoveringWebVpn = true);
+    try {
+      if (await _recoverWebVpnSession() && mounted) await _restore();
+    } finally {
+      if (mounted) setState(() => _recoveringWebVpn = false);
+    }
+  }
+
   Future<void> _load(
       {bool force = false, int? termId, bool fromPull = false}) async {
     if (!_authenticated) return;
@@ -233,7 +264,9 @@ class _CourseRecordingsPageState extends State<CourseRecordingsPage> {
 
   Future<void> _openCourse(VodCourse course,
       {VodLesson? lesson, List<VodLesson>? preparedLessons}) async {
-    if (_openingCourse || lesson != null && !lesson.canPlay) return;
+    if (_openingCourse || lesson != null && !recordingLessonCanSelect(lesson)) {
+      return;
+    }
     if (!_authenticated ||
         course.termId != _catalog.selectedTermId ||
         !_catalog.hasCompleteAvailability(course) ||
@@ -247,8 +280,15 @@ class _CourseRecordingsPageState extends State<CourseRecordingsPage> {
     final initial = lesson ??
         (live != null && live.isLiveAvailable && live.canPlay ? live : null) ??
         lessons.where((item) => item.isLiveAvailable).firstOrNull ??
-        lessons.where((item) => !item.isLive && item.isPlayable).firstOrNull ??
-        lessons.where((item) => !item.isLive && item.canPlay).firstOrNull;
+        lessons
+            .where((item) =>
+                !item.isLive &&
+                item.isPlayable &&
+                recordingLessonCanSelect(item))
+            .firstOrNull ??
+        lessons
+            .where((item) => !item.isLive && recordingLessonCanSelect(item))
+            .firstOrNull;
     _openingCourse = true;
     try {
       await Navigator.of(context).push<void>(shuyoRoute(
@@ -260,6 +300,7 @@ class _CourseRecordingsPageState extends State<CourseRecordingsPage> {
           lessons: lessons,
           skipInitialCatalogLoad: true,
           onSessionExpired: _recoverSession,
+          onWebVpnSessionExpired: _recoverWebVpnSession,
         ),
       ));
     } finally {
@@ -302,6 +343,7 @@ class _CourseRecordingsPageState extends State<CourseRecordingsPage> {
             _campusAuthRequired(ssoExpired: ssoExpired),
         onLoginRequested: _login,
         onSessionExpired: _recoverSession,
+        onWebVpnSessionExpired: _recoverWebVpnSession,
       ),
     ));
   }
@@ -451,8 +493,12 @@ class _CourseRecordingsPageState extends State<CourseRecordingsPage> {
           content: Text(_errorMessage()),
           actions: [
             TextButton(
-              onPressed: _loading ? null : () => _load(force: true),
-              child: const Text('重试'),
+              onPressed: _loading || _recoveringWebVpn
+                  ? null
+                  : _webVpnSessionError
+                      ? _retryWebVpnSession
+                      : () => _load(force: true),
+              child: Text(_webVpnSessionError ? '恢复连接' : '重试'),
             ),
           ],
         ),
@@ -707,6 +753,7 @@ class _CourseRecordingsPageState extends State<CourseRecordingsPage> {
 
   Widget _errorState() {
     final error = _error;
+    final webVpnSession = _webVpnSessionError;
     return EmptyState(
       icon: error is VodPermissionException
           ? Icons.lock_outline
@@ -714,11 +761,13 @@ class _CourseRecordingsPageState extends State<CourseRecordingsPage> {
       title: error is VodPermissionException ? '暂时无法查看课程' : '课程加载失败',
       message: _errorMessage(),
       action: TextButton.icon(
-        onPressed: _loading
+        onPressed: _loading || _recoveringWebVpn
             ? null
-            : () => _authenticated ? _load(force: true) : _restore(),
-        icon: const Icon(Icons.refresh),
-        label: const Text('重试'),
+            : webVpnSession
+                ? _retryWebVpnSession
+                : () => _authenticated ? _load(force: true) : _restore(),
+        icon: Icon(webVpnSession ? Icons.vpn_key_outlined : Icons.refresh),
+        label: Text(webVpnSession ? '恢复连接' : '重试'),
       ),
     );
   }

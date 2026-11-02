@@ -9,6 +9,7 @@ import 'package:shuyo/data/services/vod_api_client.dart';
 import 'package:shuyo/data/services/vod_auth_service.dart';
 import 'package:shuyo/features/course_recordings/course_recordings_page.dart';
 import 'package:shuyo/features/course_recordings/recording_player_page.dart';
+import 'package:shuyo/features/course_recordings/recording_search_page.dart';
 import 'package:shuyo/features/course_recordings/recording_timetable_view.dart';
 import 'package:shuyo/shared/theme/shuyo_theme.dart';
 import 'package:shuyo/shared/widgets/course_color_label.dart';
@@ -173,6 +174,19 @@ class _OfflineAuth extends _Auth {
   Future<bool> hasSession({bool? useWebVpn}) async => storedSession;
 }
 
+class _RecoveryAuth extends _Auth {
+  final requests = <({bool useWebVpn, bool forceRefresh})>[];
+  Object? error;
+
+  @override
+  Future<void> ensureSession(
+      {required bool useWebVpn, bool forceRefresh = false}) async {
+    requests.add((useWebVpn: useWebVpn, forceRefresh: forceRefresh));
+    final failure = error;
+    if (failure != null) throw failure;
+  }
+}
+
 Future<void> _mount(
   WidgetTester tester,
   _Repository repository, {
@@ -180,6 +194,9 @@ Future<void> _mount(
   _Auth? auth,
   Future<bool> Function()? login,
   Future<bool> Function()? sessionLoader,
+  Future<bool> Function()? webVpnRecovery,
+  Future<void> Function()? campusSessionExpired,
+  bool useWebVpn = false,
   double textScale = 1,
   bool disableAnimations = false,
   bool prepareSessionWithAuth = false,
@@ -198,6 +215,9 @@ Future<void> _mount(
     home: CourseRecordingsPage(
       repository: repository,
       authService: authService,
+      useWebVpn: useWebVpn,
+      onWebVpnSessionExpired: webVpnRecovery,
+      onCampusSessionExpired: campusSessionExpired,
       sessionLoader:
           prepareSessionWithAuth ? null : sessionLoader ?? () async => signedIn,
       onLoginRequested: login ?? () async => false,
@@ -225,6 +245,221 @@ Future<void> _selectTimetableDate(
 }
 
 void main() {
+  testWidgets('home WebVPN auth recovery reloads only after gateway success',
+      (tester) async {
+    final repository = _Repository()
+      ..coursesLoader = ((_, __) async => [_programming])
+      ..lessonsLoader = ((_, __) async => [
+            const VodLesson(
+                id: 1, teachingClassId: 101, name: '录播', isPlayable: true),
+          ]);
+    final auth = _RecoveryAuth()
+      ..error = const VodWebVpnAuthRequiredException();
+    var recoveries = 0;
+    var restored = false;
+    var campusExpiries = 0;
+    var logins = 0;
+    await _mount(tester, repository,
+        auth: auth,
+        prepareSessionWithAuth: true,
+        useWebVpn: true,
+        webVpnRecovery: () async {
+          recoveries++;
+          if (restored) auth.error = null;
+          return restored;
+        },
+        campusSessionExpired: () async => campusExpiries++,
+        login: () async {
+          logins++;
+          return true;
+        });
+    await tester.pumpAndSettle();
+    expect(find.text('WebVPN 连接已失效，请恢复连接后重试'), findsOneWidget);
+    expect(find.text('恢复连接'), findsOneWidget);
+    expect(repository.termRequests, 0);
+    expect(auth.requests, hasLength(1));
+    expect(recoveries, 0);
+    await tester.tap(find.text('恢复连接'));
+    await tester.pumpAndSettle();
+    expect(recoveries, 1);
+    expect(repository.termRequests, 0);
+    expect(repository.clears, 0);
+    expect(auth.requests, hasLength(1));
+    expect(find.text('WebVPN 连接已失效，请恢复连接后重试'), findsOneWidget);
+    restored = true;
+    await tester.tap(find.text('恢复连接'));
+    await tester.pumpAndSettle();
+    expect(recoveries, 2);
+    expect(auth.requests, [
+      (useWebVpn: true, forceRefresh: false),
+      (useWebVpn: true, forceRefresh: false),
+      (useWebVpn: true, forceRefresh: false),
+    ]);
+    expect(repository.termRequests, 1);
+    expect(repository.forcedCourseRequests, [false]);
+    expect(repository.clears, 1);
+    expect(find.byKey(const ValueKey('vod-course:101')), findsOneWidget);
+    expect(find.text('WebVPN 连接已失效，请恢复连接后重试'), findsNothing);
+    expect(campusExpiries, 0);
+    expect(logins, 0);
+    expect(auth.sessionClears, 0);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('home WebVPN catalog recovery preserves campus authentication',
+      (tester) async {
+    var restored = false;
+    final repository = _Repository()
+      ..coursesLoader = ((_, __) async {
+        if (!restored) throw const VodWebVpnSessionExpiredException();
+        return [_programming];
+      })
+      ..lessonsLoader = ((_, __) async => [
+            const VodLesson(
+                id: 1, teachingClassId: 101, name: '录播', isPlayable: true),
+          ]);
+    final auth = _RecoveryAuth();
+    var campusExpiries = 0;
+    var recoveries = 0;
+    await _mount(tester, repository,
+        auth: auth,
+        useWebVpn: true,
+        webVpnRecovery: () async {
+          recoveries++;
+          restored = true;
+          return true;
+        },
+        campusSessionExpired: () async => campusExpiries++);
+    await tester.pumpAndSettle();
+    expect(find.text('WebVPN 连接已失效，请恢复连接后重试'), findsOneWidget);
+    expect(find.text('登录校园账户'), findsNothing);
+    expect(find.byKey(const ValueKey('vod-search')), findsOneWidget);
+    expect(repository.clears, 0);
+    await tester.tap(find.text('恢复连接'));
+    await tester.pumpAndSettle();
+    expect(recoveries, 1);
+    expect(repository.clears, 1);
+    expect(repository.forcedCourseRequests, [false, false]);
+    expect(find.byKey(const ValueKey('vod-course:101')), findsOneWidget);
+    expect(campusExpiries, 0);
+    expect(auth.sessionClears, 0);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('WebVPN recovery preserves VOD auth and retries only on success',
+      (tester) async {
+    final repository = _Repository()
+      ..coursesLoader = ((_, __) async => [_programming])
+      ..lessonsLoader = ((_, __) async => [
+            const VodLesson(
+                id: 1, teachingClassId: 101, name: '录播', isPlayable: true),
+          ])
+      ..playbackLoader =
+          ((_, __) async => throw const VodWebVpnSessionExpiredException());
+    final auth = _RecoveryAuth();
+    var recoveries = 0;
+    var logins = 0;
+    var campusExpiries = 0;
+    var restored = false;
+    await _mount(tester, repository,
+        auth: auth,
+        useWebVpn: true,
+        webVpnRecovery: () async {
+          recoveries++;
+          return restored;
+        },
+        login: () async {
+          logins++;
+          return true;
+        },
+        campusSessionExpired: () async => campusExpiries++);
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('vod-course:101')));
+    await tester.pumpAndSettle();
+    expect(repository.playbackRequests, hasLength(1));
+    expect(find.text('WebVPN 连接已失效，请恢复连接后重试'), findsOneWidget);
+    await tester.tap(find.text('恢复连接'));
+    await tester.pumpAndSettle();
+    expect(recoveries, 1);
+    expect(auth.requests, isEmpty);
+    expect(repository.clears, 0);
+    expect(repository.playbackRequests, hasLength(1));
+    restored = true;
+    await tester.tap(find.text('恢复连接'));
+    await tester.pumpAndSettle();
+    expect(recoveries, 2);
+    expect(auth.requests, [(useWebVpn: true, forceRefresh: false)]);
+    expect(repository.clears, 1);
+    expect(repository.playbackRequests, hasLength(2));
+    expect(logins, 0);
+    expect(campusExpiries, 0);
+    expect(auth.sessionClears, 0);
+    await tester.pump(const Duration(seconds: 2));
+    expect(recoveries, 2);
+    expect(repository.playbackRequests, hasLength(2));
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('WebVPN recovery auth failure preserves campus state and media',
+      (tester) async {
+    final repository = _Repository()
+      ..coursesLoader = ((_, __) async => [_programming])
+      ..lessonsLoader = ((_, __) async => [
+            const VodLesson(
+                id: 1, teachingClassId: 101, name: '录播', isPlayable: true),
+          ])
+      ..playbackLoader =
+          ((_, __) async => throw const VodWebVpnSessionExpiredException());
+    final auth = _RecoveryAuth()
+      ..error = const VodCampusAuthRequiredException(ssoExpired: true);
+    var logins = 0;
+    var campusExpiries = 0;
+    await _mount(tester, repository,
+        auth: auth,
+        useWebVpn: true,
+        webVpnRecovery: () async => true,
+        login: () async {
+          logins++;
+          return true;
+        },
+        campusSessionExpired: () async => campusExpiries++);
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('vod-course:101')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('恢复连接'));
+    await tester.pumpAndSettle();
+    expect(auth.requests, [(useWebVpn: true, forceRefresh: false)]);
+    expect(repository.clears, 0);
+    expect(repository.playbackRequests, hasLength(1));
+    expect(find.text('WebVPN 连接已失效，请恢复连接后重试'), findsOneWidget);
+    expect(logins, 0);
+    expect(campusExpiries, 0);
+    expect(auth.sessionClears, 0);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('home forwards dedicated WebVPN recovery to recording search',
+      (tester) async {
+    final repository = _Repository();
+    final auth = _RecoveryAuth();
+    var recoveries = 0;
+    await _mount(tester, repository, auth: auth, useWebVpn: true,
+        webVpnRecovery: () async {
+      recoveries++;
+      return true;
+    });
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('vod-search')));
+    await tester.pumpAndSettle();
+    final search =
+        tester.widget<RecordingSearchPage>(find.byType(RecordingSearchPage));
+    expect(await search.onWebVpnSessionExpired!(), isTrue);
+    expect(recoveries, 1);
+    expect(auth.requests, [(useWebVpn: true, forceRefresh: false)]);
+    expect(repository.clears, 1);
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets(
       'lazy rows keep one catalog revision throughout a scrolling refresh',
       (tester) async {

@@ -53,6 +53,7 @@ class RecordingSearchController extends ChangeNotifier {
   List<VodSearchResult> results = const [];
   List<VodCourse> courses = const [];
   final courseLessons = <(int, int), List<VodLesson>>{};
+  final _pendingLivePreviews = <(int, int), Completer<List<VodLesson>>>{};
   final extraMatches = <(int, int), String>{};
   int visibleCourseCount = 0;
   int availableCourseCount = 0;
@@ -62,6 +63,18 @@ class RecordingSearchController extends ChangeNotifier {
   bool loadingCourses = false;
   bool needsLogin = false;
 
+  Future<List<VodLesson>>? pendingLivePreview((int, int) key) {
+    final pending = _pendingLivePreviews[key];
+    return pending == null || pending.isCompleted ? null : pending.future;
+  }
+
+  void _finishPendingLivePreviews() {
+    for (final pending in _pendingLivePreviews.values) {
+      if (!pending.isCompleted) pending.complete(const []);
+    }
+    _pendingLivePreviews.clear();
+  }
+
   bool _isCurrent(int value) => !_disposed && value == revision;
 
   void _publish() {
@@ -70,6 +83,7 @@ class RecordingSearchController extends ChangeNotifier {
 
   void clear({bool requireLogin = false}) {
     revision++;
+    _finishPendingLivePreviews();
     results = const [];
     courses = const [];
     courseLessons.clear();
@@ -127,9 +141,30 @@ class RecordingSearchController extends ChangeNotifier {
             (result.course.termId, result.course.teachingClassId),
             () => []).add(result);
       }
+      // A current live hit is already enough to open the player. The full
+      // preview still loads in the existing queue and fills in recordings.
+      final liveCourses = <(int, int), VodCourse>{};
+      for (final key in groups.keys) {
+        final course = preferred[key]!.course;
+        final catalog = VodRepository.mergeSearchLessons(
+            course, groups[key]!.map((result) => result.lesson), const []);
+        final live =
+            catalog.where((lesson) => lesson.isLiveAvailable).firstOrNull;
+        if (live == null) continue;
+        courseLessons[key] = catalog;
+        availableCourseCount++;
+        _pendingLivePreviews[key] = Completer<List<VodLesson>>();
+        liveCourses[key] = course.withLiveLesson(live);
+      }
+      // Keep the service ranking within each group, but put active live
+      // courses first so their preview requests are not stuck behind VODs.
       courses = List.unmodifiable([
-        for (final key in groups.keys) preferred[key]!.course,
+        for (final key in groups.keys)
+          if (liveCourses.containsKey(key)) liveCourses[key]!,
+        for (final key in groups.keys)
+          if (!liveCourses.containsKey(key)) preferred[key]!.course,
       ]);
+      visibleCourseCount = liveCourses.length;
       for (final entry in preferred.entries) {
         final course = entry.value.course;
         final courseNumber = entry.value.courseNumber;
@@ -158,27 +193,37 @@ class RecordingSearchController extends ChangeNotifier {
                 forceRefresh: forceRefresh);
           } on VodSessionExpiredException {
             rethrow;
+          } on VodWebVpnAuthRequiredException {
+            rethrow;
           } on VodCampusAuthRequiredException {
             rethrow;
           } on Object {
             lessons = const [];
           }
           if (!_isCurrent(current)) return;
-          final catalog = <int, VodLesson>{
-            for (final lesson in lessons)
-              if (lesson.id > 0 &&
-                  !lesson.isLive &&
-                  lesson.teachingClassId == course.teachingClassId)
-                lesson.id: lesson,
-          }.values.toList()
-            ..sort((a, b) {
-              final byTime = (b.beginTime?.millisecondsSinceEpoch ?? 0)
-                  .compareTo(a.beginTime?.millisecondsSinceEpoch ?? 0);
-              return byTime == 0 ? b.id.compareTo(a.id) : byTime;
-            });
-          courseLessons[(course.termId, course.teachingClassId)] =
-              List.unmodifiable(catalog);
-          if (catalog.isNotEmpty) availableCourseCount++;
+          final key = (course.termId, course.teachingClassId);
+          final catalog = VodRepository.mergeSearchLessons(
+              course, groups[key]!.map((result) => result.lesson), lessons);
+          final hadLessons = courseLessons[key]?.isNotEmpty ?? false;
+          courseLessons[key] = catalog;
+          final live =
+              catalog.where((lesson) => lesson.isLiveAvailable).firstOrNull;
+          if (live != null) {
+            courses = List.unmodifiable([
+              for (final currentCourse in courses)
+                if ((currentCourse.termId, currentCourse.teachingClassId) ==
+                    key)
+                  currentCourse.withLiveLesson(live)
+                else
+                  currentCourse,
+            ]);
+          }
+          if (!hadLessons && catalog.isNotEmpty) availableCourseCount++;
+          if (hadLessons && catalog.isEmpty) availableCourseCount--;
+          final pendingLive = _pendingLivePreviews.remove(key);
+          if (pendingLive != null && !pendingLive.isCompleted) {
+            pendingLive.complete(catalog);
+          }
           // Requests may finish out of order; reveal only the completed prefix.
           while (visibleCourseCount < courses.length) {
             final next = courses[visibleCourseCount];
@@ -196,6 +241,8 @@ class RecordingSearchController extends ChangeNotifier {
         for (var worker = 0; worker < 3 && worker < pending.length; worker++)
           loadNext(),
       ], eagerError: true);
+    } on VodWebVpnSessionExpiredException catch (failure) {
+      if (_isCurrent(current)) error = failure;
     } on VodSessionExpiredException catch (failure) {
       if (!_isCurrent(current)) return;
       clear(requireLogin: true);
@@ -208,6 +255,7 @@ class RecordingSearchController extends ChangeNotifier {
       if (_isCurrent(current)) error = failure;
     } finally {
       if (_isCurrent(current)) {
+        _finishPendingLivePreviews();
         searching = false;
         loadingCourses = false;
         _publish();
@@ -230,6 +278,7 @@ class RecordingSearchController extends ChangeNotifier {
   void dispose() {
     _disposed = true;
     revision++;
+    _finishPendingLivePreviews();
     super.dispose();
   }
 }

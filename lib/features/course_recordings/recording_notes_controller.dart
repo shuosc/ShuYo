@@ -3,6 +3,7 @@ import 'package:flutter/foundation.dart';
 import '../../data/models/course_recording.dart';
 import '../../data/models/vod_ppt.dart';
 import '../../data/services/vod_api_client.dart';
+import '../../data/services/vod_auth_exception.dart';
 
 typedef RecordingNotesLoader = Future<List<VodPptSlide>> Function(
   int lessonId, {
@@ -88,6 +89,9 @@ class RecordingNotesController extends ValueNotifier<RecordingNotesState> {
     } on Object catch (error) {
       if (_disposed || revision != _revision) return null;
       final message = switch (error) {
+        VodWebVpnSessionExpiredException() ||
+        VodWebVpnAuthRequiredException() =>
+          'WebVPN 连接已失效，请恢复连接后重试',
         VodSessionExpiredException() => '校园账户登录已失效，请重新进入录播平台后重试',
         VodPermissionException() => '平台暂未允许读取这节课的 PPT 笔记，请稍后下拉重试',
         VodInvalidResponseException() => '平台返回的 PPT 笔记数据异常，请稍后下拉重试',

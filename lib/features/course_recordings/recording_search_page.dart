@@ -14,6 +14,7 @@ import 'recording_search_controller.dart';
 import 'recording_list_presentation.dart';
 import 'recording_course_title.dart';
 import 'recording_player_page.dart';
+import 'recording_lesson_selection.dart';
 import 'recording_status_icon.dart';
 import 'recording_term_menu.dart';
 
@@ -26,6 +27,7 @@ class RecordingSearchPage extends StatefulWidget {
     this.onSessionInvalidated,
     this.onLoginRequested,
     this.onSessionExpired,
+    this.onWebVpnSessionExpired,
   });
 
   final VodRepository repository;
@@ -34,6 +36,7 @@ class RecordingSearchPage extends StatefulWidget {
   final Future<void> Function(bool ssoExpired)? onSessionInvalidated;
   final Future<bool> Function()? onLoginRequested;
   final Future<bool> Function()? onSessionExpired;
+  final Future<bool> Function()? onWebVpnSessionExpired;
 
   @override
   State<RecordingSearchPage> createState() => _RecordingSearchPageState();
@@ -51,7 +54,7 @@ class _RecordingSearchPageState extends State<RecordingSearchPage> {
       onSessionInvalidated: widget.onSessionInvalidated);
   late RecordingSearchViewData _view =
       RecordingSearchViewData(_searchController);
-  final _courseRows = <(int, int), Widget>{};
+  final _courseRows = <(int, int), (VodCourse, List<VodLesson>?, Widget)>{};
   final _animatedCourses = <(int, int)>{};
   int _renderedRevision = -1;
   int get _selectedTermId => _view.selectedTermId;
@@ -64,6 +67,7 @@ class _RecordingSearchPageState extends State<RecordingSearchPage> {
   bool get _loadingCourses => _view.loadingCourses;
   bool get _needsLogin => _view.needsLogin;
   bool _loggingIn = false;
+  bool _recoveringWebVpn = false;
   bool _openingLesson = false;
   int get _revision => _searchController.revision;
 
@@ -75,8 +79,9 @@ class _RecordingSearchPageState extends State<RecordingSearchPage> {
   }
 
   void _updateSearchChrome() {
-    _searchBusy.value =
-        _searchController.searching || _searchController.loadingCourses;
+    _searchBusy.value = _searchController.searching ||
+        _searchController.loadingCourses ||
+        _recoveringWebVpn;
     _searchNeedsLogin.value = _searchController.needsLogin;
   }
 
@@ -186,10 +191,30 @@ class _RecordingSearchPageState extends State<RecordingSearchPage> {
         course.termId != _searchController.selectedTermId) {
       return;
     }
+    final key = (course.termId, course.teachingClassId);
+    // A preview can finish after this row was built but before its next frame.
+    // Resolve the selection at tap time instead of using the cached row data.
+    lessons = _searchController.courseLessons[key] ?? lessons;
+    course = _searchController.courses
+            .where((item) => (item.termId, item.teachingClassId) == key)
+            .firstOrNull ??
+        course;
     if (lessons.isEmpty) return;
-    final initial = lessons.where((lesson) => lesson.canPlay).firstOrNull;
+    final pendingPreview = _searchController.pendingLivePreview(key);
+    final selectable = lessons.where(recordingLessonCanSelect);
+    final initial =
+        selectable.where((lesson) => lesson.isLiveAvailable).firstOrNull ??
+            selectable
+                .where((lesson) => !lesson.isLive && lesson.isPlayable)
+                .firstOrNull ??
+            selectable.firstOrNull;
     _openingLesson = true;
-    unawaited(widget.repository.warmCourseRecordings(course, lessons));
+    final recordings = lessons
+        .where((lesson) => !lesson.isLive && !lesson.isGenerating)
+        .toList(growable: false);
+    if (recordings.isNotEmpty) {
+      unawaited(widget.repository.warmCourseRecordings(course, recordings));
+    }
     try {
       await Navigator.of(context).push<void>(shuyoRoute(
         builder: (_) => RecordingPlayerPage(
@@ -201,9 +226,11 @@ class _RecordingSearchPageState extends State<RecordingSearchPage> {
           lessons: lessons,
           loadCourseCatalog: false,
           loadPreviewCatalog: true,
-          skipInitialCatalogLoad: true,
+          skipInitialCatalogLoad: pendingPreview == null,
+          initialPreviewCatalog: pendingPreview,
           repository: widget.repository,
           onSessionExpired: _recoverPlaybackSession,
+          onWebVpnSessionExpired: widget.onWebVpnSessionExpired,
         ),
       ));
     } finally {
@@ -216,6 +243,26 @@ class _RecordingSearchPageState extends State<RecordingSearchPage> {
     final recovered = await widget.onSessionExpired?.call() ?? false;
     if (mounted) _searchController.sessionRecovered(recovered);
     return recovered;
+  }
+
+  Future<void> _recoverWebVpnSession() async {
+    final recover = widget.onWebVpnSessionExpired;
+    if (recover == null || _recoveringWebVpn) return;
+    final revision = _revision;
+    setState(() => _recoveringWebVpn = true);
+    _updateSearchChrome();
+    try {
+      final recovered = await recover();
+      if (!mounted || revision != _revision || !recovered) return;
+      await _search();
+    } on Object {
+      // Keep the connection failure available for another explicit attempt.
+    } finally {
+      if (mounted) {
+        setState(() => _recoveringWebVpn = false);
+        _updateSearchChrome();
+      }
+    }
   }
 
   @override
@@ -426,6 +473,8 @@ class _RecordingSearchPageState extends State<RecordingSearchPage> {
         ),
       );
     } else if (_error != null) {
+      final webVpnSession = _error is VodWebVpnSessionExpiredException ||
+          _error is VodWebVpnAuthRequiredException;
       state = EmptyState(
         icon: _error is VodPermissionException
             ? Icons.lock_outline
@@ -433,9 +482,14 @@ class _RecordingSearchPageState extends State<RecordingSearchPage> {
         title: '录播搜索失败',
         message: _errorMessage(),
         action: TextButton.icon(
-          onPressed: _search,
-          icon: const Icon(Icons.refresh),
-          label: const Text('重试'),
+          onPressed: _recoveringWebVpn ||
+                  webVpnSession && widget.onWebVpnSessionExpired == null
+              ? null
+              : webVpnSession
+                  ? _recoverWebVpnSession
+                  : _search,
+          icon: Icon(webVpnSession ? Icons.vpn_key_outlined : Icons.refresh),
+          label: Text(webVpnSession ? '恢复连接' : '重试'),
         ),
       );
     } else if (_searching) {
@@ -484,8 +538,14 @@ class _RecordingSearchPageState extends State<RecordingSearchPage> {
                     }
                     final course = courses[index ~/ 2];
                     final key = (course.termId, course.teachingClassId);
-                    final row = _courseRows.putIfAbsent(
-                        key, () => _courseTile(course, view));
+                    final lessons = view.courseLessons[key];
+                    final cached = _courseRows[key];
+                    final row = cached != null &&
+                            identical(cached.$1, course) &&
+                            identical(cached.$2, lessons)
+                        ? cached.$3
+                        : _courseTile(course, view);
+                    _courseRows[key] = (course, lessons, row);
                     return _SearchCourseEntrance(
                       key: ValueKey(
                           'vod-search-entrance:${view.revision}:${course.termId}:${course.teachingClassId}'),

@@ -7,9 +7,11 @@ import 'package:shuyo/data/models/course_recording.dart';
 import 'package:shuyo/data/models/vod_search_result.dart';
 import 'package:shuyo/data/repositories/vod_repository.dart';
 import 'package:shuyo/data/services/vod_api_client.dart';
+import 'package:shuyo/data/services/vod_auth_exception.dart';
 import 'package:shuyo/features/course_recordings/course_recordings_page.dart';
 import 'package:shuyo/features/course_recordings/recording_player_page.dart';
 import 'package:shuyo/features/course_recordings/recording_search_page.dart';
+import 'package:shuyo/features/course_recordings/recording_status_icon.dart';
 import 'package:shuyo/shared/theme/shuyo_theme.dart';
 
 const _terms = [
@@ -187,6 +189,14 @@ class _Repository extends VodRepository {
     playbackRequests.add(lesson);
     throw const VodPermissionException();
   }
+
+  @override
+  Future<VodPlayback> prepareLivePlaybackWithProtocol({
+    required VodCourse course,
+    required VodLesson lesson,
+    required VodLiveProtocol protocol,
+  }) =>
+      preparePlayback(course: course, lesson: lesson);
 }
 
 Future<void> _mount(
@@ -194,14 +204,17 @@ Future<void> _mount(
   _Repository repository, {
   Future<void> Function(bool)? invalidated,
   Future<bool> Function()? login,
+  Future<bool> Function()? webVpnRecovery,
   double textScale = 1,
+  bool disableAnimations = false,
 }) async {
   addTearDown(repository.dispose);
   await tester.pumpWidget(MaterialApp(
     theme: ShuYoThemes.all.first.themeData(),
     builder: (context, child) => MediaQuery(
-      data: MediaQuery.of(context)
-          .copyWith(textScaler: TextScaler.linear(textScale)),
+      data: MediaQuery.of(context).copyWith(
+          textScaler: TextScaler.linear(textScale),
+          disableAnimations: disableAnimations),
       child: child!,
     ),
     home: RecordingSearchPage(
@@ -210,6 +223,7 @@ Future<void> _mount(
       selectedTermId: 7,
       onSessionInvalidated: invalidated,
       onLoginRequested: login,
+      onWebVpnSessionExpired: webVpnRecovery,
     ),
   ));
   await tester.pumpAndSettle();
@@ -254,6 +268,99 @@ void _expectSingleLessonCount(WidgetTester tester, Finder row, String count) {
 }
 
 void main() {
+  for (final previewFailure in [false, true]) {
+    for (final error in [
+      const VodWebVpnSessionExpiredException(),
+      const VodWebVpnAuthRequiredException(),
+    ]) {
+      testWidgets(
+          'search ${previewFailure ? 'preview' : 'query'} ${error.runtimeType} restores without campus login',
+          (tester) async {
+        var restored = false;
+        var allowRecovery = false;
+        var recoveries = 0;
+        var invalidations = 0;
+        var logins = 0;
+        final repository = _Repository()
+          ..searchLoader = ((_, __) async {
+            if (!previewFailure && !restored) throw error;
+            return [_result(1)];
+          })
+          ..previewLoader = ((_, __) async {
+            if (previewFailure && !restored) throw error;
+            return [_result(1).lesson];
+          });
+        await _mount(tester, repository,
+            invalidated: (_) async => invalidations++,
+            login: () async {
+              logins++;
+              return true;
+            },
+            webVpnRecovery: () async {
+              recoveries++;
+              restored = allowRecovery;
+              return allowRecovery;
+            });
+        await _submit(tester, '程序');
+        await tester.pumpAndSettle();
+        expect(find.text('WebVPN 连接已失效，请恢复连接后重试'), findsOneWidget);
+        expect(find.text('重新登录'), findsNothing);
+        expect(invalidations, 0);
+        expect(logins, 0);
+        expect(recoveries, 0);
+        expect(repository.searches, hasLength(1));
+        await tester.tap(find.text('恢复连接'));
+        await tester.pumpAndSettle();
+        expect(recoveries, 1);
+        expect(repository.searches, hasLength(1));
+        expect(find.text('WebVPN 连接已失效，请恢复连接后重试'), findsOneWidget);
+        allowRecovery = true;
+        await tester.tap(find.text('恢复连接'));
+        await tester.pumpAndSettle();
+        expect(recoveries, 2);
+        expect(repository.searches, hasLength(2));
+        expect(
+            repository.previewCalls.every((request) => !request.force), isTrue);
+        expect(find.byKey(const ValueKey('vod-search-course:7:101')),
+            findsOneWidget);
+        expect(find.text('WebVPN 连接已失效，请恢复连接后重试'), findsNothing);
+        expect(invalidations, 0);
+        expect(logins, 0);
+        expect(tester.takeException(), isNull);
+      });
+    }
+  }
+
+  testWidgets(
+      'search forwards WebVPN recovery without invalidating campus auth',
+      (tester) async {
+    final repository = _Repository()
+      ..searchLoader = ((_, __) async => [_result(1)]);
+    var recoveries = 0;
+    var invalidations = 0;
+    await _mount(tester, repository,
+        invalidated: (_) async => invalidations++,
+        webVpnRecovery: () async {
+          recoveries++;
+          return true;
+        });
+    await _submit(tester, '程序');
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('vod-search-course:7:101')));
+    await tester.pumpAndSettle();
+    final player =
+        tester.widget<RecordingPlayerPage>(find.byType(RecordingPlayerPage));
+    expect(await player.onWebVpnSessionExpired!(), isTrue);
+    expect(recoveries, 1);
+    expect(invalidations, 0);
+    Navigator.of(tester.element(find.byType(RecordingPlayerPage))).pop();
+    await tester.pumpAndSettle();
+    expect(
+        find.byKey(const ValueKey('vod-search-course:7:101')), findsOneWidget);
+    expect(find.text('重新登录'), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('typing only rebuilds the search controls after results load',
       (tester) async {
     final repository = _Repository()
@@ -722,6 +829,231 @@ void main() {
     expect(repository.warmedCourses, isEmpty);
     expect(repository.playbackRequests, isEmpty);
     expect(repository.lessonRequests, 0);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets(
+      'search uses the existing live row and opens live before playback',
+      (tester) async {
+    tester.view.physicalSize = const Size(600, 1200);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final now = DateTime.now();
+    final recording = _result(1, begin: now.subtract(const Duration(days: 1)));
+    final live = VodLesson(
+      id: 2,
+      teachingClassId: 101,
+      name: _course.name,
+      isPlayable: true,
+      isLive: true,
+      beginTime: now.subtract(const Duration(minutes: 20)),
+      liveEndTime: now.add(const Duration(minutes: 20)),
+    );
+    final pending = VodLesson(
+      id: 3,
+      teachingClassId: 101,
+      name: _course.name,
+      isPlayable: false,
+      isGenerating: true,
+      beginTime: now,
+    );
+    final shadow = VodLesson(
+      id: live.id,
+      teachingClassId: 101,
+      name: _course.name,
+      isPlayable: false,
+      isGenerating: true,
+    );
+    final repository = _Repository()
+      ..searchLoader = ((_, __) async => [
+            recording,
+            VodSearchResult(course: _course, lesson: live),
+          ])
+      ..previewLoader = (_, __) async => [pending, shadow, recording.lesson];
+    await _mount(tester, repository, disableAnimations: true);
+    await _submit(tester, '程序');
+    await tester.pumpAndSettle();
+
+    final row = find.byKey(const ValueKey('vod-search-course:7:101'));
+    _expectSingleLessonCount(tester, row, '3');
+    final status = tester.widget<RecordingStatusIcon>(
+        find.descendant(of: row, matching: find.byType(RecordingStatusIcon)));
+    expect(status.isLive, isTrue);
+    expect(repository.searches, hasLength(1));
+    expect(repository.previewCalls, hasLength(1));
+    expect(repository.playbackRequests, isEmpty);
+    expect(repository.verificationRequests, isEmpty);
+
+    await tester.tap(row);
+    await tester.pumpAndSettle();
+    final player =
+        tester.widget<RecordingPlayerPage>(find.byType(RecordingPlayerPage));
+    expect(player.initialLesson, live);
+    expect(player.lessons.map((lesson) => lesson.id), [3, 2, 1]);
+    expect(repository.playbackRequests, [live]);
+    expect(repository.previewCalls, hasLength(1));
+    expect(repository.warmedCourses.single.lessons, [recording.lesson]);
+    final pendingRow = tester
+        .widget<ListTile>(find.byKey(const ValueKey('recording-lesson-3')));
+    expect(pendingRow.enabled, isFalse);
+    expect(pendingRow.onTap, isNull);
+    expect(find.text('回放生成中'), findsNothing);
+    expect(tester.takeException(), isNull);
+
+    final refresh = tester.widget<RefreshIndicator>(find
+        .descendant(
+            of: find.byType(RecordingPlayerPage),
+            matching: find.byType(RefreshIndicator))
+        .first);
+    unawaited(refresh.onRefresh());
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('recording-lesson-2')), findsOneWidget);
+    expect(repository.playbackRequests, [live]);
+    expect(repository.previewCalls, hasLength(2));
+    expect(tester.takeException(), isNull);
+  });
+
+  for (final openBeforePreview in [false, true]) {
+    testWidgets(
+        'live search ${openBeforePreview ? 'shares a pending preview' : 'updates its cached row'}',
+        (tester) async {
+      tester.view.physicalSize = const Size(600, 1200);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final now = DateTime.now();
+      final live = VodLesson(
+        id: 2,
+        teachingClassId: 101,
+        name: _course.name,
+        isPlayable: true,
+        isLive: true,
+        beginTime: now,
+        classroom: 'A101',
+        liveEndTime: now.add(const Duration(hours: 1)),
+      );
+      final recording =
+          _result(1, begin: now.subtract(const Duration(days: 1)));
+      final preview = Completer<List<VodLesson>>();
+      final repository = _Repository()
+        ..searchLoader = ((_, __) async => [
+              VodSearchResult(course: _course, lesson: live),
+            ])
+        ..previewLoader = (_, __) => preview.future;
+      await _mount(tester, repository, disableAnimations: true);
+      await _submit(tester, '程序');
+      await tester.pump(const Duration(milliseconds: 300));
+
+      final row = find.byKey(const ValueKey('vod-search-course:7:101'));
+      expect(row, findsOneWidget);
+      _expectSingleLessonCount(tester, row, '1');
+      expect(tester.widget<ListTile>(row).onTap, isNotNull);
+      expect(repository.previewRequests, 1);
+
+      if (openBeforePreview) {
+        await tester.tap(row);
+        await tester.pump(const Duration(milliseconds: 300));
+        expect(repository.playbackRequests, [live]);
+        expect(repository.previewRequests, 1);
+      }
+      preview.complete([recording.lesson]);
+      await tester.pumpAndSettle();
+      if (!openBeforePreview) {
+        _expectSingleLessonCount(tester, row, '2');
+        await tester.tap(row);
+        await tester.pumpAndSettle();
+        final player = tester
+            .widget<RecordingPlayerPage>(find.byType(RecordingPlayerPage));
+        expect(player.lessons.map((lesson) => lesson.id), containsAll([1, 2]));
+        expect(player.skipInitialCatalogLoad, isTrue);
+      } else {
+        expect(
+            find.byKey(const ValueKey('recording-lesson-1')), findsOneWidget);
+      }
+      expect(repository.previewRequests, 1);
+      expect(repository.playbackRequests, [live]);
+      expect(tester.takeException(), isNull);
+    });
+  }
+
+  testWidgets('tapping a stale live row uses the just-completed preview',
+      (tester) async {
+    tester.view.physicalSize = const Size(600, 1200);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final now = DateTime.now();
+    final live = VodLesson(
+      id: 2,
+      teachingClassId: 101,
+      name: _course.name,
+      isPlayable: true,
+      isLive: true,
+      beginTime: now,
+      classroom: 'A101',
+      liveEndTime: now.add(const Duration(hours: 1)),
+    );
+    final recording = _result(1, begin: now.subtract(const Duration(days: 1)));
+    final preview = Completer<List<VodLesson>>();
+    final repository = _Repository()
+      ..searchLoader = ((_, __) async => [
+            VodSearchResult(course: _course, lesson: live),
+          ])
+      ..previewLoader = (_, __) => preview.future;
+    await _mount(tester, repository, disableAnimations: true);
+    await _submit(tester, '程序');
+    await tester.pump(const Duration(milliseconds: 300));
+    final row = find.byKey(const ValueKey('vod-search-course:7:101'));
+    _expectSingleLessonCount(tester, row, '1');
+    final staleTap = tester.widget<ListTile>(row).onTap!;
+
+    // Complete the preview and run its microtasks, without rendering a new row.
+    preview.complete([recording.lesson]);
+    await tester.idle();
+    _expectSingleLessonCount(tester, row, '1');
+    staleTap();
+    await tester.pumpAndSettle();
+
+    final player =
+        tester.widget<RecordingPlayerPage>(find.byType(RecordingPlayerPage));
+    expect(player.lessons.map((lesson) => lesson.id), containsAll([1, 2]));
+    expect(player.skipInitialCatalogLoad, isTrue);
+    expect(repository.previewRequests, 1);
+    expect(repository.playbackRequests, [live]);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('generating-only search uses the existing disabled episode',
+      (tester) async {
+    tester.view.physicalSize = const Size(600, 1200);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final pending = _result(2, playable: false);
+    final repository = _Repository()
+      ..searchLoader = ((_, __) async => [pending])
+      ..previewLoader = (_, __) async => [];
+    await _mount(tester, repository, disableAnimations: true);
+    await _submit(tester, '程序');
+    await tester.pumpAndSettle();
+    final row = find.byKey(const ValueKey('vod-search-course:7:101'));
+    _expectSingleLessonCount(tester, row, '1');
+    expect(tester.widget<ListTile>(row).enabled, isTrue);
+    await tester.tap(row);
+    await tester.pumpAndSettle();
+    final player =
+        tester.widget<RecordingPlayerPage>(find.byType(RecordingPlayerPage));
+    expect(player.initialLesson, isNull);
+    expect(player.lessons, [pending.lesson]);
+    expect(repository.playbackRequests, isEmpty);
+    expect(repository.warmedCourses, isEmpty);
+    expect(repository.previewCalls, hasLength(1));
+    final episode = tester
+        .widget<ListTile>(find.byKey(const ValueKey('recording-lesson-2')));
+    expect(episode.enabled, isFalse);
+    expect(episode.onTap, isNull);
+    expect(find.text('回放生成中，生成后可观看'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 

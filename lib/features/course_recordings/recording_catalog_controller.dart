@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import '../../data/models/course_recording.dart';
 import '../../data/repositories/vod_repository.dart';
 import '../../data/services/vod_api_client.dart';
+import '../../data/services/vod_auth_exception.dart';
 import 'recording_timetable_data.dart';
 
 class RecordingCourseCount {
@@ -195,6 +196,8 @@ class RecordingCatalogController extends ChangeNotifier {
       courses = nextCourses;
       _schedule(nextCourses, revision, force);
       _publish(dataChanged: true);
+    } on VodWebVpnSessionExpiredException catch (failure) {
+      if (_isCurrent(revision)) error = failure;
     } on VodSessionExpiredException catch (failure) {
       if (_isCurrent(revision)) {
         await onSessionInvalidated(failure.ssoExpired);
@@ -272,6 +275,10 @@ class RecordingCatalogController extends ChangeNotifier {
       lessonCounts[id] = RecordingCourseCount(
           playable: playable.length, lessonIds: Set.unmodifiable(total));
       failedLessonCounts.remove(id);
+    } on VodWebVpnSessionExpiredException catch (failure) {
+      if (_isCurrent(request.revision)) error = failure;
+    } on VodWebVpnAuthRequiredException catch (failure) {
+      if (_isCurrent(request.revision)) error = failure;
     } on VodSessionExpiredException catch (failure) {
       if (_isCurrent(request.revision)) {
         await onSessionInvalidated(failure.ssoExpired);
