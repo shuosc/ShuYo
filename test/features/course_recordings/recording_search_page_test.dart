@@ -391,6 +391,118 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets('IME selection and keyboard insets preserve search result rows',
+      (tester) async {
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(600, 1000);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetViewInsets);
+    final repository = _Repository()
+      ..searchLoader = (_, __) async => [_result(1)];
+    await _mount(tester, repository);
+    await _submit(tester, '程序');
+    await tester.pumpAndSettle();
+
+    final row = find.byKey(const ValueKey('vod-search-course:7:101'));
+    final originalRow = tester.widget<ListTile>(row);
+    final summary = find.byKey(const ValueKey('vod-search-summary'));
+    final originalSummary = tester.widget<Padding>(summary);
+    final query = find.byKey(const ValueKey('vod-search-query'));
+    await tester.showKeyboard(query);
+    await tester.pump();
+    final originalInput = tester.widget<TextField>(query);
+
+    tester.testTextInput.updateEditingValue(const TextEditingValue(
+      text: '程序',
+      selection: TextSelection.collapsed(offset: 1),
+      composing: TextRange(start: 0, end: 1),
+    ));
+    await tester.pump();
+    expect(tester.widget<TextField>(query), same(originalInput));
+
+    final initialHeight =
+        tester.getSize(find.byKey(const ValueKey('vod-search-results'))).height;
+    for (final inset in [60.0, 140.0, 220.0, 300.0, 220.0, 100.0, 0.0]) {
+      tester.view.viewInsets = FakeViewPadding(bottom: inset);
+      await tester.pump(const Duration(milliseconds: 16));
+      expect(tester.widget<ListTile>(row), same(originalRow));
+      expect(tester.widget<Padding>(summary), same(originalSummary));
+      final height = tester
+          .getSize(find.byKey(const ValueKey('vod-search-results')))
+          .height;
+      expect(height, closeTo(initialHeight - inset, .1));
+    }
+    expect(repository.searches, hasLength(1));
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('rows first reached while dragging do not start entrance fades',
+      (tester) async {
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(600, 800);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    addTearDown(tester.view.resetPhysicalSize);
+    final repository = _Repository()
+      ..searchLoader = (_, __) async => [
+            for (var index = 0; index < 40; index++)
+              _result(index % 20 + 1,
+                  classId: 101 + index, name: '程序设计 $index'),
+          ];
+    await _mount(tester, repository);
+    await _submit(tester, '程序');
+    await tester.pumpAndSettle();
+    Finder row(int index) =>
+        find.byKey(ValueKey('vod-search-course:7:${101 + index}'),
+            skipOffstage: false);
+    final initiallyBuilt = {
+      for (var index = 0; index < 40; index++)
+        if (tester.any(row(index))) index,
+    };
+    final list = find.byKey(const ValueKey('vod-search-results'));
+    final gesture = await tester.startGesture(tester.getCenter(list));
+    await gesture.moveBy(const Offset(0, -400));
+    await tester.pump(const Duration(milliseconds: 16));
+    final newRows = [
+      for (var index = 0; index < 40; index++)
+        if (!initiallyBuilt.contains(index) && tester.any(row(index))) index,
+    ];
+    expect(newRows, isNotEmpty);
+    for (final index in newRows) {
+      var foundEntrance = false;
+      var foundFade = false;
+      tester.element(row(index)).visitAncestorElements((element) {
+        if (element.widget.runtimeType.toString() == '_SearchCourseEntrance') {
+          foundEntrance = true;
+          return false;
+        }
+        if (element.widget is FadeTransition) foundFade = true;
+        return true;
+      });
+      expect(foundEntrance, isTrue);
+      expect(foundFade, isFalse);
+    }
+    await gesture.up();
+    await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('initial results still animate when the list is idle',
+      (tester) async {
+    final repository = _Repository()
+      ..searchLoader = (_, __) async => [_result(1)];
+    await _mount(tester, repository);
+    await _submit(tester, '程序');
+    await tester.pump(const Duration(milliseconds: 16));
+    final row = find.byKey(const ValueKey('vod-search-course:7:101'));
+    final fade =
+        find.ancestor(of: row, matching: find.byType(FadeTransition)).first;
+    expect(tester.widget<FadeTransition>(fade).opacity.value, lessThan(1));
+    await tester.pumpAndSettle();
+    expect(tester.widget<FadeTransition>(fade).opacity.value, 1);
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('summary uses course count and separate year and season lines',
       (tester) async {
     await _mount(tester, _Repository());

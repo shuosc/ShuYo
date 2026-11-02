@@ -44,6 +44,7 @@ class RecordingSearchPage extends StatefulWidget {
 
 class _RecordingSearchPageState extends State<RecordingSearchPage> {
   final _queryController = TextEditingController();
+  final _queryState = ValueNotifier((hasText: false, hasKeyword: false));
   final _queryFocusNode = FocusNode();
   final _scrollController = ScrollController();
   final _searchBusy = ValueNotifier(false);
@@ -56,6 +57,7 @@ class _RecordingSearchPageState extends State<RecordingSearchPage> {
       RecordingSearchViewData(_searchController);
   final _courseRows = <(int, int), (VodCourse, List<VodLesson>?, Widget)>{};
   final _animatedCourses = <(int, int)>{};
+  ThemeData? _rowTheme;
   int _renderedRevision = -1;
   int get _selectedTermId => _view.selectedTermId;
   int get _visibleCourseCount => _view.visibleCourseCount;
@@ -73,8 +75,15 @@ class _RecordingSearchPageState extends State<RecordingSearchPage> {
   @override
   void initState() {
     super.initState();
+    _queryController.addListener(_updateQueryState);
     _searchController.addListener(_updateSearchChrome);
     _updateSearchChrome();
+  }
+
+  void _updateQueryState() {
+    final text = _queryController.text;
+    _queryState.value =
+        (hasText: text.isNotEmpty, hasKeyword: text.trim().isNotEmpty);
   }
 
   void _updateSearchChrome() {
@@ -90,6 +99,8 @@ class _RecordingSearchPageState extends State<RecordingSearchPage> {
     _searchController.dispose();
     _searchBusy.dispose();
     _searchNeedsLogin.dispose();
+    _queryController.removeListener(_updateQueryState);
+    _queryState.dispose();
     _queryController.dispose();
     _queryFocusNode.dispose();
     _scrollController.dispose();
@@ -99,8 +110,14 @@ class _RecordingSearchPageState extends State<RecordingSearchPage> {
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
-    // Cached rows still follow theme and text scale changes.
-    _courseRows.clear();
+    // Cached tiles capture theme colors, but text and layout descendants
+    // subscribe to their own media settings (including text scaling). An IME
+    // inset change must not invalidate every cached row.
+    final theme = Theme.of(context);
+    if (_rowTheme != theme) {
+      _rowTheme = theme;
+      _courseRows.clear();
+    }
   }
 
   void _clearSearch({bool clearField = true}) {
@@ -295,7 +312,9 @@ class _RecordingSearchPageState extends State<RecordingSearchPage> {
         Padding(
           padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
           child: ListenableBuilder(
-            listenable: Listenable.merge([_queryController, _searchNeedsLogin]),
+            // Editing values also change for cursor, selection and IME
+            // composition updates. Those do not change either button's state.
+            listenable: Listenable.merge([_queryState, _searchNeedsLogin]),
             builder: (context, child) => Row(children: [
               Expanded(
                 child: TextField(
@@ -313,7 +332,7 @@ class _RecordingSearchPageState extends State<RecordingSearchPage> {
                   },
                   decoration: InputDecoration(
                     labelText: '课程 / 教师 / 课程号关键词',
-                    suffixIcon: _queryController.text.isEmpty
+                    suffixIcon: !_queryState.value.hasText
                         ? null
                         : IconButton(
                             key: const ValueKey('vod-search-clear'),
@@ -330,7 +349,7 @@ class _RecordingSearchPageState extends State<RecordingSearchPage> {
                 tooltip: '开始搜索',
                 onPressed: _searchNeedsLogin.value ||
                         _loggingIn ||
-                        _queryController.text.trim().isEmpty
+                        !_queryState.value.hasKeyword
                     ? null
                     : _search,
                 icon: Icon(Icons.search,
@@ -557,13 +576,19 @@ class _RecordingSearchPageState extends State<RecordingSearchPage> {
                         ? cached.$3
                         : _courseTile(course, view);
                     _courseRows[key] = (course, lessons, row);
+                    final firstAppearance = _animatedCourses.add(key);
+                    final scrolling = _scrollController.hasClients &&
+                        _scrollController.position.isScrollingNotifier.value;
                     return _SearchCourseEntrance(
                       key: ValueKey((
                         view.revision,
                         course.termId,
                         course.teachingClassId
                       )),
-                      animate: _animatedCourses.add(key),
+                      // The first page still enters normally. Creating a new
+                      // opacity/translation animation for each row during a
+                      // drag or fling adds compositing work to every frame.
+                      animate: firstAppearance && !scrolling,
                       child: row,
                     );
                   },
@@ -653,35 +678,40 @@ class _SearchCourseEntrance extends StatefulWidget {
 
 class _SearchCourseEntranceState extends State<_SearchCourseEntrance>
     with SingleTickerProviderStateMixin {
-  late final AnimationController _controller = AnimationController(
-    vsync: this,
-    duration: const Duration(milliseconds: 280),
-    value: widget.animate ? 0 : 1,
-  );
+  late final AnimationController? _controller = widget.animate
+      ? AnimationController(
+          vsync: this,
+          duration: const Duration(milliseconds: 280),
+        )
+      : null;
   late final Animation<double> _opacity =
-      _controller.drive(CurveTween(curve: Curves.easeOutCubic));
+      _controller!.drive(CurveTween(curve: Curves.easeOutCubic));
   late final Animation<Offset> _position =
       _opacity.drive(Tween(begin: const Offset(.12, 0), end: Offset.zero));
 
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
+    final controller = _controller;
+    if (controller == null) return;
     if (MediaQuery.disableAnimationsOf(context)) {
-      _controller.value = 1;
-    } else if (!_controller.isAnimating && _controller.value < 1) {
-      _controller.forward();
+      controller.value = 1;
+    } else if (!controller.isAnimating && controller.value < 1) {
+      controller.forward();
     }
   }
 
   @override
   void dispose() {
-    _controller.dispose();
+    _controller?.dispose();
     super.dispose();
   }
 
   @override
-  Widget build(BuildContext context) => SlideTransition(
-        position: _position,
-        child: FadeTransition(opacity: _opacity, child: widget.child),
-      );
+  Widget build(BuildContext context) => _controller == null
+      ? widget.child
+      : SlideTransition(
+          position: _position,
+          child: FadeTransition(opacity: _opacity, child: widget.child),
+        );
 }
