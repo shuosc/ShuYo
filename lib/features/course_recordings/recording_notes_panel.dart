@@ -9,6 +9,7 @@ import '../../shared/theme/shuyo_theme.dart';
 import '../../shared/widgets/empty_state.dart';
 import '../../shared/widgets/fullscreen_image_page.dart';
 import 'recording_detail_sheet.dart';
+import 'recording_player_tabs.dart';
 
 /// The portrait player's lesson-specific, lazily built PPT notes stream.
 class RecordingNotesPanel extends StatefulWidget {
@@ -61,7 +62,6 @@ class _RecordingNotesPanelState extends State<RecordingNotesPanel> {
 
   @override
   Widget build(BuildContext context) {
-    final colors = context.shuyoColors;
     final panel = RefreshIndicator(
       onRefresh: _refresh,
       child: CustomScrollView(
@@ -112,40 +112,11 @@ class _RecordingNotesPanelState extends State<RecordingNotesPanel> {
             )
           else ...[
             SliverPadding(
-              padding: const EdgeInsets.fromLTRB(16, 16, 16, 0),
-              sliver: SliverToBoxAdapter(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    Wrap(
-                      alignment: WrapAlignment.spaceBetween,
-                      spacing: 16,
-                      runSpacing: 6,
-                      children: [
-                        Text('共 ${widget.slides.length} 条笔记',
-                            style: ShuYoTextStyles.meta(
-                                size: 13, color: colors.textSecondary)),
-                        Text('按时间排序',
-                            style: ShuYoTextStyles.meta(
-                                color: colors.textTertiary)),
-                      ],
-                    ),
-                    const SizedBox(height: 8),
-                    Text(
-                      '文字由录播平台自动识别，点击笔记查看全文。',
-                      style: ShuYoTextStyles.meta(
-                        color: colors.textTertiary,
-                        height: 1.5,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-            SliverPadding(
               padding: EdgeInsets.fromLTRB(
                   16, 0, 16, MediaQuery.paddingOf(context).bottom + 24),
               sliver: SliverList.builder(
+                // Rows already own their keyed paint boundary below.
+                addRepaintBoundaries: false,
                 itemCount: widget.slides.length,
                 itemBuilder: (context, index) => RepaintBoundary(
                   key: ValueKey('recording-note-${widget.slides[index].id}'),
@@ -280,7 +251,6 @@ class _NoteEntry extends StatelessWidget {
           onClose: close,
           onSeek: canSeek
               ? () {
-                  close();
                   if (context.mounted) onSeek(_position);
                 }
               : null,
@@ -333,8 +303,10 @@ class _NoteDetails extends StatelessWidget {
                     child: Text('笔记详情',
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
-                        style: ShuYoTextStyles.bodyCompact(
-                            color: colors.textPrimary)),
+                        style:
+                            RecordingPlayerTabs.labelStyleOf(context).copyWith(
+                          color: colors.textPrimary,
+                        )),
                   ),
                   _CopyNoteButton(slide: slide),
                   IconButton(
@@ -515,6 +487,8 @@ class _PptImage extends StatefulWidget {
 
   final Uri url;
   final _PptImageHeaders imageHeaders;
+
+  /// Decode ceiling; the actual width follows the rendered size and DPR.
   final int cacheWidth;
   final bool compact;
 
@@ -567,22 +541,34 @@ class _PptImageState extends State<_PptImage> {
     );
   }
 
-  Widget _image(Map<String, String> headers) => Image.network(
-        widget.url.toString(),
-        headers: headers,
-        fit: BoxFit.contain,
-        cacheWidth: widget.cacheWidth,
-        excludeFromSemantics: true,
-        errorBuilder: (context, error, stackTrace) => _unavailable(),
-        frameBuilder: (context, child, frame, synchronouslyLoaded) =>
-            synchronouslyLoaded || frame != null
-                ? child
-                : const Center(
-                    child: SizedBox.square(
-                      dimension: 20,
-                      child: CircularProgressIndicator(strokeWidth: 2),
-                    ),
-                  ),
+  // Like PiliPlus's NetworkImgLayer, decode for the actual display size:
+  // https://github.com/bggRGjQaUbCoE/PiliPlus/blob/265f879fa85973b4bf885bde2562f1007f1013b8/lib/common/widgets/image/network_img_layer.dart
+  // Keep the existing ceilings; the full-screen image viewer uses the source.
+  Widget _image(Map<String, String> headers) => LayoutBuilder(
+        builder: (context, constraints) {
+          final cacheWidth = constraints.hasBoundedWidth
+              ? (constraints.maxWidth * MediaQuery.devicePixelRatioOf(context))
+                  .ceil()
+                  .clamp(1, widget.cacheWidth)
+              : widget.cacheWidth;
+          return Image.network(
+            widget.url.toString(),
+            headers: headers,
+            fit: BoxFit.contain,
+            cacheWidth: cacheWidth,
+            excludeFromSemantics: true,
+            errorBuilder: (context, error, stackTrace) => _unavailable(),
+            frameBuilder: (context, child, frame, synchronouslyLoaded) =>
+                synchronouslyLoaded || frame != null
+                    ? child
+                    : const Center(
+                        child: SizedBox.square(
+                          dimension: 20,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        ),
+                      ),
+          );
+        },
       );
 
   Widget _unavailable() => widget.compact

@@ -1,8 +1,11 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 import 'package:shuyo/data/models/course_recording.dart';
@@ -14,6 +17,7 @@ import 'package:shuyo/features/course_recordings/recording_episode_tile.dart';
 import 'package:shuyo/features/course_recordings/recording_course_overview.dart';
 import 'package:shuyo/features/course_recordings/recording_playback_status.dart';
 import 'package:shuyo/features/course_recordings/recording_player_page.dart';
+import 'package:shuyo/features/course_recordings/recording_player_layout.dart';
 import 'package:shuyo/features/course_recordings/recording_secondary_video.dart';
 import 'package:shuyo/features/course_recordings/recording_status_icon.dart';
 import 'package:shuyo/shared/theme/shuyo_theme.dart';
@@ -591,7 +595,7 @@ void main() {
         expect(button.center.dy, row.center.dy);
       }
       expect(row.bottom, tester.view.physicalSize.height - 12);
-      final timeLabel = find.text('1:05:00 / 1:30:00');
+      final timeLabel = find.text('1:05:00/1:30:00');
       expect(timeLabel, findsOneWidget);
       expect(tester.widget<Text>(timeLabel).maxLines, 1);
       expect(time.center.dy, row.center.dy);
@@ -1046,10 +1050,11 @@ void main() {
         .setMockMethodCallHandler(channel, null));
   }
 
-  String notesTabLabel(WidgetTester tester) => tester
-      .widget<Text>(find.byKey(const ValueKey('recording-notes-tab-label')))
-      .textSpan!
-      .toPlainText();
+  String notesTabLabel(WidgetTester tester) {
+    final text = tester
+        .widget<Text>(find.byKey(const ValueKey('recording-notes-tab-label')));
+    return text.data ?? text.textSpan!.toPlainText();
+  }
 
   const note = VodPptSlide(
     id: 'first-note',
@@ -1063,6 +1068,87 @@ void main() {
     position: Duration(seconds: 24),
     text: '当前课次第二张 PPT 的识别文字',
   );
+
+  testWidgets(
+      'entry starts requests but defers decoders until the slide settles',
+      (tester) async {
+    prepareNotesPortrait(tester);
+    final harness = _PlaybackHarness();
+    var playbackRequests = 0;
+    final content = (page(
+      harness: harness,
+      load: (lesson) async {
+        playbackRequests++;
+        return playback(lesson);
+      },
+      loadNotes: (_) async => [],
+    ) as MaterialApp)
+        .home!;
+    await tester.pumpWidget(MaterialApp(
+      home: Builder(
+          builder: (context) => Scaffold(
+                body: TextButton(
+                  onPressed: () =>
+                      Navigator.of(context).push(PageRouteBuilder<void>(
+                    transitionDuration: const Duration(milliseconds: 400),
+                    pageBuilder: (_, animation, secondary) => content,
+                    transitionsBuilder: (_, animation, secondary, child) =>
+                        SlideTransition(
+                      position: animation.drive(Tween<Offset>(
+                          begin: const Offset(1, 0), end: Offset.zero)),
+                      child: child,
+                    ),
+                  )),
+                  child: const Text('打开课程'),
+                ),
+              )),
+    ));
+    await tester.tap(find.text('打开课程'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 150));
+    expect(playbackRequests, 1);
+    expect(harness.platforms, isEmpty);
+    await tester.pump(const Duration(milliseconds: 250));
+    await tester.pumpAndSettle();
+    expect(harness.platforms, isNotEmpty);
+    expect(
+        harness.platforms.every((player) => player.opened.length == 1), isTrue);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets(
+      'notes completion leaves video and introduction widgets untouched',
+      (tester) async {
+    prepareNotesPortrait(tester);
+    final pending = Completer<List<VodPptSlide>>();
+    final harness = _PlaybackHarness();
+    await tester.pumpWidget(page(
+      harness: harness,
+      load: (lesson) async => playback(lesson),
+      loadNotes: (_) => pending.future,
+    ));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+    final video = tester.widget<Video>(find.byType(Video));
+    final tabView = tester.widget<TabBarView>(find.byType(TabBarView));
+    final introduction = tester.widget<CustomScrollView>(
+        find.byKey(const ValueKey('course-player-episodes')));
+    final opens =
+        harness.platforms.map((player) => player.opened.length).toList();
+    pending.complete([note, anotherNote]);
+    await tester.pumpAndSettle();
+    expect(notesTabLabel(tester), '笔记 2');
+    expect(tester.widget<Video>(find.byType(Video)), same(video));
+    expect(tester.widget<TabBarView>(find.byType(TabBarView)), same(tabView));
+    expect(
+        tester.widget<CustomScrollView>(
+            find.byKey(const ValueKey('course-player-episodes'))),
+        same(introduction));
+    expect(harness.platforms.map((player) => player.opened.length), opens);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
 
   testWidgets(
       'portrait notes tabs show OCR count and preserve playback across taps and swipes',
@@ -1120,6 +1206,10 @@ void main() {
         harness.platforms.every((player) => player.seeks.length == 1), isTrue);
     expect(harness.platforms.map((player) => player.seeks.single),
         everyElement(note.position));
+    expect(find.byKey(const ValueKey('recording-note-detail-first-note')),
+        findsOneWidget);
+    await tester.tap(find.byTooltip('关闭'));
+    await tester.pumpAndSettle();
     expect(find.byKey(const ValueKey('recording-note-detail-first-note')),
         findsNothing);
     await tester.tap(find.text('简介'));
@@ -1192,7 +1282,7 @@ void main() {
     await tester.pumpWidget(const SizedBox.shrink());
   });
 
-  testWidgets('empty and failed notes omit zero count and retry only notes',
+  testWidgets('empty notes show zero while failed notes omit unknown count',
       (tester) async {
     prepareNotesPortrait(tester);
     final harness = _PlaybackHarness();
@@ -1215,7 +1305,7 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.byKey(const ValueKey('recording-notes-tab-label')));
     await tester.pumpAndSettle();
-    expect(notesTabLabel(tester), '笔记');
+    expect(notesTabLabel(tester), '笔记 0');
     expect(find.byKey(const ValueKey('recording-notes-empty')), findsOneWidget);
     expect(find.text('当前课次暂无 PPT 笔记'), findsOneWidget);
     expect(find.text('重试'), findsNothing);
@@ -1247,6 +1337,80 @@ void main() {
     expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox.shrink());
   });
+
+  for (final (description, accepted) in [
+    ('successful empty', true),
+    ('rejected', false),
+  ]) {
+    testWidgets(
+        '$description PPT response reaches the correct player notes state',
+        (tester) async {
+      prepareNotesPortrait(tester);
+      final requests = <int>[];
+      final httpClient = MockClient((request) async {
+        expect(request.method, 'GET');
+        expect(request.url.path, '/v1/course/ai/ppt');
+        requests.add(int.parse(request.url.queryParameters['courseId']!));
+        return http.Response(
+          jsonEncode({
+            'status': 200,
+            'code': null,
+            'ok': accepted,
+            'dataOk': false,
+            'data': null,
+          }),
+          200,
+          headers: {'content-type': 'application/json; charset=utf-8'},
+        );
+      });
+      addTearDown(httpClient.close);
+      final repository = VodRepository(
+        apiClient: VodApiClient(
+          httpClient: httpClient,
+          headersLoader: (_) async => {},
+          uriResolver: (path, query) => Uri.https('vod.example', path, query),
+          useWebVpn: false,
+        ),
+      );
+      addTearDown(repository.dispose);
+      final harness = _PlaybackHarness();
+      var playbackRequests = 0;
+      await tester.pumpWidget(page(
+        harness: harness,
+        load: (lesson) async {
+          playbackRequests++;
+          return playback(lesson);
+        },
+        loadNotes: (id) => repository.loadPptSlides(id, forceRefresh: true),
+      ));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('recording-notes-tab-label')));
+      await tester.pumpAndSettle();
+      expect(notesTabLabel(tester), accepted ? '笔记 0' : '笔记');
+      expect(find.byKey(const ValueKey('recording-notes-empty')),
+          accepted ? findsOneWidget : findsNothing);
+      expect(find.byKey(const ValueKey('recording-notes-error')),
+          accepted ? findsNothing : findsOneWidget);
+      expect(requests, [first.id]);
+      final opens =
+          harness.platforms.map((player) => player.opened.length).toList();
+
+      await tester.drag(find.byKey(const ValueKey('recording-notes-scroll')),
+          const Offset(0, 350));
+      await tester.pumpAndSettle();
+      expect(requests, [first.id, first.id]);
+      expect(notesTabLabel(tester), accepted ? '笔记 0' : '笔记');
+      expect(find.byKey(const ValueKey('recording-notes-empty')),
+          accepted ? findsOneWidget : findsNothing);
+      expect(find.byKey(const ValueKey('recording-notes-error')),
+          accepted ? findsNothing : findsOneWidget);
+      expect(find.text('重试'), findsNothing);
+      expect(playbackRequests, 1);
+      expect(harness.platforms.map((player) => player.opened.length), opens);
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+    });
+  }
 
   testWidgets('a pending pull refresh cannot overwrite a new lesson',
       (tester) async {
@@ -1347,17 +1511,20 @@ void main() {
     await tester.tap(find.byKey(const ValueKey('recording-notes-tab-label')));
     await tester.pumpAndSettle();
     expect(find.byKey(const ValueKey('recording-notes-empty')), findsOneWidget);
+    expect(notesTabLabel(tester), '笔记 0');
     await tester.drag(find.byKey(const ValueKey('recording-notes-scroll')),
         const Offset(0, 350));
     await tester.pumpAndSettle();
     expect(find.byKey(const ValueKey('recording-notes-error')), findsOneWidget);
     expect(find.byKey(const ValueKey('recording-notes-empty')), findsNothing);
+    expect(notesTabLabel(tester), '笔记');
     await tester.drag(find.byKey(const ValueKey('recording-notes-scroll')),
         const Offset(0, 350));
     await tester.pumpAndSettle();
     expect(requests, 3);
     expect(find.byKey(const ValueKey('recording-notes-empty')), findsOneWidget);
     expect(find.byKey(const ValueKey('recording-notes-error')), findsNothing);
+    expect(notesTabLabel(tester), '笔记 0');
     expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox.shrink());
   });
@@ -1376,6 +1543,7 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.byKey(const ValueKey('recording-notes-tab-label')));
     await tester.pumpAndSettle();
+    expect(notesTabLabel(tester), '笔记 0');
     await tester.drag(find.byKey(const ValueKey('recording-notes-scroll')),
         const Offset(0, 350));
     await tester.pump();
@@ -1384,6 +1552,7 @@ void main() {
     expect(find.byKey(const ValueKey('recording-notes-empty')), findsOneWidget);
     expect(find.byKey(const ValueKey('recording-notes-loading')), findsNothing);
     expect(find.byType(RefreshProgressIndicator), findsOneWidget);
+    expect(notesTabLabel(tester), '笔记 0');
     pendingRefresh.complete([note]);
     await tester.pumpAndSettle();
     expect(find.text(note.text), findsOneWidget);
@@ -1596,6 +1765,188 @@ void main() {
       await tester.pumpWidget(const SizedBox.shrink());
     });
   }
+
+  testWidgets(
+      'fullscreen round trips retain both tab scrolls and an open note detail',
+      (tester) async {
+    prepareNotesPortrait(tester);
+    final harness = _PlaybackHarness();
+    var playbackRequests = 0;
+    var noteRequests = 0;
+    final slides = List.generate(
+      40,
+      (index) => VodPptSlide(
+        id: 'retained-$index',
+        imageUrl: null,
+        position: Duration(seconds: index * 30),
+        text: List.generate(100, (line) => '第 $index 页的第 $line 行完整笔记正文。')
+            .join('\n'),
+      ),
+    );
+    await tester.pumpWidget(page(
+      harness: harness,
+      lessons: [
+        first,
+        for (var index = 0; index < 60; index++)
+          VodLesson(
+            id: 200 + index,
+            teachingClassId: 10,
+            name: course.name,
+            beginTime: DateTime(2026, 8, index + 1),
+            isPlayable: true,
+          ),
+      ],
+      load: (lesson) async {
+        playbackRequests++;
+        return playback(lesson);
+      },
+      loadNotes: (_) async {
+        noteRequests++;
+        return slides;
+      },
+    ));
+    await tester.pumpAndSettle();
+
+    ScrollPosition scrollPosition(Finder view) => tester
+        .state<ScrollableState>(
+          find.descendant(of: view, matching: find.byType(Scrollable)).first,
+        )
+        .position;
+    final introduction = find.byKey(const ValueKey('course-player-episodes'));
+    await tester.drag(introduction, const Offset(0, -650));
+    await tester.pumpAndSettle();
+    final introductionPosition = scrollPosition(introduction);
+    final introductionOffset = introductionPosition.pixels;
+    expect(introductionOffset, greaterThan(100));
+
+    await tester.tap(find.byKey(const ValueKey('recording-notes-tab-label')));
+    await tester.pumpAndSettle();
+    final notes = find.byKey(const ValueKey('recording-notes-scroll'));
+    await tester.drag(notes, const Offset(0, -450));
+    await tester.pumpAndSettle();
+    final notesPosition = scrollPosition(notes);
+    final notesOffset = notesPosition.pixels;
+    expect(notesOffset, greaterThan(100));
+    final selectedSlide = slides.firstWhere((slide) => find
+        .byKey(ValueKey('recording-note-open-${slide.id}'))
+        .hitTestable()
+        .evaluate()
+        .isNotEmpty);
+    await tester
+        .tap(find.byKey(ValueKey('recording-note-open-${selectedSlide.id}')));
+    await tester.pumpAndSettle();
+    final detailScroll = find
+        .byKey(ValueKey('recording-note-detail-scroll-${selectedSlide.id}'));
+    await tester.drag(detailScroll, const Offset(0, -620));
+    await tester.pumpAndSettle();
+    final detailPosition = scrollPosition(detailScroll);
+    final detailOffset = detailPosition.pixels;
+    expect(detailOffset, greaterThan(100));
+    final portraitLayout = tester.state(find.byType(RecordingPlayerLayout));
+    final tabs = tester.widget<TabBar>(find.byType(TabBar)).controller!;
+    final videoState = tester.state(find.byType(Video));
+    final opens =
+        harness.platforms.map((player) => player.opened.length).toList();
+    final pauses = harness.platforms.map((player) => player.pauses).toList();
+
+    // Cover both the native fullscreen route and the actual orientation resize.
+    for (var roundTrip = 0; roundTrip < 2; roundTrip++) {
+      await tester
+          .widget<RecordingVideoControls>(find.byType(RecordingVideoControls))
+          .state
+          .enterFullscreen();
+      tester.view.physicalSize = const Size(852, 393);
+      await tester.pumpAndSettle();
+      expect(
+        tester.state(find.byType(RecordingPlayerLayout, skipOffstage: false)),
+        same(portraitLayout),
+      );
+      expect(detailPosition.pixels, closeTo(detailOffset, .01));
+      expect(tabs.index, 1);
+      await tester
+          .widget<RecordingVideoControls>(find.byType(RecordingVideoControls))
+          .state
+          .exitFullscreen();
+      tester.view.physicalSize = const Size(393, 852);
+      await tester.pumpAndSettle();
+      expect(find.byKey(ValueKey('recording-note-detail-${selectedSlide.id}')),
+          findsOneWidget);
+      expect(scrollPosition(detailScroll), same(detailPosition));
+      expect(detailPosition.pixels, closeTo(detailOffset, .01));
+      expect(notesPosition.pixels, closeTo(notesOffset, .01));
+      expect(tabs.index, 1);
+      expect(tester.state(find.byType(Video)), same(videoState));
+    }
+
+    // Back closes the original detail history entry, then the notes list and
+    // introduction reveal their own retained scroll positions.
+    await tester.binding.handlePopRoute();
+    await tester.pumpAndSettle();
+    expect(find.byKey(ValueKey('recording-note-detail-${selectedSlide.id}')),
+        findsNothing);
+    expect(scrollPosition(notes), same(notesPosition));
+    expect(notesPosition.pixels, closeTo(notesOffset, .01));
+    await tester.tap(find.text('简介'));
+    await tester.pumpAndSettle();
+    expect(
+        scrollPosition(introduction).pixels, closeTo(introductionOffset, .01));
+    expect(playbackRequests, 1);
+    expect(noteRequests, 1);
+    expect(harness.platforms.map((player) => player.opened.length), opens);
+    expect(harness.platforms.map((player) => player.pauses), pauses);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets(
+      'changing lessons in fullscreen clears only the previous note details',
+      (tester) async {
+    prepareNotesPortrait(tester);
+    final harness = _PlaybackHarness();
+    final noteRequests = <int>[];
+    await tester.pumpWidget(page(
+      harness: harness,
+      lessons: [first, second],
+      load: (lesson) async => playback(lesson),
+      loadNotes: (id) async {
+        noteRequests.add(id);
+        return id == first.id ? [note] : [anotherNote];
+      },
+    ));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('recording-notes-tab-label')));
+    await tester.pumpAndSettle();
+    await tester
+        .tap(find.byKey(const ValueKey('recording-note-open-first-note')));
+    await tester.pumpAndSettle();
+    final portraitLayout = tester.state(find.byType(RecordingPlayerLayout));
+    await tester
+        .widget<RecordingVideoControls>(find.byType(RecordingVideoControls))
+        .state
+        .enterFullscreen();
+    tester.view.physicalSize = const Size(852, 393);
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('选集'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(ValueKey('fullscreen-lesson-${second.id}')));
+    await tester.pumpAndSettle();
+    await tester
+        .widget<RecordingVideoControls>(find.byType(RecordingVideoControls))
+        .state
+        .exitFullscreen();
+    tester.view.physicalSize = const Size(393, 852);
+    await tester.pumpAndSettle();
+    expect(
+        tester.state(find.byType(RecordingPlayerLayout)), same(portraitLayout));
+    expect(tester.widget<TabBar>(find.byType(TabBar)).controller!.index, 1);
+    expect(find.byKey(const ValueKey('recording-note-detail-first-note')),
+        findsNothing);
+    expect(find.byKey(const ValueKey('recording-note-open-second-note')),
+        findsOneWidget);
+    expect(noteRequests, [first.id, second.id]);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
 
   testWidgets(
       'fullscreen size changes preserve the video host and both streams',
@@ -4285,7 +4636,7 @@ void main() {
       ),
     ));
     await tester.pump();
-    final time = find.text('1:05:00 / 1:30:00');
+    final time = find.text('1:05:00/1:30:00');
     expect(time, findsOneWidget);
     expect(tester.widget<Text>(time).maxLines, 1);
     expect(tester.takeException(), isNull);
@@ -4389,7 +4740,7 @@ void main() {
     slider.onChangeEnd!(const Duration(minutes: 10).inMilliseconds.toDouble());
     await tester.pump();
     expect(platform.lastSeek, const Duration(minutes: 10));
-    final time = find.text('10:00 / 1:30:00');
+    final time = find.text('10:00/1:30:00');
     expect(time, findsOneWidget);
     expect(tester.widget<Text>(time).maxLines, 1);
     expect(find.byTooltip('退出全屏'), findsNWidgets(2));

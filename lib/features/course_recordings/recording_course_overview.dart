@@ -3,8 +3,9 @@ import 'package:flutter/material.dart';
 import '../../data/models/course_recording.dart';
 import '../../shared/shuyo_text_styles.dart';
 import '../../shared/theme/shuyo_theme.dart';
+import 'recording_course_schedule.dart';
 
-typedef RecordingCourseDay = ({int weekday, Set<int> sections});
+export 'recording_course_schedule.dart';
 
 const _weekdays = {
   DateTime.monday: '周一',
@@ -13,32 +14,6 @@ const _weekdays = {
   DateTime.thursday: '周四',
   DateTime.friday: '周五',
 };
-final _sectionPattern =
-    RegExp(r'^第?\s*(\d{1,2})(?:\s*[-–—~～至]\s*(\d{1,2}))?\s*节(?:课)?$');
-
-List<RecordingCourseDay> recordingCourseDays(Iterable<VodLesson> lessons) {
-  final days = <int, Set<int>>{};
-  for (final lesson in lessons) {
-    final begin = lesson.beginTime;
-    final match = _sectionPattern.firstMatch(lesson.sectionLabel.trim());
-    if (begin == null || match == null) continue;
-    final first = int.parse(match[1]!);
-    final last = int.parse(match[2] ?? match[1]!);
-    if (first < 1 || last < first || last > 12) continue;
-    final schoolDate =
-        begin.isUtc ? begin.add(const Duration(hours: 8)) : begin;
-    if (schoolDate.weekday > DateTime.friday) continue;
-    final sections = days.putIfAbsent(schoolDate.weekday, () => <int>{});
-    for (var section = first; section <= last; section++) {
-      sections.add(section);
-    }
-  }
-  final weekdays = days.keys.toList()..sort();
-  return List.unmodifiable([
-    for (final weekday in weekdays)
-      (weekday: weekday, sections: Set<int>.unmodifiable(days[weekday]!)),
-  ]);
-}
 
 class RecordingCourseOverview extends StatelessWidget {
   const RecordingCourseOverview({

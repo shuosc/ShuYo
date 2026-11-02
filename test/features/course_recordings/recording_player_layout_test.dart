@@ -178,6 +178,66 @@ void main() {
     await tester.pumpWidget(const SizedBox.shrink());
   });
 
+  testWidgets(
+      'continuous collapse reuses toolbar and buttons while fading and hit testing',
+      (tester) async {
+    final platform = _LayoutPlatformPlayer();
+    final player = Player(platformPlayer: platform);
+    addTearDown(player.dispose);
+    var moreActions = 0;
+    var backs = 0;
+    await _pumpLayout(tester,
+        player: player, onBack: () => backs++, onMore: () => moreActions++);
+    final toolbar = find.byKey(_toolbarKey);
+    final resume = find.byKey(_resumeKey);
+    final more = find.byKey(const ValueKey('recording-collapsed-more'));
+    final back = find.widgetWithIcon(IconButton, Icons.arrow_back);
+    final initialToolbar = tester.widget<Opacity>(toolbar).child;
+    final initialResume = tester.widget<TextButton>(resume);
+    final initialMore = tester.widget<IconButton>(more);
+    final initialBack = tester.widget<IconButton>(back);
+    expect(_toolbarOpacity(tester), 0);
+    expect(resume.hitTestable(), findsNothing);
+    expect(more.hitTestable(), findsNothing);
+
+    final gesture = await tester.startGesture(tester
+        .getCenter(find.byKey(const ValueKey('recording-test-lesson-list'))));
+    var partialFrames = 0;
+    for (var frame = 0; frame < 12; frame++) {
+      await gesture.moveBy(const Offset(0, -24));
+      await tester.pump(const Duration(milliseconds: 16));
+      final ratio = (_outerController(tester).offset / 164).clamp(0.0, 1.0);
+      if (ratio > 0 && ratio < 1) partialFrames++;
+      expect(_toolbarOpacity(tester), closeTo(ratio, .001));
+      expect(tester.widget<Opacity>(toolbar).child, same(initialToolbar));
+      expect(tester.widget<TextButton>(resume), same(initialResume));
+      expect(tester.widget<IconButton>(more), same(initialMore));
+      expect(tester.widget<IconButton>(back), same(initialBack));
+      expect(_headerHeight(tester), closeTo(220 - 164 * ratio, .001));
+    }
+    await gesture.up();
+    await tester.pumpAndSettle();
+    expect(partialFrames, greaterThan(2));
+    expect(_toolbarOpacity(tester), 1);
+    expect(resume.hitTestable(), findsOneWidget);
+    expect(more.hitTestable(), findsOneWidget);
+    await tester.tap(more);
+    await tester.tap(back);
+    expect(moreActions, 1);
+    expect(backs, 1);
+
+    await tester.tap(resume);
+    await tester.pumpAndSettle();
+    expect(_headerHeight(tester), 220);
+    expect(_toolbarOpacity(tester), 0);
+    expect(resume.hitTestable(), findsNothing);
+    expect(more.hitTestable(), findsNothing);
+    expect(platform.plays, 1);
+    expect(platform.opens, 0);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
   testWidgets('more action follows the back button throughout collapse',
       (tester) async {
     final platform = _LayoutPlatformPlayer();

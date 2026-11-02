@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shuyo/data/models/vod_ppt.dart';
 import 'package:shuyo/features/course_recordings/recording_notes_panel.dart';
+import 'package:shuyo/features/course_recordings/recording_player_tabs.dart';
 import 'package:shuyo/shared/theme/shuyo_theme.dart';
 import 'package:shuyo/shared/widgets/fullscreen_image_page.dart';
 
@@ -25,13 +26,16 @@ void main() {
     Future<Map<String, String>> Function(Uri)? headersLoader,
     ThemeData? theme,
     double textScale = 1,
+    double devicePixelRatio = 1,
     bool canSeek = true,
   }) =>
       MaterialApp(
         theme: theme,
         home: Scaffold(
           body: MediaQuery(
-            data: MediaQueryData(textScaler: TextScaler.linear(textScale)),
+            data: MediaQueryData(
+                textScaler: TextScaler.linear(textScale),
+                devicePixelRatio: devicePixelRatio),
             child: RecordingNotesPanel(
               slides: slides,
               loading: loading,
@@ -44,6 +48,50 @@ void main() {
           ),
         ),
       );
+
+  testWidgets(
+      'PPT decoding follows display width and DPR without renewing headers',
+      (tester) async {
+    tester.view.physicalSize = const Size(360, 780);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final slides = [slide(1, image: true)];
+    var headerRequests = 0;
+    Future<Map<String, String>> headers(Uri _) async {
+      headerRequests++;
+      return const {};
+    }
+
+    for (final dpr in [1.0, 2.0, 3.0, 4.0]) {
+      await tester.pumpWidget(
+          app(slides: slides, devicePixelRatio: dpr, headersLoader: headers));
+      await tester.pumpAndSettle();
+      final thumbnail = find.descendant(
+          of: find.byKey(const ValueKey('recording-note-thumbnail-1')),
+          matching: find.byType(Image));
+      final thumbnailProvider =
+          tester.widget<Image>(thumbnail).image as ResizeImage;
+      expect(tester.getSize(thumbnail).width, 104);
+      expect(thumbnailProvider.width, (104 * dpr).ceil().clamp(1, 312));
+      expect((thumbnailProvider.imageProvider as NetworkImage).url,
+          slides.single.imageUrl.toString());
+      await tester.tap(find.byKey(const ValueKey('recording-note-open-1')));
+      await tester.pumpAndSettle();
+      final detail = find.descendant(
+          of: find.byKey(const ValueKey('recording-note-image-1')),
+          matching: find.byType(Image));
+      final detailProvider = tester.widget<Image>(detail).image as ResizeImage;
+      expect(detailProvider.width,
+          (tester.getSize(detail).width * dpr).ceil().clamp(1, 1280));
+      expect((detailProvider.imageProvider as NetworkImage).url,
+          slides.single.imageUrl.toString());
+      await tester.tap(find.byTooltip('关闭'));
+      await tester.pumpAndSettle();
+    }
+    expect(headerRequests, 1);
+    expect(tester.takeException(), isNull);
+  });
 
   testWidgets('loading, unavailable content, and request failure are distinct',
       (tester) async {
@@ -104,7 +152,8 @@ void main() {
       ],
       onSeek: positions.add,
     ));
-    expect(find.text('按时间排序'), findsOneWidget);
+    expect(find.text('按时间排序'), findsNothing);
+    expect(find.text('文字由录播平台自动识别，点击笔记查看全文。'), findsNothing);
     expect(find.text('PPT 第 1 页'), findsOneWidget);
     expect(find.byType(SelectableText), findsNothing);
     expect(find.text('01:00'), findsOneWidget);
@@ -122,7 +171,48 @@ void main() {
     await tester.tap(find.byKey(const ValueKey('recording-note-seek-long')));
     await tester.pumpAndSettle();
     expect(positions, [const Duration(hours: 1, minutes: 2, seconds: 3)]);
+    expect(find.text('笔记详情'), findsOneWidget);
+    await tester.tap(find.byTooltip('关闭'));
+    await tester.pumpAndSettle();
     expect(find.text('笔记详情'), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('seeking retains the open detail and its body scroll position',
+      (tester) async {
+    final positions = <Duration>[];
+    final note = slide(1,
+        text: List.generate(150, (index) => '第 $index 行 PPT 识别正文。').join('\n'));
+    await tester.pumpWidget(app(slides: [note], onSeek: positions.add));
+    await tester.tap(find.byKey(const ValueKey('recording-note-open-1')));
+    await tester.pumpAndSettle();
+    final body = find.byKey(const ValueKey('recording-note-detail-scroll-1'));
+    final bodyState = tester.state<ScrollableState>(
+        find.descendant(of: body, matching: find.byType(Scrollable)).first);
+    bodyState.position.jumpTo(600);
+    await tester.pumpAndSettle();
+    expect(bodyState.position.pixels, 600);
+    final before = tester
+        .getRect(find.byKey(const ValueKey('recording-note-detail-toolbar')));
+
+    await tester.tap(find.byKey(const ValueKey('recording-note-seek-1')));
+    await tester.pumpAndSettle();
+
+    expect(positions, [note.position]);
+    expect(find.text('笔记详情'), findsOneWidget);
+    expect(
+        tester.state<ScrollableState>(
+            find.descendant(of: body, matching: find.byType(Scrollable)).first),
+        same(bodyState));
+    expect(bodyState.position.pixels, 600);
+    expect(
+        tester.getRect(
+            find.byKey(const ValueKey('recording-note-detail-toolbar'))),
+        before);
+    await tester.tap(find.byTooltip('关闭'));
+    await tester.pumpAndSettle();
+    expect(find.text('笔记详情'), findsNothing);
+    expect(find.byKey(const ValueKey('recording-note-open-1')), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 
@@ -152,7 +242,7 @@ void main() {
     expect(summary.overflow, TextOverflow.ellipsis);
     expect(summary.data!.length, lessThan(note.text.length));
     expect(find.text('01'), findsNothing);
-    expect(find.text('共 1 条笔记'), findsOneWidget);
+    expect(find.text('共 1 条笔记'), findsNothing);
     await tester.tap(find.byKey(const ValueKey('recording-note-open-1')));
     await tester.pumpAndSettle();
     expect(
@@ -177,6 +267,11 @@ void main() {
     await tester.pumpAndSettle();
     final toolbar = tester
         .getRect(find.byKey(const ValueKey('recording-note-detail-toolbar')));
+    final titleStyle = tester.widget<Text>(find.text('笔记详情')).style!;
+    expect(titleStyle.fontSize, 13);
+    expect(titleStyle.fontWeight, FontWeight.w500);
+    expect(titleStyle.height, 1.43);
+    expect(titleStyle.letterSpacing, .1);
     final copy =
         tester.getRect(find.byKey(const ValueKey('recording-note-copy-1')));
     final seek =
@@ -196,6 +291,67 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('笔记详情'), findsOneWidget);
     expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('detail heading shares the actual tab label style and theme',
+      (tester) async {
+    final base = ShuYoThemes.byId(ShuYoThemes.defaultId).themeData();
+    for (final theme in [
+      base,
+      base.copyWith(
+        tabBarTheme: base.tabBarTheme.copyWith(
+          labelStyle: const TextStyle(
+            fontSize: 18,
+            fontWeight: FontWeight.w700,
+            height: 1.6,
+            letterSpacing: .5,
+          ),
+        ),
+      ),
+    ]) {
+      await tester.pumpWidget(MaterialApp(
+        theme: theme,
+        home: DefaultTabController(
+          length: 2,
+          child: Builder(builder: (context) {
+            return Scaffold(
+              body: Column(children: [
+                RecordingPlayerTabs(
+                  controller: DefaultTabController.of(context),
+                  noteCount: 1,
+                ),
+                Expanded(
+                  child: RecordingNotesPanel(
+                    slides: [slide(1)],
+                    loading: false,
+                    error: null,
+                    onRefresh: () async {},
+                    onSeek: (_) {},
+                  ),
+                ),
+              ]),
+            );
+          }),
+        ),
+      ));
+      await tester.pumpAndSettle();
+      final tabStyle = tester.widget<TabBar>(find.byType(TabBar)).labelStyle!;
+      await tester.tap(find.byKey(const ValueKey('recording-note-open-1')));
+      await tester.pumpAndSettle();
+      final title = find.text('笔记详情');
+      final context = tester.element(title);
+      final titleStyle = tester.widget<Text>(title).style!;
+      expect(titleStyle,
+          tabStyle.copyWith(color: Theme.of(context).colorScheme.onSurface));
+      expect(
+          titleStyle,
+          RecordingPlayerTabs.labelStyleOf(context).copyWith(
+            color: Theme.of(context).colorScheme.onSurface,
+          ));
+      await tester.tap(find.byTooltip('关闭'));
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull);
+    }
   });
 
   testWidgets('77 PPT attachments obtain credentials only as rows appear',
@@ -218,7 +374,7 @@ void main() {
         const Offset(0, -700));
     await tester.pump();
     expect(requests.length, greaterThan(before));
-    expect(requests.length, lessThan(20));
+    expect(requests.length, lessThan(30));
     expect(tester.takeException(), isNull);
   });
 

@@ -12,6 +12,7 @@ import '../../shared/shuyo_text_styles.dart';
 import '../../shared/theme/shuyo_theme.dart';
 import 'recording_episode_tile.dart';
 import 'recording_episode_metadata.dart';
+import 'recording_episode_navigation.dart';
 import 'recording_episode_sort_icon.dart';
 import 'recording_fullscreen_status.dart';
 import 'recording_playback_info.dart';
@@ -20,6 +21,18 @@ import 'recording_player_preferences.dart';
 import 'recording_playback_status.dart';
 import 'recording_seek_controller.dart';
 import 'recording_secondary_video.dart';
+
+typedef _ProgressPresentation = ({
+  double maximum,
+  double played,
+  double buffered
+});
+typedef _TimePresentation = ({int playedSeconds, int totalSeconds});
+typedef _LoadingPresentation = ({
+  bool playing,
+  bool buffering,
+  int bufferedSeconds
+});
 
 class RecordingVideoControls extends StatefulWidget {
   const RecordingVideoControls({
@@ -120,6 +133,19 @@ class _RecordingVideoControlsState extends State<RecordingVideoControls>
   Player get _clockPlayer => widget.timelinePlayer ?? widget.player;
   static const _episodeItemExtent = 80.0;
   final _subscriptions = <StreamSubscription<dynamic>>[];
+  final _loadingSubscriptions = <StreamSubscription<dynamic>>[];
+  // PiliPlus 265f879fa85973b4bf885bde2562f1007f1013b8 keeps displayed
+  // seconds separate from raw position listeners. Keep seek/slider precision,
+  // while publishing only changes to each independent UI projection.
+  final _progressPresentation = ValueNotifier<_ProgressPresentation>(
+      (maximum: 1, played: 0, buffered: 0));
+  final _timePresentation =
+      ValueNotifier<_TimePresentation>((playedSeconds: 0, totalSeconds: 0));
+  final _loadingPresentation = ValueNotifier<_LoadingPresentation>(
+      (playing: false, buffering: false, bufferedSeconds: 0));
+  final _playingPresentation = ValueNotifier(false);
+  final _ratePresentation = ValueNotifier(1.0);
+  final _episodeNavigationCache = RecordingEpisodeNavigationCache();
   final _episodeScrollController = ScrollController();
   late final AnimationController _episodeAnimation;
   late final AnimationController _controlsAnimation;
@@ -160,6 +186,7 @@ class _RecordingVideoControlsState extends State<RecordingVideoControls>
         }
       });
     _bindPlayer();
+    _bindLoadingPlayer();
     _showControls();
   }
 
@@ -174,23 +201,55 @@ class _RecordingVideoControlsState extends State<RecordingVideoControls>
       final pending = _pendingSeekPosition;
       if (pending != null && recordingSeekPositionMatches(position, pending)) {
         _clearPendingSeekPosition();
-        setState(() => _dragPosition = null);
+        _dragPosition = null;
+        _timelineChanged();
         _showControls();
       } else {
-        setState(() {});
+        _timelineChanged();
       }
     }));
     for (final stream in <Stream<dynamic>>[
       _clockPlayer.stream.duration,
-      _clockPlayer.stream.playing,
-      _clockPlayer.stream.buffering,
       _clockPlayer.stream.buffer,
-      _clockPlayer.stream.rate,
     ]) {
-      _subscriptions.add(stream.listen((_) {
-        if (mounted) setState(() {});
-      }));
+      _subscriptions.add(stream.listen((_) => _timelineChanged()));
     }
+    _subscriptions.add(_clockPlayer.stream.playing.listen((_) {
+      if (mounted) _playingPresentation.value = _playing;
+    }));
+    _subscriptions.add(_clockPlayer.stream.rate.listen((rate) {
+      if (mounted) _ratePresentation.value = rate;
+    }));
+    _timelineChanged();
+    _playingPresentation.value = _playing;
+    _ratePresentation.value = _clockPlayer.state.rate;
+  }
+
+  void _bindLoadingPlayer() {
+    for (final subscription in _loadingSubscriptions) {
+      unawaited(subscription.cancel());
+    }
+    _loadingSubscriptions.clear();
+    // The loading overlay describes the visible decoder, which can differ from
+    // the timeline decoder after a persistent dual-view role exchange.
+    for (final stream in <Stream<dynamic>>[
+      widget.player.stream.playing,
+      widget.player.stream.buffering,
+      widget.player.stream.buffer,
+    ]) {
+      _loadingSubscriptions.add(stream.listen((_) => _loadingChanged()));
+    }
+    _loadingChanged();
+  }
+
+  void _loadingChanged() {
+    if (!mounted) return;
+    final state = widget.player.state;
+    _loadingPresentation.value = (
+      playing: state.playing,
+      buffering: state.buffering,
+      bufferedSeconds: state.buffering ? state.buffer.inSeconds : 0,
+    );
   }
 
   @override
@@ -220,6 +279,10 @@ class _RecordingVideoControlsState extends State<RecordingVideoControls>
       _surfaceSeek = null;
       _surfaceDragOrigin = null;
     }
+    if (oldWidget.player != widget.player) _bindLoadingPlayer();
+    _timelineChanged();
+    _playingPresentation.value = _playing;
+    _ratePresentation.value = _clockPlayer.state.rate;
   }
 
   @override
@@ -235,7 +298,12 @@ class _RecordingVideoControlsState extends State<RecordingVideoControls>
     _controlsAnimation.dispose();
     _episodeAnimation.dispose();
     _episodeScrollController.dispose();
-    for (final subscription in _subscriptions) {
+    _progressPresentation.dispose();
+    _timePresentation.dispose();
+    _loadingPresentation.dispose();
+    _playingPresentation.dispose();
+    _ratePresentation.dispose();
+    for (final subscription in [..._subscriptions, ..._loadingSubscriptions]) {
       unawaited(subscription.cancel());
     }
     super.dispose();
@@ -244,6 +312,23 @@ class _RecordingVideoControlsState extends State<RecordingVideoControls>
   bool get _episodePanelVisible => _episodesOpen || _episodeAnimation.value > 0;
 
   bool get _playing => widget.livePlaying ?? _clockPlayer.state.playing;
+
+  void _timelineChanged() {
+    if (!mounted) return;
+    final progress = _progressValues();
+    _progressPresentation.value = progress;
+    _timePresentation.value = (
+      playedSeconds: Duration(milliseconds: progress.played.round()).inSeconds,
+      totalSeconds: math.max(0, _clockPlayer.state.duration.inSeconds),
+    );
+  }
+
+  Widget _progressView(
+          Widget Function(BuildContext, _ProgressPresentation) builder) =>
+      ValueListenableBuilder<_ProgressPresentation>(
+        valueListenable: _progressPresentation,
+        builder: (context, progress, _) => builder(context, progress),
+      );
 
   void _startLongPress(LongPressStartDetails details) {
     if (widget.isLive ||
@@ -364,19 +449,22 @@ class _RecordingVideoControlsState extends State<RecordingVideoControls>
     _clearPendingSeekPosition();
     _seekController.begin();
     _hideTimer?.cancel();
-    setState(() => _dragPosition = value);
+    _dragPosition = value;
+    _timelineChanged();
   }
 
   void _previewSeek(double value) {
     _hideTimer?.cancel();
-    setState(() => _dragPosition = value);
+    _dragPosition = value;
+    _timelineChanged();
     _seekController.preview(Duration(milliseconds: value.round()));
   }
 
   Future<void> _finishSeek(double value) async {
     final revision = ++_seekRevision;
     final target = Duration(milliseconds: value.round());
-    setState(() => _dragPosition = value);
+    _dragPosition = value;
+    _timelineChanged();
     var failed = false;
     try {
       await _seekController.finish(target);
@@ -387,13 +475,15 @@ class _RecordingVideoControlsState extends State<RecordingVideoControls>
       if (mounted && revision == _seekRevision) {
         if (failed ||
             recordingSeekPositionMatches(_clockPlayer.state.position, target)) {
-          setState(() => _dragPosition = null);
+          _dragPosition = null;
+          _timelineChanged();
         } else {
           _pendingSeekPosition = target;
           _seekPositionTimer = Timer(recordingSeekPositionTimeout, () {
             if (!mounted || revision != _seekRevision) return;
             _clearPendingSeekPosition();
-            setState(() => _dragPosition = null);
+            _dragPosition = null;
+            _timelineChanged();
             _showControls();
           });
         }
@@ -498,7 +588,9 @@ class _RecordingVideoControlsState extends State<RecordingVideoControls>
         position:
             Tween<Offset>(begin: Offset(0, top ? -1 : 1.2), end: Offset.zero)
                 .animate(_controlsAnimation),
-        child: child,
+        // Match PiliPlus's control-overlay paint isolation without changing
+        // texture ownership or the existing slide transition.
+        child: RepaintBoundary(child: child),
       );
 
   void _togglePlayback() {
@@ -515,28 +607,20 @@ class _RecordingVideoControlsState extends State<RecordingVideoControls>
     _showControls();
   }
 
-  VodLesson? _adjacentLesson(int direction) {
-    final allowed = widget.episodeLessons?.map((lesson) => lesson.id).toSet();
-    final index = widget.lessons
-        .indexWhere((lesson) => lesson.id == widget.selectedLessonId);
-    if (index < 0) return null;
-    for (var candidate = index + direction;
-        candidate >= 0 && candidate < widget.lessons.length;
-        candidate += direction) {
-      if (widget.lessons[candidate].canPlay &&
-          (allowed == null || allowed.contains(widget.lessons[candidate].id))) {
-        return widget.lessons[candidate];
-      }
-    }
-    return null;
-  }
+  RecordingEpisodeNavigation get _episodeNavigation =>
+      _episodeNavigationCache.resolve(
+        lessons: widget.lessons,
+        episodeLessons: widget.episodeLessons,
+        selectedLessonId: widget.selectedLessonId,
+        newestFirst: _newestFirst,
+      );
+
+  VodLesson? _adjacentLesson(int direction) =>
+      direction > 0 ? _episodeNavigation.older : _episodeNavigation.newer;
 
   bool get _newestFirst => widget.episodeNewestFirst ?? _localNewestFirst;
 
-  List<VodLesson> get _panelLessons {
-    final lessons = widget.episodeLessons ?? widget.lessons;
-    return _newestFirst ? lessons : lessons.reversed.toList(growable: false);
-  }
+  List<VodLesson> get _panelLessons => _episodeNavigation.panelLessons;
 
   void _jumpToEpisodePosition(double offset) {
     if (!_episodeScrollController.hasClients) return;
@@ -552,9 +636,9 @@ class _RecordingVideoControlsState extends State<RecordingVideoControls>
   }
 
   void _jumpToCurrentEpisode({bool showMessage = true}) {
-    final index = _panelLessons
-        .indexWhere((lesson) => lesson.id == widget.selectedLessonId);
-    if (index >= 0) {
+    final index =
+        _episodeNavigation.panelIndexByLessonId[widget.selectedLessonId];
+    if (index != null) {
       _jumpToEpisodePosition(index * _episodeItemExtent);
     } else if (showMessage && widget.onClearClassroomFilter != null) {
       widget.onClearClassroomFilter!();
@@ -587,10 +671,8 @@ class _RecordingVideoControlsState extends State<RecordingVideoControls>
   @override
   Widget build(BuildContext context) {
     final fullscreen = widget.fullscreen;
-    final selectedLesson = widget.selectedLesson ??
-        widget.lessons
-            .where((lesson) => lesson.id == widget.selectedLessonId)
-            .firstOrNull;
+    final selectedLesson =
+        widget.selectedLesson ?? _episodeNavigation.selectedLesson;
     final episodeHeading = selectedLesson == null
         ? ''
         : recordingFullscreenEpisodeHeading(selectedLesson);
@@ -851,15 +933,24 @@ class _RecordingVideoControlsState extends State<RecordingVideoControls>
                     bottom: safeInsets.bottom + 12,
                     child: _liveProtocolMenu(),
                   ),
-                if ((widget.loading ||
-                        widget.player.state.buffering &&
-                            widget.player.state.playing) &&
-                    widget.failure == null)
-                  RecordingPlaybackLoading(
-                    buffering: widget.player.state.buffering,
-                    buffered: widget.player.state.buffer,
-                    onRetry: widget.onReload,
+                // All live-video children can be positioned. An inactive
+                // non-positioned loading builder would otherwise make Stack
+                // adopt its zero size and place controls outside the viewport.
+                Positioned.fill(
+                  child: ValueListenableBuilder<_LoadingPresentation>(
+                    valueListenable: _loadingPresentation,
+                    builder: (context, loading, _) => (widget.loading ||
+                                loading.buffering && loading.playing) &&
+                            widget.failure == null
+                        ? RecordingPlaybackLoading(
+                            buffering: loading.buffering,
+                            buffered:
+                                Duration(seconds: loading.bufferedSeconds),
+                            onRetry: widget.onReload,
+                          )
+                        : const SizedBox.shrink(),
                   ),
+                ),
                 if (_episodePanelVisible) ...[
                   Positioned.fill(
                       child: FadeTransition(
@@ -1036,7 +1127,7 @@ class _RecordingVideoControlsState extends State<RecordingVideoControls>
 
   Widget _episodePanel(EdgeInsets safeInsets) {
     final panelLessons = _panelLessons;
-    final numberedLessons = widget.episodeLessons ?? widget.lessons;
+    final numbers = _episodeNavigation.episodeNumbers;
     final colors = context.shuyoColors;
     return Material(
       key: const ValueKey('recording-fullscreen-episode-panel'),
@@ -1063,8 +1154,6 @@ class _RecordingVideoControlsState extends State<RecordingVideoControls>
                         itemCount: panelLessons.length,
                         itemBuilder: (context, index) {
                           final lesson = panelLessons[index];
-                          final originalIndex = numberedLessons
-                              .indexWhere((item) => item.id == lesson.id);
                           final selected = lesson.id == widget.selectedLessonId;
                           return Column(children: [
                             Expanded(
@@ -1072,7 +1161,7 @@ class _RecordingVideoControlsState extends State<RecordingVideoControls>
                               tileKey:
                                   ValueKey('fullscreen-lesson-${lesson.id}'),
                               lesson: lesson,
-                              number: numberedLessons.length - originalIndex,
+                              number: numbers[lesson.id]!,
                               selected: selected,
                               onTap: !lesson.canPlay
                                   ? null
@@ -1118,8 +1207,7 @@ class _RecordingVideoControlsState extends State<RecordingVideoControls>
                 ),
               );
           final hasLessons = _panelLessons.isNotEmpty;
-          final hasCurrent = widget.lessons
-              .any((lesson) => lesson.id == widget.selectedLessonId);
+          final hasCurrent = _episodeNavigation.hasCurrent;
           return Row(children: [
             Text('选集',
                 style: ShuYoTextStyles.sectionTitle(
@@ -1147,7 +1235,7 @@ class _RecordingVideoControlsState extends State<RecordingVideoControls>
         colors: const [Color(0xC0000000), Colors.transparent],
       ));
 
-  ({double maximum, double played, double buffered}) _progressValues() {
+  _ProgressPresentation _progressValues() {
     final state = _clockPlayer.state;
     if (state.duration <= Duration.zero) {
       return (maximum: 1, played: 0, buffered: 0);
@@ -1167,38 +1255,38 @@ class _RecordingVideoControlsState extends State<RecordingVideoControls>
         : colors.primary;
   }
 
-  Widget _compactProgressBar() {
-    final progress = _progressValues();
-    final primary = _progressColor();
-    return ClipRRect(
-      key: const ValueKey('recording-compact-progress'),
-      child: SizedBox(
-        height: 3.5,
-        child: Stack(fit: StackFit.expand, children: [
-          const ColoredBox(
-            key: ValueKey('recording-compact-unbuffered'),
-            color: Color(0x33FFFFFF),
+  Widget _compactProgressBar() => _progressView((context, progress) {
+        final primary = _progressColor();
+        return RepaintBoundary(
+            child: ClipRRect(
+          key: const ValueKey('recording-compact-progress'),
+          child: SizedBox(
+            height: 3.5,
+            child: Stack(fit: StackFit.expand, children: [
+              const ColoredBox(
+                key: ValueKey('recording-compact-unbuffered'),
+                color: Color(0x33FFFFFF),
+              ),
+              FractionallySizedBox(
+                alignment: AlignmentDirectional.centerStart,
+                widthFactor: progress.buffered / progress.maximum,
+                child: ColoredBox(
+                  key: const ValueKey('recording-compact-buffered'),
+                  color: primary.withValues(alpha: .4),
+                ),
+              ),
+              FractionallySizedBox(
+                alignment: AlignmentDirectional.centerStart,
+                widthFactor: progress.played / progress.maximum,
+                child: ColoredBox(
+                  key: const ValueKey('recording-compact-played'),
+                  color: primary,
+                ),
+              ),
+            ]),
           ),
-          FractionallySizedBox(
-            alignment: AlignmentDirectional.centerStart,
-            widthFactor: progress.buffered / progress.maximum,
-            child: ColoredBox(
-              key: const ValueKey('recording-compact-buffered'),
-              color: primary.withValues(alpha: .4),
-            ),
-          ),
-          FractionallySizedBox(
-            alignment: AlignmentDirectional.centerStart,
-            widthFactor: progress.played / progress.maximum,
-            child: ColoredBox(
-              key: const ValueKey('recording-compact-played'),
-              color: primary,
-            ),
-          ),
-        ]),
-      ),
-    );
-  }
+        ));
+      });
 
   Widget _liveProtocolMenu() => PopupMenuButton<VodLiveProtocol>(
         tooltip: '直播线路',
@@ -1238,14 +1326,6 @@ class _RecordingVideoControlsState extends State<RecordingVideoControls>
       );
 
   Widget _bottomControls(bool fullscreen) {
-    final state = _clockPlayer.state;
-    final duration = state.duration.inMilliseconds.toDouble();
-    final progress = _progressValues();
-    final position = progress.played;
-    final buffered = progress.buffered;
-    final progressColor = _progressColor();
-    final currentTime = _durationText(Duration(milliseconds: position.round()));
-    final totalTime = _durationText(state.duration);
     return LayoutBuilder(builder: (context, constraints) {
       final narrow = constraints.maxWidth < 340;
       final buttonWidth = fullscreen && constraints.maxWidth >= 600
@@ -1254,49 +1334,65 @@ class _RecordingVideoControlsState extends State<RecordingVideoControls>
               ? 30.0
               : 35.0;
       final timeFontSize = fullscreen ? 14.0 : 13.0;
-      final speedWidth = widget.isLive
-          ? 0.0
-          : TextPainter.computeWidth(
-                  text: TextSpan(
-                      text: '${state.rate}X',
-                      style: DefaultTextStyle.of(context)
-                          .style
-                          .copyWith(fontSize: 13)),
-                  textDirection: Directionality.of(context),
-                  textScaler: MediaQuery.textScalerOf(context)) +
-              16;
-      final time = ConstrainedBox(
-        key: const ValueKey('recording-playback-time'),
-        constraints: BoxConstraints(
-            maxWidth: math.min(
-                narrow ? 120 : 168,
-                math.max(
-                    0,
-                    constraints.maxWidth -
-                        42 -
-                        (widget.lessons.isEmpty ? 0 : buttonWidth * 2) -
-                        buttonWidth -
-                        speedWidth))),
-        child: FittedBox(
-          fit: BoxFit.scaleDown,
-          child: Text.rich(
-            TextSpan(children: [
-              TextSpan(text: currentTime),
-              TextSpan(
-                  text: ' / $totalTime',
-                  style: const TextStyle(color: Color(0xFFD0D0D0))),
-            ]),
-            maxLines: 1,
-            style: TextStyle(
-                color: Colors.white,
-                fontSize: timeFontSize,
-                fontWeight: FontWeight.w700,
-                height: 1.4,
-                fontFamily: 'Monospace',
-                fontFeatures: const [FontFeature.tabularFigures()]),
-          ),
-        ),
-      );
+      final time = ValueListenableBuilder<_TimePresentation>(
+          valueListenable: _timePresentation,
+          builder: (context, time, _) {
+            final currentTime =
+                _durationText(Duration(seconds: time.playedSeconds));
+            final totalTime =
+                _durationText(Duration(seconds: time.totalSeconds));
+            return ValueListenableBuilder<double>(
+              valueListenable: _ratePresentation,
+              builder: (context, rate, child) {
+                final speedWidth = widget.isLive
+                    ? 0.0
+                    : TextPainter.computeWidth(
+                            text: TextSpan(
+                                text: '${rate}X',
+                                style: DefaultTextStyle.of(context)
+                                    .style
+                                    .copyWith(fontSize: 13)),
+                            textDirection: Directionality.of(context),
+                            textScaler: MediaQuery.textScalerOf(context)) +
+                        16;
+                return ConstrainedBox(
+                  key: const ValueKey('recording-playback-time'),
+                  constraints: BoxConstraints(
+                      maxWidth: math.min(
+                          narrow ? 120 : 168,
+                          math.max(
+                              0,
+                              constraints.maxWidth -
+                                  42 -
+                                  (widget.lessons.isEmpty
+                                      ? 0
+                                      : buttonWidth * 2) -
+                                  buttonWidth -
+                                  speedWidth))),
+                  child: FittedBox(
+                    fit: BoxFit.scaleDown,
+                    child: child,
+                  ),
+                );
+              },
+              child: Text.rich(
+                TextSpan(children: [
+                  TextSpan(text: currentTime),
+                  TextSpan(
+                      text: '/$totalTime',
+                      style: const TextStyle(color: Color(0xFFD0D0D0))),
+                ]),
+                maxLines: 1,
+                style: TextStyle(
+                    color: Colors.white,
+                    fontSize: timeFontSize,
+                    fontWeight: FontWeight.w700,
+                    height: 1.4,
+                    fontFamily: 'Monospace',
+                    fontFeatures: const [FontFeature.tabularFigures()]),
+              ),
+            );
+          });
       Widget iconButton({
         required String tooltip,
         required IconData icon,
@@ -1381,37 +1477,41 @@ class _RecordingVideoControlsState extends State<RecordingVideoControls>
                     style: const TextStyle(color: Colors.white, fontSize: 13))),
           ),
         if (!widget.isLive)
-          PopupMenuButton<double>(
-            tooltip: '播放速度',
-            color: Colors.black.withValues(alpha: .8),
-            surfaceTintColor: Colors.transparent,
-            elevation: 0,
-            requestFocus: false,
-            enabled: !widget.loading,
-            initialValue: state.rate,
-            onOpened: () => _hideTimer?.cancel(),
-            onCanceled: _showControls,
-            onSelected: (rate) {
-              unawaited(_clockPlayer.setRate(rate));
-              _showControls();
-            },
-            itemBuilder: (_) => [
-              for (final rate in [.5, .75, 1.0, 1.25, 1.5, 1.75, 2.0])
-                PopupMenuItem(
-                    value: rate,
-                    height: 35,
-                    padding: const EdgeInsets.only(left: 30),
-                    child: Semantics(
-                      selected: state.rate == rate,
-                      child: Text('${rate}X',
-                          style: const TextStyle(
-                              color: Colors.white, fontSize: 13)),
-                    ))
-            ],
-            child: Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 8),
-                child: Text('${state.rate}X',
-                    style: const TextStyle(color: Colors.white, fontSize: 13))),
+          ValueListenableBuilder<double>(
+            valueListenable: _ratePresentation,
+            builder: (context, currentRate, _) => PopupMenuButton<double>(
+              tooltip: '播放速度',
+              color: Colors.black.withValues(alpha: .8),
+              surfaceTintColor: Colors.transparent,
+              elevation: 0,
+              requestFocus: false,
+              enabled: !widget.loading,
+              initialValue: currentRate,
+              onOpened: () => _hideTimer?.cancel(),
+              onCanceled: _showControls,
+              onSelected: (rate) {
+                unawaited(_clockPlayer.setRate(rate));
+                _showControls();
+              },
+              itemBuilder: (_) => [
+                for (final rate in [.5, .75, 1.0, 1.25, 1.5, 1.75, 2.0])
+                  PopupMenuItem(
+                      value: rate,
+                      height: 35,
+                      padding: const EdgeInsets.only(left: 30),
+                      child: Semantics(
+                        selected: currentRate == rate,
+                        child: Text('${rate}X',
+                            style: const TextStyle(
+                                color: Colors.white, fontSize: 13)),
+                      ))
+              ],
+              child: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 8),
+                  child: Text('${currentRate}X',
+                      style:
+                          const TextStyle(color: Colors.white, fontSize: 13))),
+            ),
           ),
         if (widget.isLive && widget.onLiveProtocolChanged != null)
           _liveProtocolMenu(),
@@ -1441,45 +1541,55 @@ class _RecordingVideoControlsState extends State<RecordingVideoControls>
             if (!widget.isLive)
               Padding(
                 padding: const EdgeInsets.fromLTRB(10, 0, 10, 7),
-                child: SizedBox(
-                    key: const ValueKey('recording-seek-track'),
-                    height: 14,
-                    child: SliderTheme(
-                      data: SliderTheme.of(context).copyWith(
-                          trackHeight: 3.5,
-                          trackShape: const RoundedRectSliderTrackShape(),
-                          thumbShape: const RoundSliderThumbShape(
-                              enabledThumbRadius: 7,
-                              elevation: 0,
-                              pressedElevation: 0),
-                          overlayShape:
-                              const RoundSliderOverlayShape(overlayRadius: 12)),
-                      child: Slider(
-                        padding: EdgeInsets.zero,
-                        value: position.toDouble(),
-                        secondaryTrackValue: buffered.toDouble(),
-                        min: 0,
-                        max: progress.maximum,
-                        activeColor: progressColor,
-                        inactiveColor: const Color(0x33FFFFFF),
-                        secondaryActiveColor:
-                            progressColor.withValues(alpha: .4),
-                        onChangeStart: _beginSeek,
-                        onChanged: duration <= 0 || widget.loading
-                            ? null
-                            : _previewSeek,
-                        onChangeEnd: (value) => unawaited(_finishSeek(value)),
-                      ),
-                    )),
+                child: _progressView((context, progress) {
+                  final progressColor = _progressColor();
+                  return RepaintBoundary(
+                      child: SizedBox(
+                          key: const ValueKey('recording-seek-track'),
+                          height: 14,
+                          child: SliderTheme(
+                            data: SliderTheme.of(context).copyWith(
+                                trackHeight: 3.5,
+                                trackShape: const RoundedRectSliderTrackShape(),
+                                thumbShape: const RoundSliderThumbShape(
+                                    enabledThumbRadius: 7,
+                                    elevation: 0,
+                                    pressedElevation: 0),
+                                overlayShape: const RoundSliderOverlayShape(
+                                    overlayRadius: 12)),
+                            child: Slider(
+                              padding: EdgeInsets.zero,
+                              value: progress.played,
+                              secondaryTrackValue: progress.buffered,
+                              min: 0,
+                              max: progress.maximum,
+                              activeColor: progressColor,
+                              inactiveColor: const Color(0x33FFFFFF),
+                              secondaryActiveColor:
+                                  progressColor.withValues(alpha: .4),
+                              onChangeStart: _beginSeek,
+                              onChanged: _clockPlayer.state.duration <=
+                                          Duration.zero ||
+                                      widget.loading
+                                  ? null
+                                  : _previewSeek,
+                              onChangeEnd: (value) =>
+                                  unawaited(_finishSeek(value)),
+                            ),
+                          )));
+                }),
               ),
             Row(key: const ValueKey('recording-bottom-controls'), children: [
-              iconButton(
-                  tooltip: _playing ? '暂停' : '播放',
-                  onPressed: widget.loading ? null : _togglePlayback,
-                  icon: _playing ? Icons.pause : Icons.play_arrow,
-                  size: 20,
-                  width: 42,
-                  height: 34),
+              ValueListenableBuilder<bool>(
+                valueListenable: _playingPresentation,
+                builder: (context, playing, _) => iconButton(
+                    tooltip: playing ? '暂停' : '播放',
+                    onPressed: widget.loading ? null : _togglePlayback,
+                    icon: playing ? Icons.pause : Icons.play_arrow,
+                    size: 20,
+                    width: 42,
+                    height: 34),
+              ),
               if (!widget.isLive) time,
               if (widget.lessons.isNotEmpty) ...[
                 iconButton(

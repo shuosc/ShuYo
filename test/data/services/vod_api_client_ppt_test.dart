@@ -99,10 +99,14 @@ void main() {
     expect(slides[1].imageUrl!.query, 'q=a%2Fb');
   });
 
-  test('null data and an empty doc list are valid empty notes', () async {
+  test('null data and optional empty doc lists are valid empty notes',
+      () async {
     for (final data in [
       null,
-      {'docList': []}
+      <String, Object?>{},
+      {'docList': null, 'dupKeywordList': null},
+      {'dupKeywordList': []},
+      {'docList': []},
     ]) {
       final api = client((_) async => response(data));
       addTearDown(api.dispose);
@@ -110,10 +114,39 @@ void main() {
     }
   });
 
+  test('the platform reports an empty PPT success with dataOk false', () async {
+    final api = client((_) async => http.Response(
+        jsonEncode({
+          'code': null,
+          'status': 200,
+          'ok': true,
+          'dataOk': false,
+          'data': null,
+          'message': null,
+        }),
+        200));
+    addTearDown(api.dispose);
+    expect(await api.fetchPptSlides(42), isEmpty);
+  });
+
+  test('empty success exception is limited to the PPT endpoint', () async {
+    final api = client((_) async => http.Response(
+        jsonEncode({'status': 200, 'ok': true, 'dataOk': false, 'data': null}),
+        200));
+    addTearDown(api.dispose);
+    await expectLater(api.fetchTerms(), throwsA(isA<VodApiException>()));
+  });
+
+  test('explicit empty success may omit the optional null data field',
+      () async {
+    final api = client((_) async => http.Response(
+        jsonEncode({'status': 200, 'ok': true, 'dataOk': false}), 200));
+    addTearDown(api.dispose);
+    expect(await api.fetchPptSlides(42), isEmpty);
+  });
+
   for (final data in [
     'invalid',
-    <String, Object?>{},
-    {'docList': null},
     {'docList': {}},
     {
       'docList': [42]
@@ -186,6 +219,16 @@ void main() {
     {'status': 200, 'dataOk': false, 'data': null},
     {'status': 200, 'code': 403, 'data': null},
     {'status': 200, 'code': 10013, 'data': null},
+    {'status': 500, 'ok': true, 'dataOk': false, 'data': null},
+    {'status': 200, 'ok': false, 'dataOk': false, 'data': null},
+    {'status': 200, 'code': 403, 'ok': true, 'dataOk': false, 'data': null},
+    {'status': 200, 'code': 10013, 'ok': true, 'dataOk': false, 'data': null},
+    {
+      'status': 200,
+      'ok': true,
+      'dataOk': false,
+      'data': {'docList': []}
+    },
   ]) {
     test('a rejected PPT response is not treated as empty: $envelope',
         () async {
