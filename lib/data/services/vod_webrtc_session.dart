@@ -276,6 +276,16 @@ class VodWebRtcSession {
       if (_disposed || generation != _generation || _peer != peer) return;
       debugPrint('ShuYoVOD WebRTC media state: ${connectionState.name}');
       if (connectionState ==
+          RTCPeerConnectionState.RTCPeerConnectionStateConnected) {
+        // Native audio routing can be reset while ICE is reconnecting. A
+        // track event may have applied volume before the peer became usable,
+        // so reapply the current play/mute/volume state once media is live.
+        unawaited(_applyPlaybackState().catchError((Object cause) {
+          _logFailure('audio state', cause);
+          _fail('WebRTC 音频恢复失败，请重试或切换线路');
+        }));
+      }
+      if (connectionState ==
           RTCPeerConnectionState.RTCPeerConnectionStateFailed) {
         _fail('WebRTC 媒体连接失败，请重试或切换线路');
       }
