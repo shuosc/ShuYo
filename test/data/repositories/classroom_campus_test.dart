@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:shuyo/core/classroom_url_resolver.dart';
 import 'package:shuyo/data/models/classroom.dart';
 import 'package:shuyo/data/repositories/classroom_repository.dart';
 import 'package:shuyo/data/services/classroom_api_client.dart';
@@ -134,14 +135,17 @@ class _CampusRepository extends ClassroomRepository {
   );
 
   @override
-  Future<ClassroomSearchOptions> loadOptions(
-          {bool forceRefresh = false}) async =>
+  Future<ClassroomSearchOptions> loadOptions({
+    bool forceRefresh = false,
+    ClassroomAccessMode? accessMode,
+  }) async =>
       options;
 
   @override
   Future<ClassroomAvailabilityResult> search(
     ClassroomAvailabilityQuery query, {
     bool forceRefresh = false,
+    ClassroomAccessMode? accessMode,
   }) async =>
       ClassroomAvailabilityResult(
         building: query.building,

@@ -51,7 +51,8 @@ void main() {
       (await ClientSettingsService().loadNetworkSettings()).webVpnEnabled,
       isFalse,
     );
-    expect(await page.onWebVpnRecoveryRequired!(false), isFalse);
+    expect(await page.onWebVpnRecoveryRequired!(false),
+        WebVpnRecoveryOutcome.unavailable);
     expect(account.recoveries, 1);
 
     await tester.pumpWidget(const SizedBox.shrink());

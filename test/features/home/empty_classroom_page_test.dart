@@ -8,6 +8,7 @@ import 'package:shuyo/core/classroom_url_resolver.dart';
 import 'package:shuyo/data/models/classroom.dart';
 import 'package:shuyo/data/repositories/classroom_repository.dart';
 import 'package:shuyo/data/services/classroom_api_client.dart';
+import 'package:shuyo/data/services/unified_account_service.dart';
 import 'package:shuyo/features/home/empty_classroom_page.dart';
 
 void main() {
@@ -26,7 +27,7 @@ void main() {
           repository: repository,
           onWebVpnRecoveryRequired: (_) async {
             recoveries++;
-            return true;
+            return WebVpnRecoveryOutcome.recovered;
           },
           onWebVpnExpired: () async => expiryNotifications++,
         ),
@@ -54,7 +55,7 @@ void main() {
         repository: repository,
         onWebVpnRecoveryRequired: (_) async {
           recoveries++;
-          return true;
+          return WebVpnRecoveryOutcome.recovered;
         },
       ),
     ));
@@ -70,7 +71,7 @@ void main() {
   testWidgets('closing WebVPN during recovery prevents retry', (tester) async {
     ClassroomUrlResolver.configure(useWebVpn: true);
     final repository = _PendingRepository();
-    final recovery = Completer<bool>();
+    final recovery = Completer<WebVpnRecoveryOutcome>();
     var recoveries = 0;
     await tester.pumpWidget(MaterialApp(
       home: EmptyClassroomPage(
@@ -86,7 +87,7 @@ void main() {
     await tester.pump();
     expect(recoveries, 1);
     ClassroomUrlResolver.configure(useWebVpn: false);
-    recovery.complete(true);
+    recovery.complete(WebVpnRecoveryOutcome.recovered);
     await tester.pumpAndSettle();
 
     expect(repository.searches, 1);
@@ -184,12 +185,14 @@ class _PendingRepository extends _SnapshotRepository {
   Future<ClassroomAvailabilityResult> search(
     ClassroomAvailabilityQuery query, {
     bool forceRefresh = false,
+    ClassroomAccessMode? accessMode,
   }) {
     if (searches == 0) {
       searches++;
       return pending.future;
     }
-    return super.search(query, forceRefresh: forceRefresh);
+    return super
+        .search(query, forceRefresh: forceRefresh, accessMode: accessMode);
   }
 }
 
@@ -216,13 +219,17 @@ class _SnapshotRepository extends ClassroomRepository {
   ClassroomSearchOptions? get optionsSnapshot => _snapshot;
 
   @override
-  Future<ClassroomSearchOptions> loadOptions({bool forceRefresh = false}) =>
+  Future<ClassroomSearchOptions> loadOptions({
+    bool forceRefresh = false,
+    ClassroomAccessMode? accessMode,
+  }) =>
       pendingLoad ?? Future.value(options);
 
   @override
   Future<ClassroomAvailabilityResult> search(
     ClassroomAvailabilityQuery query, {
     bool forceRefresh = false,
+    ClassroomAccessMode? accessMode,
   }) async {
     searches += 1;
     return ClassroomAvailabilityResult(
