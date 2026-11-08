@@ -310,11 +310,11 @@ class _CampusCardSpendingChartState extends State<CampusCardSpendingChart>
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              amount('消费', Icons.arrow_upward_rounded, day.amount,
-                  'campus-card-chart-selected-amount'),
-              const SizedBox(height: 4),
-              amount('充值', Icons.arrow_downward_rounded, day.creditAmount,
+              amount('充值', Icons.arrow_upward_rounded, day.creditAmount,
                   'campus-card-chart-selected-credit-amount'),
+              const SizedBox(height: 4),
+              amount('消费', Icons.arrow_downward_rounded, day.amount,
+                  'campus-card-chart-selected-amount'),
             ],
           ),
         ),
@@ -415,9 +415,9 @@ class _CampusCardSpendingChartState extends State<CampusCardSpendingChart>
               Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  _legend('消费', colors.accent),
+                  _legend('充值', colors.accent),
                   const SizedBox(height: 4),
-                  _legend('充值', colors.accent, outlined: true),
+                  _legend('消费', colors.accent, outlined: true),
                 ],
               ),
               const SizedBox(width: 12),
@@ -452,8 +452,8 @@ class _CampusCardSpendingChartState extends State<CampusCardSpendingChart>
                             key: const ValueKey('campus-card-chart-selection'),
                             liveRegion: true,
                             label: '${_dateKey(data[selectedIndex].date)}，'
-                                '消费 ¥ ${data[selectedIndex].amount.toStringAsFixed(2)}，'
-                                '充值 ¥ ${data[selectedIndex].creditAmount.toStringAsFixed(2)}',
+                                '充值 ¥ ${data[selectedIndex].creditAmount.toStringAsFixed(2)}，'
+                                '消费 ¥ ${data[selectedIndex].amount.toStringAsFixed(2)}',
                             child: ExcludeSemantics(
                               child:
                                   _selectionInfo(data[selectedIndex], colors),
@@ -631,8 +631,9 @@ class _SpendingBarPainter extends CustomPainter {
       final highlight =
           (1 - (index - selectionPosition.value).abs()).clamp(0.0, 1.0);
       for (var series = 0; series < 2; series++) {
-        final amount =
-            series == 0 ? data[index].amount : data[index].creditAmount;
+        // Match the recharge-first order of the legend and selected amounts.
+        final isCredit = series == 0;
+        final amount = isCredit ? data[index].creditAmount : data[index].amount;
         if (amount == 0) continue;
         final height = plot.height * amount / ceiling;
         final rect = Rect.fromLTWH(left + series * (barWidth + gap),
@@ -641,7 +642,7 @@ class _SpendingBarPainter extends CustomPainter {
         final bar = RRect.fromRectAndCorners(rect,
             topLeft: const Radius.circular(2),
             topRight: const Radius.circular(2));
-        if (series == 0) {
+        if (isCredit) {
           canvas.drawRRect(bar,
               Paint()..color = color.withValues(alpha: .55 + .45 * highlight));
         } else {
@@ -712,7 +713,7 @@ class _SpendingBarPainter extends CustomPainter {
               properties: SemanticsProperties(
                 textDirection: TextDirection.ltr,
                 label:
-                    '${_dateLabel(data[index].date)}，消费 ¥ ${data[index].amount.toStringAsFixed(2)}，充值入账 ¥ ${data[index].creditAmount.toStringAsFixed(2)}',
+                    '${_dateLabel(data[index].date)}，充值入账 ¥ ${data[index].creditAmount.toStringAsFixed(2)}，消费 ¥ ${data[index].amount.toStringAsFixed(2)}',
                 button: true,
                 selected: index == selectedIndex,
                 onTap: () => onSelect(index),
