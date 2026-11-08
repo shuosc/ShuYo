@@ -7,6 +7,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import '../../data/models/academic_schedule.dart';
+import '../../data/models/academic_schedule_collection.dart';
 import '../../data/repositories/academic_schedule_repository.dart';
 import '../../data/services/academic_schedule_api_client.dart';
 import '../../data/services/academic_schedule_display_settings_service.dart';
@@ -20,6 +21,7 @@ import '../../shared/navigation/shuyo_route.dart';
 import '../../shared/theme/shuyo_theme.dart';
 import '../../shared/widgets/empty_state.dart';
 import 'academic_schedule_editor_page.dart';
+import 'academic_schedule_collection_page.dart';
 import 'schedule_share_page.dart';
 
 const _scheduleCellInset = 2.5;
@@ -41,6 +43,7 @@ class AcademicSchedulePage extends StatefulWidget {
     this.initialState,
     this.initialDisplayState,
     this.initialLoadError,
+    this.onPrimaryScheduleChanged,
   });
 
   final AcademicScheduleRepository repository;
@@ -51,6 +54,7 @@ class AcademicSchedulePage extends StatefulWidget {
   final AcademicScheduleCacheState? initialState;
   final AcademicScheduleDisplayState? initialDisplayState;
   final String? initialLoadError;
+  final Future<void> Function()? onPrimaryScheduleChanged;
 
   @override
   State<AcademicSchedulePage> createState() => _AcademicSchedulePageState();
@@ -72,6 +76,14 @@ class _AcademicSchedulePageState extends State<AcademicSchedulePage> {
   Map<String, int> _courseColorValues = const {};
   late bool _usingInitialState;
   String? _initialLoadError;
+  String? _viewedTermKey;
+  String? _primaryTermKey;
+  bool _calendarConfigured = true;
+  int _discoveredCount = 0;
+  bool _reloadingCollection = false;
+
+  bool get _viewingPrimary =>
+      _viewedTermKey == null || _viewedTermKey == _primaryTermKey;
 
   @override
   void initState() {
@@ -83,10 +95,7 @@ class _AcademicSchedulePageState extends State<AcademicSchedulePage> {
     if (initialState != null) {
       _applyCachedState(initialState.schedule, initialState.weekState);
       unawaited(
-        widget.widgetService.syncSchedule(
-          schedule: initialState.schedule,
-          weekState: initialState.weekState,
-        ),
+        widget.widgetService.syncFromCache(),
       );
     }
     final initialDisplayState = widget.initialDisplayState;
@@ -94,6 +103,8 @@ class _AcademicSchedulePageState extends State<AcademicSchedulePage> {
       _applyDisplayState(initialDisplayState);
     }
     _loadFuture = _usingInitialState ? Future<void>.value() : _loadCached();
+    widget.repository.discoveryState.addListener(_discoveryChanged);
+    if (_usingInitialState) unawaited(_loadInitialCollectionMetadata());
     _weekTimer = Timer.periodic(
       const Duration(minutes: 1),
       (_) => _refreshDisplayedWeekIfNeeded(),
@@ -108,7 +119,27 @@ class _AcademicSchedulePageState extends State<AcademicSchedulePage> {
         title: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Text(_schedule?.term.displayName ?? '课表'),
+            Flexible(
+              child: InkWell(
+                key: const ValueKey('schedule-term-picker'),
+                splashFactory: NoSplash.splashFactory,
+                highlightColor: Colors.transparent,
+                borderRadius: BorderRadius.circular(4),
+                onTap: widget.repository.supportsTermDiscovery
+                    ? _openTermPicker
+                    : null,
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 8),
+                  child: Row(mainAxisSize: MainAxisSize.min, children: [
+                    Flexible(
+                        child: Text(_schedule?.term.displayName ?? '课表',
+                            maxLines: 1, overflow: TextOverflow.ellipsis)),
+                    if (widget.repository.supportsTermDiscovery)
+                      const Icon(Icons.arrow_drop_down, size: 20),
+                  ]),
+                ),
+              ),
+            ),
             Transform.translate(
               offset: const Offset(-3, -0.5),
               child: Opacity(
@@ -147,21 +178,42 @@ class _AcademicSchedulePageState extends State<AcademicSchedulePage> {
           const SizedBox(width: 2),
         ],
       ),
-      body: _usingInitialState
-          ? _buildLoadedBody(_initialLoadError)
-          : FutureBuilder<void>(
-              future: _loadFuture,
-              builder: (context, snapshot) {
-                if (snapshot.connectionState != ConnectionState.done) {
-                  return const Center(
-                      child: CircularProgressIndicator(strokeWidth: 3));
-                }
-                if (snapshot.hasError) {
-                  return _buildLoadedBody(snapshot.error.toString());
-                }
-                return _buildLoadedBody(null);
-              },
+      body: Column(children: [
+        if (_schedule != null && (!_viewingPrimary || !_calendarConfigured))
+          Material(
+            color: Theme.of(context).colorScheme.surfaceContainerLow,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+              child: Row(children: [
+                Expanded(
+                    child: Text(
+                  !_viewingPrimary ? '正在浏览其他学期，首页、组件和提醒仍使用常用课表' : '开学日期未设置',
+                  style: Theme.of(context).textTheme.bodySmall,
+                )),
+                if (!_calendarConfigured)
+                  TextButton(
+                      onPressed: _setFirstWeekStartDate,
+                      child: const Text('设置日期')),
+              ]),
             ),
+          ),
+        Expanded(
+            child: _usingInitialState
+                ? _buildLoadedBody(_initialLoadError)
+                : FutureBuilder<void>(
+                    future: _loadFuture,
+                    builder: (context, snapshot) {
+                      if (snapshot.connectionState != ConnectionState.done) {
+                        return const Center(
+                            child: CircularProgressIndicator(strokeWidth: 3));
+                      }
+                      if (snapshot.hasError) {
+                        return _buildLoadedBody(snapshot.error.toString());
+                      }
+                      return _buildLoadedBody(null);
+                    },
+                  )),
+      ]),
     );
   }
 
@@ -243,19 +295,126 @@ class _AcademicSchedulePageState extends State<AcademicSchedulePage> {
     final displayStateFuture = _displaySettingsService.loadState();
     final cachedState = await cachedStateFuture;
     final displayState = await displayStateFuture;
-    if (!mounted) {
-      return;
+    final records = await widget.repository.loadSavedSchedules();
+    final primary = await widget.repository.loadPrimaryTermKey();
+    AcademicScheduleRecord? viewed;
+    for (final record in records) {
+      if (record.key == _viewedTermKey && record.hasSavedSchedule) {
+        viewed = record;
+      }
     }
+    if (viewed == null && cachedState.schedule == null) {
+      for (final record in records) {
+        if (record.hasSavedSchedule) {
+          viewed = record;
+          break;
+        }
+      }
+    }
+    final schedule = viewed?.schedule ??
+        cachedState.schedule ??
+        (_usingInitialState ? _schedule : null);
+    final key = schedule == null
+        ? null
+        : academicTermKey(schedule.term.yearCode, schedule.term.termCode);
+    final record =
+        key == null ? null : await widget.repository.loadTermRecord(key);
+    final weekState = cachedState.schedule == null &&
+            viewed == null &&
+            _usingInitialState &&
+            _weekState != null
+        ? _weekState!
+        : key == null || key == primary
+            ? cachedState.weekState
+            : await widget.repository.loadTermWeekState(key);
+    if (!mounted) return;
     setState(() {
-      _applyCachedState(cachedState.schedule, cachedState.weekState);
+      _viewedTermKey = key;
+      _primaryTermKey = primary;
+      _calendarConfigured = record == null || record.firstWeekStart != null;
+      _applyCachedState(schedule, weekState);
       _applyDisplayState(displayState);
     });
-    unawaited(
-      widget.widgetService.syncSchedule(
-        schedule: cachedState.schedule,
-        weekState: cachedState.weekState,
+    unawaited(widget.widgetService.syncFromCache());
+  }
+
+  Future<void> _loadInitialCollectionMetadata() async {
+    final schedule = _schedule;
+    if (schedule == null) return;
+    final key = academicTermKey(schedule.term.yearCode, schedule.term.termCode);
+    final primary = await widget.repository.loadPrimaryTermKey();
+    final record = await widget.repository.loadTermRecord(key);
+    if (!mounted) return;
+    setState(() {
+      _viewedTermKey = key;
+      _primaryTermKey = primary ?? key;
+      _calendarConfigured = record == null || record.firstWeekStart != null;
+      if (!_calendarConfigured) _displayedWeek = 1;
+    });
+  }
+
+  void _discoveryChanged() {
+    final state = widget.repository.discoveryState.value;
+    if (state.saved != _discoveredCount || !state.running) {
+      _discoveredCount = state.saved;
+      unawaited(_reloadCollection());
+    }
+  }
+
+  Future<void> _reloadCollection() async {
+    if (!mounted || _reloadingCollection) return;
+    _reloadingCollection = true;
+    try {
+      await _loadCached();
+    } on Object {
+      // Keep the currently displayed snapshot on a background cache failure.
+    } finally {
+      _reloadingCollection = false;
+    }
+  }
+
+  Future<void> _openTermPicker() async {
+    final key = await showModalBottomSheet<String>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (_) => AcademicScheduleTermPicker(
+        repository: widget.repository,
+        viewedKey: _viewedTermKey,
       ),
     );
+    if (!mounted || key == null) return;
+    if (key == scheduleManagerSelection) {
+      await _openScheduleManager();
+    } else {
+      _viewedTermKey = key;
+      await _loadCached();
+    }
+  }
+
+  Future<void> _primaryChanged() async {
+    unawaited(widget.widgetService.syncFromCache());
+    await widget.notificationService.syncScheduleReminders();
+    await widget.onPrimaryScheduleChanged?.call();
+  }
+
+  Future<void> _openScheduleManager() async {
+    final selected = await Navigator.of(context).push<String>(shuyoRoute(
+      builder: (_) => AcademicScheduleCollectionPage(
+        repository: widget.repository,
+        onLoginRequired: widget.onLoginRequired,
+        onPrimaryChanged: _primaryChanged,
+      ),
+    ));
+    if (!mounted) return;
+    if (selected != null) _viewedTermKey = selected;
+    await _loadCached();
+  }
+
+  Future<int> _syncReminders({bool requestPermission = false}) async {
+    if (!_viewingPrimary) return 0;
+    return widget.notificationService
+        .syncScheduleReminders(requestPermission: requestPermission);
   }
 
   void _applyDisplayState(AcademicScheduleDisplayState state) {
@@ -269,7 +428,7 @@ class _AcademicSchedulePageState extends State<AcademicSchedulePage> {
   ) {
     _schedule = schedule;
     _weekState = weekState;
-    _displayedWeek = schedule == null
+    _displayedWeek = schedule == null || !_calendarConfigured
         ? 1
         : _displayableWeek(
             widget.repository.activeWeekFromState(schedule, weekState),
@@ -282,35 +441,80 @@ class _AcademicSchedulePageState extends State<AcademicSchedulePage> {
     if (_refreshing) {
       return;
     }
+    final targetKey = _viewedTermKey;
+    final targetName = _schedule?.term.displayName ?? '这一学期';
+    final targetIsPrimary = _viewingPrimary || targetKey == null;
     setState(() => _refreshing = true);
     if (kDebugMode) debugPrint('[SHU_SCHEDULE_FLOW] manual refresh start');
     try {
-      final schedule = await widget.repository.refreshSchedule();
-      final weekState = await widget.repository.loadWeekState();
-      if (!mounted) {
-        return;
-      }
-      setState(() {
-        _schedule = schedule;
-        _weekState = weekState;
-        _displayedWeek = _displayableWeek(
-          widget.repository.activeWeekFromState(schedule, weekState),
-          schedule,
+      try {
+        final schedule = targetIsPrimary
+            ? await widget.repository.refreshSchedule()
+            : await widget.repository
+                .refreshTerm(targetKey, replaceEdited: true);
+        final weekState = targetIsPrimary
+            ? await widget.repository.loadWeekState()
+            : await widget.repository.loadTermWeekState(targetKey);
+        if (!mounted) {
+          return;
+        }
+        // A request belongs to the term selected when it started. Switching
+        // while it is in flight must not replace the newly selected view.
+        if (_viewedTermKey == targetKey) {
+          setState(() {
+            _schedule = schedule;
+            _weekState = weekState;
+            _displayedWeek = _displayableWeek(
+              widget.repository.activeWeekFromState(schedule, weekState),
+              schedule,
+            );
+            _followsCurrentWeek = true;
+          });
+        }
+        unawaited(
+          widget.widgetService.syncFromCache(),
         );
-        _followsCurrentWeek = true;
-      });
-      unawaited(
-        widget.widgetService.syncSchedule(
-          schedule: schedule,
-          weekState: weekState,
-        ),
-      );
-      final reminderCount =
-          await widget.notificationService.syncScheduleReminders(
-        requestPermission: true,
-      );
-      if (kDebugMode) debugPrint('[SHU_SCHEDULE_FLOW] manual refresh success');
-      _showScheduleReminderSnack('课表已同步', reminderCount);
+        final reminderCount = targetIsPrimary
+            ? await widget.notificationService.syncScheduleReminders(
+                requestPermission: true,
+              )
+            : 0;
+        if (kDebugMode) {
+          debugPrint('[SHU_SCHEDULE_FLOW] manual refresh success');
+        }
+        await _loadCached();
+        if (targetIsPrimary) await widget.onPrimaryScheduleChanged?.call();
+        _showScheduleReminderSnack('课表已同步', reminderCount);
+      } on AcademicNoScheduleException {
+        if (!mounted) return;
+        final key = targetKey;
+        if (key == null) {
+          _showSnack('当前学期暂无课表，可在管理页查找其他学期');
+        } else {
+          final confirmed = await showDialog<bool>(
+            context: context,
+            builder: (context) => AlertDialog(
+              title: const Text('教务返回空课表'),
+              content: Text('是否将 $targetName 替换为空课表？'),
+              actions: [
+                TextButton(
+                    onPressed: () => Navigator.pop(context, false),
+                    child: const Text('保留本地版本')),
+                FilledButton(
+                    onPressed: () => Navigator.pop(context, true),
+                    child: const Text('替换')),
+              ],
+            ),
+          );
+          if (confirmed == true) {
+            await widget.repository.acceptEmptyTerm(key);
+            if (key == await widget.repository.loadPrimaryTermKey()) {
+              await _primaryChanged();
+            }
+            await _loadCached();
+          }
+        }
+      }
     } on AcademicAuthException catch (error, stackTrace) {
       if (kDebugMode) {
         debugPrint('[SHU_SCHEDULE_FLOW] manual refresh requires login: $error');
@@ -344,7 +548,7 @@ class _AcademicSchedulePageState extends State<AcademicSchedulePage> {
       context: context,
       builder: (context) => AlertDialog(
         title: const Text('确认更新'),
-        content: const Text('点击确定后将与教务系统中课表同步，不会保留本地编辑'),
+        content: const Text('点击确定后将更新正在查看的这一学期，不会保留本地编辑。'),
         actions: [
           TextButton(
             onPressed: () => Navigator.of(context).pop(false),
@@ -420,8 +624,14 @@ class _AcademicSchedulePageState extends State<AcademicSchedulePage> {
       ),
     );
     if (picked == null || !mounted) return;
-    await widget.repository.setFirstWeekStart(picked);
-    final weekState = await widget.repository.loadWeekState();
+    if (_viewedTermKey == null || _viewingPrimary) {
+      await widget.repository.setFirstWeekStart(picked);
+    } else {
+      await widget.repository.setTermFirstWeekStart(_viewedTermKey!, picked);
+    }
+    final weekState = _viewedTermKey == null
+        ? await widget.repository.loadWeekState()
+        : await widget.repository.loadTermWeekState(_viewedTermKey!);
     await TermCalendarStore().save(
       '${schedule.term.yearCode}:${schedule.term.termCode}',
       weekState.firstWeekStart,
@@ -430,6 +640,7 @@ class _AcademicSchedulePageState extends State<AcademicSchedulePage> {
       return;
     }
     setState(() {
+      _calendarConfigured = true;
       _weekState = weekState;
       _displayedWeek = _displayableWeek(
         widget.repository.activeWeekFromState(schedule, weekState),
@@ -439,14 +650,12 @@ class _AcademicSchedulePageState extends State<AcademicSchedulePage> {
       _selectedManualSlot = null;
     });
     unawaited(
-      widget.widgetService.syncSchedule(
-        schedule: _schedule,
-        weekState: weekState,
-      ),
+      widget.widgetService.syncFromCache(),
     );
-    await widget.notificationService.syncScheduleReminders(
+    await _syncReminders(
       requestPermission: true,
     );
+    if (_viewingPrimary) await widget.onPrimaryScheduleChanged?.call();
     _showSnack('已将 ${picked.month}月${picked.day}日设为第一周首日');
   }
 
@@ -499,7 +708,7 @@ class _AcademicSchedulePageState extends State<AcademicSchedulePage> {
     final next = schedule.copyWith(
       sessions: [...schedule.sessions, ...sessions],
     );
-    await widget.repository.saveCachedSchedule(next);
+    await widget.repository.saveWorkingSchedule(next);
     if (!mounted) {
       return;
     }
@@ -521,12 +730,9 @@ class _AcademicSchedulePageState extends State<AcademicSchedulePage> {
       }
     }
     unawaited(
-      widget.widgetService.syncSchedule(
-        schedule: next,
-        weekState: _weekState,
-      ),
+      widget.widgetService.syncFromCache(),
     );
-    unawaited(widget.notificationService.syncScheduleReminders());
+    unawaited(_syncReminders());
   }
 
   Future<void> _handleDayHeaderTap(int weekday) async {
@@ -779,7 +985,7 @@ class _AcademicSchedulePageState extends State<AcademicSchedulePage> {
   }
 
   Future<void> _persistSessions(AcademicSchedule next) async {
-    await widget.repository.saveCachedSchedule(next);
+    await widget.repository.saveWorkingSchedule(next);
     if (!mounted) {
       return;
     }
@@ -788,12 +994,9 @@ class _AcademicSchedulePageState extends State<AcademicSchedulePage> {
       _selectedManualSlot = null;
     });
     unawaited(
-      widget.widgetService.syncSchedule(
-        schedule: next,
-        weekState: _weekState,
-      ),
+      widget.widgetService.syncFromCache(),
     );
-    unawaited(widget.notificationService.syncScheduleReminders());
+    unawaited(_syncReminders());
   }
 
   Future<void> _handleCourseTap(CourseSession session) async {
@@ -874,7 +1077,7 @@ class _AcademicSchedulePageState extends State<AcademicSchedulePage> {
       ));
     }
     final next = schedule.copyWith(sessions: nextSessions);
-    await widget.repository.saveCachedSchedule(next);
+    await widget.repository.saveWorkingSchedule(next);
     if (!mounted) {
       return;
     }
@@ -896,12 +1099,9 @@ class _AcademicSchedulePageState extends State<AcademicSchedulePage> {
       }
     }
     unawaited(
-      widget.widgetService.syncSchedule(
-        schedule: next,
-        weekState: _weekState,
-      ),
+      widget.widgetService.syncFromCache(),
     );
-    unawaited(widget.notificationService.syncScheduleReminders());
+    unawaited(_syncReminders());
   }
 
   Future<void> _deleteCourse(
@@ -951,7 +1151,7 @@ class _AcademicSchedulePageState extends State<AcademicSchedulePage> {
       return;
     }
     final next = schedule.copyWith(sessions: nextSessions);
-    await widget.repository.saveCachedSchedule(next);
+    await widget.repository.saveWorkingSchedule(next);
     if (!mounted) {
       return;
     }
@@ -960,12 +1160,9 @@ class _AcademicSchedulePageState extends State<AcademicSchedulePage> {
       _selectedManualSlot = null;
     });
     unawaited(
-      widget.widgetService.syncSchedule(
-        schedule: next,
-        weekState: _weekState,
-      ),
+      widget.widgetService.syncFromCache(),
     );
-    unawaited(widget.notificationService.syncScheduleReminders());
+    unawaited(_syncReminders());
   }
 
   Future<_CourseDeleteScope?> _openDeleteScopeMenu(
@@ -1185,6 +1382,13 @@ class _AcademicSchedulePageState extends State<AcademicSchedulePage> {
                     onTap: () => Navigator.of(context)
                         .pop(_ScheduleMenuAction.updateSchedule),
                   ),
+                  if (widget.repository.supportsTermDiscovery)
+                    ListTile(
+                      leading: const Icon(Icons.folder_outlined),
+                      title: const Text('管理课表'),
+                      onTap: () => Navigator.of(context)
+                          .pop(_ScheduleMenuAction.manageSchedules),
+                    ),
                   ListTile(
                     leading: const Icon(Icons.shuffle_outlined),
                     title: const Text('随机颜色'),
@@ -1215,6 +1419,8 @@ class _AcademicSchedulePageState extends State<AcademicSchedulePage> {
       return;
     }
     switch (action) {
+      case _ScheduleMenuAction.manageSchedules:
+        await _openScheduleManager();
       case _ScheduleMenuAction.updateSchedule:
         await _confirmAndUpdateSchedule();
       case _ScheduleMenuAction.randomColors:
@@ -1436,6 +1642,7 @@ class _AcademicSchedulePageState extends State<AcademicSchedulePage> {
     final schedule = _schedule;
     final weekState = _weekState;
     if (!mounted ||
+        !_calendarConfigured ||
         !_followsCurrentWeek ||
         schedule == null ||
         weekState == null) {
@@ -1454,21 +1661,20 @@ class _AcademicSchedulePageState extends State<AcademicSchedulePage> {
       _selectedManualSlot = null;
     });
     unawaited(
-      widget.widgetService.syncSchedule(
-        schedule: schedule,
-        weekState: weekState,
-      ),
+      widget.widgetService.syncFromCache(),
     );
   }
 
   @override
   void dispose() {
     _weekTimer?.cancel();
+    widget.repository.discoveryState.removeListener(_discoveryChanged);
     super.dispose();
   }
 }
 
 enum _ScheduleMenuAction {
+  manageSchedules,
   updateSchedule,
   randomColors,
   settings,

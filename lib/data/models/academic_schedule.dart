@@ -9,6 +9,7 @@ class AcademicTerm {
     required this.studentName,
     required this.studentId,
     required this.className,
+    this.admissionYearCode = '',
   });
 
   final String yearCode;
@@ -18,6 +19,7 @@ class AcademicTerm {
   final String studentName;
   final String studentId;
   final String className;
+  final String admissionYearCode;
 
   String get displayName {
     final year = academicYearName.isEmpty ? yearCode : academicYearName;
@@ -36,6 +38,7 @@ class AcademicTerm {
       studentName: stringValue(json['XM']),
       studentId: stringValue(json['XH']),
       className: stringValue(json['BJMC']),
+      admissionYearCode: stringValue(json['NJDM_ID']),
     );
   }
 
@@ -48,6 +51,7 @@ class AcademicTerm {
       'studentName': studentName,
       'studentId': studentId,
       'className': className,
+      if (admissionYearCode.isNotEmpty) 'admissionYearCode': admissionYearCode,
     };
   }
 
@@ -60,6 +64,7 @@ class AcademicTerm {
       studentName: stringValue(json['studentName']),
       studentId: stringValue(json['studentId']),
       className: stringValue(json['className']),
+      admissionYearCode: stringValue(json['admissionYearCode']),
     );
   }
 }

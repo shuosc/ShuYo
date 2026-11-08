@@ -30,7 +30,9 @@ class AcademicScheduleWidgetService {
     }
     try {
       final schedule = await _repository.loadCachedSchedule();
-      final weekState = await _repository.loadWeekState(now: now);
+      final weekState = await _repository.primaryCalendarConfigured()
+          ? await _repository.loadWeekState(now: now)
+          : null;
       await syncSchedule(schedule: schedule, weekState: weekState, now: now);
     } on Object {
       // 小组件同步不能影响 App 内课表读取。

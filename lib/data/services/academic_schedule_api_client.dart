@@ -3,6 +3,9 @@ import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
+import 'package:html/parser.dart' as html_parser;
+
+import '../models/academic_schedule_collection.dart';
 import 'package:http/io_client.dart';
 
 import '../../core/academic_constants.dart';
@@ -42,14 +45,29 @@ class AcademicTermQuery {
     required this.termCode,
     this.academicYearName = '',
     this.termName = '',
+    this.lastYearInclusive,
   });
 
   final String yearCode;
   final String termCode;
   final String academicYearName;
   final String termName;
+  final int? lastYearInclusive;
+
+  String get key => academicTermKey(yearCode, termCode);
 
   bool get isValid => yearCode.isNotEmpty && termCode.isNotEmpty;
+}
+
+class AcademicTermCatalog {
+  const AcademicTermCatalog({required this.currentTerm, required this.terms});
+
+  final AcademicTermQuery currentTerm;
+  final List<AcademicTermQuery> terms;
+}
+
+class AcademicNoScheduleException extends AcademicApiException {
+  const AcademicNoScheduleException() : super('该学年学期暂无您的课表');
 }
 
 class AcademicScheduleApiClient {
@@ -83,8 +101,7 @@ class AcademicScheduleApiClient {
         throw const AcademicApiException('未能识别当前学期');
       }
       _debug('term resolved year=${term.yearCode} term=${term.termCode}');
-      final json = await fetchScheduleJson(term);
-      final schedule = AcademicScheduleParser.parse(json);
+      final schedule = await fetchScheduleForTerm(term);
       _debug('sync success');
       return schedule;
     } on Object catch (error, stackTrace) {
@@ -99,7 +116,10 @@ class AcademicScheduleApiClient {
     }
   }
 
-  Future<AcademicTermQuery> fetchCurrentTermQuery() async {
+  Future<AcademicTermQuery> fetchCurrentTermQuery() async =>
+      (await fetchTermCatalog()).currentTerm;
+
+  Future<AcademicTermCatalog> fetchTermCatalog() async {
     final response = await HttpTimeout.request(
       _httpClient.get(
         _uri(AcademicConstants.scheduleIndexPath),
@@ -109,24 +129,112 @@ class AcademicScheduleApiClient {
     );
     _debugResponse('schedule-index', response);
     _ensureSuccess(response);
-    final html = response.body;
-    _ensureNotLoginPage(html);
-    final yearCode = _selectedOptionValue(html, 'xnm') ??
-        _hiddenInputValue(html, 'xnm') ??
-        '';
-    final termCode = _selectedOptionValue(html, 'xqm') ??
-        _hiddenInputValue(html, 'xqm') ??
-        '';
-    return AcademicTermQuery(
-      yearCode: yearCode,
-      termCode: termCode,
-      academicYearName: _selectedOptionText(html, 'xnm') ??
-          _hiddenInputValue(html, 'xnmc') ??
-          '',
-      termName: _selectedOptionText(html, 'xqm') ??
-          _hiddenInputValue(html, 'xqmmc') ??
-          '',
+    _ensureNotLoginPage(response.body);
+    return parseTermCatalog(response.body);
+  }
+
+  @visibleForTesting
+  static AcademicTermCatalog parseTermCatalog(String html) {
+    final document = html_parser.parse(html);
+    List<(String, String, bool)> options(String id) => [
+          for (final option in document.querySelectorAll('select#$id option'))
+            if ((option.attributes['value'] ?? '').trim().isNotEmpty)
+              (
+                option.attributes['value']!.trim(),
+                option.text.trim(),
+                option.attributes.containsKey('selected'),
+              ),
+        ];
+    final years = options('xnm');
+    final semesters = options('xqm');
+    String selected(String id, List<(String, String, bool)> items) {
+      for (final item in items) {
+        if (item.$3) return item.$1;
+      }
+      return document
+              .querySelector('input[name="$id"]')
+              ?.attributes['value']
+              ?.trim() ??
+          '';
+    }
+
+    final year = selected('xnm', years);
+    final semester = selected('xqm', semesters);
+    String name(
+        List<(String, String, bool)> items, String code, String fallback) {
+      for (final item in items) {
+        if (item.$1 == code) return item.$2;
+      }
+      return fallback;
+    }
+
+    final current = AcademicTermQuery(
+      yearCode: year,
+      termCode: semester,
+      academicYearName: name(
+          years,
+          year,
+          document.querySelector('input[name="xnmc"]')?.attributes['value'] ??
+              ''),
+      termName: name(
+          semesters,
+          semester,
+          document.querySelector('input[name="xqmmc"]')?.attributes['value'] ??
+              ''),
     );
+    if (!current.isValid) {
+      throw const AcademicApiException('未能识别教务默认学期');
+    }
+    final candidates = <String, AcademicTermQuery>{current.key: current};
+    for (final y in years) {
+      for (final term in semesters) {
+        final maxYear = int.tryParse(
+            RegExp(r'(\d{4})及之前').firstMatch(term.$2)?.group(1) ?? '');
+        final yearNumber = int.tryParse(y.$1);
+        if (maxYear != null && yearNumber != null && yearNumber > maxYear) {
+          continue;
+        }
+        final query = AcademicTermQuery(
+          yearCode: y.$1,
+          termCode: term.$1,
+          academicYearName: y.$2,
+          termName: term.$2.replaceFirst(RegExp(r'[（(].*$'), '').trim(),
+          lastYearInclusive: maxYear,
+        );
+        candidates[query.key] = query;
+      }
+    }
+    final currentYear = int.tryParse(year) ?? 0;
+    const termOrder = {'3': 0, '12': 1, '16': 2, '32': 3};
+    final terms = candidates.values.toList()
+      ..sort((a, b) {
+        if (a.key == current.key) return b.key == current.key ? 0 : -1;
+        if (b.key == current.key) return 1;
+        final distanceA = ((int.tryParse(a.yearCode) ?? 0) - currentYear).abs();
+        final distanceB = ((int.tryParse(b.yearCode) ?? 0) - currentYear).abs();
+        final distance = distanceA.compareTo(distanceB);
+        if (distance != 0) return distance;
+        final yearOrder = b.yearCode.compareTo(a.yearCode);
+        if (yearOrder != 0) return yearOrder;
+        final semesterOrder = (termOrder[a.termCode] ?? 99)
+            .compareTo(termOrder[b.termCode] ?? 99);
+        return semesterOrder != 0
+            ? semesterOrder
+            : a.termCode.compareTo(b.termCode);
+      });
+    return AcademicTermCatalog(currentTerm: current, terms: terms);
+  }
+
+  Future<AcademicSchedule> fetchScheduleForTerm(AcademicTermQuery term) async {
+    if (!term.isValid) throw const AcademicApiException('无效的学年或学期');
+    final json = await fetchScheduleJson(term);
+    final schedule = AcademicScheduleParser.parse(json);
+    if (schedule.term.yearCode != term.yearCode ||
+        schedule.term.termCode != term.termCode ||
+        schedule.term.studentId.isEmpty) {
+      throw const AcademicApiException('教务返回的课表与所查询的学期不匹配');
+    }
+    return schedule;
   }
 
   Future<JsonMap> fetchScheduleJson(AcademicTermQuery term) async {
@@ -158,7 +266,9 @@ class AcademicScheduleApiClient {
     if (decoded is! JsonMap) {
       throw const AcademicApiException('教务系统返回了无法识别的课表数据');
     }
-    if (decoded['kbList'] is! List || decoded['xsxx'] is! JsonMap) {
+    if (decoded['kbList'] is! List ||
+        decoded['xsxx'] is! JsonMap ||
+        (decoded.containsKey('sjkList') && decoded['sjkList'] is! List)) {
       throw const AcademicApiException('教务系统返回的数据不包含课表');
     }
     return decoded;
@@ -261,55 +371,5 @@ class AcademicScheduleApiClient {
 
   void _debug(String message) {
     if (kDebugMode) debugPrint('[SHU_SCHEDULE_API] $message');
-  }
-
-  String? _selectedOptionValue(String html, String selectId) {
-    final option = _selectedOption(html, selectId);
-    if (option == null) {
-      return null;
-    }
-    return RegExp(
-      r'''value\s*=\s*["']([^"']*)["']''',
-      caseSensitive: false,
-    ).firstMatch(option)?.group(1);
-  }
-
-  String? _selectedOptionText(String html, String selectId) {
-    final option = _selectedOption(html, selectId);
-    if (option == null) {
-      return null;
-    }
-    return option
-        .replaceAll(RegExp(r'<[^>]+>'), '')
-        .replaceAll('&nbsp;', ' ')
-        .trim();
-  }
-
-  String? _selectedOption(String html, String selectId) {
-    final select = RegExp(
-      '<select[^>]+id=["\\\']$selectId["\\\'][\\s\\S]*?</select>',
-      caseSensitive: false,
-    ).firstMatch(html)?.group(0);
-    if (select == null) {
-      return null;
-    }
-    return RegExp(
-      r'''<option\b[^>]*selected\b[^>]*>[\s\S]*?</option>''',
-      caseSensitive: false,
-    ).firstMatch(select)?.group(0);
-  }
-
-  String? _hiddenInputValue(String html, String name) {
-    final input = RegExp(
-      '<input[^>]+name=["\\\']$name["\\\'][^>]*>',
-      caseSensitive: false,
-    ).firstMatch(html)?.group(0);
-    if (input == null) {
-      return null;
-    }
-    return RegExp(
-      r'''value\s*=\s*["']([^"']*)["']''',
-      caseSensitive: false,
-    ).firstMatch(input)?.group(1);
   }
 }

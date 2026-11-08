@@ -291,7 +291,7 @@ class AcademicScheduleNotificationService {
     final schedule =
         settings.enabled ? await _repository.loadCachedSchedule() : null;
     final alarms = <_EarlyClassAlarm>[];
-    if (schedule != null) {
+    if (schedule != null && await _repository.primaryCalendarConfigured()) {
       final weekState = await _repository.loadWeekState();
       alarms.addAll(
         _upcomingEarlyClassAlarms(
@@ -364,7 +364,7 @@ class AcademicScheduleNotificationService {
     }
 
     final schedule = await _repository.loadCachedSchedule();
-    if (schedule == null) {
+    if (schedule == null || !await _repository.primaryCalendarConfigured()) {
       return 0;
     }
     final weekState = await _repository.loadWeekState(
@@ -551,7 +551,7 @@ class AcademicScheduleNotificationService {
     DateTime now,
   ) async {
     final schedule = await _repository.loadCachedSchedule();
-    if (schedule == null) {
+    if (schedule == null || !await _repository.primaryCalendarConfigured()) {
       return const [];
     }
     final weekState = await _repository.loadWeekState(

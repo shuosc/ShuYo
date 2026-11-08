@@ -267,6 +267,16 @@ final _schedule = AcademicSchedule(
     className: '',
   ),
   sessions: const [],
-  untimedCourses: const [],
+  untimedCourses: const [
+    UntimedCourse(
+        id: 'practice',
+        courseName: '测试实践课',
+        teacherName: '',
+        campus: '',
+        weeks: [],
+        weekText: '',
+        summary: '',
+        credit: ''),
+  ],
   fetchedAt: DateTime(2026, 8, 31),
 );

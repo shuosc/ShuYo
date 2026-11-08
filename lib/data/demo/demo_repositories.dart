@@ -18,6 +18,9 @@ class DemoAcademicScheduleRepository extends AcademicScheduleRepository {
   final AcademicSchedule schedule;
 
   @override
+  bool get supportsTermDiscovery => false;
+
+  @override
   Future<AcademicSchedule?> loadCachedSchedule() async => schedule;
 
   @override

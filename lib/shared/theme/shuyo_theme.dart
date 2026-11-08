@@ -104,6 +104,21 @@ class ShuYoThemeSpec {
           borderSide: BorderSide(color: colors.accent, width: 1.4),
         ),
       ),
+      bottomSheetTheme: BottomSheetThemeData(
+        backgroundColor: colors.brightness == Brightness.light
+            ? Colors.white
+            : colors.surface,
+        modalBackgroundColor: colors.brightness == Brightness.light
+            ? Colors.white
+            : colors.surface,
+        surfaceTintColor: Colors.transparent,
+      ),
+      popupMenuTheme: PopupMenuThemeData(
+        color: colors.brightness == Brightness.light
+            ? Colors.white
+            : colors.surface,
+        surfaceTintColor: Colors.transparent,
+      ),
       dialogTheme: DialogThemeData(
         backgroundColor: colors.surface,
         surfaceTintColor: Colors.transparent,

@@ -286,6 +286,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
       });
     }
     if (!widget.isDemo) {
+      unawaited(_resumeScheduleDiscovery());
       unawaited(_initializeCampusCardBalance());
       _scheduleSummaryTimer = Timer.periodic(
         const Duration(minutes: 1),
@@ -320,7 +321,12 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (widget.isDemo || state != AppLifecycleState.resumed) return;
+    if (widget.isDemo) return;
+    if (state != AppLifecycleState.resumed) {
+      _scheduleRepository.pauseDiscovery();
+      return;
+    }
+    unawaited(_resumeScheduleDiscovery());
     unawaited(_clientBackendRepository.reportPresence());
     unawaited(_refreshScheduleSummaryQuietly());
     unawaited(_refreshAnnouncementSummaryQuietly());
@@ -334,6 +340,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
 
   @override
   void dispose() {
+    _scheduleRepository.pauseDiscovery();
     WidgetsBinding.instance.removeObserver(this);
     _scheduleSummaryTimer?.cancel();
     _announcementSummaryTimer?.cancel();
@@ -398,6 +405,8 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
                             notificationService: _scheduleNotificationService,
                             widgetService: _scheduleWidgetService,
                             onLoginRequired: _handleInvalidAcademicSession,
+                            onPrimaryScheduleChanged:
+                                _refreshScheduleSummaryQuietly,
                             studentIdentityService: _studentIdentityService,
                             initialState: widget.initialOpenSchedule &&
                                     _scheduleDataRevision == 0
@@ -638,6 +647,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
       }
       if (!mounted) return;
       if (!firstLogin) {
+        unawaited(_resumeScheduleDiscovery());
         unawaited(() async {
           await _studentIdentityService.ensureAfterCampusLogin();
           await _clientBackendRepository.reportPresence();
@@ -649,6 +659,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
       }
       await _syncScheduleAfterAcademicLogin();
       if (!mounted || !_hasAcademicSession) return;
+      unawaited(_resumeScheduleDiscovery());
       unawaited(() async {
         await _syncAcademicExtrasAfterLogin();
         await _studentIdentityService.ensureAfterCampusLogin();
@@ -770,6 +781,9 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
         _showSnack('校园账户已登录，课表已同步');
       }
       return true;
+    } on AcademicNoScheduleException {
+      if (mounted) _showSnack('默认学期暂无课表，将继续查找其他学期');
+      return false;
     } on AcademicAuthException {
       await _academicAuthService.clearAccount(sessionExpired: true);
       if (mounted) {
@@ -790,6 +804,13 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
       if (mounted) setState(() => _syncingAcademicSchedule = false);
       unawaited(_refreshScheduleSummaryQuietly());
     }
+  }
+
+  Future<void> _resumeScheduleDiscovery() async {
+    if (widget.isDemo || !_hasAcademicSession || _academicSessionExpired) {
+      return;
+    }
+    await _scheduleRepository.discoverSchedules();
   }
 
   Future<void> _refreshScheduleSummaryQuietly() async {
@@ -1342,6 +1363,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
   }
 
   Future<bool> _logoutAcademicAccount() async {
+    _scheduleRepository.pauseDiscovery();
     _resetCampusCardRequests();
     _otpTokenRepository.resetSession(sessionActive: false);
     // Let an in-flight recovery finish before deleting credentials, so it
