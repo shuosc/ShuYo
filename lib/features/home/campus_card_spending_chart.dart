@@ -183,8 +183,7 @@ class _CampusCardSpendingChartState extends State<CampusCardSpendingChart>
     }
     _keepSelectionInRange();
     if (!DateUtils.isSameDay(oldWidget.endDate, widget.endDate) ||
-        widget.bills == null ||
-        widget.error != null) {
+        widget.bills == null) {
       _resetSelection();
     }
   }
@@ -326,8 +325,10 @@ class _CampusCardSpendingChartState extends State<CampusCardSpendingChart>
   Widget build(BuildContext context) {
     final colors = context.shuyoColors;
     final error = widget.error;
-    final requiresLogin = error is CampusCardAuthRequiredException ||
-        (error is CampusCardException && error.code == 'accountMismatch');
+    final mismatchedAccount =
+        error is CampusCardException && error.code == 'accountMismatch';
+    final requiresLogin =
+        error is CampusCardAuthRequiredException || mismatchedAccount;
     final data = _data;
     final selectedIndex = _selectedIndex;
     return Column(
@@ -378,25 +379,32 @@ class _CampusCardSpendingChartState extends State<CampusCardSpendingChart>
           ],
         ),
         const SizedBox(height: 10),
-        if (widget.error != null)
+        if (error != null) ...[
           ConstrainedBox(
             key: const ValueKey('campus-card-chart-error'),
-            constraints: const BoxConstraints(minHeight: 184),
-            child:
-                Column(mainAxisAlignment: MainAxisAlignment.center, children: [
-              Text(requiresLogin ? '登录校园账户后查看消费趋势' : '消费趋势暂时无法加载',
-                  style:
-                      ShuYoTextStyles.bodyCompact(color: colors.textSecondary)),
-              if (widget.onRetry != null)
-                TextButton(
-                  key: const ValueKey('campus-card-chart-retry'),
-                  onPressed: widget.onRetry,
-                  style: TextButton.styleFrom(foregroundColor: colors.accent),
-                  child: Text(requiresLogin ? '登录校园账户' : '重试'),
-                ),
-            ]),
-          )
-        else if (widget.bills == null)
+            constraints: BoxConstraints(
+                minHeight: widget.bills == null || mismatchedAccount ? 184 : 0),
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              crossAxisAlignment: widget.bills == null || mismatchedAccount
+                  ? CrossAxisAlignment.center
+                  : CrossAxisAlignment.start,
+              children: [
+                Text(requiresLogin ? '请登录校园账户' : '刷新失败',
+                    style: ShuYoTextStyles.bodyCompact(
+                        color: colors.textSecondary)),
+                if (widget.onRetry != null)
+                  TextButton(
+                    key: const ValueKey('campus-card-chart-retry'),
+                    onPressed: widget.onRetry,
+                    style: TextButton.styleFrom(foregroundColor: colors.accent),
+                    child: Text(requiresLogin ? '登录校园账户' : '重试'),
+                  ),
+              ],
+            ),
+          ),
+        ],
+        if (widget.bills == null && error == null)
           Semantics(
             liveRegion: true,
             child: ConstrainedBox(
@@ -408,7 +416,7 @@ class _CampusCardSpendingChartState extends State<CampusCardSpendingChart>
                           color: colors.textSecondary))),
             ),
           )
-        else ...[
+        else if (widget.bills != null && !mismatchedAccount) ...[
           Row(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [

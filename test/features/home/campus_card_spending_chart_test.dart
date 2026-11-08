@@ -526,7 +526,8 @@ void main() {
     }
   });
 
-  testWidgets('initial loading reserves chart space and errors hide amounts',
+  testWidgets(
+      'initial loading reserves space and refresh errors keep the chart',
       (tester) async {
     var retries = 0;
     await _pump(tester, bills: null, loading: true);
@@ -550,9 +551,10 @@ void main() {
         bills: _bills(),
         error: StateError('private diagnostic'),
         onRetry: () => retries++);
-    expect(find.text('消费趋势暂时无法加载'), findsOneWidget);
+    expect(find.text('刷新失败'), findsOneWidget);
     expect(find.textContaining('private diagnostic'), findsNothing);
-    expect(find.byKey(const ValueKey('campus-card-chart-plot')), findsNothing);
+    expect(
+        find.byKey(const ValueKey('campus-card-chart-plot')), findsOneWidget);
     await tester.tap(find.byKey(const ValueKey('campus-card-chart-retry')));
     expect(retries, 1);
 
@@ -560,6 +562,48 @@ void main() {
     expect(
         find.byKey(const ValueKey('campus-card-chart-plot')), findsOneWidget);
     expect(find.text('消费'), findsOneWidget);
+  });
+
+  testWidgets(
+      'a failed initial request has concise feedback and a retry action',
+      (tester) async {
+    var retries = 0;
+    await _pump(tester,
+        bills: null,
+        error: StateError('private diagnostic'),
+        onRetry: () => retries++);
+    expect(find.text('刷新失败'), findsOneWidget);
+    expect(find.byKey(const ValueKey('campus-card-chart-plot')), findsNothing);
+    expect(
+        tester
+            .getSize(find.byKey(const ValueKey('campus-card-chart-error')))
+            .height,
+        greaterThanOrEqualTo(184));
+    await tester.tap(find.byKey(const ValueKey('campus-card-chart-retry')));
+    expect(retries, 1);
+  });
+
+  testWidgets('a failed refresh keeps the chart selection and completed data',
+      (tester) async {
+    final bills = _bills();
+    await _pump(tester, bills: bills);
+    final plot = find.byKey(const ValueKey('campus-card-chart-plot'));
+    final bounds = tester.getRect(plot);
+    await tester.tapAt(Offset(bounds.left + 1, bounds.center.dy));
+    await tester.pump();
+    final selectedDate = tester
+        .widget<Text>(
+            find.byKey(const ValueKey('campus-card-chart-selected-date')))
+        .data;
+    await _pump(tester, bills: bills, error: StateError('refresh failed'));
+    expect(plot, findsOneWidget);
+    expect(find.text('刷新失败'), findsOneWidget);
+    expect(
+        tester
+            .widget<Text>(
+                find.byKey(const ValueKey('campus-card-chart-selected-date')))
+            .data,
+        selectedDate);
   });
 
   testWidgets('refresh retains completed chart, selection and painter data',
@@ -625,6 +669,11 @@ void main() {
           bills: _bills(), error: error, onRetry: () => logins++);
       expect(find.text('登录校园账户'), findsOneWidget);
       expect(find.text('重试'), findsNothing);
+      expect(
+          find.byKey(const ValueKey('campus-card-chart-plot')),
+          error is CampusCardAuthRequiredException
+              ? findsOneWidget
+              : findsNothing);
       expect(find.byKey(const ValueKey('campus-card-chart-selected-amount')),
           findsNothing);
       await tester.tap(find.byKey(const ValueKey('campus-card-chart-retry')));

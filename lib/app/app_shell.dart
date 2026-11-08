@@ -15,6 +15,7 @@ import '../data/demo/demo_data_bundle.dart';
 import '../data/demo/demo_repositories.dart';
 import '../data/models/client_backend.dart';
 import '../data/models/campus_card.dart';
+import '../data/models/campus_card_snapshot.dart';
 import '../data/models/classroom.dart';
 import '../data/models/home_layout.dart';
 import '../data/repositories/academic_schedule_repository.dart';
@@ -37,6 +38,7 @@ import '../data/services/academic_schedule_widget_service.dart';
 import '../data/services/client_settings_service.dart';
 import '../data/services/campus_card_service.dart';
 import '../data/services/campus_card_balance_store.dart';
+import '../data/services/campus_card_cache.dart';
 import '../data/services/chaoxing_booking_client.dart';
 import '../data/services/student_identity_service.dart';
 import '../data/services/unified_account_service.dart';
@@ -173,6 +175,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
   CampusCardService get _campusCardService => _campusCardServiceInstance ??=
       CampusCardService(accountService: _unifiedAccountService);
   final _campusCardBalanceStore = CampusCardBalanceStore();
+  final _campusCardCache = CampusCardCache();
   CampusCardInfo? _campusCardInfo;
   double? _campusCardBalance;
   DateTime? _campusCardQueriedAt;
@@ -722,6 +725,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
         ? null
         : await _profilePreferences.loadNickname(studentId);
     if (!mounted) return;
+    _campusCardCache.selectAccount(studentId);
     setState(() {
       _academicStudentId = studentId;
       _nickname = nickname;
@@ -986,6 +990,8 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
     }
     final revision = _campusCardRevision;
     final studentId = _academicStudentId;
+    _campusCardCache.selectAccount(studentId);
+    unawaited(_campusCardCache.load());
     if (studentId != null) {
       try {
         final cached = await _campusCardBalanceStore.load(studentId);
@@ -996,6 +1002,10 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
           setState(() {
             _campusCardBalance = cached.balance;
             _campusCardQueriedAt = cached.queriedAt;
+            _campusCardInfo = CampusCardBalanceSnapshot(
+                    balance: cached.balance, queriedAt: cached.queriedAt)
+                .toCard(studentId);
+            _campusCardInfoQueriedAt = cached.queriedAt;
           });
         }
       } on Object {
@@ -1019,6 +1029,8 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
       _campusCardQueriedAt = queriedAt;
       _campusCardRefreshError = null;
     });
+    unawaited(_campusCardCache.rememberBalance(card, queriedAt,
+        revision: _campusCardCache.revision));
     unawaited(_campusCardBalanceStore
         .save(
           studentId: card.studentId,
@@ -1109,10 +1121,9 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
       } else if (interactive) {
         setState(() => _campusCardRefreshError = error.message);
       }
-    } on Object catch (error) {
+    } on Object {
       if (mounted && revision == _campusCardRevision && interactive) {
-        setState(() => _campusCardRefreshError =
-            error is CampusCardException ? error.message : '余额刷新失败，请稍后重试');
+        setState(() => _campusCardRefreshError = '刷新失败');
       }
     }
   }
@@ -1230,9 +1241,11 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
     if (!_hasAcademicSession || _academicStudentId == null) {
       if (!await _loginCampusCard() || !mounted) return;
     }
+    _campusCardCache.selectAccount(_academicStudentId);
     await Navigator.of(context).push<void>(
       shuyoRoute(
         builder: (_) => CampusCardPage(
+          cache: _campusCardCache,
           serviceFactory: () => _campusCardService,
           fetchCardInfo: _fetchCampusCardBalance,
           initialCard: _campusCardInfo,
@@ -1395,6 +1408,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
   Future<bool> _logoutAcademicAccount() async {
     _scheduleRepository.pauseDiscovery();
     _resetCampusCardRequests();
+    await _campusCardCache.clear();
     _otpTokenRepository.resetSession(sessionActive: false);
     // Let an in-flight recovery finish before deleting credentials, so it
     // cannot install a fresh WebVPN token after the user signs out.
