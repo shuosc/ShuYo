@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:shuyo/data/models/academic_schedule.dart';
+import 'package:shuyo/data/models/academic_schedule_collection.dart';
 import 'package:shuyo/data/repositories/academic_schedule_repository.dart';
 import 'package:shuyo/data/services/academic_account_store.dart';
 import 'package:shuyo/data/services/academic_schedule_api_client.dart';
@@ -46,18 +47,24 @@ AcademicSchedule _schedule(AcademicTermQuery query, {String? name}) {
 
 class _Api extends AcademicScheduleApiClient {
   int requests = 0;
+  int catalogRequests = 0;
+  bool authExpired = false;
   String? historicalName;
   final emptyTerms = <String>{};
   Completer<void>? refreshGate;
   final terms = <AcademicTermQuery>[_current, _history];
 
   @override
-  Future<AcademicTermCatalog> fetchTermCatalog() async =>
-      AcademicTermCatalog(currentTerm: _current, terms: terms);
+  Future<AcademicTermCatalog> fetchTermCatalog() async {
+    catalogRequests++;
+    if (authExpired) throw const AcademicAuthException();
+    return AcademicTermCatalog(currentTerm: _current, terms: terms);
+  }
 
   @override
   Future<AcademicSchedule> fetchCurrentSchedule() async {
     requests++;
+    if (authExpired) throw const AcademicAuthException();
     return _schedule(_current);
   }
 
@@ -65,6 +72,7 @@ class _Api extends AcademicScheduleApiClient {
   Future<AcademicSchedule> fetchScheduleForTerm(AcademicTermQuery query) async {
     requests++;
     await refreshGate?.future;
+    if (authExpired) throw const AcademicAuthException();
     final schedule = _schedule(query,
         name: query.key == _history.key ? historicalName : null);
     return emptyTerms.contains(query.key)
@@ -118,14 +126,20 @@ void main() {
     notifications = _Notifications(repository);
   });
 
-  Future<void> showPage(WidgetTester tester, {String? themeId}) async {
+  Future<void> showPage(
+    WidgetTester tester, {
+    String? themeId,
+    Future<void> Function()? onLoginRequired,
+    Future<bool> Function()? onRecoverSession,
+  }) async {
     await tester.pumpWidget(MaterialApp(
       theme: ShuYoThemes.byId(themeId ?? ShuYoThemes.defaultId).themeData(),
       home: AcademicSchedulePage(
         repository: repository,
         notificationService: notifications,
         widgetService: widgets,
-        onLoginRequired: () async {},
+        onLoginRequired: onLoginRequired ?? () async {},
+        onRecoverSession: onRecoverSession,
       ),
     ));
     await tester.pumpAndSettle();
@@ -279,6 +293,222 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  for (final themeId in [ShuYoThemes.defaultId, ShuYoThemes.systemDarkId]) {
+    testWidgets('picker matches the more menu text size and weight in $themeId',
+        (tester) async {
+      tester.view.physicalSize = const Size(320, 700);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(() {
+        tester.view.resetPhysicalSize();
+        tester.view.resetDevicePixelRatio();
+      });
+      await showPage(tester, themeId: themeId);
+      await tester.tap(find.byTooltip('更多'));
+      await tester.pumpAndSettle();
+      final moreMenuText = find.text('更新课表');
+      final moreMenuStyle =
+          DefaultTextStyle.of(tester.element(moreMenuText)).style;
+      expect(moreMenuStyle.fontWeight, FontWeight.w400);
+      expect(moreMenuStyle.fontSize, 15.5);
+      Navigator.of(tester.element(moreMenuText)).pop();
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('schedule-term-picker')));
+      await tester.pumpAndSettle();
+      final picker = find.byType(AcademicScheduleTermPicker);
+      final year = tester.widget<Text>(find.descendant(
+        of: find.byKey(const ValueKey('schedule-year-2026')),
+        matching: find.byType(Text),
+      ));
+      expect(year.style!.fontSize, moreMenuStyle.fontSize);
+      expect(year.style!.fontWeight, FontWeight.w400);
+      final tile = tester
+          .widget<ListTile>(find.byKey(const ValueKey('schedule-term-2026:3')));
+      expect(tile.dense, isNot(true));
+      expect(tile.minTileHeight, 52);
+      expect((tile.title! as Text).style!.fontSize, moreMenuStyle.fontSize);
+      final primary = tester
+          .widget<Text>(find.descendant(of: picker, matching: find.text('常用')));
+      expect(primary.style!.fontSize, moreMenuStyle.fontSize);
+      final manager = tester.widget<Text>(
+          find.descendant(of: picker, matching: find.text('管理课表')));
+      expect(manager.style!.fontSize, moreMenuStyle.fontSize);
+      for (final text in tester.widgetList<Text>(
+          find.descendant(of: picker, matching: find.byType(Text)))) {
+        expect(text.style!.fontWeight, moreMenuStyle.fontWeight);
+        expect(text.style!.fontSize, moreMenuStyle.fontSize);
+      }
+      expect(find.text('管理课表').hitTestable(), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    });
+  }
+
+  testWidgets('management hides expired-login messages until the user searches',
+      (tester) async {
+    api.authExpired = true;
+    await repository.discoverSchedules(force: true);
+    expect(repository.discoveryState.value.requiresLogin, isTrue);
+    var recoveries = 0;
+    final requests = api.catalogRequests;
+    await showPage(tester, onRecoverSession: () async {
+      recoveries++;
+      return false;
+    });
+    await openManager(tester);
+    expect(find.text('教务登录已失效，登录后可继续查找'), findsNothing);
+    expect(find.text('请先登录校园账户再查找课表'), findsNothing);
+    expect(find.text('查找其他课表'), findsOneWidget);
+    expect(recoveries, 0);
+    expect(api.catalogRequests, requests);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('known expiry recovers first and continues discovery in one tap',
+      (tester) async {
+    api.authExpired = true;
+    await repository.discoverSchedules(force: true);
+    final requests = api.catalogRequests;
+    var recoveries = 0;
+    await showPage(tester, onRecoverSession: () async {
+      recoveries++;
+      expect(api.catalogRequests, requests);
+      api.authExpired = false;
+      return true;
+    });
+    await openManager(tester);
+    await tester.tap(find.text('查找其他课表'));
+    await tester.pumpAndSettle();
+    expect(recoveries, 1);
+    expect(api.catalogRequests, requests + 1);
+    expect(repository.discoveryState.value.requiresLogin, isFalse);
+    expect(find.textContaining('登录'), findsNothing);
+    expect((await repository.loadSavedSchedules()).length, 2);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('newly detected expiry recovers and retries discovery once',
+      (tester) async {
+    api.authExpired = true;
+    final requests = api.catalogRequests;
+    var recoveries = 0;
+    await showPage(tester, onRecoverSession: () async {
+      recoveries++;
+      expect(api.catalogRequests, requests + 1);
+      api.authExpired = false;
+      return true;
+    });
+    await openManager(tester);
+    await tester.tap(find.text('查找其他课表'));
+    await tester.pumpAndSettle();
+    expect(recoveries, 1);
+    expect(api.catalogRequests, requests + 2);
+    expect(repository.discoveryState.value.requiresLogin, isFalse);
+    expect(find.textContaining('登录'), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('failed recovery stops discovery without an expiry warning',
+      (tester) async {
+    api.authExpired = true;
+    await repository.discoverSchedules(force: true);
+    final requests = api.catalogRequests;
+    var recoveries = 0;
+    await showPage(tester, onRecoverSession: () async {
+      recoveries++;
+      return false;
+    });
+    await openManager(tester);
+    await tester.tap(find.text('查找其他课表'));
+    await tester.pumpAndSettle();
+    expect(recoveries, 1);
+    expect(api.catalogRequests, requests);
+    expect(find.textContaining('登录'), findsNothing);
+    expect(
+        tester
+            .widget<FilledButton>(find.widgetWithText(FilledButton, '查找其他课表'))
+            .onPressed,
+        isNotNull);
+    expect((await repository.loadSavedSchedules()).length, 2);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('search remains disabled while session recovery is pending',
+      (tester) async {
+    api.authExpired = true;
+    await repository.discoverSchedules(force: true);
+    final requests = api.catalogRequests;
+    final recovery = Completer<bool>();
+    var recoveries = 0;
+    await showPage(tester, onRecoverSession: () {
+      recoveries++;
+      return recovery.future;
+    });
+    await openManager(tester);
+    final search = find.widgetWithText(FilledButton, '查找其他课表');
+    await tester.tap(search);
+    await tester.pump();
+    expect(tester.widget<FilledButton>(search).onPressed, isNull);
+    expect(find.byType(LinearProgressIndicator), findsOneWidget);
+    expect(find.textContaining('登录'), findsNothing);
+    await tester.tap(search);
+    await tester.pump();
+    expect(recoveries, 1);
+    expect(api.catalogRequests, requests);
+    api.authExpired = false;
+    recovery.complete(true);
+    await tester.pumpAndSettle();
+    expect(api.catalogRequests, requests + 1);
+    expect(tester.widget<FilledButton>(search).onPressed, isNotNull);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('persistent expiry does not cause a recovery loop',
+      (tester) async {
+    api.authExpired = true;
+    final requests = api.catalogRequests;
+    var recoveries = 0;
+    await showPage(tester, onRecoverSession: () async {
+      recoveries++;
+      return true;
+    });
+    await openManager(tester);
+    await tester.tap(find.text('查找其他课表'));
+    await tester.pumpAndSettle();
+    expect(recoveries, 1);
+    expect(api.catalogRequests, requests + 2);
+    expect(repository.discoveryState.value.requiresLogin, isTrue);
+    expect(find.textContaining('登录'), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('legacy login callback also resumes the requested discovery',
+      (tester) async {
+    api.authExpired = true;
+    await repository.discoverSchedules(force: true);
+    final requests = api.catalogRequests;
+    var logins = 0;
+    await showPage(tester, onLoginRequired: () async {
+      logins++;
+      api.authExpired = false;
+    });
+    await openManager(tester);
+    await tester.tap(find.text('查找其他课表'));
+    await tester.pumpAndSettle();
+    expect(logins, 1);
+    expect(api.catalogRequests, requests + 1);
+    expect(repository.discoveryState.value.requiresLogin, isFalse);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('management still shows non-authentication discovery errors',
+      (tester) async {
+    repository.discoveryState.value =
+        const ScheduleDiscoveryState(message: '网络连接失败，请稍后重试');
+    await showPage(tester);
+    await openManager(tester);
+    expect(find.text('网络连接失败，请稍后重试'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets(
       'long picker scrolls within its maximum height in both directions',
       (tester) async {
@@ -326,6 +556,51 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  for (final themeId in [ShuYoThemes.defaultId, ShuYoThemes.systemDarkId]) {
+    testWidgets('management uses regular weight throughout in $themeId',
+        (tester) async {
+      await showPage(tester, themeId: themeId);
+      await openManager(tester);
+      final page = find.byType(AcademicScheduleCollectionPage);
+      TextStyle effectiveStyle(Finder finder) {
+        final text = tester.widget<Text>(finder);
+        return DefaultTextStyle.of(tester.element(finder))
+            .style
+            .merge(text.style);
+      }
+
+      for (final text in tester.widgetList<Text>(
+          find.descendant(of: page, matching: find.byType(Text)))) {
+        expect(effectiveStyle(find.byWidget(text)).fontWeight, FontWeight.w400);
+      }
+      expect(effectiveStyle(find.text('管理课表')).fontSize, 17.5);
+      expect(effectiveStyle(find.text('已保存 2 份课表')).fontSize, 15.5);
+      expect(effectiveStyle(find.text('2026-2027 学年')).fontSize, 14.5);
+      expect(effectiveStyle(find.text('查找其他课表')).fontSize, 14);
+      final tile = tester.widget<ListTile>(
+          find.byKey(const ValueKey('managed-schedule-2026:3')));
+      final title = tile.title! as Text;
+      final term = (title.textSpan! as TextSpan).children!.first as TextSpan;
+      expect(term.style!.fontWeight, FontWeight.w400);
+      expect(title.style!.fontSize, 15.5);
+      final badgeText = find.descendant(
+          of: find.byKey(const ValueKey('managed-schedule-primary-2026:3')),
+          matching: find.byType(Text));
+      expect(effectiveStyle(badgeText).fontSize, 11);
+      await tester.tap(find.byTooltip('管理 2025-2026 秋'));
+      await tester.pumpAndSettle();
+      for (final text in ['查看课表', '更新这一学期', '设为常用']) {
+        expect(effectiveStyle(find.text(text)).fontWeight, FontWeight.w400);
+      }
+      Navigator.of(tester.element(find.text('查看课表'))).pop();
+      await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('更多检查选项'));
+      await tester.pumpAndSettle();
+      expect(effectiveStyle(find.text('完整检查所有学年')).fontWeight, FontWeight.w400);
+      expect(tester.takeException(), isNull);
+    });
+  }
+
   testWidgets(
       'management vertically centers the primary pill in the full schedule row',
       (tester) async {
@@ -349,7 +624,7 @@ void main() {
     final originalStyle = Theme.of(badgeContext).textTheme.bodyLarge!.copyWith(
           color: Colors.white,
           fontSize: 11,
-          fontWeight: FontWeight.w500,
+          fontWeight: FontWeight.w400,
         );
     final originalText = TextPainter(
       text: TextSpan(text: '常用', style: originalStyle),
@@ -382,6 +657,64 @@ void main() {
     expect(metadata.textSpan!.toPlainText(), isNot(contains('常用')));
     expect(find.text('开学日期未设置'), findsNothing);
     expect(find.byKey(const ValueKey('managed-schedule-primary-2025:3')),
+        findsNothing);
+    expect(tester.takeException(), isNull);
+  });
+
+  for (final age in [
+    Duration.zero,
+    const Duration(minutes: 10),
+    const Duration(hours: 3),
+    const Duration(days: 3),
+    const Duration(days: 21),
+    const Duration(days: 120),
+    const Duration(days: 400),
+  ]) {
+    testWidgets('management formats a sync time $age ago', (tester) async {
+      final syncedAt = DateTime.now().subtract(age);
+      final prefs = await SharedPreferences.getInstance();
+      final key =
+          'academic.schedule.collection.TEST_STUDENT.term.${_current.key}';
+      final record = jsonDecode(prefs.getString(key)!) as Map<String, dynamic>;
+      record['syncedAt'] = syncedAt.toUtc().toIso8601String();
+      await prefs.setString(key, jsonEncode(record));
+      await showPage(tester);
+      await openManager(tester);
+      final expected = age.inMinutes < 1
+          ? '刚刚'
+          : age.inHours < 1
+              ? '${age.inMinutes}分钟前'
+              : age.inDays < 1
+                  ? '${age.inHours}小时前'
+                  : age.inDays < 7
+                      ? '${age.inDays}天前'
+                      : age.inDays < 365
+                          ? '${syncedAt.month}月${syncedAt.day}日'
+                          : '${syncedAt.year}年${syncedAt.month}月${syncedAt.day}日';
+      final metadata = tester.widget<Text>(
+          find.byKey(const ValueKey('managed-schedule-meta-2026:3')));
+      expect(metadata.textSpan!.toPlainText(), '同步于 $expected');
+      expect(metadata.style!.color,
+          ShuYoThemes.byId(ShuYoThemes.defaultId).colors.textMuted);
+      expect(metadata.maxLines, 1);
+      expect(tester.takeException(), isNull);
+    });
+  }
+
+  testWidgets('management omits sync metadata when no sync time is saved',
+      (tester) async {
+    final prefs = await SharedPreferences.getInstance();
+    final key =
+        'academic.schedule.collection.TEST_STUDENT.term.${_current.key}';
+    final record = jsonDecode(prefs.getString(key)!) as Map<String, dynamic>;
+    record.remove('syncedAt');
+    await prefs.setString(key, jsonEncode(record));
+    await showPage(tester);
+    await openManager(tester);
+    final tile = tester.widget<ListTile>(
+        find.byKey(const ValueKey('managed-schedule-2026:3')));
+    expect(tile.subtitle, isNull);
+    expect(find.byKey(const ValueKey('managed-schedule-meta-2026:3')),
         findsNothing);
     expect(tester.takeException(), isNull);
   });

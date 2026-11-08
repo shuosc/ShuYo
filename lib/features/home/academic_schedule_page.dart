@@ -39,6 +39,7 @@ class AcademicSchedulePage extends StatefulWidget {
     required this.notificationService,
     required this.widgetService,
     required this.onLoginRequired,
+    this.onRecoverSession,
     this.studentIdentityService,
     this.initialState,
     this.initialDisplayState,
@@ -50,6 +51,7 @@ class AcademicSchedulePage extends StatefulWidget {
   final AcademicScheduleNotificationService notificationService;
   final AcademicScheduleWidgetService widgetService;
   final Future<void> Function() onLoginRequired;
+  final Future<bool> Function()? onRecoverSession;
   final StudentIdentityService? studentIdentityService;
   final AcademicScheduleCacheState? initialState;
   final AcademicScheduleDisplayState? initialDisplayState;
@@ -403,6 +405,7 @@ class _AcademicSchedulePageState extends State<AcademicSchedulePage> {
       builder: (_) => AcademicScheduleCollectionPage(
         repository: widget.repository,
         onLoginRequired: widget.onLoginRequired,
+        onRecoverSession: widget.onRecoverSession,
         onPrimaryChanged: _primaryChanged,
       ),
     ));

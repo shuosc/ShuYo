@@ -405,6 +405,10 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
                             notificationService: _scheduleNotificationService,
                             widgetService: _scheduleWidgetService,
                             onLoginRequired: _handleInvalidAcademicSession,
+                            onRecoverSession: () =>
+                                _recoverInvalidAcademicSession(
+                              resumeScheduleDiscovery: false,
+                            ),
                             onPrimaryScheduleChanged:
                                 _refreshScheduleSummaryQuietly,
                             studentIdentityService: _studentIdentityService,
@@ -595,6 +599,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
     bool connectWebVpn = true,
     bool allowInitialSync = true,
     bool showRecoveryNotice = true,
+    bool resumeScheduleDiscovery = true,
   }) async {
     if (widget.isDemo || _completingAcademicLogin) return;
     _completingAcademicLogin = true;
@@ -647,7 +652,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
       }
       if (!mounted) return;
       if (!firstLogin) {
-        unawaited(_resumeScheduleDiscovery());
+        if (resumeScheduleDiscovery) unawaited(_resumeScheduleDiscovery());
         unawaited(() async {
           await _studentIdentityService.ensureAfterCampusLogin();
           await _clientBackendRepository.reportPresence();
@@ -659,7 +664,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
       }
       await _syncScheduleAfterAcademicLogin();
       if (!mounted || !_hasAcademicSession) return;
-      unawaited(_resumeScheduleDiscovery());
+      if (resumeScheduleDiscovery) unawaited(_resumeScheduleDiscovery());
       unawaited(() async {
         await _syncAcademicExtrasAfterLogin();
         await _studentIdentityService.ensureAfterCampusLogin();
@@ -861,12 +866,24 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
   }
 
   Future<void> _handleInvalidAcademicSession() async {
-    if (_handlingInvalidAcademicSession) return;
+    await _recoverInvalidAcademicSession();
+  }
+
+  Future<bool> _recoverInvalidAcademicSession({
+    bool resumeScheduleDiscovery = true,
+  }) async {
+    if (_handlingInvalidAcademicSession) return false;
     _handlingInvalidAcademicSession = true;
     try {
-      final recovered = await _recoverAcademicWithSso();
-      if (!mounted || recovered != false) return;
-      await _handleCampusSsoExpired();
+      final recovered = await _recoverAcademicWithSso(
+        showRecoveryNotice: resumeScheduleDiscovery,
+        resumeScheduleDiscovery: resumeScheduleDiscovery,
+      );
+      if (!mounted) return false;
+      if (recovered != false) return recovered == true;
+      return await _handleCampusSsoExpired(
+        resumeScheduleDiscovery: resumeScheduleDiscovery,
+      );
     } finally {
       _handlingInvalidAcademicSession = false;
     }
@@ -874,7 +891,10 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
 
   /// true: recovered; false: SSO explicitly needs authentication;
   /// null: transport or business result is uncertain, so retain credentials.
-  Future<bool?> _recoverAcademicWithSso() async {
+  Future<bool?> _recoverAcademicWithSso({
+    bool showRecoveryNotice = true,
+    bool resumeScheduleDiscovery = true,
+  }) async {
     Uri? callback;
     try {
       callback = await _unifiedAccountService.authorizeAcademic();
@@ -914,6 +934,8 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
     await _finishAcademicLogin(
       connectWebVpn: false,
       allowInitialSync: false,
+      showRecoveryNotice: showRecoveryNotice,
+      resumeScheduleDiscovery: resumeScheduleDiscovery,
     );
     return true;
   }
@@ -1121,10 +1143,14 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
     }
   }
 
-  Future<bool> _handleCampusSsoExpired({bool interactive = true}) async {
+  Future<bool> _handleCampusSsoExpired({
+    bool interactive = true,
+    bool resumeScheduleDiscovery = true,
+  }) async {
     await _markCampusAccountExpired();
     if (!mounted || !interactive) return false;
-    return _loginCampusAccount();
+    return _loginCampusAccount(
+        resumeScheduleDiscovery: resumeScheduleDiscovery);
   }
 
   Future<bool> _loginCampusCard({bool showErrorSnack = true}) =>
@@ -1138,6 +1164,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
     String? title,
     String? description,
     bool showErrorSnack = true,
+    bool resumeScheduleDiscovery = true,
   }) async {
     final pending = _campusLoginTask;
     if (pending != null) {
@@ -1150,6 +1177,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
     final operation = _openCampusLogin(
       title: title,
       description: description,
+      resumeScheduleDiscovery: resumeScheduleDiscovery,
     );
     _campusLoginTask = operation;
     try {
@@ -1173,6 +1201,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
   Future<bool> _openCampusLogin({
     String? title,
     String? description,
+    bool resumeScheduleDiscovery = true,
   }) async {
     final expiring = _campusAccountExpiryTask;
     if (expiring != null) await expiring;
@@ -1188,6 +1217,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
     await _finishAcademicLogin(
       allowInitialSync: false,
       showRecoveryNotice: false,
+      resumeScheduleDiscovery: resumeScheduleDiscovery,
     );
     return mounted && _hasAcademicSession;
   }

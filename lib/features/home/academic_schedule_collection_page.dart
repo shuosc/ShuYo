@@ -6,6 +6,7 @@ import '../../data/models/academic_schedule_collection.dart';
 import '../../data/repositories/academic_schedule_repository.dart';
 import '../../data/services/academic_schedule_api_client.dart';
 import '../../shared/theme/shuyo_theme.dart';
+import '../../shared/time_format.dart';
 
 const scheduleManagerSelection = 'manage-schedules';
 
@@ -56,40 +57,51 @@ class _TermPickerState extends State<AcademicScheduleTermPicker> {
 
   Widget _yearSection(List<AcademicScheduleRecord> records) {
     final colors = context.shuyoColors;
+    final textTheme = Theme.of(context).textTheme;
     return Column(
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         Padding(
           key: ValueKey('schedule-year-${records.first.yearCode}'),
-          padding: const EdgeInsets.fromLTRB(12, 12, 12, 4),
+          padding: const EdgeInsets.fromLTRB(12, 16, 12, 6),
           child: Text(
             '${records.first.academicYearName} 学年',
-            style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                  color: colors.textTertiary,
-                  fontWeight: FontWeight.w500,
-                ),
+            style: textTheme.bodyLarge?.copyWith(
+              color: colors.textSecondary,
+              fontWeight: FontWeight.w400,
+              height: 1.3,
+            ),
           ),
         ),
         for (final record in records)
           ListTile(
             key: ValueKey('schedule-term-${record.key}'),
-            dense: true,
+            minTileHeight: 52,
             contentPadding: const EdgeInsets.symmetric(horizontal: 12),
-            title: Text('${record.termName}季学期'),
+            title: Text(
+              '${record.termName}季学期',
+              style: textTheme.bodyLarge?.copyWith(
+                color: colors.textPrimary,
+                fontWeight: FontWeight.w400,
+                height: 1.35,
+              ),
+            ),
             trailing: record.key == _primary || widget.viewedKey == record.key
                 ? Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
                       if (record.key == _primary)
-                        Text('常用',
-                            style: Theme.of(context)
-                                .textTheme
-                                .bodySmall
-                                ?.copyWith(color: colors.textSecondary)),
+                        Text(
+                          '常用',
+                          style: textTheme.bodyLarge?.copyWith(
+                            color: colors.textSecondary,
+                            fontWeight: FontWeight.w400,
+                          ),
+                        ),
                       if (widget.viewedKey == record.key) ...[
                         const SizedBox(width: 8),
-                        Icon(Icons.check, size: 18, color: colors.textPrimary),
+                        Icon(Icons.check, size: 20, color: colors.accent),
                       ],
                     ],
                   )
@@ -139,9 +151,17 @@ class _TermPickerState extends State<AcademicScheduleTermPicker> {
                           padding: EdgeInsets.zero,
                           children: [
                             if (_records.isEmpty)
-                              const Padding(
-                                padding: EdgeInsets.all(12),
-                                child: Text('暂无已保存的课表'),
+                              Padding(
+                                padding: const EdgeInsets.all(12),
+                                child: Text(
+                                  '暂无已保存的课表',
+                                  style: Theme.of(context)
+                                      .textTheme
+                                      .bodyLarge
+                                      ?.copyWith(
+                                        fontWeight: FontWeight.w400,
+                                      ),
+                                ),
                               ),
                             for (final entry in years.entries)
                               _yearSection(entry.value),
@@ -160,7 +180,12 @@ class _TermPickerState extends State<AcademicScheduleTermPicker> {
                 const Divider(height: 1),
                 ListTile(
                   leading: const Icon(Icons.folder_outlined),
-                  title: const Text('管理课表'),
+                  title: Text(
+                    '管理课表',
+                    style: Theme.of(context).textTheme.bodyLarge?.copyWith(
+                          fontWeight: FontWeight.w400,
+                        ),
+                  ),
                   onTap: () =>
                       Navigator.of(context).pop(scheduleManagerSelection),
                 ),
@@ -179,21 +204,26 @@ class AcademicScheduleCollectionPage extends StatefulWidget {
     required this.repository,
     required this.onLoginRequired,
     required this.onPrimaryChanged,
+    this.onRecoverSession,
   });
 
   final AcademicScheduleRepository repository;
   final Future<void> Function() onLoginRequired;
   final Future<void> Function() onPrimaryChanged;
+  final Future<bool> Function()? onRecoverSession;
 
   @override
   State<AcademicScheduleCollectionPage> createState() => _CollectionPageState();
 }
 
 class _CollectionPageState extends State<AcademicScheduleCollectionPage> {
+  static const _regularTextStyle = TextStyle(fontWeight: FontWeight.w400);
+
   List<AcademicScheduleRecord> _records = const [];
   String? _primary;
   final _busy = <String>{};
   bool _loading = true;
+  bool _discovering = false;
 
   @override
   void initState() {
@@ -279,19 +309,51 @@ class _CollectionPageState extends State<AcademicScheduleCollectionPage> {
     }
   }
 
+  Future<bool> _recoverSession() async {
+    final recover = widget.onRecoverSession;
+    if (recover != null) return recover();
+    await widget.onLoginRequired();
+    return true;
+  }
+
   Future<void> _discover({bool full = false, bool failedOnly = false}) async {
+    if (_discovering || widget.repository.discoveryState.value.running) return;
     if (full &&
         !await _confirm(
             '完整检查所有学年', '将检查教务提供的全部学年，包含入学前和较远的未来学年。已保存的课表不会被覆盖，检查可能需要较长时间。')) {
       return;
     }
-    await widget.repository.discoverSchedules(
-        force: true, fullScan: full, retryFailuresOnly: failedOnly);
-    if (!mounted) return;
-    if (widget.repository.discoveryState.value.requiresLogin) {
-      await widget.onLoginRequired();
+    if (!mounted ||
+        _discovering ||
+        widget.repository.discoveryState.value.running) {
+      return;
     }
-    await _load();
+    setState(() => _discovering = true);
+    try {
+      var recoveryAttempted = false;
+      if (widget.repository.discoveryState.value.requiresLogin) {
+        recoveryAttempted = true;
+        if (!await _recoverSession() || !mounted) return;
+      }
+      await widget.repository.discoverSchedules(
+          force: true, fullScan: full, retryFailuresOnly: failedOnly);
+      if (!mounted) return;
+      if (widget.repository.discoveryState.value.requiresLogin &&
+          !recoveryAttempted) {
+        if (!await _recoverSession() || !mounted) return;
+        await widget.repository.discoverSchedules(
+            force: true, fullScan: full, retryFailuresOnly: failedOnly);
+      }
+    } on AcademicAuthException {
+      // Authentication is handled by the existing session recovery flow.
+    } on Object catch (error) {
+      _message(error.toString());
+    } finally {
+      if (mounted) {
+        setState(() => _discovering = false);
+        await _load();
+      }
+    }
   }
 
   Future<void> _action(AcademicScheduleRecord record, String action) async {
@@ -329,7 +391,7 @@ class _CollectionPageState extends State<AcademicScheduleCollectionPage> {
         TextSpan(children: [
           TextSpan(
             text: '${record.termName}季学期',
-            style: const TextStyle(fontWeight: FontWeight.w500),
+            style: _regularTextStyle,
           ),
           TextSpan(
             text: '  ${record.courseCount} 门课',
@@ -351,7 +413,9 @@ class _CollectionPageState extends State<AcademicScheduleCollectionPage> {
                     style: TextStyle(color: colors.textSecondary),
                   ),
                 if (record.syncedAt != null)
-                  TextSpan(text: '同步于 ${_dateText(record.syncedAt!)}'),
+                  TextSpan(
+                    text: '同步于 ${TimeFormat.relativeDate(record.syncedAt!)}',
+                  ),
               ]),
               key: ValueKey('managed-schedule-meta-${record.key}'),
               style: textTheme.bodySmall?.copyWith(color: colors.textMuted),
@@ -380,7 +444,7 @@ class _CollectionPageState extends State<AcademicScheduleCollectionPage> {
                 style: textTheme.bodyLarge?.copyWith(
                   color: Colors.white,
                   fontSize: 11,
-                  fontWeight: FontWeight.w500,
+                  fontWeight: FontWeight.w400,
                 ),
               ),
             ),
@@ -395,10 +459,16 @@ class _CollectionPageState extends State<AcademicScheduleCollectionPage> {
               tooltip: '管理 ${record.displayName}',
               onSelected: (action) => unawaited(_action(record, action)),
               itemBuilder: (_) => [
-                const PopupMenuItem(value: 'view', child: Text('查看课表')),
-                const PopupMenuItem(value: 'update', child: Text('更新这一学期')),
+                const PopupMenuItem(
+                    value: 'view',
+                    child: Text('查看课表', style: _regularTextStyle)),
+                const PopupMenuItem(
+                    value: 'update',
+                    child: Text('更新这一学期', style: _regularTextStyle)),
                 if (record.key != _primary)
-                  const PopupMenuItem(value: 'primary', child: Text('设为常用')),
+                  const PopupMenuItem(
+                      value: 'primary',
+                      child: Text('设为常用', style: _regularTextStyle)),
               ],
             ),
         ],
@@ -419,7 +489,10 @@ class _CollectionPageState extends State<AcademicScheduleCollectionPage> {
         rows.add(Padding(
           padding: const EdgeInsets.fromLTRB(20, 20, 20, 4),
           child: Text('${record.academicYearName} 学年',
-              style: Theme.of(context).textTheme.titleSmall),
+              style: Theme.of(context)
+                  .textTheme
+                  .titleSmall
+                  ?.merge(_regularTextStyle)),
         ));
         previousYear = record.yearCode;
       }
@@ -427,13 +500,15 @@ class _CollectionPageState extends State<AcademicScheduleCollectionPage> {
     }
     return Scaffold(
       appBar: AppBar(
-        title: const Text('管理课表'),
+        title: const Text('管理课表', style: _regularTextStyle),
         actions: [
           PopupMenuButton<String>(
             tooltip: '更多检查选项',
             onSelected: (_) => unawaited(_discover(full: true)),
             itemBuilder: (_) => [
-              const PopupMenuItem(value: 'full', child: Text('完整检查所有学年')),
+              const PopupMenuItem(
+                  value: 'full',
+                  child: Text('完整检查所有学年', style: _regularTextStyle)),
             ],
           ),
         ],
@@ -444,44 +519,53 @@ class _CollectionPageState extends State<AcademicScheduleCollectionPage> {
               Padding(
                 padding: const EdgeInsets.fromLTRB(20, 16, 20, 4),
                 child: Text('已保存 ${saved.length} 份课表',
-                    style: Theme.of(context).textTheme.titleMedium),
+                    style: Theme.of(context)
+                        .textTheme
+                        .titleMedium
+                        ?.merge(_regularTextStyle)),
               ),
               ValueListenableBuilder<ScheduleDiscoveryState>(
                 valueListenable: widget.repository.discoveryState,
-                builder: (context, state, _) => Padding(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      if (state.running) const LinearProgressIndicator(),
-                      if (state.running || state.message != null)
-                        Padding(
-                            padding: const EdgeInsets.only(top: 8),
-                            child: Text(state.description)),
-                      const SizedBox(height: 8),
-                      Wrap(spacing: 8, children: [
-                        FilledButton.tonalIcon(
-                          onPressed: state.running ? null : () => _discover(),
-                          icon: const Icon(Icons.search),
-                          label: const Text('查找其他课表'),
-                        ),
-                        if (failed.isNotEmpty)
-                          TextButton(
-                            onPressed: state.running
-                                ? null
-                                : () => _discover(failedOnly: true),
-                            child: Text('重试失败项（${failed.length}）'),
+                builder: (context, state, _) {
+                  final discovering = _discovering || state.running;
+                  return Padding(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        if (discovering) const LinearProgressIndicator(),
+                        if (!state.requiresLogin &&
+                            (state.running || state.message != null))
+                          Padding(
+                              padding: const EdgeInsets.only(top: 8),
+                              child: Text(state.description)),
+                        const SizedBox(height: 8),
+                        Wrap(spacing: 8, children: [
+                          FilledButton.tonalIcon(
+                            onPressed: discovering ? null : () => _discover(),
+                            icon: const Icon(Icons.search),
+                            label:
+                                const Text('查找其他课表', style: _regularTextStyle),
                           ),
-                        if (state.running)
-                          TextButton(
-                            onPressed: widget.repository.pauseDiscovery,
-                            child: const Text('暂停'),
-                          ),
-                      ]),
-                    ],
-                  ),
-                ),
+                          if (failed.isNotEmpty)
+                            TextButton(
+                              onPressed: discovering
+                                  ? null
+                                  : () => _discover(failedOnly: true),
+                              child: Text('重试失败项（${failed.length}）',
+                                  style: _regularTextStyle),
+                            ),
+                          if (state.running)
+                            TextButton(
+                              onPressed: widget.repository.pauseDiscovery,
+                              child: const Text('暂停', style: _regularTextStyle),
+                            ),
+                        ]),
+                      ],
+                    ),
+                  );
+                },
               ),
               const Divider(),
               if (saved.isEmpty)
@@ -509,9 +593,3 @@ class _CollectionPageState extends State<AcademicScheduleCollectionPage> {
     );
   }
 }
-
-String _dateText(DateTime date) =>
-    '${date.year}-${date.month.toString().padLeft(2, '0')}-'
-    '${date.day.toString().padLeft(2, '0')} '
-    '${date.hour.toString().padLeft(2, '0')}:'
-    '${date.minute.toString().padLeft(2, '0')}';
