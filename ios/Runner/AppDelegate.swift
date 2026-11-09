@@ -15,6 +15,7 @@ import UserNotifications
   private let courseLiveActivityController = CourseLiveActivityController()
 
   private static let earlyClassAlarmIdsKey = "early_class_alarm_ids"
+  private static let earlyClassAlarmTitlesKey = "early_class_alarm_titles"
 
   override func application(
     _ application: UIApplication,
@@ -86,6 +87,7 @@ import UserNotifications
         case "sync":
           guard
             let arguments = call.arguments as? [String: Any],
+            let enabled = arguments["enabled"] as? Bool,
             let alarms = arguments["alarms"] as? [[String: Any]]
           else {
             result(
@@ -100,7 +102,7 @@ import UserNotifications
           let previousTask = earlyClassAlarmSyncTask
           earlyClassAlarmSyncTask = Task { @MainActor [weak self] in
             await previousTask?.value
-            await self?.syncEarlyClassAlarms(alarms, result: result)
+            await self?.syncEarlyClassAlarms(alarms, enabled: enabled, result: result)
           }
         default:
           result(FlutterMethodNotImplemented)
@@ -121,33 +123,13 @@ import UserNotifications
   #if canImport(AlarmKit) && !targetEnvironment(macCatalyst)
     @available(iOS 26.0, *)
     @MainActor
-    private func syncEarlyClassAlarms(
+    func syncEarlyClassAlarms(
       _ rawAlarms: [[String: Any]],
+      enabled: Bool,
       result: @escaping FlutterResult
     ) async {
       let manager = AlarmManager.shared
       let defaults = UserDefaults.standard
-      do {
-        let currentIDs = Set(try manager.alarms.map(\.id))
-        for rawID in defaults.stringArray(forKey: Self.earlyClassAlarmIdsKey) ?? [] {
-          guard
-            let id = UUID(uuidString: rawID),
-            currentIDs.contains(id)
-          else { continue }
-          try manager.cancel(id: id)
-        }
-      } catch {
-        result(
-          FlutterError(
-            code: "alarm_cancel_failed",
-            message: error.localizedDescription,
-            details: nil
-          )
-        )
-        return
-      }
-      defaults.removeObject(forKey: Self.earlyClassAlarmIdsKey)
-
       guard manager.authorizationState == .authorized else {
         result(-1)
         return
@@ -163,9 +145,54 @@ import UserNotifications
         let date = Date(timeIntervalSince1970: milliseconds.doubleValue / 1000)
         return date > Date() ? (date, title) : nil
       }
-      var scheduledIDs: [String] = []
+      let ownedIDs = Set(defaults.stringArray(forKey: Self.earlyClassAlarmIdsKey) ?? [])
+      var titles = defaults.dictionary(forKey: Self.earlyClassAlarmTitlesKey) as? [String: String] ?? [:]
+      var scheduledIDs = ownedIDs
+      var pending = enabled ? alarms : []
 
-      for (date, title) in alarms {
+      func persist() {
+        defaults.set(scheduledIDs.sorted(), forKey: Self.earlyClassAlarmIdsKey)
+        defaults.set(titles.filter { scheduledIDs.contains($0.key) }, forKey: Self.earlyClassAlarmTitlesKey)
+      }
+
+      do {
+        let currentAlarms = try manager.alarms.filter { ownedIDs.contains($0.id.uuidString) }
+        scheduledIDs = Set(currentAlarms.map { $0.id.uuidString })
+        for alarm in currentAlarms {
+          let rawID = alarm.id.uuidString
+          if enabled {
+            if case let .fixed(date)? = alarm.schedule {
+              if let index = pending.firstIndex(where: {
+                $0.0 == date && (titles[rawID] == nil || titles[rawID] == $0.1)
+              }) {
+                // The title is absent only when adopting alarms from an older app version.
+                titles[rawID] = pending.remove(at: index).1
+                continue
+              }
+              if date <= Date() { continue }
+            }
+            // Resuming the app must not stop an alarm that is already due or ringing.
+            if alarm.state != .scheduled { continue }
+          }
+          try manager.cancel(id: alarm.id)
+          scheduledIDs.remove(rawID)
+          titles.removeValue(forKey: rawID)
+          persist()
+        }
+      } catch {
+        persist()
+        result(
+          FlutterError(
+            code: "alarm_sync_failed",
+            message: error.localizedDescription,
+            details: nil
+          )
+        )
+        return
+      }
+
+      for (date, title) in pending {
+        guard date > Date() else { continue }
         let id = UUID()
         let localizedTitle = LocalizedStringResource(stringLiteral: title)
         let alert: AlarmPresentation.Alert
@@ -192,12 +219,13 @@ import UserNotifications
 
         do {
           try await manager.schedule(id: id, configuration: configuration)
-          scheduledIDs.append(id.uuidString)
-          defaults.set(scheduledIDs, forKey: Self.earlyClassAlarmIdsKey)
+          scheduledIDs.insert(id.uuidString)
+          titles[id.uuidString] = title
+          persist()
         } catch AlarmManager.AlarmError.maximumLimitReached {
           break
         } catch {
-          defaults.set(scheduledIDs, forKey: Self.earlyClassAlarmIdsKey)
+          persist()
           result(
             FlutterError(
               code: "alarm_sync_failed",
@@ -209,7 +237,7 @@ import UserNotifications
         }
       }
 
-      defaults.set(scheduledIDs, forKey: Self.earlyClassAlarmIdsKey)
+      persist()
       result(scheduledIDs.count)
     }
 
