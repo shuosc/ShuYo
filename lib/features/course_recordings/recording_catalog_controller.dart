@@ -6,6 +6,7 @@ import '../../data/models/course_recording.dart';
 import '../../data/repositories/vod_repository.dart';
 import '../../data/services/vod_api_client.dart';
 import '../../data/services/vod_auth_exception.dart';
+import 'recording_lesson_selection.dart';
 import 'recording_timetable_data.dart';
 
 class RecordingCourseCount {
@@ -49,13 +50,17 @@ class RecordingCatalogViewData {
   final Set<int> pendingLessonCounts;
 
   bool hasCompleteAvailability(VodCourse course) =>
-      lessonCounts.containsKey(course.teachingClassId) &&
-      requestedLessonCounts.contains(course.teachingClassId) &&
-      !pendingLessonCounts.contains(course.teachingClassId);
+      recordingCourseHasCompleteAvailability(
+        lessonsLoaded: lessonCounts.containsKey(course.teachingClassId),
+        requested: requestedLessonCounts.contains(course.teachingClassId),
+        pending: pendingLessonCounts.contains(course.teachingClassId),
+      );
 
-  bool hasPlayableCourse(VodCourse course) =>
-      lessonCounts[course.teachingClassId]?.lessonIds.isNotEmpty == true ||
-      course.liveLesson?.isLiveAvailable == true && course.liveLesson!.id > 0;
+  bool hasPlayableCourse(VodCourse course) => recordingCourseHasPlayable(
+        hasPlayableLessons:
+            lessonCounts[course.teachingClassId]?.lessonIds.isNotEmpty == true,
+        liveLesson: course.liveLesson,
+      );
 }
 
 /// Owns catalog requests and derived data without depending on a widget/frame.
@@ -94,6 +99,9 @@ class RecordingCatalogController extends ChangeNotifier {
   Object? error;
   bool loading = false;
   bool pullRefreshing = false;
+  // Pull-to-refresh replaces content without a top progress bar. A normal load
+  // (first entry or a term switch) keeps it until pending counts settle.
+  bool _progressSuppressed = false;
   Completer<void>? _completion;
   RecordingTimetableData? _timetable;
   Future<RecordingTimetableData>? _timetableFuture;
@@ -102,7 +110,7 @@ class RecordingCatalogController extends ChangeNotifier {
   int _dataRevision = 0;
 
   bool get isLoading => loading || pendingLessonCounts.isNotEmpty;
-  bool get showLoadingProgress => isLoading && !pullRefreshing;
+  bool get showLoadingProgress => isLoading && !_progressSuppressed;
   VodTerm? get selectedTerm =>
       terms.where((term) => term.id == selectedTermId).firstOrNull;
   List<VodCourse> get visibleCourses {
@@ -118,9 +126,16 @@ class RecordingCatalogController extends ChangeNotifier {
   void _updateVisibleCourses() {
     if (!_visibleDirty) return;
     _visibleDirty = false;
-    _visibleCourses = List.unmodifiable(courses.where((course) =>
+    // Live courses stay pinned above recordings. The repository already
+    // partitions its snapshots; repeating it here keeps ordering stable while
+    // lesson counts arrive out of order.
+    bool counted(VodCourse course) =>
         lessonCounts.containsKey(course.teachingClassId) ||
-        failedLessonCounts.contains(course.teachingClassId)));
+        failedLessonCounts.contains(course.teachingClassId);
+    _visibleCourses = List.unmodifiable([
+      ...courses.where((course) => course.isLive && counted(course)),
+      ...courses.where((course) => !course.isLive && counted(course)),
+    ]);
     _visibleIndexes = Map.unmodifiable({
       for (var index = 0; index < _visibleCourses.length; index++)
         _visibleCourses[index].teachingClassId: index,
@@ -235,7 +250,9 @@ class RecordingCatalogController extends ChangeNotifier {
 
   Future<void> load(
       {bool force = false, int? termId, bool fromPull = false}) async {
-    if (_disposed || fromPull && (isLoading || pullRefreshing)) return;
+    // Pull-to-refresh only waits for the catalog request. Pending lesson counts
+    // keep running in the background so rows can recover one by one.
+    if (_disposed || fromPull && (loading || pullRefreshing)) return;
     _complete(force: true);
     final completion = Completer<void>();
     _completion = completion;
@@ -243,6 +260,7 @@ class RecordingCatalogController extends ChangeNotifier {
     _cancelDrain();
     loading = true;
     pullRefreshing = fromPull;
+    _progressSuppressed = fromPull;
     error = null;
     if (courses.isEmpty || termId != null && termId != selectedTermId) {
       courses = const [];
@@ -318,7 +336,9 @@ class RecordingCatalogController extends ChangeNotifier {
   }
 
   void _complete({bool force = false}) {
-    if (!force && isLoading) return;
+    // Lesson counts are a background refinement; the pull gesture ends with
+    // the catalog request so the list unlocks while counts settle.
+    if (!force && loading) return;
     final completion = _completion;
     _completion = null;
     pullRefreshing = false;
@@ -414,13 +434,17 @@ class RecordingCatalogController extends ChangeNotifier {
   }
 
   bool hasCompleteAvailability(VodCourse course) =>
-      lessonCounts.containsKey(course.teachingClassId) &&
-      requestedLessonCounts.contains(course.teachingClassId) &&
-      !pendingLessonCounts.contains(course.teachingClassId);
+      recordingCourseHasCompleteAvailability(
+        lessonsLoaded: lessonCounts.containsKey(course.teachingClassId),
+        requested: requestedLessonCounts.contains(course.teachingClassId),
+        pending: pendingLessonCounts.contains(course.teachingClassId),
+      );
 
-  bool hasPlayableCourse(VodCourse course) =>
-      lessonCounts[course.teachingClassId]?.lessonIds.isNotEmpty == true ||
-      course.liveLesson?.isLiveAvailable == true && course.liveLesson!.id > 0;
+  bool hasPlayableCourse(VodCourse course) => recordingCourseHasPlayable(
+        hasPlayableLessons:
+            lessonCounts[course.teachingClassId]?.lessonIds.isNotEmpty == true,
+        liveLesson: course.liveLesson,
+      );
 
   void _cancelDrain() {
     _drainTimer?.cancel();

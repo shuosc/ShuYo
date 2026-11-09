@@ -88,8 +88,11 @@ class _CourseRecordingsPageState extends State<CourseRecordingsPage> {
   bool get _courseScrolling => _courseScrollController.positions
       .any((position) => position.isScrollingNotifier.value);
 
-  bool get _showLoadingProgress =>
-      _checkingSession || _recoveringWebVpn || _view.showLoadingProgress;
+  // Pulling refreshes the catalog only; pending lesson counts keep settling in
+  // the background and must not lock the gesture. Read the controller instead
+  // of the rendered snapshot: the list presentation may still be frozen.
+  bool get _refreshBlocked =>
+      _checkingSession || _recoveringWebVpn || _catalog.loading;
   bool get _webVpnSessionError =>
       _error is VodWebVpnAuthRequiredException ||
       _error is VodWebVpnSessionExpiredException;
@@ -284,16 +287,7 @@ class _CourseRecordingsPageState extends State<CourseRecordingsPage> {
     final live = course.liveLesson;
     final initial = lesson ??
         (live != null && live.isLiveAvailable && live.canPlay ? live : null) ??
-        lessons.where((item) => item.isLiveAvailable).firstOrNull ??
-        lessons
-            .where((item) =>
-                !item.isLive &&
-                item.isPlayable &&
-                recordingLessonCanSelect(item))
-            .firstOrNull ??
-        lessons
-            .where((item) => !item.isLive && recordingLessonCanSelect(item))
-            .firstOrNull;
+        preferredRecordingLesson(lessons);
     _openingCourse = true;
     try {
       await Navigator.of(context).push<void>(shuyoRoute(
@@ -498,7 +492,6 @@ class _CourseRecordingsPageState extends State<CourseRecordingsPage> {
     final visibleIndexes = _view.visibleIndexes;
     final view = _view;
     final loadingCourses = _loading || _pendingLessonCounts.isNotEmpty;
-    final unknownCourseCount = _courses.isEmpty && (_loading || _error != null);
     return Column(children: [
       if (_error != null && _courses.isNotEmpty)
         MaterialBanner(
@@ -521,52 +514,35 @@ class _CourseRecordingsPageState extends State<CourseRecordingsPage> {
           child: Row(children: [
             Expanded(
               flex: 2,
-              child: Row(children: [
-                Expanded(
-                  child: Text.rich(
-                    TextSpan(children: [
-                      if (selectedTerm.academicYear.isEmpty)
-                        TextSpan(text: selectedTerm.name)
-                      else ...[
-                        TextSpan(text: '${selectedTerm.academicYear} 学年 '),
-                        TextSpan(
-                          text: selectedTerm.seasonLabel,
-                          style: TextStyle(
-                              color: Theme.of(context).colorScheme.primary),
-                        ),
-                      ],
-                    ]),
-                    maxLines: 2,
+              // Year and season keep separate rows so a narrow header never
+              // truncates the season behind the leading year.
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    selectedTerm.academicYear.isEmpty
+                        ? selectedTerm.name
+                        : '${selectedTerm.academicYear} 学年',
+                    maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: ShuYoTextStyles.bodyCompact(
                             color: context.shuyoColors.textPrimary)
                         .copyWith(fontWeight: FontWeight.w600),
                   ),
-                ),
-                const SizedBox(width: 12),
-                Flexible(
-                  child: Text.rich(
-                    key: const ValueKey('vod-course-count'),
-                    TextSpan(children: [
-                      TextSpan(
-                          text: unknownCourseCount ? '—' : '${_courses.length}',
-                          style: unknownCourseCount
-                              ? null
-                              : TextStyle(
-                                  color:
-                                      Theme.of(context).colorScheme.primary)),
-                      const TextSpan(text: '个课程'),
-                    ]),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: ShuYoTextStyles.meta(
-                            color: context.shuyoColors.textPrimary)
-                        .copyWith(fontWeight: FontWeight.w600),
-                  ),
-                ),
-              ]),
+                  if (selectedTerm.academicYear.isNotEmpty)
+                    Text(
+                      selectedTerm.seasonLabel,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: ShuYoTextStyles.bodyCompact(
+                              color: Theme.of(context).colorScheme.primary)
+                          .copyWith(fontWeight: FontWeight.w600),
+                    ),
+                ],
+              ),
             ),
-            const SizedBox(width: 4),
+            const SizedBox(width: 8),
             Expanded(
               child: Align(
                 alignment: Alignment.centerRight,
@@ -605,7 +581,7 @@ class _CourseRecordingsPageState extends State<CourseRecordingsPage> {
                     enabled: !_timetableMode,
                     child: RefreshIndicator(
                       notificationPredicate: (notification) =>
-                          !_showLoadingProgress &&
+                          !_refreshBlocked &&
                           defaultScrollNotificationPredicate(notification),
                       onRefresh: () => _load(force: true, fromPull: true),
                       child: visibleCourses.isEmpty
@@ -688,7 +664,7 @@ class _CourseRecordingsPageState extends State<CourseRecordingsPage> {
         loading: snapshot.connectionState != ConnectionState.done ||
             view.loading ||
             view.pendingLessonCounts.isNotEmpty,
-        refreshEnabled: !view.showLoadingProgress,
+        refreshEnabled: !_refreshBlocked,
         failedCourseCount: view.courses
             .where((course) =>
                 view.failedLessonCounts.contains(course.teachingClassId))
@@ -705,43 +681,53 @@ class _CourseRecordingsPageState extends State<CourseRecordingsPage> {
   }
 
   Widget _courseTile(VodCourse course, RecordingCatalogViewData view) {
+    final complete = view.hasCompleteAvailability(course);
+    final playable = view.hasPlayableCourse(course);
+    final enabled = complete && playable;
     final signature = (
       course,
       view.lessonCounts[course.teachingClassId],
-      view.hasCompleteAvailability(course),
+      complete,
       view.failedLessonCounts.contains(course.teachingClassId),
+      enabled,
     );
     final cached = _courseRows[course.teachingClassId];
     if (cached?.signature == signature) return cached!.row;
-    final unavailable =
-        view.hasCompleteAvailability(course) && !view.hasPlayableCourse(course);
+    // A refresh greys every row until its own lesson count returns, then the
+    // row recovers one at a time. Only a confirmed empty course swaps the
+    // chevron for the unavailable marker.
+    final unavailable = complete && !playable;
     final lessons =
         view.courseLessons[course.teachingClassId] ?? const <VodLesson>[];
     final row = ListTile(
       key: ValueKey('vod-course:${course.teachingClassId}'),
       contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      enabled: enabled,
       leading: Tooltip(
         message: course.isLive ? '正在直播' : '录播回放',
-        child:
-            RecordingStatusIcon(isLive: course.isLive, enabled: !unavailable),
+        child: RecordingStatusIcon(
+          isLive: course.isLive,
+          enabled: course.isLive || enabled,
+          dimmed: !enabled,
+        ),
       ),
       title: RecordingCourseTitle(
           course: course,
           maxNameLines: 2,
           missingTeacherLabel: '教师信息暂未提供',
-          enabled: !unavailable),
+          enabled: enabled),
       trailing: unavailable
           ? Icon(Icons.block, color: Theme.of(context).disabledColor)
-          : _lessonCount(course, view),
-      onTap: unavailable || !view.hasCompleteAvailability(course)
-          ? null
-          : () => _openCourse(course, preparedLessons: lessons),
+          : _lessonCount(course, view, enabled),
+      onTap:
+          enabled ? () => _openCourse(course, preparedLessons: lessons) : null,
     );
     _courseRows[course.teachingClassId] = (signature: signature, row: row);
     return row;
   }
 
-  Widget _lessonCount(VodCourse course, RecordingCatalogViewData view) {
+  Widget _lessonCount(
+      VodCourse course, RecordingCatalogViewData view, bool enabled) {
     final count = view.lessonCounts[course.teachingClassId];
     final playable = count?.playable;
     final failed = view.failedLessonCounts.contains(course.teachingClassId);
@@ -755,6 +741,9 @@ class _CourseRecordingsPageState extends State<CourseRecordingsPage> {
                     !count.lessonIds.contains(live.id)
                 ? 1
                 : 0);
+    final mutedColor = enabled
+        ? context.shuyoColors.textSecondary
+        : Theme.of(context).disabledColor;
     return Row(mainAxisSize: MainAxisSize.min, children: [
       Tooltip(
         message: count != null
@@ -767,18 +756,19 @@ class _CourseRecordingsPageState extends State<CourseRecordingsPage> {
           TextSpan(children: [
             TextSpan(
               text: playable == null ? '—' : '$playable',
-              style: playable == null
+              style: playable == null || !enabled
                   ? null
                   : TextStyle(color: Theme.of(context).colorScheme.primary),
             ),
             TextSpan(text: '/${total ?? '—'}节'),
           ]),
-          style: ShuYoTextStyles.meta(color: context.shuyoColors.textSecondary)
+          style: ShuYoTextStyles.meta(color: mutedColor)
               .copyWith(fontWeight: FontWeight.w600),
         ),
       ),
       const SizedBox(width: 8),
-      if (view.hasCompleteAvailability(course)) const Icon(Icons.chevron_right),
+      Icon(Icons.chevron_right,
+          color: enabled ? null : Theme.of(context).disabledColor),
     ]);
   }
 

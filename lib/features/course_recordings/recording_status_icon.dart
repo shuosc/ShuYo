@@ -8,12 +8,17 @@ class RecordingStatusIcon extends StatefulWidget {
       required this.isLive,
       this.isGenerating = false,
       this.enabled = true,
+      this.dimmed = false,
       this.disabledColor,
       this.backgroundColor});
 
   final bool isLive;
   final bool isGenerating;
   final bool enabled;
+
+  /// Greys the icon out without changing what it reports. Used while a refresh
+  /// is still confirming a course's lessons.
+  final bool dimmed;
   final Color? disabledColor;
   final Color? backgroundColor;
 
@@ -41,7 +46,8 @@ class _RecordingStatusIconState extends State<RecordingStatusIcon>
   }
 
   void _updateAnimation() {
-    if ((widget.isGenerating || widget.isLive && widget.enabled) &&
+    if (!widget.dimmed &&
+        (widget.isGenerating || widget.isLive && widget.enabled) &&
         !MediaQuery.disableAnimationsOf(context)) {
       if (!_animation.isAnimating) _animation.repeat();
     } else {
@@ -57,7 +63,7 @@ class _RecordingStatusIconState extends State<RecordingStatusIcon>
 
   @override
   Widget build(BuildContext context) {
-    final color = widget.enabled
+    final color = widget.enabled && !widget.dimmed
         ? Theme.of(context).colorScheme.primary
         : widget.disabledColor ?? Theme.of(context).disabledColor;
     if (!widget.isLive) {

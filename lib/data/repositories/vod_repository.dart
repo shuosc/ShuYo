@@ -119,11 +119,17 @@ class VodRepository {
   }
 
   Future<List<VodTerm>> loadTerms({bool forceRefresh = false}) {
+    final generation = _generation;
+    if (forceRefresh && _pending.containsKey('terms')) {
+      return _waitForPending('terms').then((_) {
+        _checkGeneration(generation);
+        return loadTerms(forceRefresh: true);
+      });
+    }
     final cached = _terms;
     if (!forceRefresh && cached != null && _isFresh(cached)) {
       return Future.value(cached.value);
     }
-    final generation = _generation;
     return _run('terms', () async {
       final result = await _withLocalFallback<List<VodTerm>>(
         'terms',
@@ -187,28 +193,61 @@ class VodRepository {
     bool forceRefresh = false,
     void Function(List<VodCourse>)? onProgress,
   }) {
+    final generation = _generation;
+    final pendingKey = 'catalog:$termId';
+    if (forceRefresh && _pending.containsKey(pendingKey)) {
+      return _waitForPending(pendingKey).then((_) {
+        _checkGeneration(generation);
+        return loadCatalog(
+            termId: termId, forceRefresh: true, onProgress: onProgress);
+      });
+    }
     final cached = _catalog[termId];
     if (!forceRefresh &&
         cached != null &&
-        !_pending.containsKey('catalog:$termId') &&
+        !_pending.containsKey(pendingKey) &&
         DateTime.now().difference(cached.createdAt) <
             const Duration(seconds: 30)) {
       _catalogPreview.remove(termId);
       onProgress?.call(cached.value);
       return Future.value(cached.value);
     }
-    final generation = _generation;
-    return _runCourses('catalog:$termId', (publish) async {
+    return _runCourses(pendingKey, (publish) async {
       List<VodCourse> recordings = const [];
       List<VodLesson> live = const [];
+      // Keep the last known live lessons on screen while the fresh live list is
+      // still loading, so a refresh never makes a broadcasting course vanish
+      // or lose its pinned position. A successful live response replaces them.
+      final previousCourses = {
+        for (final course in cached?.value ?? const <VodCourse>[])
+          course.teachingClassId: course,
+      };
+      final retainedLive = <int, VodLesson>{
+        for (final course in previousCourses.values)
+          if (course.liveLesson case final lesson?
+              when lesson.id > 0 &&
+                  lesson.teachingClassId == course.teachingClassId)
+            lesson.id: lesson,
+      };
+      var liveAuthoritative = false;
       List<VodCourse> merge() {
         _checkGeneration(generation);
         final courses = {
           for (final course in recordings) course.teachingClassId: course
         };
-        for (final lesson in live) {
-          final course =
-              courses[lesson.teachingClassId] ?? lesson.catalogCourse;
+        final liveIds = {for (final lesson in live) lesson.id};
+        bool isRetained(VodLesson lesson) =>
+            !liveIds.contains(lesson.id) && retainedLive.containsKey(lesson.id);
+        for (final lesson in [
+          ...live,
+          for (final entry in retainedLive.entries)
+            if (!liveIds.contains(entry.key)) entry.value,
+        ]) {
+          final course = courses[lesson.teachingClassId] ??
+              lesson.catalogCourse ??
+              (isRetained(lesson)
+                  ? previousCourses[lesson.teachingClassId]
+                  : null);
           if (course == null ||
               course.termId != termId ||
               course.teachingClassId != lesson.teachingClassId) {
@@ -249,13 +288,17 @@ class VodRepository {
         ).then(recordingsReady),
         _client
             .fetchLiveLessons(termId: termId, onProgress: liveReady)
-            .catchError((Object error) async {
+            .then((lessons) {
+          liveAuthoritative = true;
+          return lessons;
+        }).catchError((Object error) async {
           if (!_canUseLocalFallback(error) || !await hasCachedRecordings()) {
             throw error;
           }
           return <VodLesson>[];
         }).then(liveReady),
       ]);
+      if (liveAuthoritative) retainedLive.clear();
       final result = merge();
       _catalog[termId] = _Cached(result);
       _catalogPreview.remove(termId);

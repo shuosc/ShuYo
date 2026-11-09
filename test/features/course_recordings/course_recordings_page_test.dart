@@ -677,7 +677,9 @@ void main() {
         tester.widget<RecordingPlayerPage>(find.byType(RecordingPlayerPage));
     expect(player.initialLesson?.id, 1);
     expect(player.skipInitialCatalogLoad, isTrue);
-    expect(repository.lessonRequests, before);
+    // The caller's list paints first, then one background request reconciles it
+    // with the server because the page has no pull gesture anymore.
+    expect(repository.lessonRequests, before + 1);
   });
 
   testWidgets('recording platform information is available from the title',
@@ -809,12 +811,10 @@ void main() {
     await tester.pumpAndSettle();
     final toggle = find.byKey(const ValueKey('vod-view-toggle'));
     final summary = find.byKey(const ValueKey('vod-course-summary'));
-    final courseCount = find.byKey(const ValueKey('vod-course-count'));
+    expect(find.byKey(const ValueKey('vod-course-count')), findsNothing);
     expect(find.descendant(of: find.byType(AppBar), matching: toggle),
         findsNothing);
     expect(find.descendant(of: summary, matching: toggle), findsOneWidget);
-    expect(tester.getTopRight(courseCount).dx,
-        lessThanOrEqualTo(tester.getTopLeft(toggle).dx));
     expect(tester.getTopRight(toggle).dx,
         lessThanOrEqualTo(tester.getTopRight(summary).dx));
     expect(find.byType(RecordingTimetableView), findsNothing);
@@ -884,7 +884,7 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('timetable preserves pull and automatic loading feedback rules',
+  testWidgets('timetable pulls refresh independently of pending counts',
       (tester) async {
     final initialLessons = Completer<List<VodLesson>>();
     final catalog = Completer<List<VodCourse>>();
@@ -902,34 +902,24 @@ void main() {
     expect(progress, findsOneWidget);
     await tester.drag(
         find.byKey(const ValueKey('timetable-pageview')), const Offset(0, 400));
-    await tester.pump(const Duration(milliseconds: 400));
-    await tester.pump(const Duration(milliseconds: 400));
-    expect(find.byType(RefreshProgressIndicator), findsNothing);
-    expect(repository.forcedCourseRequests, [false]);
-    initialLessons.complete([morningLesson]);
-    await tester.pumpAndSettle();
-    await _selectTimetableDate(tester, 7, '2026-10-28');
-    expect(progress, findsNothing);
-    await tester.drag(
-        find.byKey(const PageStorageKey('timetable-list-2026-10-28')),
-        const Offset(0, 400));
     for (var frame = 0;
         frame < 20 && !repository.forcedCourseRequests.contains(true);
         frame++) {
       await tester.pump(const Duration(milliseconds: 100));
     }
-    await tester.pump();
     expect(repository.forcedCourseRequests, [false, true]);
-    expect(progress, findsNothing);
     expect(find.byType(RefreshProgressIndicator), findsOneWidget);
+
+    // The first revision settles late and must not replace the refresh.
+    initialLessons.complete([morningLesson]);
     catalog.complete([_programming]);
     await tester.pump();
     await tester.pump();
-    expect(find.byType(RefreshProgressIndicator), findsOneWidget);
     refreshedLessons.complete([morningLesson, afternoonLesson]);
     await tester.pumpAndSettle();
     expect(find.byType(RefreshProgressIndicator), findsNothing);
     expect(progress, findsNothing);
+    await _selectTimetableDate(tester, 7, '2026-10-28');
     expect(
         find.byKey(const ValueKey('timetable-entry-101-202')), findsOneWidget);
     expect(tester.takeException(), isNull);
@@ -1053,12 +1043,6 @@ void main() {
     expect(course, findsOneWidget);
     expect(tester.widget<ListTile>(course).enabled, isTrue);
     expect(find.byKey(const ValueKey('vod-loading-progress')), findsOneWidget);
-    expect(
-        tester
-            .widget<Text>(find.byKey(const ValueKey('vod-course-count')))
-            .textSpan!
-            .toPlainText(),
-        '1个课程');
     final requestsBeforeOpening = repository.lessonRequests;
     await tester.tap(course);
     await tester.pump();
@@ -1137,11 +1121,14 @@ void main() {
     expect(find.byKey(const ValueKey('vod-loading-progress')), findsNothing);
     repository.progressCallbacks[7]!(const []);
     await tester.pump();
+    // A running refresh greys the row until its own count settles; the catalog
+    // itself must stay on screen.
+    expect(find.byKey(const ValueKey('vod-course:101')), findsOneWidget);
     expect(
         tester
             .widget<ListTile>(find.byKey(const ValueKey('vod-course:101')))
             .enabled,
-        isTrue);
+        isFalse);
     refresh.completeError(const VodNetworkException());
     await refreshing;
     await tester.pumpAndSettle();
@@ -1362,10 +1349,13 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.byTooltip('选择学期'));
     await tester.pumpAndSettle();
-    expect(find.text('2026-2027 学年'), findsOneWidget);
-    expect(find.text('2025-2026 学年'), findsOneWidget);
-    expect(tester.getTopLeft(find.text('2026-2027 学年')).dy,
-        lessThan(tester.getTopLeft(find.text('2025-2026 学年')).dy));
+    final menu = find.byKey(const ValueKey('vod-term-menu'));
+    Finder yearInMenu(String year) =>
+        find.descendant(of: menu, matching: find.text('$year 学年'));
+    expect(yearInMenu('2026-2027'), findsOneWidget);
+    expect(yearInMenu('2025-2026'), findsOneWidget);
+    expect(tester.getTopLeft(yearInMenu('2026-2027')).dy,
+        lessThan(tester.getTopLeft(yearInMenu('2025-2026')).dy));
     final autumn = find.byKey(const ValueKey('vod-term-option:5'));
     final spring = find.byKey(const ValueKey('vod-term-option:6'));
     final summer = find.byKey(const ValueKey('vod-term-option:8'));
@@ -1407,8 +1397,16 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.byTooltip('选择学期'));
     await tester.pumpAndSettle();
-    expect(tester.getTopLeft(find.text('2026-2027 学年')).dy,
-        lessThan(tester.getTopLeft(find.text('2024-2025 学年')).dy));
+    final menu = find.byKey(const ValueKey('vod-term-menu'));
+    expect(
+        tester
+            .getTopLeft(
+                find.descendant(of: menu, matching: find.text('2026-2027 学年')))
+            .dy,
+        lessThan(tester
+            .getTopLeft(
+                find.descendant(of: menu, matching: find.text('2024-2025 学年')))
+            .dy));
     await tester.tap(find.byKey(const ValueKey('vod-term-year:2026-2027')));
     await tester.pumpAndSettle();
     final autumn = find.byKey(const ValueKey('vod-term-option:41'));
@@ -1434,7 +1432,8 @@ void main() {
     await tester.pumpAndSettle();
     expect(repository.courseRequests, [7, 42]);
     expect(find.byKey(const ValueKey('vod-course:4201')), findsOneWidget);
-    expect(find.text('2024-2025 学年 冬季学期'), findsOneWidget);
+    expect(find.text('2024-2025 学年'), findsOneWidget);
+    expect(find.text('冬季学期'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 
@@ -1641,25 +1640,20 @@ void main() {
         .first);
     expect(separator.indent, 16);
     expect(separator.endIndent, 16);
-    expect(find.text('2026-2027 学年 秋季学期'), findsOneWidget);
-    final term = tester.widget<Text>(find.text('2026-2027 学年 秋季学期'));
-    final termSpan = term.textSpan! as TextSpan;
-    expect(term.style!.fontWeight, FontWeight.w600);
-    expect(
-        termSpan.children!.last.style!.color,
-        Theme.of(tester.element(find.text('2026-2027 学年 秋季学期')))
-            .colorScheme
-            .primary);
-    final count =
-        tester.widget<Text>(find.byKey(const ValueKey('vod-course-count')));
-    final countSpan = count.textSpan! as TextSpan;
-    expect(count.style!.fontWeight, FontWeight.w600);
-    expect(countSpan.toPlainText(), '3个课程');
-    expect(
-        countSpan.children!.first.style!.color,
-        Theme.of(tester.element(find.byKey(const ValueKey('vod-course-count'))))
-            .colorScheme
-            .primary);
+    final year = find.text('2026-2027 学年');
+    final season = find.text('秋季学期');
+    expect(year, findsOneWidget);
+    expect(season, findsOneWidget);
+    // Year and season occupy one row each.
+    expect(tester.getTopLeft(year).dy, lessThan(tester.getTopLeft(season).dy));
+    final yearText = tester.widget<Text>(year);
+    expect(yearText.style!.fontWeight, FontWeight.w600);
+    final seasonText = tester.widget<Text>(season);
+    expect(seasonText.style!.fontWeight, FontWeight.w600);
+    expect(seasonText.style!.color,
+        Theme.of(tester.element(season)).colorScheme.primary);
+    final count = find.byKey(const ValueKey('vod-course-count'));
+    expect(count, findsNothing);
     final course = find.byKey(const ValueKey('vod-course:101'));
     final colors = tester.element(course).shuyoColors;
     final title = tester.widget<Text>(find.descendant(
@@ -1680,12 +1674,6 @@ void main() {
     await tester.pumpAndSettle();
     expect(repository.forcedCourseRequests, [false, true]);
     expect(find.text('本学期暂无可观看课程'), findsOneWidget);
-    expect(
-        tester
-            .widget<Text>(find.byKey(const ValueKey('vod-course-count')))
-            .textSpan!
-            .toPlainText(),
-        '0个课程');
     await tester.drag(find.byType(ListView), const Offset(0, 350));
     await tester.pumpAndSettle();
     expect(repository.forcedCourseRequests, [false, true, true]);
@@ -1819,7 +1807,8 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('pull refresh shows only its spinner until all counts finish',
+  testWidgets(
+      'pull refresh ends with the catalog and greys rows in the meantime',
       (tester) async {
     final catalog = Completer<List<VodCourse>>();
     final counts = {
@@ -1857,15 +1846,44 @@ void main() {
     catalog.complete(_currentCourses);
     await tester.pump();
     await tester.pump();
+    // Let the pull indicator finish its hide animation.
+    await tester.pump(const Duration(milliseconds: 400));
     expect(repository.lessonRequests, 6);
+    // The catalog finished: every row is greyed and the pull spinner is gone
+    // while lesson counts settle in the background. A pull refresh never shows
+    // the app bar progress bar.
+    expect(spinner, findsNothing);
+    expect(progress, findsNothing);
+    for (final course in _currentCourses) {
+      final row = find.byKey(ValueKey('vod-course:${course.teachingClassId}'));
+      expect(tester.widget<ListTile>(row).enabled, isFalse);
+      expect(tester.widget<ListTile>(row).onTap, isNull);
+      expect(
+          find.descendant(of: row, matching: find.byIcon(Icons.chevron_right)),
+          findsOneWidget);
+    }
+
     counts[101]!.complete([]);
+    await tester.pump();
+    await tester.pump();
+    // A confirmed empty course swaps the chevron for the unavailable marker.
+    expect(
+        tester
+            .widget<ListTile>(find.byKey(const ValueKey('vod-course:101')))
+            .enabled,
+        isFalse);
+    expect(
+        find.descendant(
+            of: find.byKey(const ValueKey('vod-course:101')),
+            matching: find.byIcon(Icons.block)),
+        findsOneWidget);
+    expect(progress, findsNothing);
+
     counts[102]!.completeError(const VodNetworkException());
     await tester.pump();
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 500));
     expect(progress, findsNothing);
-    expect(spinner, findsOneWidget);
-    expect(tester.widget<RefreshProgressIndicator>(spinner).value, isNull);
     expect(find.byTooltip('课次统计暂不可用，下拉刷新重试'), findsOneWidget);
 
     counts[103]!.complete([]);
@@ -1875,6 +1893,92 @@ void main() {
     expect(find.byKey(const ValueKey('vod-course:101')), findsOneWidget);
     expect(find.byKey(const ValueKey('vod-course:102')), findsOneWidget);
     expect(find.byKey(const ValueKey('vod-course:103')), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('pull refresh recovers rows one after another', (tester) async {
+    final refreshed = {
+      for (final course in _currentCourses)
+        course.teachingClassId: Completer<List<VodLesson>>()
+    };
+    final repository = _Repository();
+    repository.coursesLoader = (_, force) async => _currentCourses;
+    repository.lessonsLoader = (course, force) {
+      if (!force) {
+        return Future.value([
+          VodLesson(
+              id: 1,
+              teachingClassId: course.teachingClassId,
+              name: '回放',
+              isPlayable: true)
+        ]);
+      }
+      return refreshed[course.teachingClassId]!.future;
+    };
+    await _mount(tester, repository);
+    await tester.pumpAndSettle();
+    for (final course in _currentCourses) {
+      expect(
+          tester
+              .widget<ListTile>(
+                  find.byKey(ValueKey('vod-course:${course.teachingClassId}')))
+              .enabled,
+          isTrue);
+    }
+
+    await tester.drag(
+        find.byKey(const ValueKey('vod-courses:7')), const Offset(0, 400));
+    for (var frame = 0;
+        frame < 20 && !repository.forcedCourseRequests.contains(true);
+        frame++) {
+      await tester.pump(const Duration(milliseconds: 100));
+    }
+    // Background counting keeps the app bar progress spinning, so settle
+    // explicitly instead of waiting for animations to stop.
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    for (final course in _currentCourses) {
+      expect(
+          tester
+              .widget<ListTile>(
+                  find.byKey(ValueKey('vod-course:${course.teachingClassId}')))
+              .enabled,
+          isFalse);
+    }
+
+    refreshed[102]!.complete(const [
+      VodLesson(id: 2, teachingClassId: 102, name: '回放', isPlayable: true),
+    ]);
+    await tester.pump();
+    await tester.pump();
+    expect(
+        tester
+            .widget<ListTile>(find.byKey(const ValueKey('vod-course:102')))
+            .enabled,
+        isTrue);
+    expect(
+        tester
+            .widget<ListTile>(find.byKey(const ValueKey('vod-course:101')))
+            .enabled,
+        isFalse);
+
+    refreshed[101]!.complete(const []);
+    refreshed[103]!.complete(const [
+      VodLesson(id: 3, teachingClassId: 103, name: '回放', isPlayable: true),
+    ]);
+    await tester.pumpAndSettle();
+    expect(
+        tester
+            .widget<ListTile>(find.byKey(const ValueKey('vod-course:101')))
+            .enabled,
+        isFalse);
+    for (final id in [102, 103]) {
+      expect(
+          tester
+              .widget<ListTile>(find.byKey(ValueKey('vod-course:$id')))
+              .enabled,
+          isTrue);
+    }
     expect(tester.takeException(), isNull);
   });
 
@@ -1991,7 +2095,7 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('pull refresh stays disabled until pending counts finish',
+  testWidgets('pull refresh works while pending counts keep settling',
       (tester) async {
     final pending = Completer<List<VodLesson>>();
     final forceFlags = <bool>[];
@@ -2011,29 +2115,36 @@ void main() {
     await _mount(tester, repository);
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 300));
+    expect(find.byKey(const ValueKey('vod-loading-progress')), findsOneWidget);
     await tester.drag(
         find.byKey(const ValueKey('vod-courses:7')), const Offset(0, 350));
+    for (var frame = 0;
+        frame < 20 && !repository.forcedCourseRequests.contains(true);
+        frame++) {
+      await tester.pump(const Duration(milliseconds: 100));
+    }
+    // The first load's count is still pending, yet the gesture refreshed.
+    expect(repository.forcedCourseRequests, [false, true]);
+    // The app bar keeps an indeterminate progress bar while counts settle, so
+    // settle with fixed pumps instead of pumpAndSettle.
     await tester.pump();
-    await tester.pump(const Duration(milliseconds: 350));
-    expect(forceFlags, [false]);
-    expect(find.byType(RefreshProgressIndicator), findsNothing);
-    expect(find.byKey(const ValueKey('vod-loading-progress')), findsOneWidget);
-    await tester
-        .widget<RefreshIndicator>(find.byType(RefreshIndicator))
-        .onRefresh();
-    expect(repository.forcedCourseRequests, [false]);
+    await tester.pump(const Duration(milliseconds: 400));
+
+    // The stale request settles late; its results are dropped and the queued
+    // forced count takes over.
     pending.complete(const [
       VodLesson(id: 1, teachingClassId: 101, name: '旧回放', isPlayable: true),
     ]);
-    await tester.pumpAndSettle();
-    expect(forceFlags, [false]);
-    expect(find.byKey(const ValueKey('vod-loading-progress')), findsNothing);
-    await tester.drag(
-        find.byKey(const ValueKey('vod-courses:7')), const Offset(0, 350));
-    await tester.pumpAndSettle();
-    expect(forceFlags, [false, true]);
+    await tester.pump();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
     final finder = find.byKey(const ValueKey('vod-course-lesson-count:101'));
     expect(tester.widget<Text>(finder).textSpan!.toPlainText(), '2/2节');
+    expect(
+        tester
+            .widget<ListTile>(find.byKey(const ValueKey('vod-course:101')))
+            .enabled,
+        isTrue);
     expect(tester.takeException(), isNull);
   });
 
@@ -2057,7 +2168,7 @@ void main() {
     await tester.pumpAndSettle();
     final finder = find.byKey(const ValueKey('vod-course-lesson-count:101'));
     expect(tester.widget<Text>(finder).textSpan!.toPlainText(), '1/1节');
-    expect(find.text('2025-2026 学年 春季学期'), findsOneWidget);
+    expect(find.text('2025-2026 学年'), findsOneWidget);
     pending.complete(const [
       VodLesson(
           id: 21,
@@ -2167,7 +2278,7 @@ void main() {
     expect(lessonsPage.course.teachingClassId, 101);
     expect(identical(lessonsPage.repository, repository), isTrue);
     expect(lessonsPage.skipInitialCatalogLoad, isTrue);
-    expect(repository.lessonRequests, requestsBeforeOpening);
+    expect(repository.lessonRequests, requestsBeforeOpening + 1);
     expect(find.text('课程介绍'), findsNothing);
     expect(find.text('选集'), findsOneWidget);
     expect(find.text('剧集'), findsNothing);
@@ -2186,14 +2297,11 @@ void main() {
     await _mount(tester, repository, textScale: 2);
     await tester.pumpAndSettle();
     final summary = find.byKey(const ValueKey('vod-course-summary'));
-    final courseCount = find.byKey(const ValueKey('vod-course-count'));
     final toggle = find.byKey(const ValueKey('vod-view-toggle'));
     void expectToggleInSummary() {
       expect(find.descendant(of: summary, matching: toggle), findsOneWidget);
       expect(find.descendant(of: find.byType(AppBar), matching: toggle),
           findsNothing);
-      expect(tester.getTopRight(courseCount).dx,
-          lessThanOrEqualTo(tester.getTopLeft(toggle).dx));
       expect(tester.getTopRight(toggle).dx,
           lessThanOrEqualTo(tester.getTopRight(summary).dx));
       expect(tester.takeException(), isNull);

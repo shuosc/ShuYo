@@ -114,7 +114,106 @@ class _FakeClient extends VodApiClient {
   }
 }
 
+class _TermsClient extends _FakeClient {
+  _TermsClient(this.terms);
+
+  final List<VodTerm> terms;
+  Future<List<VodTerm>>? pendingTerms;
+  int termRequests = 0;
+
+  @override
+  Future<List<VodTerm>> fetchTerms() {
+    termRequests++;
+    return pendingTerms ?? Future.value(terms);
+  }
+}
+
+class _OfflineRepository extends VodRepository {
+  _OfflineRepository({super.apiClient});
+
+  @override
+  Future<bool> hasCachedRecordings() async => true;
+}
+
 void main() {
+  test('a forced term reload waits for the in-flight request and fetches again',
+      () async {
+    const firstTerm = VodTerm(id: 7, name: '当前学期', isCurrent: true);
+    const nextTerm = VodTerm(id: 8, name: '新学期', isCurrent: true);
+    final client = _TermsClient(const [nextTerm]);
+    final gate = Completer<List<VodTerm>>();
+    client.pendingTerms = gate.future;
+    final repository = VodRepository(apiClient: client);
+    addTearDown(repository.dispose);
+
+    final initial = repository.loadTerms();
+    final forced = repository.loadTerms(forceRefresh: true);
+    await Future<void>.delayed(Duration.zero);
+    expect(client.termRequests, 1);
+
+    client.pendingTerms = null;
+    gate.complete(const [firstTerm]);
+    expect(await initial, const [firstTerm]);
+    expect(await forced, const [nextTerm]);
+    expect(client.termRequests, 2);
+  });
+
+  test('refresh keeps the live course pinned until the new live list arrives',
+      () async {
+    final client = _FakeClient();
+    final repository = VodRepository(apiClient: client);
+    addTearDown(repository.dispose);
+    final liveLesson = VodLesson(
+      id: 900,
+      teachingClassId: 42,
+      name: '程序设计',
+      isPlayable: true,
+      isLive: true,
+      beginTime: DateTime(2026, 11, 9, 8),
+      liveEndTime: DateTime.now().add(const Duration(hours: 1)),
+      catalogCourse: _course,
+    );
+    client.liveLessons = [liveLesson];
+    expect((await repository.loadCatalog(termId: 7)).single.isLive, isTrue);
+
+    final nextLive = Completer<List<VodLesson>>();
+    client.liveFuture = nextLive.future;
+    final snapshots = <List<VodCourse>>[];
+    final refresh = repository.loadCatalog(
+        termId: 7, forceRefresh: true, onProgress: snapshots.add);
+    await Future<void>.delayed(Duration.zero);
+    // Recordings returned first; the previous live entry keeps the course on
+    // air and at the top instead of disappearing mid-refresh.
+    expect(snapshots.last.single.isLive, isTrue);
+
+    nextLive.complete([]);
+    expect((await refresh).single.isLive, isFalse);
+  });
+
+  test('a failed live refresh keeps the last known live course', () async {
+    final client = _FakeClient();
+    final repository = _OfflineRepository(apiClient: client);
+    addTearDown(repository.dispose);
+    client.liveLessons = [
+      VodLesson(
+        id: 900,
+        teachingClassId: 42,
+        name: '程序设计',
+        isPlayable: true,
+        isLive: true,
+        beginTime: DateTime(2026, 11, 9, 8),
+        liveEndTime: DateTime.now().add(const Duration(hours: 1)),
+        catalogCourse: _course,
+      ),
+    ];
+    expect((await repository.loadCatalog(termId: 7)).single.isLive, isTrue);
+
+    client.liveFuture = Future.error(const VodNetworkException());
+    final refreshed =
+        await repository.loadCatalog(termId: 7, forceRefresh: true);
+    expect(refreshed.single.isLive, isTrue);
+  });
+
   for (final liveFirst in [false, true]) {
     test(
         'lesson sources start concurrently when ${liveFirst ? 'live' : 'recordings'} finish first',
