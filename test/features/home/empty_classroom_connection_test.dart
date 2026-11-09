@@ -173,8 +173,7 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets(
-      'toolbar refresh is disabled until the current cold load completes',
+  testWidgets('search entry is disabled until the current cold load completes',
       (tester) async {
     final options = Completer<ClassroomSearchOptions>();
     final repository = _RoutingRepository(hasSnapshot: false)
@@ -184,28 +183,28 @@ void main() {
     await tester.pump();
     expect(
         tester
-            .widget<IconButton>(find.byWidgetPredicate(
-                (widget) => widget is IconButton && widget.tooltip == '刷新'))
+            .widget<IconButton>(
+                find.byKey(const ValueKey('classroom-search-entry')))
             .onPressed,
         isNull);
     options.complete(_options);
     await tester.pumpAndSettle();
     expect(
         tester
-            .widget<IconButton>(find.byWidgetPredicate(
-                (widget) => widget is IconButton && widget.tooltip == '刷新'))
+            .widget<IconButton>(
+                find.byKey(const ValueKey('classroom-search-entry')))
             .onPressed,
         isNotNull);
     expect(repository.loadModes, hasLength(1));
   });
 
   testWidgets(
-      'toolbar refresh retries the global route and handles a cold-load failure',
+      'cold-load retry stays on the global route and handles repeated failure',
       (tester) async {
     final repository = _RoutingRepository(hasSnapshot: false)
       ..onLoad = (_) async => throw TimeoutException('connection failed');
     await _open(tester, repository);
-    await tester.tap(find.byTooltip('刷新'));
+    await tester.tap(_button('重试WebVPN'));
     await tester.pumpAndSettle();
     expect(repository.loadModes,
         [ClassroomAccessMode.webVpn, ClassroomAccessMode.webVpn]);

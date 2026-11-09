@@ -2,7 +2,10 @@ import 'common.dart';
 
 class ClassroomCampus {
   static const defaultName = '宝山';
-  static const knownNames = ['宝山', '延长', '宝山东区', '嘉定'];
+
+  /// 空教室系统把东区单列成一个校区，但楼宇都在宝山范围内。
+  /// 展示时统一并回宝山，只保留三个校区。
+  static const knownNames = ['宝山', '延长', '嘉定'];
 }
 
 class ClassroomBuilding {
@@ -15,12 +18,32 @@ class ClassroomBuilding {
     this.code = '',
   });
 
+  /// 学校名称与楼宇惯用叫法不一致，或该楼没有开放空教室数据。
+  /// 这里按楼 id 归一化，避免依赖随接口变动的中文名。
+  static const _displayNames = <int, String>{
+    476: '经管楼',
+    477: '材料楼',
+    478: '计算机/通信楼',
+  };
+
+  /// 该楼没有开放空教室数据，不参与查询。
+  static const _hiddenIds = <int>{
+    884, // 计算机大楼
+  };
+
   final int id;
   final String name;
   final int campusId;
   final String campusName;
   final String fullName;
   final String code;
+
+  /// 是否出现在空教室的可选楼宇里。
+  static bool isSelectable(int id) => !_hiddenIds.contains(id);
+
+  /// 把接口返回的名称换成楼宇惯用名。
+  static String displayNameFor(int id, String fallback) =>
+      _displayNames[id] ?? fallback;
 
   JsonMap toJson() {
     return {
@@ -34,21 +57,37 @@ class ClassroomBuilding {
   }
 
   factory ClassroomBuilding.fromJson(JsonMap json) {
+    final id = intValue(json['id']);
+    final name = displayNameFor(
+      id,
+      stringValue(json['name'] ?? json['text']),
+    );
     final campusId = intValue(json['campusId'] ?? json['parentNodeId']);
-    final fullName = stringValue(json['fullName']);
     return ClassroomBuilding(
-      id: intValue(json['id']),
-      name: stringValue(json['name']),
+      id: id,
+      name: name,
       campusId: campusId,
       campusName: _campusName(
         campusId,
-        fullName,
+        stringValue(json['fullName']),
         stringValue(json['campusName']),
       ),
-      fullName: fullName,
+      fullName: _displayFullName(stringValue(json['fullName']), name),
       code: stringValue(json['code'] ?? json['roomCode']),
     );
   }
+}
+
+/// 让 `上海大学/宝山东区/商管大楼` 的末段与 [ClassroomBuilding.name] 一致。
+String _displayFullName(String fullName, String name) {
+  if (fullName.isEmpty) {
+    return fullName;
+  }
+  final index = fullName.lastIndexOf('/');
+  if (index < 0) {
+    return fullName;
+  }
+  return '${fullName.substring(0, index + 1)}$name';
 }
 
 class ClassroomSection {
@@ -115,7 +154,10 @@ class ClassroomSearchOptions {
       buildings: (json['buildings'] as List? ?? const [])
           .whereType<JsonMap>()
           .map(ClassroomBuilding.fromJson)
-          .where((building) => building.id > 0 && building.name.isNotEmpty)
+          .where((building) =>
+              building.id > 0 &&
+              building.name.isNotEmpty &&
+              ClassroomBuilding.isSelectable(building.id))
           .toList(growable: false),
       sections: (json['sections'] as List? ?? const [])
           .whereType<JsonMap>()
@@ -311,9 +353,9 @@ class CourseLocationMatch {
 
 String _campusName(int campusId, String fullName, String cachedName) {
   final knownName = switch (campusId) {
-    3 => '宝山',
+    // 东区（475）在宝山校区内，展示时并入宝山。
+    3 || 475 => '宝山',
     398 => '延长',
-    475 => '宝山东区',
     574 => '嘉定',
     _ => null,
   };
