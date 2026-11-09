@@ -42,6 +42,10 @@ class _TrackingSchedule extends AcademicScheduleRepository {
   bool expired = false;
   bool unavailable = false;
 
+  // Login-flow tests stub the explicit sync, not background term discovery.
+  @override
+  bool get supportsTermDiscovery => false;
+
   @override
   Future<AcademicSchedule> refreshSchedule() async {
     requests++;
@@ -93,12 +97,17 @@ class _LocalAuth extends AcademicAuthService {
 }
 
 class _LocalUnifiedAccount extends UnifiedAccountService {
+  int academicAuthorizations = 0;
+
   @override
   Future<WebVpnRecoveryOutcome> recoverWebVpn() async =>
       WebVpnRecoveryOutcome.unavailable;
 
   @override
-  Future<Uri?> authorizeAcademic() async => null;
+  Future<Uri?> authorizeAcademic() async {
+    academicAuthorizations++;
+    return null;
+  }
 
   @override
   Future<Uri?> authorizeCampusCard() async {
@@ -148,6 +157,7 @@ void main() {
     required _TrackingProgress progress,
     required _TrackingRanking ranking,
     required _LocalAuth auth,
+    _LocalUnifiedAccount? unifiedAccount,
     int signal = 0,
     bool loggedIn = false,
   }) =>
@@ -166,7 +176,7 @@ void main() {
           progressRepository: progress,
           rankingRepository: ranking,
           academicAuthService: auth,
-          unifiedAccountService: _LocalUnifiedAccount(),
+          unifiedAccountService: unifiedAccount ?? _LocalUnifiedAccount(),
         ),
       );
 
@@ -178,6 +188,7 @@ void main() {
       final progress = _TrackingProgress();
       final ranking = _TrackingRanking();
       final auth = _LocalAuth();
+      final unifiedAccount = _LocalUnifiedAccount();
       final account = AcademicAccountStore();
       if (!firstLogin) await account.takeInitialSync('DEMO0001');
       await tester.pumpWidget(shell(
@@ -185,7 +196,8 @@ void main() {
           schedule: schedule,
           progress: progress,
           ranking: ranking,
-          auth: auth));
+          auth: auth,
+          unifiedAccount: unifiedAccount));
       await tester.pumpAndSettle();
       await account.saveStudentId('DEMO0001');
       await tester.pumpWidget(shell(
@@ -194,11 +206,15 @@ void main() {
           progress: progress,
           ranking: ranking,
           auth: auth,
+          unifiedAccount: unifiedAccount,
           signal: 1));
       await tester.pumpAndSettle();
       expect(schedule.requests, firstLogin ? 1 : 0);
       expect(progress.requests, firstLogin ? 1 : 0);
       expect(ranking.requests, firstLogin ? 1 : 0);
+      expect(unifiedAccount.academicAuthorizations, 0);
+      expect(await account.loadStudentId(), 'DEMO0001');
+      expect(await account.isSessionExpired(), isFalse);
       expect(find.text('你好，DEMO0001！'), findsOneWidget);
       if (!firstLogin) {
         expect(find.text('登录已恢复，请再次点击刷新更新数据'), findsOneWidget);
