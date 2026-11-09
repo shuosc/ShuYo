@@ -167,6 +167,8 @@ class RecordingTimetableData {
     return RecordingTimetableData._(
       firstWeekMonday: firstMonday,
       maxWeek: maxWeek,
+      today: today,
+      currentWeek: currentWeek,
       initialWeek: initialWeek,
       initialWeekday: initialWeekday,
       entriesByDate: Map.unmodifiable({
@@ -179,6 +181,8 @@ class RecordingTimetableData {
   const RecordingTimetableData._({
     required this.firstWeekMonday,
     required this.maxWeek,
+    required this.today,
+    required this.currentWeek,
     required this.initialWeek,
     required this.initialWeekday,
     required Map<DateTime, List<RecordingTimetableEntry>> entriesByDate,
@@ -186,11 +190,28 @@ class RecordingTimetableData {
 
   final DateTime firstWeekMonday;
   final int maxWeek;
+
+  /// The current day in the school's time zone (UTC+8), independent of the
+  /// device time zone.
+  final DateTime today;
+
+  /// Teaching week containing [today]; may fall outside `1..maxWeek`.
+  final int currentWeek;
   final int initialWeek;
   final int initialWeekday;
   final Map<DateTime, List<RecordingTimetableEntry>> _entriesByDate;
 
   bool get hasDatedLessons => _entriesByDate.isNotEmpty;
+
+  /// Whether the given day has arrived for the school; future days stay
+  /// visible but cannot be selected.
+  bool dateHasArrived(DateTime date) => !_schoolDate(date).isAfter(today);
+
+  /// Whether the week's Monday has arrived.
+  bool weekHasArrived(int week) =>
+      week >= 1 &&
+      week <= maxWeek &&
+      dateHasArrived(dateFor(week, DateTime.monday));
 
   int weekFor(DateTime date) => _weekFor(firstWeekMonday, _schoolDate(date));
 

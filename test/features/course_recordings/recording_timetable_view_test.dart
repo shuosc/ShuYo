@@ -149,6 +149,31 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets('future days stay visible but greyed and unselectable',
+      (tester) async {
+    final selected = <RecordingTimetableEntry>[];
+    await _mount(tester, _data(lessons: [_lesson(1, 25)]),
+        disableAnimations: true, onLessonSelected: selected.add);
+
+    final future = _day('2026-10-25');
+    expect(future, findsOneWidget);
+    expect(_daySemantics(tester, '2026-10-25').properties.enabled, isFalse);
+    expect(_daySemantics(tester, '2026-10-25').properties.onTap, isNull);
+    final colors = tester.element(future).shuyoColors;
+    final texts = tester.widgetList<Text>(
+        find.descendant(of: future, matching: find.byType(Text)));
+    expect(texts, hasLength(2));
+    for (final text in texts) {
+      expect(text.style!.color, colors.textMuted);
+    }
+    await tester.tap(future, warnIfMissed: false);
+    await tester.pumpAndSettle();
+    expect(_daySemantics(tester, '2026-10-21').properties.selected, isTrue);
+    expect(_entry(1), findsNothing);
+    expect(selected, isEmpty);
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets(
       'description orders classroom section and episode with scoped colors',
       (tester) async {
@@ -358,45 +383,48 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets(
-      'date buttons animate pages and swipes stay within Monday to Sunday',
+  testWidgets('date buttons animate pages and swipes stay inside arrived days',
       (tester) async {
     await _mount(
         tester,
         _data(lessons: [
-          _lesson(1, 21),
-          _lesson(2, 25),
+          _lesson(1, 19),
+          _lesson(2, 21),
           _lesson(3, 26, week: 2),
         ]));
     final pageView = find.byKey(const ValueKey('timetable-pageview'));
     final controller = tester.widget<PageView>(pageView).controller!;
     expect(controller.page, 2);
 
+    // Days that have not arrived stay visible but cannot be opened.
     await tester.tap(_day('2026-10-25'));
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 90));
-    expect(controller.page, greaterThan(2));
-    expect(controller.page, lessThan(6));
     await tester.pumpAndSettle();
-    expect(controller.page, 6);
-    expect(_entry(2), findsOneWidget);
-    expect(_daySemantics(tester, '2026-10-25').properties.selected, isTrue);
-
-    await tester.drag(pageView, const Offset(-600, 0));
-    await tester.pumpAndSettle();
-    expect(controller.page, 6);
-    expect(find.text('第 1 周'), findsOneWidget);
-    expect(_daySemantics(tester, '2026-10-25').properties.selected, isTrue);
-    expect(_entry(2), findsOneWidget);
+    expect(controller.page, 2);
+    expect(_daySemantics(tester, '2026-10-21').properties.selected, isTrue);
+    expect(_daySemantics(tester, '2026-10-25').properties.enabled, isFalse);
 
     await tester.tap(_day('2026-10-19'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 90));
+    expect(controller.page, lessThan(2));
     await tester.pumpAndSettle();
     expect(controller.page, 0);
+    expect(_entry(1), findsOneWidget);
+    expect(_daySemantics(tester, '2026-10-19').properties.selected, isTrue);
+
     await tester.drag(pageView, const Offset(600, 0));
     await tester.pumpAndSettle();
     expect(controller.page, 0);
     expect(find.text('第 1 周'), findsOneWidget);
     expect(_daySemantics(tester, '2026-10-19').properties.selected, isTrue);
+    expect(_entry(1), findsOneWidget);
+
+    for (var attempt = 0; attempt < 4; attempt++) {
+      await tester.drag(pageView, const Offset(-600, 0));
+      await tester.pumpAndSettle();
+    }
+    expect(controller.page, 2);
+    expect(_daySemantics(tester, '2026-10-21').properties.selected, isTrue);
     expect(_day('2026-10-26'), findsNothing);
     expect(tester.takeException(), isNull);
   });
@@ -404,40 +432,60 @@ void main() {
   testWidgets(
       'only week arrows change weeks while keeping the selected weekday',
       (tester) async {
-    await _mount(tester, _data(), disableAnimations: true);
-
-    await tester.drag(find.text('第 1 周'), const Offset(350, 0));
-    await tester.pumpAndSettle();
-    expect(find.text('第 1 周'), findsOneWidget);
-    expect(find.byKey(const ValueKey('quick-week-scrubber')), findsNothing);
-    expect(_daySemantics(tester, '2026-10-21').properties.selected, isTrue);
-    expect(
-        tester
-            .widget<IconButton>(
-                find.widgetWithIcon(IconButton, Icons.chevron_left))
-            .onPressed,
-        isNull);
-    await tester.tap(find.byTooltip('下一周'));
-    await tester.pumpAndSettle();
+    await _mount(tester, _data(now: DateTime(2026, 11, 1, 12)),
+        disableAnimations: true);
 
     expect(find.text('第 2 周'), findsOneWidget);
-    expect(_daySemantics(tester, '2026-10-28').properties.selected, isTrue);
+    expect(_daySemantics(tester, '2026-11-01').properties.selected, isTrue);
+    await tester.drag(find.text('第 2 周'), const Offset(350, 0));
+    await tester.pumpAndSettle();
+    expect(find.text('第 2 周'), findsOneWidget);
+    expect(find.byKey(const ValueKey('quick-week-scrubber')), findsNothing);
     expect(
         tester
             .widget<IconButton>(
                 find.widgetWithIcon(IconButton, Icons.chevron_right))
             .onPressed,
         isNull);
-    expect(tester.widget<PageView>(find.byType(PageView)).controller!.page, 2);
-    await tester.drag(find.text('第 2 周'), const Offset(-350, 0));
+    await tester.tap(find.byTooltip('上一周'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('第 1 周'), findsOneWidget);
+    expect(_daySemantics(tester, '2026-10-25').properties.selected, isTrue);
+    expect(
+        tester
+            .widget<IconButton>(
+                find.widgetWithIcon(IconButton, Icons.chevron_left))
+            .onPressed,
+        isNull);
+    expect(tester.widget<PageView>(find.byType(PageView)).controller!.page, 6);
+    await tester.drag(find.text('第 1 周'), const Offset(-350, 0));
+    await tester.pumpAndSettle();
+    expect(find.text('第 1 周'), findsOneWidget);
+    expect(_daySemantics(tester, '2026-10-25').properties.selected, isTrue);
+    await tester.tap(find.byTooltip('下一周'));
     await tester.pumpAndSettle();
     expect(find.text('第 2 周'), findsOneWidget);
-    expect(_daySemantics(tester, '2026-10-28').properties.selected, isTrue);
-    await tester.tap(find.byTooltip('上一周'));
+    expect(_daySemantics(tester, '2026-11-01').properties.selected, isTrue);
+    expect(tester.widget<PageView>(find.byType(PageView)).controller!.page, 6);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('a week that has not started keeps the next arrow disabled',
+      (tester) async {
+    await _mount(tester, _data(), disableAnimations: true);
+
+    expect(find.text('第 1 周'), findsOneWidget);
+    expect(
+        tester
+            .widget<IconButton>(
+                find.widgetWithIcon(IconButton, Icons.chevron_right))
+            .onPressed,
+        isNull);
+    await tester.tap(find.byTooltip('下一周'), warnIfMissed: false);
     await tester.pumpAndSettle();
     expect(find.text('第 1 周'), findsOneWidget);
     expect(_daySemantics(tester, '2026-10-21').properties.selected, isTrue);
-    expect(tester.widget<PageView>(find.byType(PageView)).controller!.page, 2);
     expect(tester.takeException(), isNull);
   });
 
@@ -495,11 +543,13 @@ void main() {
       final row = tester.widget<ListTile>(entry);
       expect(row.onTap, isNull);
       expect(row.enabled, isFalse);
-      expect(row.trailing, isNull);
+      final arrow = row.trailing! as Icon;
+      expect(arrow.icon, Icons.chevron_right);
+      expect(arrow.color, Theme.of(tester.element(entry)).disabledColor);
       expect(
           find.descendant(
               of: entry, matching: find.byIcon(Icons.chevron_right)),
-          findsNothing);
+          findsOneWidget);
       _expectCompactMetadata(entry);
       await tester.tap(entry);
     }
@@ -618,7 +668,7 @@ void main() {
       'interrupting date animation keeps the settled page and date linked',
       (tester) async {
     await _mount(tester, _data(lessons: [_lesson(1, 21)]));
-    await tester.tap(_day('2026-10-25'));
+    await tester.tap(_day('2026-10-19'));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 70));
     await tester.drag(find.byType(PageView), const Offset(420, 0));
@@ -633,7 +683,7 @@ void main() {
     final dateKey =
         '${date.year}-${date.month.toString().padLeft(2, '0')}-${date.day.toString().padLeft(2, '0')}';
     expect(_daySemantics(tester, dateKey).properties.selected, isTrue);
-    expect(page, inInclusiveRange(0, 6));
+    expect(page, inInclusiveRange(0, 2));
     expect(find.text('第 1 周'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
@@ -641,38 +691,41 @@ void main() {
   testWidgets(
       'rapid date taps and week changes interrupt the previous animation',
       (tester) async {
-    await _mount(tester, _data());
-    await tester.tap(_day('2026-10-25'));
+    await _mount(tester, _data(now: DateTime(2026, 10, 28, 12)));
+    expect(_daySemantics(tester, '2026-10-28').properties.selected, isTrue);
+    await tester.tap(_day('2026-10-26'));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 60));
-    await tester.tap(_day('2026-10-19'));
+    await tester.tap(_day('2026-10-27'));
     await tester.pumpAndSettle();
 
+    expect(_daySemantics(tester, '2026-10-27').properties.selected, isTrue);
+    expect(tester.widget<PageView>(find.byType(PageView)).controller!.page, 1);
+    await tester.tap(_day('2026-10-26'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 60));
+    await tester.tap(find.byTooltip('上一周'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('第 1 周'), findsOneWidget);
     expect(_daySemantics(tester, '2026-10-19').properties.selected, isTrue);
     expect(tester.widget<PageView>(find.byType(PageView)).controller!.page, 0);
-    await tester.tap(_day('2026-10-25'));
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 60));
-    await tester.tap(find.byTooltip('下一周'));
-    await tester.pumpAndSettle();
-
-    expect(find.text('第 2 周'), findsOneWidget);
-    expect(_daySemantics(tester, '2026-11-01').properties.selected, isTrue);
-    expect(tester.widget<PageView>(find.byType(PageView)).controller!.page, 6);
     expect(tester.takeException(), isNull);
   });
 
   testWidgets('progressive anchor changes preserve the selected real date',
       (tester) async {
     const floatingTerm = VodTerm(id: 7, name: '学期');
-    await _mount(tester, _data(term: floatingTerm, lessons: [_lesson(1, 21)]));
+    final now = DateTime(2026, 10, 25, 12);
+    await _mount(
+        tester, _data(term: floatingTerm, lessons: [_lesson(1, 21)], now: now));
     await tester.tap(_day('2026-10-25'));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 90));
 
     await _mount(
         tester,
-        _data(term: floatingTerm, lessons: [
+        _data(term: floatingTerm, now: now, lessons: [
           _lesson(2, 12),
           _lesson(1, 21, week: 2),
           _lesson(3, 25, week: 2),
@@ -803,7 +856,12 @@ void main() {
     expect(_day('2026-10-25'), findsOneWidget);
     expect(tester.getRect(_day('2026-10-25')).right, lessThanOrEqualTo(320));
     expect(tester.takeException(), isNull);
-    await tester.tap(_day('2026-10-25'));
+    // Future days stay visible but cannot replace the current day.
+    await tester.tap(_day('2026-10-25'), warnIfMissed: false);
+    await tester.pumpAndSettle();
+    expect(_daySemantics(tester, '2026-10-21').properties.selected, isTrue);
+    expect(find.text('当天暂无课程'), findsNothing);
+    await tester.tap(_day('2026-10-20'));
     await tester.pumpAndSettle();
     expect(find.text('当天暂无课程'), findsOneWidget);
     expect(tester.takeException(), isNull);

@@ -54,7 +54,7 @@ class _RecordingTimetableViewState extends State<RecordingTimetableView> {
     );
     _pageOrigin = _weekStart(_selectedDate);
     _pageController = PageController(
-      initialPage: _pageIndex(_selectedDate),
+      initialPage: _initialPage(),
       keepPage: false,
     );
   }
@@ -73,9 +73,14 @@ class _RecordingTimetableViewState extends State<RecordingTimetableView> {
     final last = widget.data.dateFor(widget.data.maxWeek, DateTime.sunday);
     if (selectedDate.isBefore(first)) selectedDate = first;
     if (selectedDate.isAfter(last)) selectedDate = last;
+    // A refresh may advance "today" or move the selected date out of the
+    // selectable past; never keep a future day selected.
+    final latest =
+        widget.data.today.isBefore(first) ? first : widget.data.today;
+    if (selectedDate.isAfter(latest)) selectedDate = latest;
     final origin = _weekStart(selectedDate);
-    final originChanged = !_sameDate(_pageOrigin, origin);
-    final selectionChanged = !_sameDate(_selectedDate, selectedDate);
+    final originChanged = !DateUtils.isSameDay(_pageOrigin, origin);
+    final selectionChanged = !DateUtils.isSameDay(_selectedDate, selectedDate);
     _selectedDate = selectedDate;
     if (originChanged) {
       _replacePageController(origin);
@@ -86,7 +91,7 @@ class _RecordingTimetableViewState extends State<RecordingTimetableView> {
             identical(controller, _pageController) &&
             controller.hasClients) {
           _animatedTarget = null;
-          controller.jumpToPage(_pageIndex(_selectedDate));
+          controller.jumpToPage(_initialPage());
         }
       });
     }
@@ -103,6 +108,21 @@ class _RecordingTimetableViewState extends State<RecordingTimetableView> {
   DateTime _dateAt(int page) =>
       DateTime(_pageOrigin.year, _pageOrigin.month, _pageOrigin.day + page);
 
+  /// Pages from this week's Monday up to the last day that has arrived.
+  int _availablePages() {
+    var pages = 1;
+    for (var index = 0; index < DateTime.daysPerWeek; index++) {
+      if (widget.data.dateHasArrived(_dateAt(index))) pages = index + 1;
+    }
+    return pages;
+  }
+
+  int _initialPage() {
+    final pages = _availablePages();
+    final page = _pageIndex(_selectedDate);
+    return page < pages ? page : pages - 1;
+  }
+
   DateTime _weekStart(DateTime date) => DateTime(
       date.year, date.month, date.day + DateTime.monday - date.weekday);
 
@@ -112,7 +132,7 @@ class _RecordingTimetableViewState extends State<RecordingTimetableView> {
     _animatedTarget = null;
     _selectionRevision++;
     _pageController = PageController(
-      initialPage: _pageIndex(_selectedDate),
+      initialPage: _initialPage(),
       keepPage: false,
     );
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -121,10 +141,11 @@ class _RecordingTimetableViewState extends State<RecordingTimetableView> {
   }
 
   void _selectDate(DateTime date) {
+    if (!widget.data.dateHasArrived(date)) return;
     _userSelected = true;
-    if (_sameDate(date, _selectedDate)) return;
+    if (DateUtils.isSameDay(date, _selectedDate)) return;
     final origin = _weekStart(date);
-    if (!_sameDate(origin, _pageOrigin)) {
+    if (!DateUtils.isSameDay(origin, _pageOrigin)) {
       setState(() {
         _selectedDate = date;
         _replacePageController(origin);
@@ -159,14 +180,18 @@ class _RecordingTimetableViewState extends State<RecordingTimetableView> {
     }
   }
 
-  void _selectWeek(int week) =>
-      _selectDate(widget.data.dateFor(week, _selectedDate.weekday));
+  void _selectWeek(int week) {
+    if (!widget.data.weekHasArrived(week)) return;
+    final target = widget.data.dateFor(week, _selectedDate.weekday);
+    _selectDate(target.isAfter(widget.data.today) ? widget.data.today : target);
+  }
 
   void _onPageChanged(int page) {
     if (_animatedTarget != null && _animatedTarget != page) return;
     _animatedTarget = null;
     final date = _dateAt(page);
-    if (_sameDate(date, _selectedDate)) return;
+    if (!widget.data.dateHasArrived(date)) return;
+    if (DateUtils.isSameDay(date, _selectedDate)) return;
     setState(() {
       _selectedDate = date;
     });
@@ -185,7 +210,9 @@ class _RecordingTimetableViewState extends State<RecordingTimetableView> {
           enableQuickSwitch: false,
           onPrevious: week > 1 ? () => _selectWeek(week - 1) : null,
           onNext:
-              week < widget.data.maxWeek ? () => _selectWeek(week + 1) : null,
+              week < widget.data.maxWeek && widget.data.weekHasArrived(week + 1)
+                  ? () => _selectWeek(week + 1)
+                  : null,
           onQuickWeekSelected: _selectWeek,
         ),
         _weekdays(context, week),
@@ -223,7 +250,7 @@ class _RecordingTimetableViewState extends State<RecordingTimetableView> {
                 child: PageView.builder(
                   key: const ValueKey('timetable-pageview'),
                   controller: pageController,
-                  itemCount: DateTime.daysPerWeek,
+                  itemCount: _availablePages(),
                   onPageChanged: (page) {
                     if (identical(pageController, _pageController)) {
                       _onPageChanged(page);
@@ -255,7 +282,7 @@ class _RecordingTimetableViewState extends State<RecordingTimetableView> {
   Widget _weekdays(BuildContext context, int week) {
     final scheme = Theme.of(context).colorScheme;
     final colors = context.shuyoColors;
-    final now = DateTime.now().toUtc().add(const Duration(hours: 8));
+    final today = widget.data.today;
     const labels = ['周一', '周二', '周三', '周四', '周五', '周六', '周日'];
     return MediaQuery.withClampedTextScaling(
       maxScaleFactor: 1.25,
@@ -270,21 +297,25 @@ class _RecordingTimetableViewState extends State<RecordingTimetableView> {
               Expanded(
                 child: Builder(builder: (context) {
                   final date = widget.data.dateFor(week, weekday);
-                  final selected = _sameDate(date, _selectedDate);
-                  final today = _sameDate(date, now);
+                  final selected = DateUtils.isSameDay(date, _selectedDate);
+                  final isToday = DateUtils.isSameDay(date, today);
+                  final arrived = widget.data.dateHasArrived(date);
                   final foreground = selected
                       ? scheme.onPrimary
-                      : today
-                          ? scheme.primary
-                          : colors.textSecondary;
+                      : !arrived
+                          ? colors.textMuted
+                          : isToday
+                              ? scheme.primary
+                              : colors.textSecondary;
                   return Padding(
                     padding: const EdgeInsets.symmetric(horizontal: 2),
                     child: Semantics(
                       selected: selected,
-                      button: true,
-                      onTap: () => _selectDate(date),
+                      button: arrived,
+                      enabled: arrived,
+                      onTap: arrived ? () => _selectDate(date) : null,
                       label:
-                          '${date.year}年${date.month}月${date.day}日 ${labels[weekday - 1]}${today ? '，今天' : ''}',
+                          '${date.year}年${date.month}月${date.day}日 ${labels[weekday - 1]}${isToday ? '，今天' : ''}${arrived ? '' : '，未到'}',
                       excludeSemantics: true,
                       child: Material(
                         color: selected ? scheme.primary : Colors.transparent,
@@ -292,7 +323,7 @@ class _RecordingTimetableViewState extends State<RecordingTimetableView> {
                         child: InkWell(
                           key: ValueKey('timetable-day-${_dateKey(date)}'),
                           borderRadius: BorderRadius.circular(24),
-                          onTap: () => _selectDate(date),
+                          onTap: arrived ? () => _selectDate(date) : null,
                           child: Padding(
                             padding: const EdgeInsets.symmetric(
                                 vertical: 9, horizontal: 1),
@@ -305,7 +336,7 @@ class _RecordingTimetableViewState extends State<RecordingTimetableView> {
                                       style: ShuYoTextStyles.meta(
                                           size: 12,
                                           color: foreground,
-                                          weight: selected || today
+                                          weight: selected || isToday
                                               ? FontWeight.w600
                                               : FontWeight.w400)),
                                 ),
@@ -540,17 +571,12 @@ class _TimetableEntryTile extends StatelessWidget {
               colorFilter: ColorFilter.mode(colors.textMuted, BlendMode.srcIn),
               child: title,
             ),
-      trailing:
-          enabled ? Icon(Icons.chevron_right, color: colors.textMuted) : null,
+      trailing: Icon(Icons.chevron_right,
+          color: enabled ? colors.textMuted : Theme.of(context).disabledColor),
       onTap: enabled ? onTap : null,
     );
   }
 }
-
-bool _sameDate(DateTime first, DateTime second) =>
-    first.year == second.year &&
-    first.month == second.month &&
-    first.day == second.day;
 
 String _dateKey(DateTime date) =>
     '${date.year}-${date.month.toString().padLeft(2, '0')}-${date.day.toString().padLeft(2, '0')}';
