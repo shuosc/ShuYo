@@ -22,6 +22,7 @@ class RecordingPlayerLayout extends StatefulWidget {
     this.onMore,
     this.playingOverride,
     this.loading = false,
+    this.onRefresh,
     this.detailScope,
   });
 
@@ -37,6 +38,11 @@ class RecordingPlayerLayout extends StatefulWidget {
   final VoidCallback? onMore;
   final bool? playingOverride;
   final bool loading;
+
+  /// Pull-to-refresh for the nested content. Hosted here because the outer
+  /// [NestedScrollView] consumes the drag until the video header collapses, so
+  /// a refresh indicator inside the inner viewport would never start at the top.
+  final Future<void> Function()? onRefresh;
   final Object? detailScope;
 
   @override

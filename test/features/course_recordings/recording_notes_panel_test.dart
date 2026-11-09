@@ -21,7 +21,6 @@ void main() {
     List<VodPptSlide> slides = const [],
     bool loading = false,
     String? error,
-    Future<void> Function()? onRefresh,
     ValueChanged<Duration>? onSeek,
     Future<Map<String, String>> Function(Uri)? headersLoader,
     ThemeData? theme,
@@ -40,7 +39,6 @@ void main() {
               slides: slides,
               loading: loading,
               error: error,
-              onRefresh: onRefresh ?? () async {},
               onSeek: onSeek ?? (_) {},
               headersLoader: headersLoader,
               canSeek: canSeek,
@@ -115,24 +113,19 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('pull to refresh works for empty, failed and populated notes',
-      (tester) async {
-    var refreshes = 0;
-    Future<void> refresh() async {
-      refreshes++;
-    }
-
+  testWidgets('notes never expose a pull-to-refresh gesture', (tester) async {
     for (final panel in [
-      app(onRefresh: refresh),
-      app(error: 'timeout', onRefresh: refresh),
-      app(slides: [slide(1)], onRefresh: refresh),
+      app(),
+      app(error: 'timeout'),
+      app(slides: [slide(1)]),
     ]) {
       await tester.pumpWidget(panel);
+      expect(find.byType(RefreshIndicator), findsNothing);
       await tester.drag(find.byKey(const ValueKey('recording-notes-scroll')),
           const Offset(0, 350));
       await tester.pumpAndSettle();
+      expect(find.byType(RefreshProgressIndicator), findsNothing);
     }
-    expect(refreshes, 3);
     expect(tester.takeException(), isNull);
   });
 
@@ -369,7 +362,6 @@ void main() {
                     slides: [slide(1)],
                     loading: false,
                     error: null,
-                    onRefresh: () async {},
                     onSeek: (_) {},
                   ),
                 ),
@@ -450,20 +442,21 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('pull refresh renews the lesson image credential cache',
+  testWidgets('moving between slides renews the image credential cache',
       (tester) async {
     var headers = 0;
-    await tester.pumpWidget(app(
-      slides: [slide(1, image: true)],
-      headersLoader: (_) async {
-        headers++;
-        return const {};
-      },
-    ));
+    Future<Map<String, String>> loader(Uri _) async {
+      headers++;
+      return const {};
+    }
+
+    await tester.pumpWidget(
+        app(slides: [slide(1, image: true)], headersLoader: loader));
     await tester.pumpAndSettle();
     expect(headers, 1);
-    await tester.drag(find.byKey(const ValueKey('recording-notes-scroll')),
-        const Offset(0, 350));
+    // A new slide list rebuilds the credential cache; no gesture is involved.
+    await tester.pumpWidget(
+        app(slides: [slide(2, image: true)], headersLoader: loader));
     await tester.pumpAndSettle();
     expect(headers, 2);
     expect(tester.takeException(), isNull);

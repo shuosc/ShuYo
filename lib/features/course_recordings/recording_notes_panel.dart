@@ -18,7 +18,6 @@ class RecordingNotesPanel extends StatefulWidget {
     required this.slides,
     required this.loading,
     this.error,
-    required this.onRefresh,
     required this.onSeek,
     this.headersLoader,
     this.nested = false,
@@ -29,7 +28,6 @@ class RecordingNotesPanel extends StatefulWidget {
   final List<VodPptSlide> slides;
   final bool loading;
   final String? error;
-  final Future<void> Function() onRefresh;
   final ValueChanged<Duration> onSeek;
   final Future<Map<String, String>> Function(Uri)? headersLoader;
   final bool nested;
@@ -49,16 +47,6 @@ class _RecordingNotesPanelState extends State<RecordingNotesPanel> {
     if (!identical(oldWidget.slides, widget.slides) ||
         oldWidget.headersLoader != widget.headersLoader) {
       _imageHeaders = _PptImageHeaders(widget.headersLoader);
-    }
-  }
-
-  Future<void> _refresh() async {
-    try {
-      await widget.onRefresh();
-    } finally {
-      if (mounted) {
-        setState(() => _imageHeaders = _PptImageHeaders(widget.headersLoader));
-      }
     }
   }
 
@@ -133,12 +121,11 @@ class _RecordingNotesPanelState extends State<RecordingNotesPanel> {
         ],
       ],
     );
-    final panel = widget.isLive
-        ? scroll
-        : RefreshIndicator(onRefresh: _refresh, child: scroll);
+    // Pull-to-refresh is intentionally absent: notes arrive with the lesson and
+    // the containing player keeps the catalog current on its own.
     return RecordingDetailSheet.maybeOf(context) == null
-        ? RecordingDetailSheetHost(topInset: 0, child: panel)
-        : panel;
+        ? RecordingDetailSheetHost(topInset: 0, child: scroll)
+        : scroll;
   }
 }
 
@@ -431,31 +418,32 @@ class _NotePositionLabel extends StatelessWidget {
       fontWeight: FontWeight.w600,
     );
     return FittedBox(
-        fit: BoxFit.scaleDown,
-        alignment: Alignment.centerLeft,
-        child: Text.rich(
-          TextSpan(children: [
-            if (prefix.isNotEmpty)
-              TextSpan(
-                  text: prefix,
-                  style: TextStyle(color: context.shuyoColors.textPrimary)),
+      fit: BoxFit.scaleDown,
+      alignment: Alignment.centerLeft,
+      child: Text.rich(
+        TextSpan(children: [
+          if (prefix.isNotEmpty)
             TextSpan(
-                text: '${index + 1}',
-                style: pageStyle.copyWith(
-                    color: Theme.of(context).colorScheme.primary)),
-            TextSpan(
-                text: '/$total 页  ',
-                style: pageStyle.copyWith(color: context.shuyoColors.textPrimary)),
-            TextSpan(
-                text: _timestamp(position),
-                style: TextStyle(color: context.shuyoColors.textTertiary)),
-          ]),
-          key: labelKey,
-          maxLines: 1,
-          softWrap: false,
-          style: style,
-        ),
-      );
+                text: prefix,
+                style: TextStyle(color: context.shuyoColors.textPrimary)),
+          TextSpan(
+              text: '${index + 1}',
+              style: pageStyle.copyWith(
+                  color: Theme.of(context).colorScheme.primary)),
+          TextSpan(
+              text: '/$total 页  ',
+              style:
+                  pageStyle.copyWith(color: context.shuyoColors.textPrimary)),
+          TextSpan(
+              text: _timestamp(position),
+              style: TextStyle(color: context.shuyoColors.textTertiary)),
+        ]),
+        key: labelKey,
+        maxLines: 1,
+        softWrap: false,
+        style: style,
+      ),
+    );
   }
 }
 

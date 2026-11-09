@@ -72,16 +72,17 @@ class RecordingNotesController extends ValueNotifier<RecordingNotesState> {
       return null;
     }
     final previous = value;
-    final pullRefresh =
-        forceRefresh && previous.lessonId == lesson.id &&
-        !previous.isLive && !previous.loading;
+    final pullRefresh = forceRefresh &&
+        previous.lessonId == lesson.id &&
+        !previous.isLive &&
+        !previous.loading;
     final supported =
         lesson.id > 0 && lesson.teachingClassId == teachingClassId;
     final canLoad = supported && loader != null;
     if (!canLoad) {
       value = RecordingNotesState(
         lessonId: lesson.id,
-        error: supported ? '暂时无法加载这节课的 PPT 笔记，请稍后下拉重试' : '请先选择课次，再查看 PPT 笔记',
+        error: supported ? '暂时无法加载这节课的 PPT 笔记，请稍后重试' : '请先选择课次，再查看 PPT 笔记',
       );
       return null;
     }
@@ -102,9 +103,9 @@ class RecordingNotesController extends ValueNotifier<RecordingNotesState> {
         VodWebVpnAuthRequiredException() =>
           'WebVPN 连接已失效，请恢复连接后重试',
         VodSessionExpiredException() => '校园账户登录已失效，请重新进入录播平台后重试',
-        VodPermissionException() => '平台暂未允许读取这节课的 PPT 笔记，请稍后下拉重试',
-        VodInvalidResponseException() => '平台返回的 PPT 笔记数据异常，请稍后下拉重试',
-        _ => '暂时无法加载这节课的 PPT 笔记，请稍后下拉重试',
+        VodPermissionException() => '平台暂未允许读取这节课的 PPT 笔记，请稍后重试',
+        VodInvalidResponseException() => '平台返回的 PPT 笔记数据异常，请稍后重试',
+        _ => '暂时无法加载这节课的 PPT 笔记，请稍后重试',
       };
       if (pullRefresh && previous.slides.isNotEmpty) return message;
       value = RecordingNotesState(lessonId: lesson.id, error: message);

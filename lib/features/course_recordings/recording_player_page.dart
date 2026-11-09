@@ -167,7 +167,7 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
   Future<void> _lifecycleQueue = Future<void>.value();
   bool _heartbeatPending = false;
   bool _catalogLoading = false;
-  bool _catalogPullRefreshing = false;
+  bool _catalogSyncing = false;
   bool _episodesNewestFirst = true;
   String? _selectedClassroom;
   final _episodeKeys = <int, GlobalKey>{};
@@ -373,15 +373,7 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
             !recordingLessonCanSelect(initial) ||
             initial.id <= 0 ||
             initial.teachingClassId != widget.course.teachingClassId)) {
-      final candidates = _lessons
-          .where((lesson) => lesson.id > 0 && recordingLessonCanSelect(lesson))
-          .toList();
-      initial =
-          candidates.where((lesson) => lesson.isLiveAvailable).firstOrNull ??
-              candidates
-                  .where((lesson) => !lesson.isLive && lesson.isPlayable)
-                  .firstOrNull ??
-              candidates.where(recordingLessonCanSelect).firstOrNull;
+      initial = preferredRecordingLesson(_lessons);
     }
     if (initial != null &&
         recordingLessonCanSelect(initial) &&
@@ -398,6 +390,15 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
           _shouldLoadCatalog &&
           !widget.skipInitialCatalogLoad) {
         unawaited(_loadCatalog(initialPreview: widget.initialPreviewCatalog));
+      } else if (widget.skipInitialCatalogLoad &&
+          widget.repository != null &&
+          _shouldLoadCatalog) {
+        // The caller already handed over its cached catalog, so the first frame
+        // paints instantly. Reconcile with the server right after so the page
+        // never stays on stale lessons now that there is no pull gesture.
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) unawaited(_loadCatalog(background: true));
+        });
       }
     } else if (widget.skipInitialCatalogLoad ||
         widget.repository == null && !_lessons.any(recordingLessonCanSelect)) {
@@ -411,19 +412,17 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
 
   Future<void> _loadCatalog(
       {bool forceRefresh = false,
-      bool fromPull = false,
+      bool background = false,
       Future<List<VodLesson>>? initialPreview}) async {
     final repository = widget.repository;
-    if (repository == null ||
-        !_shouldLoadCatalog ||
-        _catalogLoading ||
-        _catalogPullRefreshing) {
-      return;
-    }
+    if (repository == null || !_shouldLoadCatalog) return;
+    // A silent background sync never blocks an explicit load; an explicit load
+    // always supersedes one that is still in flight.
+    if (background ? _catalogSyncing : _catalogLoading) return;
     final revision = ++_catalogRevision;
+    _catalogSyncing = background;
     _publish(() {
-      _catalogLoading = true;
-      _catalogPullRefreshing = fromPull;
+      if (!background) _catalogLoading = true;
     });
     try {
       final searchSeeds = <int, VodLesson>{
@@ -439,6 +438,13 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
           : await repository.loadCourseLessons(widget.course,
               forceRefresh: forceRefresh);
       if (!mounted || revision != _catalogRevision) return;
+      // An empty response must not erase a catalog that is currently playing;
+      // treat it as "nothing newer" so the open stream keeps its episode list.
+      if (lessons.isEmpty && _catalog.isNotEmpty) {
+        _catalogSyncing = false;
+        if (_catalogLoading) _publish(() => _catalogLoading = false);
+        return;
+      }
       if (initialPreview != null) {
         final recordings = lessons
             .where((lesson) => !lesson.isLive && !lesson.isGenerating)
@@ -462,11 +468,10 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
             ],
           );
         } else {
-          _catalog = _loading &&
-                  recordingLessonCanSelect(_lesson) &&
-                  !lessons.any((lesson) =>
-                      lesson.id == _lesson.id &&
-                      lesson.isLive == _lesson.isLive)
+          final keepCurrent = recordingLessonCanSelect(_lesson) &&
+              !lessons.any((lesson) =>
+                  lesson.id == _lesson.id && lesson.isLive == _lesson.isLive);
+          _catalog = (_loading || background) && keepCurrent
               ? [_lesson, ...lessons]
               : lessons;
         }
@@ -476,26 +481,30 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
       // opened without an initial lesson still needs its first selection.
       if (widget.loadPreviewCatalog && _validLesson(_lesson)) return;
       final ordered = _lessons;
-      final current = ordered
+      final kept = ordered
           .where((lesson) =>
-              lesson.id == _lesson.id &&
-              lesson.isLive == _lesson.isLive &&
-              recordingLessonCanSelect(lesson))
+              lesson.id == _lesson.id && lesson.isLive == _lesson.isLive)
           .firstOrNull;
-      final selected = current ??
-          ordered.where((lesson) => lesson.isLiveAvailable).firstOrNull ??
-          ordered
-              .where((lesson) =>
-                  !lesson.isLive &&
-                  lesson.isPlayable &&
-                  recordingLessonCanSelect(lesson))
-              .firstOrNull ??
-          ordered.where(recordingLessonCanSelect).firstOrNull;
-      if (selected != null) {
-        if (current == null ||
-            !_loading && (_playback == null || _failure != null)) {
-          await _loadLesson(selected);
+      if (kept != null && recordingLessonCanSelect(kept)) {
+        // Adopt refreshed metadata (live cutoff, availability) in place. The
+        // running stream is never reopened by a refresh.
+        final cutoffChanged = kept.liveEndTime != _lesson.liveEndTime;
+        if (!identical(kept, _lesson)) _publish(() => _lesson = kept);
+        if (kept.isLive && cutoffChanged) _startLiveTimers(_loadRevision);
+        if (!_loading && (_playback == null || _failure != null)) {
+          await _loadLesson(kept);
         }
+        return;
+      }
+      final selected = preferredRecordingLesson(ordered,
+          currentId: _lesson.id, currentIsLive: _lesson.isLive);
+      if (background && !_loading && _playback != null) {
+        // A background reconciliation only refreshes the list; it must never
+        // stop or replace a stream the user is already watching.
+        return;
+      }
+      if (selected != null) {
+        await _loadLesson(selected);
       } else {
         await _player?.pause();
         await _disposeRtc();
@@ -508,6 +517,12 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
       }
     } on Object catch (error) {
       if (!mounted || revision != _catalogRevision) return;
+      if (background) {
+        // The list is already on screen from the caller; a failed silent
+        // reconciliation keeps playback and the progress bar untouched.
+        _catalogSyncing = false;
+        return;
+      }
       if (widget.loadPreviewCatalog &&
               _validLesson(_lesson) &&
               error is! VodWebVpnSessionExpiredException ||
@@ -518,7 +533,7 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
         _publish(() => _catalogLoading = false);
         if (error is! VodPermissionException) {
           ScaffoldMessenger.of(context)
-              .showSnackBar(const SnackBar(content: Text('选集刷新失败，请稍后下拉重试')));
+              .showSnackBar(const SnackBar(content: Text('选集刷新失败，请稍后重试')));
         }
         return;
       }
@@ -541,8 +556,9 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
         };
       });
     } finally {
-      if (mounted && revision == _catalogRevision && _catalogPullRefreshing) {
-        _publish(() => _catalogPullRefreshing = false);
+      if (_catalogSyncing) _catalogSyncing = false;
+      if (mounted && revision == _catalogRevision && _catalogLoading) {
+        _publish(() => _catalogLoading = false);
       }
     }
   }
@@ -567,7 +583,9 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
     unawaited(_heartbeat(revision));
     _heartbeatTimer = Timer.periodic(
         const Duration(seconds: 60), (_) => unawaited(_heartbeat(revision)));
-    final end = playback.liveEndTime ?? _lesson.liveEndTime ?? _lesson.endTime;
+    // A catalog refresh can extend or shorten the broadcast; prefer the
+    // freshest lesson metadata over the cutoff captured when it was opened.
+    final end = _lesson.liveEndTime ?? playback.liveEndTime ?? _lesson.endTime;
     if (end == null) return;
     final remaining = end.difference(DateTime.now());
     _liveEndTimer = Timer(remaining.isNegative ? Duration.zero : remaining, () {
@@ -756,9 +774,8 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
           item.isLive == lesson.isLive &&
           recordingLessonCanSelect(item));
 
-  Future<void> _loadNotes(VodLesson lesson, {bool forceRefresh = false}) async {
-    final warning =
-        await _notesController.load(lesson, forceRefresh: forceRefresh);
+  Future<void> _loadNotes(VodLesson lesson) async {
+    final warning = await _notesController.load(lesson);
     if (mounted && warning != null) {
       ScaffoldMessenger.maybeOf(context)?.showSnackBar(
         SnackBar(content: Text(warning)),
@@ -1675,7 +1692,6 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
           // A request issued under the old session may complete after login.
           _catalogRevision++;
           _catalogLoading = false;
-          _catalogPullRefreshing = false;
         }
       });
       var recovered = false;
@@ -2263,7 +2279,6 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
       _activeClassroom,
       _episodesNewestFirst,
       _catalogLoading,
-      _catalogPullRefreshing,
       _playback?.description,
       canSeek,
       colors,
@@ -2294,7 +2309,6 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
                   notes.loading || notes.lessonId == null && _catalogLoading,
               error: notes.lessonId == null ? '请先选择课次，再查看 PPT 笔记' : notes.error,
               canSeek: canSeek,
-              onRefresh: () => _loadNotes(_lesson, forceRefresh: true),
               onSeek: (position) {
                 if (!_loading &&
                     _failure == null &&
@@ -2423,7 +2437,6 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
       _activeClassroom,
       _episodesNewestFirst,
       _catalogLoading,
-      _catalogPullRefreshing,
       _lesson.id,
       _playback?.description,
       colors,
@@ -2447,7 +2460,7 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
               builder: (context, constraints) => SliverOverlapInjector(
                   handle: NestedScrollView.sliverOverlapAbsorberHandleFor(
                       context))),
-        if (_catalogLoading && !_catalogPullRefreshing)
+        if (_catalogLoading)
           const SliverToBoxAdapter(
               child: LinearProgressIndicator(
                   key: ValueKey('recording-catalog-progress'), minHeight: 2)),
@@ -2532,17 +2545,11 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
       behavior: ScrollConfiguration.of(context).copyWith(overscroll: false),
       child: content,
     );
-    final result = widget.repository == null || !_shouldLoadCatalog
-        ? viewport
-        : RefreshIndicator(
-            notificationPredicate: (notification) =>
-                (!_catalogLoading || _catalogPullRefreshing) &&
-                defaultScrollNotificationPredicate(notification),
-            onRefresh: () => _loadCatalog(forceRefresh: true, fromPull: true),
-            child: viewport,
-          );
-    _lessonListCache[nested] = (signature, result);
-    return result;
+    // Pull-to-refresh is intentionally absent: the catalog is reconciled with
+    // the server when the page opens and after a lesson ends, so a manual
+    // gesture would only duplicate work and interrupt playback.
+    _lessonListCache[nested] = (signature, viewport);
+    return viewport;
   }
 
   void _scrollToEpisode(int id,

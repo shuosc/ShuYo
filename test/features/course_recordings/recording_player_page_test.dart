@@ -258,6 +258,11 @@ class _DeniedCatalogRepository extends _PendingCatalogRepository {
   }
 }
 
+class _LiveCatalogRepository extends _PendingCatalogRepository {
+  @override
+  Future<void> keepLiveAlive(VodCourse course, VodLesson lesson) async {}
+}
+
 class _WebVpnHeartbeatRepository extends _PendingCatalogRepository {
   bool restored = false;
   int heartbeats = 0;
@@ -1485,7 +1490,6 @@ void main() {
     prepareNotesPortrait(tester);
     final harness = _PlaybackHarness();
     final requested = <int>[];
-    var secondAttempts = 0;
     var playbackRequests = 0;
     await tester.pumpWidget(page(
       harness: harness,
@@ -1496,8 +1500,7 @@ void main() {
       loadNotes: (id) async {
         requested.add(id);
         if (id == first.id) return [];
-        if (secondAttempts++ == 0) throw const VodNetworkException();
-        return [note];
+        throw const VodNetworkException();
       },
     ));
     await tester.pumpAndSettle();
@@ -1507,10 +1510,13 @@ void main() {
     expect(find.byKey(const ValueKey('recording-notes-empty')), findsOneWidget);
     expect(find.text('当前课次暂无 PPT 笔记'), findsOneWidget);
     expect(find.text('重试'), findsNothing);
+    // Notes no longer expose a pull gesture, so dragging leaves the state be.
+    expect(find.byType(RefreshIndicator), findsNothing);
     await tester.drag(find.byKey(const ValueKey('recording-notes-scroll')),
         const Offset(0, 350));
     await tester.pumpAndSettle();
-    expect(requested, [first.id, first.id]);
+    expect(requested, [first.id]);
+    expect(notesTabLabel(tester), '笔记 0');
     tester
         .widget<RecordingVideoControls>(find.byType(RecordingVideoControls))
         .onLessonSelected!(second);
@@ -1520,16 +1526,7 @@ void main() {
     final opens =
         harness.platforms.map((player) => player.opened.length).toList();
     expect(find.text('重试'), findsNothing);
-    await tester.drag(find.byKey(const ValueKey('recording-notes-scroll')),
-        const Offset(0, 350));
-    await tester.pumpAndSettle();
-    expect(notesTabLabel(tester), '笔记 1');
-    expect(find.text(note.text), findsOneWidget);
-    await tester.drag(find.byKey(const ValueKey('recording-notes-scroll')),
-        const Offset(0, 350));
-    await tester.pumpAndSettle();
-    expect(notesTabLabel(tester), '笔记 1');
-    expect(requested, [first.id, first.id, second.id, second.id, second.id]);
+    expect(requested, [first.id, second.id]);
     expect(playbackRequests, 2);
     expect(harness.platforms.map((player) => player.opened.length), opens);
     expect(tester.takeException(), isNull);
@@ -1593,10 +1590,12 @@ void main() {
       final opens =
           harness.platforms.map((player) => player.opened.length).toList();
 
+      // Dragging the notes list must not trigger another request.
+      expect(find.byType(RefreshIndicator), findsNothing);
       await tester.drag(find.byKey(const ValueKey('recording-notes-scroll')),
           const Offset(0, 350));
       await tester.pumpAndSettle();
-      expect(requests, [first.id, first.id]);
+      expect(requests, [first.id]);
       expect(notesTabLabel(tester), accepted ? '笔记 0' : '笔记');
       expect(find.byKey(const ValueKey('recording-notes-empty')),
           accepted ? findsOneWidget : findsNothing);
@@ -1610,10 +1609,10 @@ void main() {
     });
   }
 
-  testWidgets('a pending pull refresh cannot overwrite a new lesson',
+  testWidgets('a pending notes request cannot overwrite a new lesson',
       (tester) async {
     prepareNotesPortrait(tester);
-    final pendingRefresh = Completer<List<VodPptSlide>>();
+    final pendingNotes = Completer<List<VodPptSlide>>();
     var firstRequests = 0;
     await tester.pumpWidget(page(
       harness: _PlaybackHarness(),
@@ -1621,25 +1620,17 @@ void main() {
       loadNotes: (id) {
         if (id == second.id) return Future.value([anotherNote]);
         if (firstRequests++ == 0) return Future.value([note]);
-        return pendingRefresh.future;
+        return pendingNotes.future;
       },
     ));
     await tester.pumpAndSettle();
     await tester.tap(find.byKey(const ValueKey('recording-notes-tab-label')));
     await tester.pumpAndSettle();
-    await tester.drag(find.byKey(const ValueKey('recording-notes-scroll')),
-        const Offset(0, 350));
-    await tester.pump();
-    await tester.pump(const Duration(seconds: 1));
-    expect(firstRequests, 2);
-    expect(find.text(note.text), findsOneWidget);
-    expect(find.byKey(const ValueKey('recording-notes-loading')), findsNothing);
-    expect(find.byType(RefreshProgressIndicator), findsOneWidget);
     tester
         .widget<RecordingVideoControls>(find.byType(RecordingVideoControls))
         .onLessonSelected!(second);
     await tester.pump(const Duration(milliseconds: 300));
-    pendingRefresh.complete([note]);
+    pendingNotes.complete([note]);
     await tester.pumpAndSettle();
     expect(find.text(anotherNote.text), findsOneWidget);
     expect(find.text(note.text), findsNothing);
@@ -1661,15 +1652,15 @@ void main() {
     expect(find.byKey(const ValueKey('recording-notes-error')), findsOneWidget);
     expect(find.byKey(const ValueKey('recording-notes-empty')), findsNothing);
     expect(notesTabLabel(tester), '笔记');
-    expect(find.text('暂时无法加载这节课的 PPT 笔记，请稍后下拉重试'), findsOneWidget);
+    expect(find.text('暂时无法加载这节课的 PPT 笔记，请稍后重试'), findsOneWidget);
     await tester.pumpWidget(const SizedBox.shrink());
   });
 
   for (final failure in <(VodApiException, String)>[
-    (const VodNetworkException(), '暂时无法加载这节课的 PPT 笔记，请稍后下拉重试'),
+    (const VodNetworkException(), '暂时无法加载这节课的 PPT 笔记，请稍后重试'),
     (const VodSessionExpiredException(), '校园账户登录已失效，请重新进入录播平台后重试'),
-    (const VodPermissionException(), '平台暂未允许读取这节课的 PPT 笔记，请稍后下拉重试'),
-    (const VodInvalidResponseException(), '平台返回的 PPT 笔记数据异常，请稍后下拉重试'),
+    (const VodPermissionException(), '平台暂未允许读取这节课的 PPT 笔记，请稍后重试'),
+    (const VodInvalidResponseException(), '平台返回的 PPT 笔记数据异常，请稍后重试'),
   ]) {
     testWidgets('${failure.$1.runtimeType} is not displayed as no notes',
         (tester) async {
@@ -1693,100 +1684,22 @@ void main() {
     });
   }
 
-  testWidgets('failed refresh replaces a previous empty result with an error',
+  testWidgets('a failed notes load surfaces the error for that lesson',
       (tester) async {
     prepareNotesPortrait(tester);
-    var requests = 0;
     await tester.pumpWidget(page(
       harness: _PlaybackHarness(),
       load: (lesson) async => playback(lesson),
-      loadNotes: (_) async {
-        if (++requests == 2) throw const VodNetworkException();
-        return [];
-      },
+      loadNotes: (_) async => throw const VodNetworkException(),
     ));
     await tester.pumpAndSettle();
     await tester.tap(find.byKey(const ValueKey('recording-notes-tab-label')));
-    await tester.pumpAndSettle();
-    expect(find.byKey(const ValueKey('recording-notes-empty')), findsOneWidget);
-    expect(notesTabLabel(tester), '笔记 0');
-    await tester.drag(find.byKey(const ValueKey('recording-notes-scroll')),
-        const Offset(0, 350));
     await tester.pumpAndSettle();
     expect(find.byKey(const ValueKey('recording-notes-error')), findsOneWidget);
     expect(find.byKey(const ValueKey('recording-notes-empty')), findsNothing);
     expect(notesTabLabel(tester), '笔记');
-    await tester.drag(find.byKey(const ValueKey('recording-notes-scroll')),
-        const Offset(0, 350));
-    await tester.pumpAndSettle();
-    expect(requests, 3);
-    expect(find.byKey(const ValueKey('recording-notes-empty')), findsOneWidget);
-    expect(find.byKey(const ValueKey('recording-notes-error')), findsNothing);
-    expect(notesTabLabel(tester), '笔记 0');
+    expect(find.text('暂时无法加载这节课的 PPT 笔记，请稍后重试'), findsOneWidget);
     expect(tester.takeException(), isNull);
-    await tester.pumpWidget(const SizedBox.shrink());
-  });
-
-  testWidgets('empty notes stay visible while pull refresh is pending',
-      (tester) async {
-    prepareNotesPortrait(tester);
-    final pendingRefresh = Completer<List<VodPptSlide>>();
-    var requests = 0;
-    await tester.pumpWidget(page(
-      harness: _PlaybackHarness(),
-      load: (lesson) async => playback(lesson),
-      loadNotes: (_) =>
-          ++requests == 1 ? Future.value([]) : pendingRefresh.future,
-    ));
-    await tester.pumpAndSettle();
-    await tester.tap(find.byKey(const ValueKey('recording-notes-tab-label')));
-    await tester.pumpAndSettle();
-    expect(notesTabLabel(tester), '笔记 0');
-    await tester.drag(find.byKey(const ValueKey('recording-notes-scroll')),
-        const Offset(0, 350));
-    await tester.pump();
-    await tester.pump(const Duration(seconds: 1));
-    expect(requests, 2);
-    expect(find.byKey(const ValueKey('recording-notes-empty')), findsOneWidget);
-    expect(find.byKey(const ValueKey('recording-notes-loading')), findsNothing);
-    expect(find.byType(RefreshProgressIndicator), findsOneWidget);
-    expect(notesTabLabel(tester), '笔记 0');
-    pendingRefresh.complete([note]);
-    await tester.pumpAndSettle();
-    expect(find.text(note.text), findsOneWidget);
-    expect(notesTabLabel(tester), '笔记 1');
-    await tester.pumpWidget(const SizedBox.shrink());
-  });
-
-  testWidgets('failed pull refresh retains existing notes and reports failure',
-      (tester) async {
-    prepareNotesPortrait(tester);
-    final pendingRefresh = Completer<List<VodPptSlide>>();
-    var requests = 0;
-    await tester.pumpWidget(page(
-      harness: _PlaybackHarness(),
-      load: (lesson) async => playback(lesson),
-      loadNotes: (_) =>
-          ++requests == 1 ? Future.value([note]) : pendingRefresh.future,
-    ));
-    await tester.pumpAndSettle();
-    await tester.tap(find.byKey(const ValueKey('recording-notes-tab-label')));
-    await tester.pumpAndSettle();
-    await tester.drag(find.byKey(const ValueKey('recording-notes-scroll')),
-        const Offset(0, 350));
-    await tester.pump();
-    await tester.pump(const Duration(seconds: 1));
-    expect(requests, 2);
-    expect(find.text(note.text), findsOneWidget);
-    expect(find.byKey(const ValueKey('recording-notes-loading')), findsNothing);
-    expect(notesTabLabel(tester), '笔记 1');
-    pendingRefresh.completeError(const VodNetworkException());
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 300));
-    expect(find.text(note.text), findsOneWidget);
-    expect(notesTabLabel(tester), '笔记 1');
-    expect(find.text('暂时无法加载这节课的 PPT 笔记，请稍后下拉重试'), findsOneWidget);
-    expect(find.text('重试'), findsNothing);
     await tester.pumpWidget(const SizedBox.shrink());
   });
 
@@ -3326,7 +3239,7 @@ void main() {
     await tester.pumpWidget(const SizedBox.shrink());
   });
 
-  testWidgets('portrait nested episode list keeps pull-to-refresh working',
+  testWidgets('portrait episode list has no pull-to-refresh gesture',
       (tester) async {
     tester.view.physicalSize = const Size(393, 852);
     tester.view.devicePixelRatio = 1;
@@ -3335,8 +3248,6 @@ void main() {
     final repository = _PendingCatalogRepository();
     repository.catalog.complete([first, second]);
     repository.playback.complete(playback(first));
-    final refresh = Completer<List<VodLesson>>();
-    repository.refreshCatalog = refresh.future;
     final harness = _PlaybackHarness();
     await tester.pumpWidget(MaterialApp(
       home: RecordingPlayerPage(
@@ -3349,27 +3260,128 @@ void main() {
     ));
     await tester.pumpAndSettle();
     expect(repository.catalogRequests, 1);
+    expect(find.byType(RefreshIndicator), findsNothing);
     await tester.drag(find.byKey(const ValueKey('course-player-episodes')),
         const Offset(0, 400));
-    for (var frame = 0; frame < 20 && repository.catalogRequests < 2; frame++) {
-      await tester.pump(const Duration(milliseconds: 100));
-    }
-    await tester.pump();
-    expect(repository.catalogRequests, 2);
-    final progress = find.byKey(const ValueKey('recording-catalog-progress'));
-    expect(progress, findsNothing);
-    expect(find.byType(RefreshProgressIndicator), findsOneWidget);
-    await tester
-        .widget<RefreshIndicator>(find.byType(RefreshIndicator))
-        .onRefresh();
-    expect(repository.catalogRequests, 2);
-    refresh.complete([first, second]);
     await tester.pumpAndSettle();
-    expect(progress, findsNothing);
+    // The pull no longer issues a request or shows an indicator.
+    expect(repository.catalogRequests, 1);
     expect(find.byType(RefreshProgressIndicator), findsNothing);
     expect(repository.requested, hasLength(1));
     expect(
         harness.platforms.every((player) => player.opened.length == 1), isTrue);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('opening with a live seed reconciles without reopening playback',
+      (tester) async {
+    prepareNotesPortrait(tester);
+    final repository = _LiveCatalogRepository();
+    final live = VodLesson(
+      id: 301,
+      teachingClassId: course.teachingClassId,
+      name: course.name,
+      isPlayable: true,
+      isLive: true,
+      beginTime: DateTime(2026, 11, 9, 8),
+      liveEndTime: DateTime.now().add(const Duration(hours: 1)),
+    );
+    VodPlayback livePlayback(VodLesson lesson) => VodPlayback(
+          lessonId: lesson.id,
+          teachingClassId: course.teachingClassId,
+          title: course.name,
+          isLive: true,
+          liveEndTime: lesson.liveEndTime,
+          views: [
+            VodView(
+                viewNumber: 1,
+                url: Uri.https('media.example', '/live-classroom')),
+          ],
+        );
+    repository.catalog.complete([live]);
+    final extended =
+        live.withLiveEndTime(DateTime.now().add(const Duration(hours: 2)));
+    repository.refreshCatalog = Future.value([extended]);
+    final harness = _PlaybackHarness();
+    final requested = <int>[];
+    await tester.pumpWidget(MaterialApp(
+      home: RecordingPlayerPage(
+        course: course,
+        initialLesson: live,
+        lessons: [live],
+        skipInitialCatalogLoad: true,
+        repository: repository,
+        liveProxyFactory: (_) => _FakeLiveProxy(),
+        loadNotes: (_) async => [],
+        loadPlayback: (lesson) async {
+          requested.add(lesson.id);
+          return livePlayback(lesson);
+        },
+        playerFactory: harness.createPlayer,
+        videoControllerFactory: harness.createController,
+      ),
+    ));
+    // A live lesson keeps its status icon animating, so settle with fixed
+    // pumps instead of pumpAndSettle.
+    for (var frame = 0; frame < 8; frame++) {
+      await tester.pump(const Duration(milliseconds: 100));
+    }
+    expect(requested, [live.id]);
+    expect(find.text('视频暂时无法播放，可刷新播放地址后重试。'), findsNothing);
+    final opened = harness.platforms.first.opened.length;
+    // The seeded list is reconciled once in the background.
+    expect(repository.catalogRequests, 1);
+
+    // The refreshed metadata replaces the catalog entry in place: the running
+    // stream is neither reopened nor asked for another playback URL.
+    expect(requested, [live.id]);
+    expect(harness.platforms.first.opened, hasLength(opened));
+    expect(find.byType(RefreshIndicator), findsNothing);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('a background reconciliation never stops a playing live lesson',
+      (tester) async {
+    prepareNotesPortrait(tester);
+    final repository = _LiveCatalogRepository();
+    final live = VodLesson(
+      id: 301,
+      teachingClassId: course.teachingClassId,
+      name: course.name,
+      isPlayable: true,
+      isLive: true,
+      beginTime: DateTime(2026, 11, 9, 8),
+    );
+    repository.catalog.complete([live, second]);
+    final harness = _PlaybackHarness();
+    final requested = <int>[];
+    await tester.pumpWidget(MaterialApp(
+      home: RecordingPlayerPage(
+        course: course,
+        initialLesson: live,
+        lessons: [live, second],
+        skipInitialCatalogLoad: true,
+        repository: repository,
+        liveProxyFactory: (_) => _FakeLiveProxy(),
+        loadNotes: (_) async => [],
+        loadPlayback: (lesson) async {
+          requested.add(lesson.id);
+          return playback(lesson);
+        },
+        playerFactory: harness.createPlayer,
+        videoControllerFactory: harness.createController,
+      ),
+    ));
+    for (var frame = 0; frame < 8; frame++) {
+      await tester.pump(const Duration(milliseconds: 100));
+    }
+    expect(requested, [live.id]);
+    // The background list refresh drops the ended live entry but must leave
+    // the running stream untouched; the live-end timer owns the transition.
+    expect(find.byType(RefreshIndicator), findsNothing);
+    expect(requested, [live.id]);
     expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox.shrink());
   });
@@ -5072,7 +5084,7 @@ void main() {
 
   for (final preview in [false, true]) {
     testWidgets(
-        '${preview ? 'preview' : 'course'} uses the preloaded catalog until a manual refresh',
+        '${preview ? 'preview' : 'course'} reconciles the preloaded catalog in the background',
         (tester) async {
       final regular = _PendingCatalogRepository();
       final search = _PendingPreviewRepository();
@@ -5102,20 +5114,18 @@ void main() {
         ),
       ));
       await tester.pumpAndSettle();
-      expect(regular.catalogRequests, 0);
-      expect(search.requests, isEmpty);
-      expect(requested, [first.id]);
-      expect(
-          find.byKey(const ValueKey('recording-lesson-102')), findsOneWidget);
-      await tester
-          .widget<RefreshIndicator>(find.byType(RefreshIndicator))
-          .onRefresh();
-      await tester.pumpAndSettle();
+      // The handed-over list paints first, then one silent request refreshes it.
       if (preview) {
-        expect(search.requests.single.forceRefresh, isTrue);
+        expect(search.requests, hasLength(1));
+        expect(search.requests.single.forceRefresh, isFalse);
       } else {
         expect(regular.catalogRequests, 1);
       }
+      expect(requested, [first.id]);
+      expect(
+          find.byKey(const ValueKey('recording-lesson-102')), findsOneWidget);
+      // No manual refresh gesture is exposed any more.
+      expect(find.byType(RefreshIndicator), findsNothing);
       expect(requested, [first.id]);
       expect(tester.takeException(), isNull);
       await tester.pumpWidget(const SizedBox.shrink());
@@ -5143,7 +5153,8 @@ void main() {
       ),
     ));
     await tester.pumpAndSettle();
-    expect(repository.catalogRequests, 0);
+    // One silent background reconciliation, then nothing else.
+    expect(repository.catalogRequests, 1);
     expect(requested, [second.id]);
     expect(harness.platforms.first.opened, hasLength(1));
     expect(tester.takeException(), isNull);
@@ -5207,12 +5218,14 @@ void main() {
       ),
     ));
     await tester.pumpAndSettle();
-    expect(repository.requests, isEmpty);
+    // One silent reconciliation on open, then the recovery keeps its own.
+    expect(repository.requests, hasLength(1));
+    expect(repository.requests.single.forceRefresh, isFalse);
     await tester.tap(find.text('重新登录'));
     await tester.pumpAndSettle();
     expect(recoveries, 1);
     expect(attempts, 2);
-    expect(repository.requests.single.forceRefresh, isTrue);
+    expect(repository.requests.last.forceRefresh, isTrue);
     expect(harness.platforms.first.opened, hasLength(1));
     expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox.shrink());
@@ -5410,7 +5423,7 @@ void main() {
     expect(repository.requests.single.forceRefresh, isFalse);
     expect(find.byKey(const ValueKey('recording-catalog-progress')),
         findsOneWidget);
-    expect(find.byType(RefreshIndicator), findsOneWidget);
+    expect(find.byType(RefreshIndicator), findsNothing);
     await tester
         .ensureVisible(find.byKey(const ValueKey('recording-lesson-102')));
     await tester.pump();
@@ -5461,12 +5474,6 @@ void main() {
                 find.byKey(const ValueKey('recording-lesson-102')))
             .selected,
         isTrue);
-    repository.refreshCatalog = Future.value([statusUnknown]);
-    await tester
-        .widget<RefreshIndicator>(find.byType(RefreshIndicator))
-        .onRefresh();
-    await tester.pumpAndSettle();
-    expect(repository.requests.last.forceRefresh, isTrue);
     expect(repository.requested, [101, 102]);
     expect(find.byKey(const ValueKey('recording-lesson-101')), findsNothing);
     expect(find.byKey(const ValueKey('recording-lesson-102')), findsOneWidget);
@@ -5479,8 +5486,7 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('preview failure preserves playback failure and permits refresh',
-      (tester) async {
+  testWidgets('preview failure preserves playback failure', (tester) async {
     final repository = _PendingPreviewRepository();
     addTearDown(repository.dispose);
     await tester.pumpWidget(MaterialApp(
@@ -5501,15 +5507,9 @@ void main() {
     repository.catalog.completeError(const VodNetworkException());
     await tester.pump();
     expect(find.text('无法获取这节录播的播放地址，请稍后重试。'), findsOneWidget);
-    expect(find.text('选集刷新失败，请稍后下拉重试'), findsOneWidget);
+    expect(find.text('选集刷新失败，请稍后重试'), findsOneWidget);
     expect(repository.requested, [101]);
-    repository.refreshCatalog = Future.value([]);
-    await tester
-        .widget<RefreshIndicator>(find.byType(RefreshIndicator))
-        .onRefresh();
-    await tester.pump();
-    expect(repository.requests.last.forceRefresh, isTrue);
-    expect(repository.requested, [101]);
+    expect(find.byType(RefreshIndicator), findsNothing);
     expect(find.text('无法获取这节录播的播放地址，请稍后重试。'), findsOneWidget);
     expect(find.byKey(const ValueKey('recording-lesson-102')), findsOneWidget);
     expect(tester.takeException(), isNull);
@@ -5619,7 +5619,7 @@ void main() {
       expect(repository.catalogRequests, 1);
       expect(repository.requested, [first]);
       expect(find.text('无法获取这节录播的播放地址，请稍后重试。'), findsNothing);
-      expect(find.text('选集刷新失败，请稍后下拉重试'), findsNothing);
+      expect(find.text('选集刷新失败，请稍后重试'), findsNothing);
       if (playbackDenied) {
         repository.playback.completeError(const VodPermissionException());
       } else {
@@ -5667,7 +5667,7 @@ void main() {
     expect(platform.state.playing, isTrue);
     expect(platform.pauses, pauses);
     expect(find.text('无法获取这节录播的播放地址，请稍后重试。'), findsNothing);
-    expect(find.text('选集刷新失败，请稍后下拉重试'), findsNothing);
+    expect(find.text('选集刷新失败，请稍后重试'), findsNothing);
     expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox.shrink());
     await tester.pump();
@@ -5723,11 +5723,8 @@ void main() {
     await tester.pump(const Duration(milliseconds: 400));
     expect(repository.catalogRequests, 1);
     expect(progress, findsOneWidget);
+    expect(find.byType(RefreshIndicator), findsNothing);
     expect(find.byType(RefreshProgressIndicator), findsNothing);
-    await tester
-        .widget<RefreshIndicator>(find.byType(RefreshIndicator))
-        .onRefresh();
-    expect(repository.catalogRequests, 1);
     repository.catalog.complete([live, first]);
     await tester.pump();
     expect(progress, findsNothing);
