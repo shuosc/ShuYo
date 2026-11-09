@@ -112,7 +112,19 @@ void main() {
     );
   });
 
-  for (final status in [401, 403]) {
+  for (final status in [401, 403, 901]) {
+    test('HTTP $status on the index requires session recovery', () async {
+      final api = AcademicScheduleApiClient(
+        authService: _Auth(),
+        httpClient: MockClient((_) async => http.Response('', status)),
+      );
+      await expectLater(
+        api.fetchTermCatalog(),
+        throwsA(isA<AcademicAuthException>()
+            .having((error) => error.statusCode, 'statusCode', status)),
+      );
+    });
+
     test('HTTP $status pauses discovery as authentication failure', () async {
       final api = AcademicScheduleApiClient(
         authService: _Auth(),

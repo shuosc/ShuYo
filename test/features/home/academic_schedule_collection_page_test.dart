@@ -48,6 +48,7 @@ AcademicSchedule _schedule(AcademicTermQuery query, {String? name}) {
 class _Api extends AcademicScheduleApiClient {
   int requests = 0;
   int catalogRequests = 0;
+  final requestedTerms = <String>[];
   bool authExpired = false;
   String? historicalName;
   final emptyTerms = <String>{};
@@ -57,22 +58,23 @@ class _Api extends AcademicScheduleApiClient {
   @override
   Future<AcademicTermCatalog> fetchTermCatalog() async {
     catalogRequests++;
-    if (authExpired) throw const AcademicAuthException();
+    if (authExpired) throw const AcademicAuthException('expired', 901);
     return AcademicTermCatalog(currentTerm: _current, terms: terms);
   }
 
   @override
   Future<AcademicSchedule> fetchCurrentSchedule() async {
     requests++;
-    if (authExpired) throw const AcademicAuthException();
+    if (authExpired) throw const AcademicAuthException('expired', 901);
     return _schedule(_current);
   }
 
   @override
   Future<AcademicSchedule> fetchScheduleForTerm(AcademicTermQuery query) async {
     requests++;
+    requestedTerms.add(query.key);
     await refreshGate?.future;
-    if (authExpired) throw const AcademicAuthException();
+    if (authExpired) throw const AcademicAuthException('expired', 901);
     final schedule = _schedule(query,
         name: query.key == _history.key ? historicalName : null);
     return emptyTerms.contains(query.key)
@@ -359,6 +361,141 @@ void main() {
     expect(find.text('查找其他课表'), findsOneWidget);
     expect(recoveries, 0);
     expect(api.catalogRequests, requests);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('manual refresh restores SSO and retries without logging out',
+      (tester) async {
+    final requests = api.requests;
+    var recoveries = 0;
+    var legacyLogins = 0;
+    api.authExpired = true;
+    await showPage(tester, onLoginRequired: () async {
+      legacyLogins++;
+    }, onRecoverSession: () async {
+      recoveries++;
+      api.authExpired = false;
+      return true;
+    });
+    await refreshViewedTerm(tester);
+    expect(recoveries, 1);
+    expect(legacyLogins, 0);
+    expect(api.requests, requests + 2);
+    expect(await AcademicAccountStore().loadStudentId(), 'TEST_STUDENT');
+    expect(find.textContaining('课表已同步'), findsOneWidget);
+    expect(find.text('课表刷新失败'), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('historical refresh retries the selected term after SSO recovery',
+      (tester) async {
+    var recoveries = 0;
+    await showPage(tester, onRecoverSession: () async {
+      recoveries++;
+      api.authExpired = false;
+      api.historicalName = '恢复后的历史课程';
+      return true;
+    });
+    await viewHistory(tester);
+    api.authExpired = true;
+    final requests = api.requests;
+    await refreshViewedTerm(tester);
+    expect(recoveries, 1);
+    expect(api.requests, requests + 2);
+    expect(await repository.loadPrimaryTermKey(), _current.key);
+    expect(
+        (await repository.loadTermRecord(_history.key))!
+            .schedule!
+            .sessions
+            .every((course) => course.courseName == '恢复后的历史课程'),
+        isTrue);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('recovery cannot redirect a refresh to a newly selected primary',
+      (tester) async {
+    await showPage(tester, onRecoverSession: () async {
+      api.authExpired = false;
+      await repository.setPrimaryTerm(_history.key);
+      return true;
+    });
+    api.authExpired = true;
+    await refreshViewedTerm(tester);
+    expect(api.requestedTerms.sublist(api.requestedTerms.length - 2),
+        [_current.key, _current.key]);
+    expect(await repository.loadPrimaryTermKey(), _history.key);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('management update restores SSO and retries the same term',
+      (tester) async {
+    var recoveries = 0;
+    await showPage(tester, onRecoverSession: () async {
+      recoveries++;
+      api.authExpired = false;
+      api.historicalName = '管理页恢复后的课程';
+      return true;
+    });
+    await openManager(tester);
+    api.authExpired = true;
+    final requests = api.requests;
+    await tester.tap(find.descendant(
+      of: find.byKey(ValueKey('managed-schedule-${_history.key}')),
+      matching: find.byType(PopupMenuButton<String>),
+    ));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('更新这一学期'));
+    await tester.pumpAndSettle();
+    expect(recoveries, 1);
+    expect(api.requests, requests + 2);
+    expect(find.text('这一学期的课表已更新'), findsOneWidget);
+    expect(
+        (await repository.loadTermRecord(_history.key))!
+            .schedule!
+            .sessions
+            .every((course) => course.courseName == '管理页恢复后的课程'),
+        isTrue);
+    expect(await repository.loadPrimaryTermKey(), _current.key);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('failed manual recovery keeps saved schedules without retrying',
+      (tester) async {
+    final requests = api.requests;
+    final cached = (await repository.loadCachedSchedule())!.toJson();
+    var recoveries = 0;
+    api.authExpired = true;
+    await showPage(tester, onRecoverSession: () async {
+      recoveries++;
+      return false;
+    });
+    await refreshViewedTerm(tester);
+    expect(recoveries, 1);
+    expect(api.requests, requests + 1);
+    expect((await repository.loadCachedSchedule())!.toJson(), cached);
+    expect((await repository.loadSavedSchedules()).length, 2);
+    expect(find.text('课表刷新失败'), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('persistent manual expiry does not recover in a loop',
+      (tester) async {
+    final requests = api.requests;
+    var recoveries = 0;
+    var legacyLogins = 0;
+    api.authExpired = true;
+    await showPage(tester, onLoginRequired: () async {
+      legacyLogins++;
+    }, onRecoverSession: () async {
+      recoveries++;
+      return true;
+    });
+    await refreshViewedTerm(tester);
+    expect(recoveries, 1);
+    expect(legacyLogins, 0);
+    expect(api.requests, requests + 2);
+    expect(find.text('教务登录恢复后仍无法同步，请稍后重试'), findsOneWidget);
+    expect((await repository.loadSavedSchedules()).length, 2);
     expect(tester.takeException(), isNull);
   });
 

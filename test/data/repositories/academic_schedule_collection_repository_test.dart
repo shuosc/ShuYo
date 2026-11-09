@@ -272,7 +272,7 @@ void main() {
   test(
       'authentication failure pauses the queue without recording an empty term',
       () async {
-    api.errors[history.key] = const AcademicAuthException();
+    api.errors[history.key] = const AcademicAuthException('expired', 901);
     await repo.refreshSchedule();
     await repo.discoverSchedules(now: now);
     expect(repo.discoveryState.value.requiresLogin, isTrue);

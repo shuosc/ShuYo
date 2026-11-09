@@ -10,6 +10,7 @@ import '../../data/models/academic_schedule.dart';
 import '../../data/models/academic_schedule_collection.dart';
 import '../../data/repositories/academic_schedule_repository.dart';
 import '../../data/services/academic_schedule_api_client.dart';
+import '../../data/services/academic_session_recovery.dart';
 import '../../data/services/academic_schedule_display_settings_service.dart';
 import '../../data/services/academic_schedule_notification_service.dart';
 import '../../data/services/academic_schedule_widget_service.dart';
@@ -447,14 +448,23 @@ class _AcademicSchedulePageState extends State<AcademicSchedulePage> {
     final targetKey = _viewedTermKey;
     final targetName = _schedule?.term.displayName ?? '这一学期';
     final targetIsPrimary = _viewingPrimary || targetKey == null;
+    var retrying = false;
     setState(() => _refreshing = true);
     if (kDebugMode) debugPrint('[SHU_SCHEDULE_FLOW] manual refresh start');
     try {
       try {
-        final schedule = targetIsPrimary
-            ? await widget.repository.refreshSchedule()
-            : await widget.repository
-                .refreshTerm(targetKey, replaceEdited: true);
+        final schedule = await requestWithAcademicSessionRecovery(
+          request: () => targetKey == null || (targetIsPrimary && !retrying)
+              ? widget.repository.refreshSchedule()
+              : widget.repository.refreshTerm(targetKey, replaceEdited: true),
+          recoverSession: () {
+            // The primary term can change while SSO is being restored. Retry
+            // the term that this action originally requested, not the new one.
+            retrying = true;
+            return _recoverSession();
+          },
+        );
+        if (schedule == null || !mounted) return;
         final weekState = targetIsPrimary
             ? await widget.repository.loadWeekState()
             : await widget.repository.loadTermWeekState(targetKey);
@@ -526,7 +536,10 @@ class _AcademicSchedulePageState extends State<AcademicSchedulePage> {
           stackTrace: stackTrace,
         );
       }
-      await _handleLoginRequired();
+      await _showErrorDialog(
+        title: '课表刷新失败',
+        message: '教务登录恢复后仍无法同步，请稍后重试',
+      );
     } on Object catch (error, stackTrace) {
       if (kDebugMode) {
         debugPrint('[SHU_SCHEDULE_FLOW] manual refresh failed: $error');
@@ -603,6 +616,17 @@ class _AcademicSchedulePageState extends State<AcademicSchedulePage> {
       _displaySettings = settings;
     });
     _showSnack('已随机分配颜色');
+  }
+
+  Future<bool> _recoverSession() async {
+    if (!mounted) return false;
+    final recover = widget.onRecoverSession;
+    if (recover != null) {
+      final recovered = await recover();
+      return mounted && recovered;
+    }
+    await _handleLoginRequired();
+    return mounted;
   }
 
   Future<void> _handleLoginRequired() async {

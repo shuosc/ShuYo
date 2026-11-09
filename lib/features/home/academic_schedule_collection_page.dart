@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import '../../data/models/academic_schedule_collection.dart';
 import '../../data/repositories/academic_schedule_repository.dart';
 import '../../data/services/academic_schedule_api_client.dart';
+import '../../data/services/academic_session_recovery.dart';
 import '../../shared/theme/shuyo_theme.dart';
 import '../../shared/time_format.dart';
 
@@ -284,7 +285,12 @@ class _CollectionPageState extends State<AcademicScheduleCollectionPage> {
     setState(() => _busy.add(record.key));
     try {
       try {
-        await widget.repository.refreshTerm(record.key, replaceEdited: true);
+        final schedule = await requestWithAcademicSessionRecovery(
+          request: () =>
+              widget.repository.refreshTerm(record.key, replaceEdited: true),
+          recoverSession: _recoverSession,
+        );
+        if (schedule == null || !mounted) return;
         if (record.key == _primary) await widget.onPrimaryChanged();
         _message('这一学期的课表已更新');
       } on AcademicNoScheduleException {
@@ -299,8 +305,7 @@ class _CollectionPageState extends State<AcademicScheduleCollectionPage> {
         }
       }
     } on AcademicAuthException {
-      await widget.onLoginRequired();
-      _message('登录恢复后，请再次更新这一学期');
+      _message('教务登录恢复后仍无法同步，请稍后重试');
     } on Object catch (error) {
       _message(error.toString());
     } finally {
@@ -310,10 +315,14 @@ class _CollectionPageState extends State<AcademicScheduleCollectionPage> {
   }
 
   Future<bool> _recoverSession() async {
+    if (!mounted) return false;
     final recover = widget.onRecoverSession;
-    if (recover != null) return recover();
+    if (recover != null) {
+      final recovered = await recover();
+      return mounted && recovered;
+    }
     await widget.onLoginRequired();
-    return true;
+    return mounted;
   }
 
   Future<void> _discover({bool full = false, bool failedOnly = false}) async {

@@ -309,7 +309,9 @@ class AcademicScheduleApiClient {
   Uri _uri(String path) => AcademicUrlResolver.uri(path);
 
   void _ensureSuccess(http.Response response) {
-    if (response.statusCode == 401 || response.statusCode == 403) {
+    if (response.statusCode == 401 ||
+        response.statusCode == 403 ||
+        response.statusCode == 901) {
       throw AcademicAuthException('教务登录已失效', response.statusCode);
     }
     if (response.statusCode < 200 || response.statusCode >= 300) {
