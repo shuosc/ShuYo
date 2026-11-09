@@ -1209,8 +1209,8 @@ void main() {
     // The glyph is a play triangle with a small cross in its bottom-right.
     final triangle = find.descendant(
         of: toggle, matching: find.byIcon(Icons.play_arrow_rounded));
-    final cross = find.descendant(
-        of: toggle, matching: find.byIcon(Icons.close_rounded));
+    final cross =
+        find.descendant(of: toggle, matching: find.byIcon(Icons.close_rounded));
     expect(triangle, findsOneWidget);
     expect(cross, findsOneWidget);
     final crossCenter = tester.getCenter(cross);
