@@ -867,52 +867,41 @@ class _LibraryBookingPageState extends State<LibraryBookingPage> {
 
   Widget _homeRecentSection() {
     final colors = context.shuyoColors;
-    final records = _homeActiveBookings();
+    final booking = _homeActiveBookings().firstOrNull;
     return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
       Padding(
         padding: const EdgeInsets.fromLTRB(0, 8, 16, 8),
         child: Text('我的预约', style: Theme.of(context).textTheme.titleLarge),
       ),
-      SizedBox(
+      ConstrainedBox(
         key: const ValueKey('home-bookings-viewport'),
-        width: double.infinity,
-        height: _homeBookingsHeight(),
-        child: SingleChildScrollView(
-          key: const ValueKey('home-bookings-scroll'),
-          primary: false,
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              if (records.isEmpty)
-                Padding(
-                  padding: const EdgeInsets.only(bottom: 16),
-                  child: Text(
-                      _bookingsLoading || !_homeCacheLoaded
-                          ? '加载中'
-                          : _bookingsIncomplete
-                              ? '预约列表暂时无法完整加载'
-                              : '暂无待履约或进行中的预约',
-                      style: TextStyle(color: colors.textTertiary)),
-                ),
-              if (!_bookingsLoading &&
-                  records.isNotEmpty &&
-                  _bookingsIncomplete)
-                Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 12),
-                  child: Text('部分预约状态暂时无法更新',
-                      style: TextStyle(color: colors.textTertiary)),
-                ),
-              for (final (index, item) in records.indexed) ...[
-                if (index > 0)
-                  CustomBackgroundScope.maybeOf(context) != null
-                      ? const SizedBox.shrink()
-                      : Divider(height: 1, color: colors.border),
-                _bookingTile(item, index,
-                    key: ValueKey<String>(
-                        'home:${ThereBookingClient.string(item['id'])}')),
-              ],
-            ],
-          ),
+        constraints: BoxConstraints(minHeight: _homeBookingsMinHeight()),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            if (booking == null)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 16),
+                child: Text(
+                    _bookingsLoading || !_homeCacheLoaded
+                        ? '加载中'
+                        : _bookingsIncomplete
+                            ? '预约列表暂时无法完整加载，请检查是否连接校园网'
+                            : '暂无待履约或进行中的预约',
+                    style: TextStyle(color: colors.textTertiary)),
+              ),
+            if (!_bookingsLoading && booking != null && _bookingsIncomplete)
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 12),
+                child: Text('部分预约状态暂时无法更新',
+                    style: TextStyle(color: colors.textTertiary)),
+              ),
+            if (booking != null)
+              _bookingTile(booking, 0,
+                  key: ValueKey<String>(
+                      'home:${ThereBookingClient.string(booking['id'])}')),
+          ],
         ),
       ),
       Align(
@@ -933,7 +922,7 @@ class _LibraryBookingPageState extends State<LibraryBookingPage> {
     ]);
   }
 
-  double _homeBookingsHeight() {
+  double _homeBookingsMinHeight() {
     final theme = Theme.of(context).textTheme;
     double lineHeight(TextStyle? style) {
       final painter = TextPainter(
@@ -948,8 +937,7 @@ class _LibraryBookingPageState extends State<LibraryBookingPage> {
       return height;
     }
 
-    // Reserve one typical row, including its padding and gaps.
-    // Wrapping titles and additional bookings scroll within the same space.
+    // Reserve one typical row while allowing wrapped content to grow.
     final rowHeight = 32 +
         7 +
         8 +
