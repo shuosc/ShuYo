@@ -6,9 +6,11 @@ import '../../core/classroom_url_resolver.dart';
 import '../../data/models/classroom.dart';
 import '../../data/repositories/classroom_repository.dart';
 import '../../data/services/classroom_api_client.dart';
+import '../../shared/navigation/shuyo_route.dart';
 import '../../shared/shuyo_text_styles.dart';
 import '../../shared/theme/shuyo_theme.dart';
 import '../../shared/widgets/empty_state.dart';
+import '../empty_classroom/classroom_search_page.dart';
 
 class EmptyClassroomPage extends StatefulWidget {
   const EmptyClassroomPage({
@@ -40,8 +42,14 @@ class _EmptyClassroomPageState extends State<EmptyClassroomPage> {
   late DateTime _selectedDate = widget.initialDate ?? DateTime.now();
   bool _loadingOptions = false;
   bool _refreshingOptions = false;
-  String _keyword = '';
+  bool _querying = false;
+  bool _pullRefreshing = false;
   bool _initialSelectionApplied = false;
+
+  /// AppBar 进度条只代表“非下拉刷新”的网络活动；下拉时由 [RefreshIndicator]
+  /// 自带的转圈负责，两者不同时出现。
+  bool get _toolbarBusy =>
+      (_refreshingOptions || _querying) && !_pullRefreshing;
 
   @override
   void initState() {
@@ -79,18 +87,22 @@ class _EmptyClassroomPageState extends State<EmptyClassroomPage> {
         title: const Text('空教室'),
         actions: [
           IconButton(
-            tooltip: '刷新',
-            onPressed: _refreshingOptions ? null : _refresh,
-            icon: _refreshingOptions
-                ? const SizedBox(
-                    width: 20,
-                    height: 20,
-                    child: CircularProgressIndicator(strokeWidth: 3),
-                  )
-                : const Icon(Icons.refresh),
+            key: const ValueKey('classroom-search-entry'),
+            tooltip: '搜索课程',
+            onPressed: _options == null ? null : _openSearch,
+            icon: const Icon(Icons.search),
           ),
           const SizedBox(width: 2),
         ],
+        bottom: PreferredSize(
+          preferredSize: const Size.fromHeight(3),
+          child: _toolbarBusy
+              ? const LinearProgressIndicator(
+                  key: ValueKey('classroom-toolbar-progress'),
+                  minHeight: 3,
+                )
+              : const SizedBox(height: 3),
+        ),
       ),
       body: _loadedBody(),
     );
@@ -150,7 +162,6 @@ class _EmptyClassroomPageState extends State<EmptyClassroomPage> {
           onPreviousRange: () => _stepRange(-1),
           onNextRange: () => _stepRange(1),
           onDateChanged: _setDate,
-          onKeywordChanged: (value) => setState(() => _keyword = value),
         ),
         Expanded(child: _resultBody()),
       ],
@@ -173,11 +184,8 @@ class _EmptyClassroomPageState extends State<EmptyClassroomPage> {
         // Keep it visible until the replacement is ready to avoid a flash.
         if (snapshot.hasData) {
           return RefreshIndicator(
-            onRefresh: _search,
-            child: _ClassroomResultList(
-              result: snapshot.data!,
-              keyword: _keyword,
-            ),
+            onRefresh: _refreshByPull,
+            child: _ClassroomResultList(result: snapshot.data!),
           );
         }
         if (snapshot.connectionState != ConnectionState.done) {
@@ -242,8 +250,31 @@ class _EmptyClassroomPageState extends State<EmptyClassroomPage> {
     }
   }
 
-  Future<void> _refresh() async {
-    await _loadOptions(force: true);
+  /// 下拉刷新走列表自己的转圈，不重复点亮 AppBar 进度条。
+  Future<void> _refreshByPull() async {
+    if (_pullRefreshing) return;
+    _pullRefreshing = true;
+    try {
+      await _search();
+    } finally {
+      _pullRefreshing = false;
+    }
+  }
+
+  Future<void> _openSearch() async {
+    final options = _options;
+    if (options == null) return;
+    await Navigator.of(context).push<void>(
+      shuyoRoute(
+        builder: (_) => ClassroomSearchPage(
+          repository: widget.repository,
+          options: options,
+          initialDate: _selectedDate,
+          initialCampus: _selectedCampus ?? widget.initialCampus,
+          onWebVpnRecoveryRequired: widget.onWebVpnRecoveryRequired,
+        ),
+      ),
+    );
   }
 
   Future<T> _withWebVpnRecovery<T>(Future<T> Function() operation) async {
@@ -370,8 +401,13 @@ class _EmptyClassroomPageState extends State<EmptyClassroomPage> {
     );
     setState(() {
       _resultFuture = future;
+      _querying = true;
     });
+    // The FutureBuilder owns the error UI; the bar only has to stop.
     await future.then<void>((_) {}, onError: (_) {});
+    if (mounted) {
+      setState(() => _querying = false);
+    }
   }
 
   List<ClassroomBuilding> _campusBuildings() {
@@ -449,58 +485,6 @@ class _ClassroomQueryResult {
     }
     return '全部教学楼';
   }
-
-  List<_CourseLocationMatch> courseMatches(String keyword) {
-    final normalized = keyword.trim().toLowerCase();
-    if (normalized.isEmpty) {
-      return const <_CourseLocationMatch>[];
-    }
-    final matches = <_CourseLocationMatch>[];
-    for (final result in results) {
-      for (final floor in result.floors) {
-        for (final room in floor.rooms) {
-          for (final course in room.courses) {
-            final haystack =
-                '${result.building.name} ${room.name} ${course.courseName} ${course.teacherName}'
-                    .toLowerCase();
-            if (haystack.contains(normalized)) {
-              matches.add(
-                _CourseLocationMatch(
-                  building: result.building,
-                  room: room,
-                  course: course,
-                ),
-              );
-            }
-          }
-        }
-      }
-    }
-    matches.sort((a, b) {
-      final section = a.course.startSection.compareTo(b.course.startSection);
-      if (section != 0) {
-        return section;
-      }
-      final building = a.building.name.compareTo(b.building.name);
-      if (building != 0) {
-        return building;
-      }
-      return a.room.name.compareTo(b.room.name);
-    });
-    return matches;
-  }
-}
-
-class _CourseLocationMatch {
-  const _CourseLocationMatch({
-    required this.building,
-    required this.room,
-    required this.course,
-  });
-
-  final ClassroomBuilding building;
-  final ClassroomRoom room;
-  final ClassroomCourse course;
 }
 
 class _SearchControls extends StatelessWidget {
@@ -517,7 +501,6 @@ class _SearchControls extends StatelessWidget {
     required this.onPreviousRange,
     required this.onNextRange,
     required this.onDateChanged,
-    required this.onKeywordChanged,
   });
 
   final ClassroomSearchOptions options;
@@ -532,7 +515,6 @@ class _SearchControls extends StatelessWidget {
   final VoidCallback onPreviousRange;
   final VoidCallback onNextRange;
   final ValueChanged<DateTime> onDateChanged;
-  final ValueChanged<String> onKeywordChanged;
 
   @override
   Widget build(BuildContext context) {
@@ -657,85 +639,8 @@ class _SearchControls extends StatelessWidget {
               onPrevious: onPreviousRange,
               onNext: onNextRange,
             ),
-            const SizedBox(height: 6),
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16),
-              child: _ClassroomSearchField(
-                onChanged: onKeywordChanged,
-              ),
-            ),
           ],
         ),
-      ),
-    );
-  }
-}
-
-class _ClassroomSearchField extends StatefulWidget {
-  const _ClassroomSearchField({required this.onChanged});
-
-  final ValueChanged<String> onChanged;
-
-  @override
-  State<_ClassroomSearchField> createState() => _ClassroomSearchFieldState();
-}
-
-class _ClassroomSearchFieldState extends State<_ClassroomSearchField> {
-  final FocusNode _focusNode = FocusNode();
-
-  @override
-  void initState() {
-    super.initState();
-    _focusNode.addListener(_onFocusChanged);
-  }
-
-  void _onFocusChanged() => setState(() {});
-
-  @override
-  void dispose() {
-    _focusNode.removeListener(_onFocusChanged);
-    _focusNode.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final colors = context.shuyoColors;
-    return Container(
-      height: 52,
-      decoration: BoxDecoration(
-        border: Border(
-          bottom: BorderSide(
-            color: _focusNode.hasFocus ? colors.accent : colors.borderStrong,
-            width: _focusNode.hasFocus ? 1.5 : 1,
-          ),
-        ),
-      ),
-      child: Row(
-        children: [
-          GestureDetector(
-            onTap: _focusNode.requestFocus,
-            child: Padding(
-              padding: const EdgeInsets.only(left: 8, right: 12),
-              child: Icon(Icons.search, size: 20, color: colors.textSecondary),
-            ),
-          ),
-          Expanded(
-            child: TextField(
-              focusNode: _focusNode,
-              onTapOutside: (_) => _focusNode.unfocus(),
-              decoration: const InputDecoration(
-                hintText: '搜索课程、教师或教室',
-                border: InputBorder.none,
-                enabledBorder: InputBorder.none,
-                focusedBorder: InputBorder.none,
-                isCollapsed: true,
-              ),
-              textInputAction: TextInputAction.search,
-              onChanged: widget.onChanged,
-            ),
-          ),
-        ],
       ),
     );
   }
@@ -1000,18 +905,12 @@ class _DateButton extends StatelessWidget {
 }
 
 class _ClassroomResultList extends StatelessWidget {
-  const _ClassroomResultList({
-    required this.result,
-    required this.keyword,
-  });
+  const _ClassroomResultList({required this.result});
 
   final _ClassroomQueryResult result;
-  final String keyword;
 
   @override
   Widget build(BuildContext context) {
-    final normalizedKeyword = keyword.trim();
-    final matches = result.courseMatches(normalizedKeyword);
     final colors = context.shuyoColors;
 
     return ListView(
@@ -1028,35 +927,26 @@ class _ClassroomResultList extends StatelessWidget {
           ),
         ),
         const SizedBox(height: 5),
-        if (normalizedKeyword.isNotEmpty) ...[
-          Text(
-            '已按全天课程搜索，忽略当前节次',
-            style: TextStyle(color: colors.textTertiary),
-          ),
-          const SizedBox(height: 18),
-          _CourseMatches(matches: matches),
-        ] else ...[
-          Text(
-            '可用 ${result.availableCount} / ${result.totalRooms} 间',
-            style: TextStyle(color: colors.textTertiary),
-          ),
-          const SizedBox(height: 18),
-          if (result.availableCount == 0)
-            const Padding(
-              padding: EdgeInsets.only(top: 48),
-              child: EmptyState(
-                icon: Icons.event_busy_outlined,
-                title: '没有空教室',
-                message: '当前范围在所选节次没有可用教室。',
-              ),
-            )
-          else
-            for (final item in result.results)
-              _BuildingAvailableRooms(
-                result: item,
-                showBuildingName: result.results.length > 1,
-              ),
-        ],
+        Text(
+          '可用 ${result.availableCount} / ${result.totalRooms} 间',
+          style: TextStyle(color: colors.textTertiary),
+        ),
+        const SizedBox(height: 18),
+        if (result.availableCount == 0)
+          const Padding(
+            padding: EdgeInsets.only(top: 48),
+            child: EmptyState(
+              icon: Icons.event_busy_outlined,
+              title: '没有空教室',
+              message: '当前范围在所选节次没有可用教室。',
+            ),
+          )
+        else
+          for (final item in result.results)
+            _BuildingAvailableRooms(
+              result: item,
+              showBuildingName: result.results.length > 1,
+            ),
       ],
     );
   }
@@ -1104,61 +994,6 @@ class _BuildingAvailableRooms extends StatelessWidget {
             ),
         ],
       ),
-    );
-  }
-}
-
-class _CourseMatches extends StatelessWidget {
-  const _CourseMatches({required this.matches});
-
-  final List<_CourseLocationMatch> matches;
-
-  @override
-  Widget build(BuildContext context) {
-    if (matches.isEmpty) {
-      return Text(
-        '未找到课程位置',
-        style: TextStyle(color: context.shuyoColors.textTertiary),
-      );
-    }
-    final colors = context.shuyoColors;
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text(
-          '课程位置',
-          style: TextStyle(
-            color: colors.textPrimary,
-            fontSize: 15.5,
-            fontWeight: FontWeight.w600,
-          ),
-        ),
-        const SizedBox(height: 8),
-        for (final match in matches)
-          Padding(
-            padding: const EdgeInsets.only(bottom: 8),
-            child: Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Icon(
-                  Icons.location_on_outlined,
-                  size: 18,
-                  color: colors.accent,
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Text(
-                    '${match.course.sectionText} · '
-                    '${match.building.name} ${match.room.name} · '
-                    '${match.course.courseName}'
-                    '${match.course.teacherName.isEmpty ? '' : ' · ${match.course.teacherName}'}',
-                    style: TextStyle(color: colors.textPrimary, height: 1.35),
-                  ),
-                ),
-              ],
-            ),
-          ),
-      ],
     );
   }
 }

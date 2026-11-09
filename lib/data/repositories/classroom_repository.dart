@@ -18,6 +18,15 @@ class ClassroomSectionRange {
   String get label => start == end ? '$start节' : '$start-$end节';
 
   bool contains(int section) => section >= start && section <= end;
+
+  @override
+  bool operator ==(Object other) =>
+      other is ClassroomSectionRange &&
+      other.start == start &&
+      other.end == end;
+
+  @override
+  int get hashCode => Object.hash(start, end);
 }
 
 class ClassroomAvailabilityQuery {
@@ -136,6 +145,85 @@ class ClassroomRepository {
       createdAt: DateTime.now(),
     );
     return schedule;
+  }
+
+  /// Reads one building's whole-day timetable.
+  ///
+  /// Unlike [search] this keeps every course of the day, which is what the
+  /// room timetable and the keyword search need.
+  Future<ClassroomBuildingSchedule> loadBuildingDay({
+    required ClassroomBuilding building,
+    required DateTime date,
+    bool forceRefresh = false,
+  }) =>
+      _loadBuildingSchedule(
+        building: building,
+        date: date,
+        forceRefresh: forceRefresh,
+      );
+
+  /// Reads several buildings for the same day with a small request window.
+  ///
+  /// Buildings share one HTTP connection pool, so running all of them at once
+  /// only queues the requests while making cancellation and progress harder.
+  /// Three in flight keeps the first rows arriving almost immediately.
+  Future<List<ClassroomBuildingSchedule>> loadBuildingDays({
+    required List<ClassroomBuilding> buildings,
+    required DateTime date,
+    bool forceRefresh = false,
+    int concurrency = 3,
+    void Function(int completed, int total)? onProgress,
+    void Function(ClassroomBuildingSchedule schedule)? onLoaded,
+    bool Function()? isCancelled,
+  }) async {
+    final results = <ClassroomBuildingSchedule>[];
+    var next = 0;
+    var completed = 0;
+    final total = buildings.length;
+    final limit = concurrency < 1 ? 1 : concurrency;
+    onProgress?.call(completed, total);
+
+    Future<void> worker() async {
+      while (true) {
+        if (isCancelled?.call() ?? false) {
+          return;
+        }
+        final index = next++;
+        if (index >= total) {
+          return;
+        }
+        final schedule = await loadBuildingDay(
+          building: buildings[index],
+          date: date,
+          forceRefresh: forceRefresh,
+        );
+        if (isCancelled?.call() ?? false) {
+          return;
+        }
+        results.add(schedule);
+        completed++;
+        onLoaded?.call(schedule);
+        onProgress?.call(completed, total);
+      }
+    }
+
+    await Future.wait([
+      for (var i = 0; i < limit && i < total; i++) worker(),
+    ]);
+    return results;
+  }
+
+  /// The section range a course starting at [section] belongs to.
+  ClassroomSectionRange? rangeForSection(
+    int section,
+    List<ClassroomSectionRange> ranges,
+  ) {
+    for (final range in ranges) {
+      if (range.contains(section)) {
+        return range;
+      }
+    }
+    return null;
   }
 
   List<ClassroomSectionRange> defaultRanges(List<ClassroomSection> sections) {

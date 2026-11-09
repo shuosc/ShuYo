@@ -173,6 +173,59 @@ void main() {
     expect(find.byType(DropdownButtonFormField<String>), findsOneWidget);
     expect(repository.searches, 1);
   });
+
+  testWidgets('the toolbar refresh button is replaced by a search entry',
+      (tester) async {
+    final repository =
+        _SnapshotRepository(snapshot: _SnapshotRepository.options);
+    await tester.pumpWidget(MaterialApp(
+      home: EmptyClassroomPage(repository: repository),
+    ));
+    await tester.pumpAndSettle();
+
+    expect(find.byTooltip('刷新'), findsNothing);
+    expect(
+        find.byKey(const ValueKey('classroom-search-entry')), findsOneWidget);
+    // 下拉刷新仍然只在列表自身显示转圈，AppBar 进度条此时不出现。
+    expect(find.byType(RefreshIndicator), findsOneWidget);
+    expect(
+        find.byKey(const ValueKey('classroom-toolbar-progress')), findsNothing);
+  });
+
+  testWidgets('the inline keyword field left the main page', (tester) async {
+    final repository =
+        _SnapshotRepository(snapshot: _SnapshotRepository.options);
+    await tester.pumpWidget(MaterialApp(
+      home: EmptyClassroomPage(repository: repository),
+    ));
+    await tester.pumpAndSettle();
+
+    expect(find.byType(TextField), findsNothing);
+    expect(find.text('搜索课程、教师或教室'), findsNothing);
+  });
+
+  testWidgets('the toolbar progress bar covers a non-pull query',
+      (tester) async {
+    final repository =
+        _SnapshotRepository(snapshot: _SnapshotRepository.options);
+    await tester.pumpWidget(MaterialApp(
+      home: EmptyClassroomPage(repository: repository),
+    ));
+    await tester.pumpAndSettle();
+
+    // 换日期会发起新查询，进度条在结果回来前出现。
+    repository.hold = Completer<void>();
+    await tester.tap(find.text('明天'));
+    await tester.pump();
+
+    expect(find.byKey(const ValueKey('classroom-toolbar-progress')),
+        findsOneWidget);
+
+    repository.hold!.complete();
+    await tester.pumpAndSettle();
+    expect(
+        find.byKey(const ValueKey('classroom-toolbar-progress')), findsNothing);
+  });
 }
 
 class _PendingRepository extends _SnapshotRepository {
@@ -212,6 +265,9 @@ class _SnapshotRepository extends ClassroomRepository {
   final Future<ClassroomSearchOptions>? pendingLoad;
   int searches = 0;
 
+  /// 非空时下一次 `search` 会挂起，用于观察进度条。
+  Completer<void>? hold;
+
   @override
   ClassroomSearchOptions? get optionsSnapshot => _snapshot;
 
@@ -225,6 +281,10 @@ class _SnapshotRepository extends ClassroomRepository {
     bool forceRefresh = false,
   }) async {
     searches += 1;
+    final gate = hold;
+    if (gate != null) {
+      await gate.future;
+    }
     return ClassroomAvailabilityResult(
       building: query.building,
       date: query.date,

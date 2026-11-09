@@ -71,7 +71,10 @@ class ClassroomApiClient {
     final buildings = (formData['buildList'] as List? ?? const [])
         .whereType<JsonMap>()
         .map(ClassroomBuilding.fromJson)
-        .where((building) => building.id > 0 && building.name.isNotEmpty)
+        .where((building) =>
+            building.id > 0 &&
+            building.name.isNotEmpty &&
+            ClassroomBuilding.isSelectable(building.id))
         .toList(growable: false);
     final sections = (sectionData['section'] as List? ?? const [])
         .whereType<JsonMap>()
