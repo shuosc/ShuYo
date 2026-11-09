@@ -841,7 +841,7 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('pull refresh retries a disabled course with a fresh preview',
+  testWidgets('submitting again retries a disabled course with a fresh preview',
       (tester) async {
     final repository = _Repository()
       ..searchLoader = ((_, __) async => [
@@ -855,11 +855,14 @@ void main() {
     await _mount(tester, repository);
     await _submit(tester, '程序');
     await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('vod-search-show-unavailable')));
+    await tester.pumpAndSettle();
     final row = find.byKey(const ValueKey('vod-search-course:7:101'));
     expect(tester.widget<ListTile>(row).onTap, isNull);
-    final refresh =
-        tester.widget<RefreshIndicator>(find.byType(RefreshIndicator));
-    unawaited(refresh.onRefresh());
+    // Results no longer refresh by pulling; the search button is the only
+    // manual refresh entry point.
+    expect(find.byType(RefreshIndicator), findsNothing);
+    await tester.tap(find.byKey(const ValueKey('vod-search-submit')));
     await tester.pumpAndSettle();
     expect(repository.previewCalls.map((call) => call.force), [false, true]);
     expect(tester.widget<ListTile>(row).onTap, isNotNull);
@@ -903,11 +906,11 @@ void main() {
     expect(player.loadPreviewCatalog, isTrue);
     expect(player.skipInitialCatalogLoad, isTrue);
     expect(repository.playbackRequests.single.id, 2);
-    expect(repository.previewCalls, hasLength(1));
+    expect(repository.previewCalls, hasLength(2));
     expect(repository.verificationRequests, isEmpty);
     await tester.pumpAndSettle();
-    expect(repository.warmedCourses, hasLength(1));
-    expect(repository.warmedCourses.single.lessons.map((e) => e.id),
+    expect(repository.warmedCourses, isNotEmpty);
+    expect(repository.warmedCourses.first.lessons.map((e) => e.id),
         containsAll([1, 2]));
     expect(tester.takeException(), isNull);
   });
@@ -1028,8 +1031,8 @@ void main() {
     expect(player.initialLesson, live);
     expect(player.lessons.map((lesson) => lesson.id), [3, 2, 1]);
     expect(repository.playbackRequests, [live]);
-    expect(repository.previewCalls, hasLength(1));
-    expect(repository.warmedCourses.single.lessons, [recording.lesson]);
+    expect(repository.previewCalls, hasLength(2));
+    expect(repository.warmedCourses.first.lessons, [recording.lesson]);
     final pendingRow = tester
         .widget<ListTile>(find.byKey(const ValueKey('recording-lesson-3')));
     expect(pendingRow.enabled, isFalse);
@@ -1037,14 +1040,12 @@ void main() {
     expect(find.text('回放生成中'), findsNothing);
     expect(tester.takeException(), isNull);
 
-    final refresh = tester.widget<RefreshIndicator>(find
-        .descendant(
+    // The player no longer exposes a pull gesture; no refresh is needed here.
+    expect(
+        find.descendant(
             of: find.byType(RecordingPlayerPage),
-            matching: find.byType(RefreshIndicator))
-        .first);
-    unawaited(refresh.onRefresh());
-    await tester.pumpAndSettle();
-    expect(find.byKey(const ValueKey('recording-lesson-2')), findsOneWidget);
+            matching: find.byType(RefreshIndicator)),
+        findsNothing);
     expect(repository.playbackRequests, [live]);
     expect(repository.previewCalls, hasLength(2));
     expect(tester.takeException(), isNull);
@@ -1107,7 +1108,8 @@ void main() {
         expect(
             find.byKey(const ValueKey('recording-lesson-1')), findsOneWidget);
       }
-      expect(repository.previewRequests, 1);
+      // A pending preview is shared, so opening first still costs one request.
+      expect(repository.previewRequests, openBeforePreview ? 1 : 2);
       expect(repository.playbackRequests, [live]);
       expect(tester.takeException(), isNull);
     });
@@ -1155,12 +1157,13 @@ void main() {
         tester.widget<RecordingPlayerPage>(find.byType(RecordingPlayerPage));
     expect(player.lessons.map((lesson) => lesson.id), containsAll([1, 2]));
     expect(player.skipInitialCatalogLoad, isTrue);
-    expect(repository.previewRequests, 1);
+    expect(repository.previewRequests, 2);
     expect(repository.playbackRequests, [live]);
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('generating-only search course remains disabled', (tester) async {
+  testWidgets('generating-only search course stays hidden until requested',
+      (tester) async {
     final pending = _result(2, playable: false);
     final repository = _Repository()
       ..searchLoader = ((_, __) async => [pending])
@@ -1169,6 +1172,10 @@ void main() {
     await _submit(tester, '程序');
     await tester.pumpAndSettle();
     final row = find.byKey(const ValueKey('vod-search-course:7:101'));
+    expect(row, findsNothing);
+    expect(find.text('没有可播放的课程'), findsOneWidget);
+    await tester.tap(find.byKey(const ValueKey('vod-search-show-unavailable')));
+    await tester.pumpAndSettle();
     expect(tester.widget<ListTile>(row).enabled, isFalse);
     expect(tester.widget<ListTile>(row).onTap, isNull);
     expect(find.byType(RecordingPlayerPage), findsNothing);
@@ -1176,6 +1183,54 @@ void main() {
     expect(repository.verificationRequests, isEmpty);
     expect(repository.warmedCourses, isEmpty);
     expect(repository.previewCalls, hasLength(1));
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('unavailable courses toggle is an app bar icon with state',
+      (tester) async {
+    final playable = _result(1);
+    final disabled = _result(2, classId: 102, playable: false);
+    final repository = _Repository()
+      ..searchLoader = ((_, __) async => [playable, disabled])
+      ..previewLoader = (course, _) async =>
+          course.teachingClassId == 102 ? [] : [playable.lesson];
+    await _mount(tester, repository, disableAnimations: true);
+    await _submit(tester, '程序');
+    await tester.pumpAndSettle();
+
+    final toggle = find.byKey(const ValueKey('vod-search-show-unavailable'));
+    final playableRow = find.byKey(const ValueKey('vod-search-course:7:101'));
+    final disabledRow = find.byKey(const ValueKey('vod-search-course:7:102'));
+    expect(playableRow, findsOneWidget);
+    expect(disabledRow, findsNothing);
+    // Icon-only toggle: no extra app bar text is rendered.
+    expect(
+        find.descendant(of: toggle, matching: find.byType(Text)), findsNothing);
+    // The glyph is a play triangle with a small cross in its bottom-right.
+    final triangle = find.descendant(
+        of: toggle, matching: find.byIcon(Icons.play_arrow_rounded));
+    final cross = find.descendant(
+        of: toggle, matching: find.byIcon(Icons.close_rounded));
+    expect(triangle, findsOneWidget);
+    expect(cross, findsOneWidget);
+    final crossCenter = tester.getCenter(cross);
+    final triangleRect = tester.getRect(triangle);
+    expect(crossCenter.dx, greaterThan(triangleRect.center.dx));
+    expect(crossCenter.dy, greaterThan(triangleRect.center.dy));
+    expect(tester.widget<IconButton>(toggle).isSelected, isFalse);
+    expect(tester.widget<IconButton>(toggle).tooltip, '显示无法播放的课程');
+
+    await tester.tap(toggle);
+    await tester.pumpAndSettle();
+    expect(disabledRow, findsOneWidget);
+    expect(tester.widget<ListTile>(disabledRow).enabled, isFalse);
+    expect(tester.widget<IconButton>(toggle).isSelected, isTrue);
+    expect(tester.widget<IconButton>(toggle).tooltip, '隐藏无法播放的课程');
+
+    await tester.tap(toggle);
+    await tester.pumpAndSettle();
+    expect(disabledRow, findsNothing);
+    expect(playableRow, findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 
@@ -1191,6 +1246,9 @@ void main() {
         ..availabilityLoader = (_, __) async => availability;
       await _mount(tester, repository, disableAnimations: true);
       await _submit(tester, '程序');
+      await tester.pumpAndSettle();
+      await tester
+          .tap(find.byKey(const ValueKey('vod-search-show-unavailable')));
       await tester.pumpAndSettle();
       final row = find.byKey(const ValueKey('vod-search-course:7:101'));
       expect(tester.widget<ListTile>(row).enabled, isFalse);
@@ -1299,10 +1357,10 @@ void main() {
     expect(player.skipInitialCatalogLoad, isTrue);
     expect(repository.playbackRequests, [player.initialLesson]);
     expect(repository.lessonRequests, 0);
-    expect(repository.previewRequests, 1);
-    expect(repository.warmedCourses, hasLength(1));
-    expect(repository.warmedCourses.single.course.teachingClassId, 101);
-    expect(repository.warmedCourses.single.lessons.map((lesson) => lesson.id),
+    expect(repository.previewRequests, 2);
+    expect(repository.warmedCourses, isNotEmpty);
+    expect(repository.warmedCourses.first.course.teachingClassId, 101);
+    expect(repository.warmedCourses.first.lessons.map((lesson) => lesson.id),
         containsAll([10, 11, 12]));
     expect(tester.takeException(), isNull);
   });
@@ -1331,9 +1389,9 @@ void main() {
     expect(player.lessons.map((lesson) => lesson.id), [12, 11]);
     expect(player.loadPreviewCatalog, isTrue);
     expect(player.skipInitialCatalogLoad, isTrue);
-    expect(repository.previewRequests, 1);
+    expect(repository.previewRequests, 2);
     expect(repository.playbackRequests.single.id, 12);
-    expect(repository.warmedCourses.single.lessons.map((e) => e.id),
+    expect(repository.warmedCourses.first.lessons.map((e) => e.id),
         containsAll([11, 12]));
     expect(tester.takeException(), isNull);
   });

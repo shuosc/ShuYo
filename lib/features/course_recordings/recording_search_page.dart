@@ -70,6 +70,8 @@ class _RecordingSearchPageState extends State<RecordingSearchPage> {
   bool _loggingIn = false;
   bool _recoveringWebVpn = false;
   bool _openingLesson = false;
+  // Unplayable courses stay out of the list until the user asks to see them.
+  bool _showUnavailable = false;
   int get _revision => _searchController.revision;
 
   @override
@@ -144,6 +146,12 @@ class _RecordingSearchPageState extends State<RecordingSearchPage> {
     await _searchController.search(keyword, forceRefresh: forceRefresh);
   }
 
+  /// The search button is the only manual refresh entry point: repeating a
+  /// keyword re-reads the server instead of reusing cached lesson metadata.
+  void _submitSearch() {
+    unawaited(_search(forceRefresh: _searchController.activeKeyword != null));
+  }
+
   Future<void> _login() async {
     final callback = widget.onLoginRequested;
     if (callback == null || _loggingIn) return;
@@ -187,16 +195,6 @@ class _RecordingSearchPageState extends State<RecordingSearchPage> {
     if (!mounted || termId == null || termId == _selectedTermId) return;
     if (_scrollController.hasClients) _scrollController.jumpTo(0);
     _searchController.selectTerm(termId);
-  }
-
-  Future<void> _refreshCourses() async {
-    if (_searchController.needsLogin ||
-        _searchController.searching ||
-        _searchController.loadingCourses ||
-        _searchController.results.isEmpty) {
-      return;
-    }
-    await _search(forceRefresh: true);
   }
 
   Future<void> _openCourse(VodCourse course, List<VodLesson> lessons,
@@ -291,6 +289,19 @@ class _RecordingSearchPageState extends State<RecordingSearchPage> {
         title: const Text('搜索录播'),
         actions: [
           IconButton(
+            key: const ValueKey('vod-search-show-unavailable'),
+            tooltip: _showUnavailable ? '隐藏无法播放的课程' : '显示无法播放的课程',
+            isSelected: _showUnavailable,
+            onPressed: _loggingIn
+                ? null
+                : () => setState(() => _showUnavailable = !_showUnavailable),
+            icon: _UnavailableCoursesIcon(
+              color: _showUnavailable
+                  ? Theme.of(context).colorScheme.primary
+                  : context.shuyoColors.textMuted,
+            ),
+          ),
+          IconButton(
             key: const ValueKey('vod-search-term-filter'),
             tooltip: '选择搜索学期',
             onPressed: widget.terms.isEmpty || _loggingIn ? null : _chooseTerm,
@@ -324,14 +335,14 @@ class _RecordingSearchPageState extends State<RecordingSearchPage> {
                   readOnly: _loggingIn,
                   onTapOutside: (_) => _queryFocusNode.unfocus(),
                   textInputAction: TextInputAction.search,
-                  onSubmitted: (_) => unawaited(_search()),
+                  onSubmitted: (_) => _submitSearch(),
                   onChanged: (value) {
                     if (value.isEmpty) {
                       _clearSearch(clearField: false);
                     }
                   },
                   decoration: InputDecoration(
-                    labelText: '课程 / 教师 / 课程号关键词',
+                    labelText: '课程 / 教师 / 课程号',
                     suffixIcon: !_queryState.value.hasText
                         ? null
                         : IconButton(
@@ -351,7 +362,7 @@ class _RecordingSearchPageState extends State<RecordingSearchPage> {
                         _loggingIn ||
                         !_queryState.value.hasKeyword
                     ? null
-                    : _search,
+                    : _submitSearch,
                 icon: Icon(Icons.search,
                     color: Theme.of(context).colorScheme.primary),
               ),
@@ -478,7 +489,17 @@ class _RecordingSearchPageState extends State<RecordingSearchPage> {
 
   Widget _buildResults() {
     final view = _view;
-    final courses = view.courses;
+    final loadedCourses = view.courses;
+    // A course is playable once its lessons contain a selectable episode.
+    final courses = _showUnavailable
+        ? loadedCourses
+        : [
+            for (final course in loadedCourses)
+              if (view.courseLessons[(course.termId, course.teachingClassId)]
+                      ?.any(recordingLessonCanSelect) ??
+                  false)
+                course,
+          ];
     // A preview can insert a course before rows that are already on screen.
     // Let the sliver relocate their keyed elements instead of disposing their
     // entrance animations and rebuilding the rows at their new indexes.
@@ -525,6 +546,19 @@ class _RecordingSearchPageState extends State<RecordingSearchPage> {
       state = const Center(child: Text('正在搜索录播…'));
     } else if (_loadingCourses && _visibleCourseCount == 0) {
       state = const Center(child: Text('正在加载课程…'));
+    } else if (_visibleCourseCount > 0 && courses.isEmpty) {
+      // Every loaded course is unplayable and currently filtered out.
+      final toggleColor = Theme.of(context).colorScheme.primary;
+      state = EmptyState(
+        icon: Icons.play_disabled_outlined,
+        title: '没有可播放的课程',
+        message: '${loadedCourses.length} 门课程暂不可播放，可在右上角切换显示。',
+        action: TextButton.icon(
+          onPressed: () => setState(() => _showUnavailable = true),
+          icon: _UnavailableCoursesIcon(color: toggleColor),
+          label: const Text('显示无法播放的课程'),
+        ),
+      );
     } else if (!_view.hasResults) {
       state = EmptyState(
         icon: _activeKeyword == null ? Icons.search : Icons.search_off,
@@ -545,58 +579,50 @@ class _RecordingSearchPageState extends State<RecordingSearchPage> {
         controller: _scrollController,
         thumbVisibility: true,
         interactive: true,
-        child: RefreshIndicator(
-          onRefresh: _refreshCourses,
-          child: CustomScrollView(
-            physics: const AlwaysScrollableScrollPhysics(),
-            key: const ValueKey('vod-search-results'),
-            controller: _scrollController,
-            keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
-            slivers: [
-              if (state != null)
-                SliverFillRemaining(hasScrollBody: false, child: state)
-              else ...[
-                const SliverToBoxAdapter(child: SizedBox(height: 8)),
-                SliverList.builder(
-                  findChildIndexCallback: (key) => courseIndices[key],
-                  itemCount: _visibleCourseCount == 0
-                      ? 0
-                      : _visibleCourseCount * 2 - 1,
-                  itemBuilder: (context, index) {
-                    if (index.isOdd) {
-                      return const Divider(indent: 16, endIndent: 16);
-                    }
-                    final course = courses[index ~/ 2];
-                    final key = (course.termId, course.teachingClassId);
-                    final lessons = view.courseLessons[key];
-                    final cached = _courseRows[key];
-                    final row = cached != null &&
-                            identical(cached.$1, course) &&
-                            identical(cached.$2, lessons)
-                        ? cached.$3
-                        : _courseTile(course, view);
-                    _courseRows[key] = (course, lessons, row);
-                    final firstAppearance = _animatedCourses.add(key);
-                    final scrolling = _scrollController.hasClients &&
-                        _scrollController.position.isScrollingNotifier.value;
-                    return _SearchCourseEntrance(
-                      key: ValueKey((
-                        view.revision,
-                        course.termId,
-                        course.teachingClassId
-                      )),
-                      // The first page still enters normally. Creating a new
-                      // opacity/translation animation for each row during a
-                      // drag or fling adds compositing work to every frame.
-                      animate: firstAppearance && !scrolling,
-                      child: row,
-                    );
-                  },
-                ),
-                const SliverToBoxAdapter(child: SizedBox(height: 24)),
-              ],
+        child: CustomScrollView(
+          physics: const AlwaysScrollableScrollPhysics(),
+          key: const ValueKey('vod-search-results'),
+          controller: _scrollController,
+          keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
+          slivers: [
+            if (state != null)
+              SliverFillRemaining(hasScrollBody: false, child: state)
+            else ...[
+              const SliverToBoxAdapter(child: SizedBox(height: 8)),
+              SliverList.builder(
+                findChildIndexCallback: (key) => courseIndices[key],
+                itemCount: courses.isEmpty ? 0 : courses.length * 2 - 1,
+                itemBuilder: (context, index) {
+                  if (index.isOdd) {
+                    return const Divider(indent: 16, endIndent: 16);
+                  }
+                  final course = courses[index ~/ 2];
+                  final key = (course.termId, course.teachingClassId);
+                  final lessons = view.courseLessons[key];
+                  final cached = _courseRows[key];
+                  final row = cached != null &&
+                          identical(cached.$1, course) &&
+                          identical(cached.$2, lessons)
+                      ? cached.$3
+                      : _courseTile(course, view);
+                  _courseRows[key] = (course, lessons, row);
+                  final firstAppearance = _animatedCourses.add(key);
+                  final scrolling = _scrollController.hasClients &&
+                      _scrollController.position.isScrollingNotifier.value;
+                  return _SearchCourseEntrance(
+                    key: ValueKey(
+                        (view.revision, course.termId, course.teachingClassId)),
+                    // The first page still enters normally. Creating a new
+                    // opacity/translation animation for each row during a
+                    // drag or fling adds compositing work to every frame.
+                    animate: firstAppearance && !scrolling,
+                    child: row,
+                  );
+                },
+              ),
+              const SliverToBoxAdapter(child: SizedBox(height: 24)),
             ],
-          ),
+          ],
         ),
       ),
     );
@@ -659,6 +685,38 @@ class _RecordingSearchPageState extends State<RecordingSearchPage> {
         : error is VodAuthException
             ? error.message
             : '暂时无法连接录播平台，请稍后重试。';
+  }
+}
+
+/// A play triangle with a small cross in its bottom-right corner: "courses that
+/// cannot be played". The cross is knocked out with a surface ring so it stays
+/// legible on any background; the caller's color carries the active state.
+class _UnavailableCoursesIcon extends StatelessWidget {
+  const _UnavailableCoursesIcon({required this.color});
+
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      width: 24,
+      height: 24,
+      child: Stack(clipBehavior: Clip.none, children: [
+        Icon(Icons.play_arrow_rounded, size: 22, color: color),
+        Positioned(
+          right: 0,
+          bottom: 1,
+          child: Container(
+            padding: const EdgeInsets.all(1),
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: Theme.of(context).colorScheme.surface,
+            ),
+            child: Icon(Icons.close_rounded, size: 10, color: color),
+          ),
+        ),
+      ]),
+    );
   }
 }
 
