@@ -82,7 +82,7 @@ void main() {
     HomeLayout? saved;
     await pumpPage(tester, onChanged: (layout) async => saved = layout);
     final remove = find.byKey(const ValueKey('remove-group:services'));
-    await tester.ensureVisible(remove);
+    await tester.scrollUntilVisible(remove, 240);
     await tester.pumpAndSettle();
     await tester.tap(remove);
     await tester.pumpAndSettle();

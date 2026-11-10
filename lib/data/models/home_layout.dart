@@ -4,6 +4,7 @@ enum HomeModule {
   announcements('announcements', '通知公告', 'overview'),
   emptyClassroom('empty_classroom', '空教室', 'overview'),
   libraryBooking('library_booking', '图书馆预约', 'overview'),
+  libraryBorrowing('library_borrowing', '图书馆借阅', 'overview'),
   campusMap('campus_map', '校园地图', 'overview'),
   otp('otp', '动态口令', 'services');
 
