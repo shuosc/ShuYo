@@ -13,6 +13,7 @@ void main() {
       'module:empty_classroom',
       'module:course_recordings',
       'module:library_booking',
+      'module:library_borrowing',
       'module:campus_map',
       'group:services',
       'module:otp',
@@ -28,6 +29,7 @@ void main() {
       HomeModule.emptyClassroom,
       HomeModule.courseRecordings,
       HomeModule.libraryBooking,
+      HomeModule.libraryBorrowing,
       HomeModule.campusMap,
     ]);
     expect(moved.visibleGroups.last.modules.last, HomeModule.todayCourse);
@@ -91,6 +93,7 @@ void main() {
       HomeModule.emptyClassroom,
       HomeModule.courseRecordings,
       HomeModule.libraryBooking,
+      HomeModule.libraryBorrowing,
       HomeModule.campusMap,
     ]);
     expect(layout.visibleGroups.last.modules.first, HomeModule.otp);
@@ -112,6 +115,7 @@ void main() {
       'module:empty_classroom',
       'module:course_recordings',
       'module:library_booking',
+      'module:library_borrowing',
       'module:campus_map',
     ]);
     final withoutLine = restored.removeDivider('line');

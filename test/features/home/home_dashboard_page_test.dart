@@ -96,12 +96,17 @@ void main() {
 
   testWidgets('campus login shows student greeting and campus services',
       (tester) async {
+    tester.view.physicalSize = const Size(800, 1000);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
     await tester.pumpWidget(page(loggedIn: true));
     expect(find.text('你好，25120000！'), findsOneWidget);
     expect(find.text('今日课程'), findsOneWidget);
     expect(find.text('空教室'), findsOneWidget);
     expect(find.text('查看可用教室'), findsOneWidget);
     expect(find.text('图书馆预约'), findsOneWidget);
+    expect(find.text('图书馆借阅'), findsOneWidget);
     expect(find.text('课程录播'), findsOneWidget);
     expect(find.text('动态口令'), findsOneWidget);
     expect(find.text('课程评价'), findsNothing);
@@ -231,6 +236,10 @@ void main() {
 
   testWidgets('only explicitly inserted dividers appear inside their card',
       (tester) async {
+    tester.view.physicalSize = const Size(800, 1000);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
     var layout = HomeLayout.defaults()
         .removeDivider('overview-divider')
         .addDivider('line');

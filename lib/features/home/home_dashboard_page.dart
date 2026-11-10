@@ -20,6 +20,7 @@ class HomeDashboardPage extends StatelessWidget {
     required this.onOpenEmptyClassroom,
     this.onOpenCourseRecordings,
     this.onOpenLibraryBooking,
+    this.onOpenLibraryBorrowing,
     this.onOpenCampusCard,
     this.onRefreshCampusCard,
     this.isCampusCardRefreshing = false,
@@ -42,6 +43,7 @@ class HomeDashboardPage extends StatelessWidget {
   final VoidCallback onOpenEmptyClassroom;
   final VoidCallback? onOpenCourseRecordings;
   final VoidCallback? onOpenLibraryBooking;
+  final VoidCallback? onOpenLibraryBorrowing;
   final VoidCallback? onOpenCampusCard;
   final VoidCallback? onRefreshCampusCard;
   final bool isCampusCardRefreshing;
@@ -212,6 +214,13 @@ class HomeDashboardPage extends StatelessWidget {
           title: module.title,
           content: '预约场馆座位',
           onTap: onOpenLibraryBooking,
+        ),
+      HomeModule.libraryBorrowing => _HomeRow(
+          key: key,
+          icon: Icons.auto_stories_outlined,
+          title: module.title,
+          content: '馆藏借阅与个人借还管理',
+          onTap: onOpenLibraryBorrowing,
         ),
       HomeModule.campusMap => _HomeRow(
           key: key,

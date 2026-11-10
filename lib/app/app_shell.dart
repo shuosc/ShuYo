@@ -44,6 +44,7 @@ import '../data/services/unified_account_service.dart';
 import '../data/services/there_booking_client.dart';
 import '../data/services/webvpn_session_store.dart';
 import '../data/services/vod_auth_service.dart';
+import '../data/services/library_auth_service.dart';
 import '../features/auth/native_login_page.dart';
 import '../features/campus_map/campus_map_page.dart';
 import '../features/course_recordings/course_recordings_page.dart';
@@ -57,6 +58,7 @@ import '../features/home/home_layout_page.dart';
 import '../features/home/otp_token_page.dart';
 import '../features/home/shuyo_content_page.dart';
 import '../features/library_booking/library_booking_page.dart';
+import '../features/library/library_page.dart';
 import '../features/onboarding/startup_onboarding.dart';
 import '../features/rate/rate_home_page.dart';
 import '../features/settings/client_settings_page.dart';
@@ -167,7 +169,11 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
   bool _checkingClientBackendPrompts = false;
   bool _refreshingWebVpnStatus = false;
   bool _openingLibraryBooking = false;
+  bool _openingLibraryBorrowing = false;
   bool _openingCourseRecordings = false;
+  LibraryAuthService? _libraryAuthServiceInstance;
+  LibraryAuthService get _libraryAuthService =>
+      _libraryAuthServiceInstance ??= LibraryAuthService();
   ThereBookingClient? _directBookingClient;
   ThereBookingClient? _webVpnBookingClient;
   ChaoxingBookingClient? _chaoxingBookingClient;
@@ -347,6 +353,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
     _directBookingClient?.dispose();
     _webVpnBookingClient?.dispose();
     _chaoxingBookingClient?.dispose();
+    _libraryAuthServiceInstance?.dispose();
     _campusCardServiceInstance?.dispose();
     _courseReviewRepositoryInstance?.dispose();
     _otpTokenRepository.dispose();
@@ -491,6 +498,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
       onOpenEmptyClassroom: () => unawaited(_openEmptyClassroom()),
       onOpenCourseRecordings: () => unawaited(_openCourseRecordings()),
       onOpenLibraryBooking: () => unawaited(_openLibraryBooking()),
+      onOpenLibraryBorrowing: () => unawaited(_openLibraryBorrowing()),
       onOpenCampusCard: () => unawaited(_openCampusCard()),
       onRefreshCampusCard: () => unawaited(_refreshCampusCardFromHome()),
       isCampusCardRefreshing: _refreshingCampusCardFromHome,
@@ -1214,6 +1222,35 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
     );
   }
 
+  Future<void> _openLibraryBorrowing() async {
+    if (_openingLibraryBorrowing) return;
+    if (widget.isDemo) {
+      _showSnack('演示模式暂不支持图书馆借阅');
+      return;
+    }
+    if (!_hasAcademicSession) {
+      _showSnack('请先登录校园账户');
+      _openAccountManager();
+      return;
+    }
+    _openingLibraryBorrowing = true;
+    try {
+      await Navigator.of(context).push<void>(
+        shuyoRoute(
+          builder: (_) => LibraryPage(
+            authService: _libraryAuthService,
+            onCampusSessionExpired: widget.isDemo
+                ? null
+                : (interactive) =>
+                    _handleCampusSsoExpired(interactive: interactive),
+          ),
+        ),
+      );
+    } finally {
+      _openingLibraryBorrowing = false;
+    }
+  }
+
   Future<void> _openOtp() async {
     if (!widget.isDemo && !_hasAcademicSession) {
       _showSnack('请先登录校园账户');
@@ -1412,6 +1449,14 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
       failed = true;
     } finally {
       campusCard.dispose();
+    }
+    final libraryAuth = LibraryAuthService();
+    try {
+      await libraryAuth.clearSession();
+    } on Object {
+      failed = true;
+    } finally {
+      libraryAuth.dispose();
     }
     try {
       await _studentIdentityService.signOut();
