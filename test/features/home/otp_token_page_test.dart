@@ -360,4 +360,16 @@ void main() {
         isNotNull);
   });
 
+  testWidgets('the hint names the systems that need the dynamic password',
+      (tester) async {
+    final repository = _FakeRepository(token: _token());
+
+    await tester.pumpWidget(
+      MaterialApp(home: OtpTokenPage(repository: repository)),
+    );
+    await tester.pump();
+
+    expect(find.textContaining('OpenVPN'), findsOneWidget);
+    expect(find.textContaining('EasyConnect'), findsOneWidget);
+  });
 }

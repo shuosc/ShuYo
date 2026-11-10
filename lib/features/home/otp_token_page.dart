@@ -368,8 +368,34 @@ class _OtpTokenPageState extends State<OtpTokenPage>
           ),
         ),
         const SizedBox(height: 10),
-        Text(
-          hasToken ? '$remaining 秒后自动更新' : '正在获取动态口令…',
+        Text.rich(
+          TextSpan(
+            children: [
+              if (hasToken)
+                TextSpan(
+                  children: [
+                    // The number keeps changing, so it carries the accent
+                    // color while the wording stays quiet.
+                    TextSpan(
+                      text: '$remaining',
+                      style: TextStyle(
+                        color: colors.accent,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    TextSpan(
+                      text: ' 秒后自动更新',
+                      style: TextStyle(color: colors.textSecondary),
+                    ),
+                  ],
+                )
+              else
+                TextSpan(
+                  text: '正在获取动态口令…',
+                  style: TextStyle(color: colors.textSecondary),
+                ),
+            ],
+          ),
           textAlign: TextAlign.center,
           style: ShuYoTextStyles.bodyCompact(color: colors.textSecondary),
         ),
@@ -381,8 +407,7 @@ class _OtpTokenPageState extends State<OtpTokenPage>
         ),
         const SizedBox(height: 16),
         Text(
-          '在需要动态口令的系统中输入这 6 位数字。口令每 ${token?.period ?? 30} 秒'
-          '自动更新，请以页面显示的为准。',
+          '登录 OpenVPN、EasyConnect 等系统时需要输入这 6 位动态数字。',
           textAlign: TextAlign.center,
           style: ShuYoTextStyles.bodyCompact(color: colors.textTertiary),
         ),
