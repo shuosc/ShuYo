@@ -2,11 +2,13 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:shuyo/data/models/library_book_item.dart';
 import 'package:shuyo/data/models/library_daily_recommend.dart';
 import 'package:shuyo/data/services/library_api_client.dart';
 import 'package:shuyo/data/services/library_auth_service.dart';
 import 'package:shuyo/features/library/library_book_detail_page.dart';
 import 'package:shuyo/features/library/library_page.dart';
+import 'package:shuyo/features/library/library_rank_list_page.dart';
 
 class _MockLibraryAuthService extends LibraryAuthService {
   _MockLibraryAuthService({
@@ -40,10 +42,15 @@ class _MockLibraryAuthService extends LibraryAuthService {
 }
 
 class _MockLibraryApiClient extends LibraryApiClient {
-  _MockLibraryApiClient({this.recommendResult});
+  _MockLibraryApiClient({
+    this.recommendResult,
+    this.rankResult = const [],
+  });
 
   LibraryDailyRecommend? recommendResult;
+  List<LibraryBookItem> rankResult;
   int fetchCalls = 0;
+  int rankCalls = 0;
 
   @override
   Future<LibraryDailyRecommend?> fetchDailyRecommend({
@@ -51,6 +58,20 @@ class _MockLibraryApiClient extends LibraryApiClient {
   }) async {
     fetchCalls++;
     return recommendResult;
+  }
+
+  @override
+  Future<List<LibraryBookItem>> fetchRankList({
+    required LibraryRankType type,
+    int page = 1,
+    int rows = 10,
+    LibraryAuthSession? session,
+    bool loadCovers = true,
+    HotLoanSortType hotLoanSort = HotLoanSortType.loanCount,
+    NewBookCampus newBookCampus = NewBookCampus.all,
+  }) async {
+    rankCalls++;
+    return rankResult;
   }
 }
 
@@ -138,7 +159,7 @@ void main() {
     expect(find.text('今日推荐'), findsOneWidget);
     // 检查书目各行内容
     expect(find.text('“傻瓜”计量经济学与Stata应用'), findsOneWidget);
-    expect(find.text('习明明编著'), findsOneWidget);
+    expect(find.textContaining('习明明'), findsOneWidget);
     expect(find.textContaining('经济科学出版社'), findsOneWidget);
     expect(find.textContaining('(2024)'), findsOneWidget);
     expect(find.textContaining('本书内容涵盖Stata的数据处理'), findsOneWidget);
@@ -150,6 +171,48 @@ void main() {
     // 验证跳转到了“图书详情”子页面
     expect(find.byType(LibraryBookDetailPage), findsOneWidget);
     expect(find.text('图书详情'), findsOneWidget);
+  });
+
+  testWidgets(
+      'displays rank gallery with 4 titles and navigates to rank list page on tap view all',
+      (tester) async {
+    final authService = _MockLibraryAuthService();
+    const hotBook = LibraryBookItem(
+      recordId: 796762,
+      title: '机器学习',
+      author: '周志华著',
+      publisher: '清华大学出版社',
+      publishYear: '2016',
+      badgeText: '借阅 5 次',
+    );
+    final apiClient = _MockLibraryApiClient(
+      rankResult: const [hotBook],
+    );
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: LibraryPage(
+          authService: authService,
+          apiClient: apiClient,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    // 验证4个榜单标题
+    expect(find.text('热门借阅'), findsOneWidget);
+    expect(find.text('热门收藏'), findsOneWidget);
+    expect(find.text('高分图书'), findsOneWidget);
+    expect(find.text('新书速递'), findsOneWidget);
+    expect(find.text('机器学习'), findsOneWidget);
+    expect(find.text('周志华著'), findsOneWidget);
+
+    // 点击底部“查看榜单”按钮进入榜单子页面
+    await tester.tap(find.text('查看榜单'));
+    await tester.pumpAndSettle();
+
+    expect(find.byType(LibraryRankListPage), findsOneWidget);
+    expect(find.text('图书榜单'), findsOneWidget);
   });
 
   testWidgets('displays error state and retries on action tapped',
@@ -171,6 +234,7 @@ void main() {
 
     // 修复错误并点击重新授权
     authService.error = null;
+    await tester.ensureVisible(find.text('重新授权'));
     await tester.tap(find.text('重新授权'));
     await tester.pumpAndSettle();
 
