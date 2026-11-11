@@ -1,3 +1,5 @@
+enum ClassroomAccessMode { direct, webVpn }
+
 class ClassroomUrlResolver {
   const ClassroomUrlResolver._();
 
@@ -12,17 +14,23 @@ class ClassroomUrlResolver {
 
   static bool get usesWebVpn => _usesWebVpn;
   static int get revision => _revision;
+  static ClassroomAccessMode get accessMode =>
+      usesWebVpn ? ClassroomAccessMode.webVpn : ClassroomAccessMode.direct;
 
   static void configure({required bool useWebVpn}) {
     if (_usesWebVpn != useWebVpn) _revision++;
     _usesWebVpn = useWebVpn;
   }
 
-  static String get baseUrl => usesWebVpn ? webVpnBaseUrl : directBaseUrl;
+  static String get baseUrl => baseUrlFor(accessMode);
+
+  static String baseUrlFor(ClassroomAccessMode mode) =>
+      mode == ClassroomAccessMode.webVpn ? webVpnBaseUrl : directBaseUrl;
 
   static Uri get baseUri => Uri.parse(baseUrl);
 
-  static Uri uri(String path) {
+  static Uri uri(String path, {ClassroomAccessMode? accessMode}) {
+    final baseUrl = baseUrlFor(accessMode ?? ClassroomUrlResolver.accessMode);
     final normalized = path.startsWith('/') ? path : '/$path';
     return Uri.parse('$baseUrl$normalized');
   }
@@ -39,14 +47,34 @@ class ClassroomAccessWindow {
   static String directFailureMessage({
     String? detail,
     DateTime? now,
+    bool webVpnEnabled = false,
   }) {
     final prefix =
         detail == null || detail.trim().isEmpty ? '' : '${detail.trim()}。';
     if (!isExternalAccessOpen(now ?? DateTime.now())) {
+      final suggestion =
+          webVpnEnabled ? '请连接校园网或学校VPN后重试直连。' : '请连接校园网、学校VPN，或开启WebVPN后重试。';
       return '$prefix当前处于空教室查询外网关闭时段（每日23:00至次日07:00）。'
-          '请连接校园网、学校VPN，或开启WebVPN后重试。';
+          '$suggestion';
     }
     final fallback = prefix.isEmpty ? '空教室系统暂时无法访问，请稍后重试。' : prefix;
     return '$fallback外网开放时段为每日07:00至23:00。';
+  }
+
+  static String webVpnFailureMessage({
+    String? detail,
+    bool serviceUnavailable = false,
+    DateTime? now,
+  }) {
+    final prefix = serviceUnavailable ? '当前WebVPN服务不可用。' : '通过WebVPN连接空教室失败。';
+    final reason = detail?.trim().replaceFirst(RegExp(r'[。.!！]+$'), '');
+    final explanation = serviceUnavailable || reason == null || reason.isEmpty
+        ? ''
+        : '$reason。';
+    if (isExternalAccessOpen(now ?? DateTime.now())) {
+      return '$prefix$explanation当前处于外网开放时段（每日07:00至23:00），可尝试直连。';
+    }
+    return '$prefix$explanation当前处于外网关闭时段（每日23:00至次日07:00）。'
+        '连接校园网或学校VPN后，可尝试直连。';
   }
 }

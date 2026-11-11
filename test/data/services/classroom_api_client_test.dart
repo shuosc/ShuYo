@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
@@ -7,6 +8,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:shuyo/core/classroom_url_resolver.dart';
 import 'package:shuyo/data/models/classroom.dart';
 import 'package:shuyo/data/services/classroom_api_client.dart';
+import 'package:shuyo/data/services/academic_auth_service.dart';
 import 'package:shuyo/data/services/classroom_auth_service.dart';
 import 'package:shuyo/data/services/session_cookie_jar.dart';
 import 'package:shuyo/data/services/webvpn_session_store.dart';
@@ -56,7 +58,9 @@ void main() {
     final assertion = expectLater(
       pending,
       throwsA(isA<ClassroomApiException>()
-          .having((error) => error.statusCode, 'original HTTP status', 503)),
+          .having((error) => error.statusCode, 'original HTTP status', 503)
+          .having((error) => error.accessMode, 'original route',
+              ClassroomAccessMode.webVpn)),
     );
     await sent.future;
     ClassroomUrlResolver.configure(useWebVpn: false);
@@ -206,4 +210,129 @@ void main() {
       expect(sent, isFalse);
     },
   );
+
+  test('direct override bypasses cookies and leaves the global VPN enabled',
+      () async {
+    ClassroomUrlResolver.configure(useWebVpn: true);
+    final revision = ClassroomUrlResolver.revision;
+    final requests = <http.Request>[];
+    final client = ClassroomApiClient(
+      authService: ClassroomAuthService(cookieLoader: (_) async {
+        fail('Direct requests must not read WebVPN cookies');
+      }),
+      httpClient: MockClient((request) async {
+        requests.add(request);
+        return http.Response('{"code":200,"data":{}}', 200);
+      }),
+    );
+    await client.fetchSearchOptions(accessMode: ClassroomAccessMode.direct);
+    await client.fetchBuildingSchedule(
+      building: _building,
+      date: DateTime(2026, 11, 8),
+      accessMode: ClassroomAccessMode.direct,
+    );
+    expect(requests, hasLength(3));
+    for (final request in requests) {
+      expect(request.url.host, ClassroomUrlResolver.directHost);
+      expect(request.headers, isNot(contains('cookie')));
+    }
+    expect(ClassroomUrlResolver.usesWebVpn, isTrue);
+    expect(ClassroomUrlResolver.revision, revision);
+  });
+
+  test('both option requests keep the originally selected mode', () async {
+    final requests = <http.Request>[];
+    final client = ClassroomApiClient(
+      httpClient: MockClient((request) async {
+        requests.add(request);
+        ClassroomUrlResolver.configure(useWebVpn: true);
+        return http.Response('{"code":200,"data":{}}', 200);
+      }),
+    );
+    await client.fetchSearchOptions();
+    expect(requests, hasLength(2));
+    expect(requests.every((r) => r.url.host == ClassroomUrlResolver.directHost),
+        isTrue);
+  });
+
+  for (final error in <Object>[
+    TimeoutException('timed out'),
+    const SocketException('DNS failed'),
+    HandshakeException('TLS failed'),
+    http.ClientException('gateway disconnected'),
+  ]) {
+    test('normalizes ${error.runtimeType} with the actual WebVPN route',
+        () async {
+      ClassroomUrlResolver.configure(useWebVpn: true);
+      final client = ClassroomApiClient(
+        authService:
+            ClassroomAuthService(cookieLoader: (_) async => _portalCookies),
+        webVpnSessionValidator: () async => WebVpnSessionStatus.unavailable,
+        httpClient: MockClient((_) async => throw error),
+      );
+      await expectLater(
+        client.fetchBuildingSchedule(
+            building: _building, date: DateTime(2026, 11, 8)),
+        throwsA(isA<ClassroomApiException>()
+            .having(
+                (e) => e.accessMode, 'actual route', ClassroomAccessMode.webVpn)
+            .having((e) => e.cause, 'original cause', same(error))
+            .having((e) => e is ClassroomWebVpnAuthException, 'false expiry',
+                isFalse)),
+      );
+    });
+  }
+
+  test('a failing session probe preserves the original request failure',
+      () async {
+    ClassroomUrlResolver.configure(useWebVpn: true);
+    final error = TimeoutException('request timed out');
+    final client = ClassroomApiClient(
+      authService:
+          ClassroomAuthService(cookieLoader: (_) async => _portalCookies),
+      webVpnSessionValidator: () async => throw StateError('probe failed'),
+      httpClient: MockClient((_) async => throw error),
+    );
+    await expectLater(
+      client.fetchBuildingSchedule(
+          building: _building, date: DateTime(2026, 11, 8)),
+      throwsA(isA<ClassroomApiException>()
+          .having((e) => e.cause, 'request cause', same(error))),
+    );
+  });
+
+  test('a confirmed rejected session produces an authentication failure',
+      () async {
+    ClassroomUrlResolver.configure(useWebVpn: true);
+    final client = ClassroomApiClient(
+      authService:
+          ClassroomAuthService(cookieLoader: (_) async => _portalCookies),
+      webVpnSessionValidator: () async => WebVpnSessionStatus.loginRequired,
+      httpClient: MockClient((_) async => http.Response('login required', 503)),
+    );
+    await expectLater(
+      client.fetchBuildingSchedule(
+          building: _building, date: DateTime(2026, 11, 8)),
+      throwsA(isA<ClassroomWebVpnAuthException>()),
+    );
+  });
+
+  test('HTTP errors retain their status code and original route', () async {
+    ClassroomUrlResolver.configure(useWebVpn: true);
+    final client = ClassroomApiClient(
+      authService:
+          ClassroomAuthService(cookieLoader: (_) async => _portalCookies),
+      webVpnSessionValidator: () async => WebVpnSessionStatus.unavailable,
+      httpClient:
+          MockClient((_) async => http.Response('gateway unavailable', 502)),
+    );
+    await expectLater(
+      client.fetchBuildingSchedule(
+          building: _building, date: DateTime(2026, 11, 8)),
+      throwsA(isA<ClassroomApiException>()
+          .having((e) => e.statusCode, 'HTTP status', 502)
+          .having(
+              (e) => e.accessMode, 'actual route', ClassroomAccessMode.webVpn)),
+    );
+  });
 }

@@ -1,3 +1,4 @@
+import '../../core/classroom_url_resolver.dart';
 import '../models/academic_schedule.dart';
 import '../models/academic_progress.dart';
 import '../models/academic_ranking.dart';
@@ -16,6 +17,9 @@ class DemoAcademicScheduleRepository extends AcademicScheduleRepository {
   DemoAcademicScheduleRepository(this.schedule);
 
   final AcademicSchedule schedule;
+
+  @override
+  bool get supportsTermDiscovery => false;
 
   @override
   Future<AcademicSchedule?> loadCachedSchedule() async => schedule;
@@ -217,13 +221,18 @@ class DemoClassroomRepository extends ClassroomRepository {
   ClassroomSearchOptions? get optionsSnapshot => options;
 
   @override
-  Future<ClassroomSearchOptions> loadOptions(
-          {bool forceRefresh = false}) async =>
+  Future<ClassroomSearchOptions> loadOptions({
+    bool forceRefresh = false,
+    ClassroomAccessMode? accessMode,
+  }) async =>
       options;
 
   @override
-  Future<ClassroomAvailabilityResult> search(ClassroomAvailabilityQuery query,
-      {bool forceRefresh = false}) async {
+  Future<ClassroomAvailabilityResult> search(
+    ClassroomAvailabilityQuery query, {
+    bool forceRefresh = false,
+    ClassroomAccessMode? accessMode,
+  }) async {
     final supported = query.building.id == schedule.building.id &&
         query.date.year == 2026 &&
         query.date.month == 9 &&

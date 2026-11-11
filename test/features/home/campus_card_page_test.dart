@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -6,6 +7,9 @@ import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:shuyo/data/models/campus_card.dart';
+import 'package:shuyo/data/models/campus_card_snapshot.dart';
+import 'package:shuyo/data/services/campus_card_cache.dart';
+import 'package:shuyo/data/services/secure_app_store.dart';
 import 'package:shuyo/data/services/campus_card_service.dart';
 import 'package:shuyo/data/services/academic_account_store.dart';
 import 'package:shuyo/features/home/campus_card_page.dart';
@@ -60,6 +64,278 @@ const _updatedChartBill = CampusCardBill(
 );
 
 void main() {
+  testWidgets(
+      'reopening shows the completed snapshot before new requests finish',
+      (tester) async {
+    SharedPreferences.setMockInitialValues({
+      AcademicAccountStore.studentIdKey: _card.studentId,
+    });
+    final cache = CampusCardCache()..selectAccount(_card.studentId);
+    final first = _ControlledCampusCardService(pendingChart: true);
+    await _pumpPage(tester, first,
+        cache: cache, initialCard: null, viewport: const Size(402, 1500));
+    first.requests.single.complete(const [_firstBill]);
+    first.chartRequests.single.complete(const [_chartBill]);
+    await tester.pumpAndSettle();
+    expect(cache.snapshot!.recent!.balances, [128.5]);
+    final originalEndDate = cache.snapshot!.chart!.endDate;
+
+    await tester.pumpWidget(const SizedBox.shrink());
+    final pendingCard = Completer<CampusCardInfo>();
+    final second = _ControlledCampusCardService(
+        pendingCard: pendingCard, pendingChart: true);
+    await _pumpPage(tester, second,
+        cache: cache, initialCard: null, viewport: const Size(402, 1500));
+    expect(find.text('¥ 128.50'), findsOneWidget);
+    expect(find.text(_firstBill.name), findsOneWidget);
+    expect(find.text('余额 ¥128.50'), findsOneWidget);
+    expect(_spendingChart(tester).bills, [_chartBill]);
+    expect(_spendingChart(tester).endDate, originalEndDate);
+    expect(_appBarProgress(), findsOneWidget);
+
+    // Even a final ledger waits for its own balance before replacing old rows.
+    second.requests.single.report(const [_currentBill, _firstBill]);
+    second.requests.single.complete(const [_currentBill, _firstBill]);
+    second.chartRequests.single.complete(const [_updatedChartBill]);
+    await tester.pump();
+    expect(find.text(_currentBill.name), findsNothing);
+    expect(find.text('余额 ¥128.50'), findsOneWidget);
+    expect(cache.snapshot!.recent!.bills, [_firstBill]);
+    expect(_spendingChart(tester).bills, [_updatedChartBill]);
+
+    pendingCard.complete(const CampusCardInfo(
+        studentId: 'TEST-IDENTITY-999',
+        name: '',
+        status: '',
+        balance: 200,
+        validUntil: ''));
+    await tester.pumpAndSettle();
+    expect(find.text(_currentBill.name), findsOneWidget);
+    expect(find.text('余额 ¥200.00'), findsOneWidget);
+    expect(find.text('余额 ¥202.50'), findsOneWidget);
+    expect(cache.snapshot!.recent!.balances, [200, 202.5]);
+    expect(cache.snapshot!.recent!.balance!.balance, 200);
+    expect(_appBarProgress(), findsNothing);
+  });
+
+  testWidgets('a new cache instance restores disk data and its original dates',
+      (tester) async {
+    final original = await _seedCampusCardCache();
+    final cache = CampusCardCache()..selectAccount(_card.studentId);
+    expect(cache.snapshot, isNull);
+    final service = _ControlledCampusCardService(
+        pendingCard: Completer<CampusCardInfo>(), pendingChart: true);
+    await _pumpPage(tester, service,
+        cache: cache, initialCard: null, viewport: const Size(402, 1500));
+    expect(find.text('¥ 128.50'), findsOneWidget);
+    expect(find.text(_firstBill.name), findsOneWidget);
+    expect(find.text('余额 ¥128.50'), findsOneWidget);
+    expect(_spendingChart(tester).bills!.single.name, _chartBill.name);
+    expect(_spendingChart(tester).endDate, original.snapshot!.chart!.endDate);
+    expect(DateUtils.isSameDay(_spendingChart(tester).endDate, DateTime.now()),
+        isFalse);
+    expect(find.byKey(const ValueKey('campus-card-chart-updated-at')),
+        findsOneWidget);
+    expect(find.byKey(const ValueKey('campus-card-bills-updated-at')),
+        findsOneWidget);
+  });
+
+  testWidgets(
+      'reopening after disk hydration never replays the old disk result',
+      (tester) async {
+    await _seedCampusCardCache();
+    final cache = CampusCardCache()..selectAccount(_card.studentId);
+    await cache.load();
+    final first = _ControlledCampusCardService();
+    await _pumpPage(tester, first,
+        cache: cache, initialCard: null, viewport: const Size(402, 1500));
+    first.requests.single.complete(const [_currentBill]);
+    await tester.pumpAndSettle();
+    expect(find.text(_currentBill.name), findsOneWidget);
+    await tester.pumpWidget(const SizedBox.shrink());
+    final second = _ControlledCampusCardService(
+        pendingCard: Completer<CampusCardInfo>(), pendingChart: true);
+    await _pumpPage(tester, second,
+        cache: cache, initialCard: null, viewport: const Size(402, 1500));
+    await tester.pump();
+    expect(find.text(_currentBill.name), findsOneWidget);
+    expect(find.text(_firstBill.name), findsNothing);
+    expect(find.text('余额 ¥128.50'), findsOneWidget);
+  });
+
+  testWidgets('late disk hydration cannot replace any fresh on-screen section',
+      (tester) async {
+    final saved = await _seedCampusCardCache();
+    final raw = jsonEncode(saved.snapshot!.toJson());
+    final store = _DelayedCampusCardStore();
+    final cache = CampusCardCache(
+        store: store, accountIdLoader: () async => _card.studentId)
+      ..selectAccount(_card.studentId);
+    final service = _ControlledCampusCardService();
+    await _pumpPage(tester, service,
+        cache: cache, initialCard: null, viewport: const Size(402, 1500));
+    service.requests.single.complete(const [_currentBill]);
+    await tester.pumpAndSettle();
+    expect(find.text(_currentBill.name), findsOneWidget);
+    store.readResult.complete(raw);
+    await tester.pumpAndSettle();
+    expect(find.text(_currentBill.name), findsOneWidget);
+    expect(find.text(_firstBill.name), findsNothing);
+    expect(_spendingChart(tester).bills, isEmpty);
+    expect(cache.snapshot!.recent!.bills.single.name, _currentBill.name);
+    expect(cache.snapshot!.chart!.bills, isEmpty);
+  });
+
+  testWidgets(
+      'failed refreshes retain all cached sections with concise feedback',
+      (tester) async {
+    final cache = await _seedCampusCardCache();
+    final snapshot = cache.snapshot;
+    final pendingCard = Completer<CampusCardInfo>();
+    final service = _ControlledCampusCardService(
+        pendingCard: pendingCard, pendingChart: true);
+    await _pumpPage(tester, service,
+        cache: cache, initialCard: null, viewport: const Size(402, 1500));
+    pendingCard.completeError(StateError('private balance diagnostic'));
+    service.requests.single.result
+        .completeError(StateError('private ledger diagnostic'));
+    service.chartRequests.single.result
+        .completeError(StateError('private chart diagnostic'));
+    await tester.pumpAndSettle();
+    expect(find.text('刷新失败'), findsNWidgets(3));
+    expect(find.textContaining('当前显示上次数据'), findsNothing);
+    expect(find.textContaining('private'), findsNothing);
+    expect(find.text('¥ 128.50'), findsOneWidget);
+    expect(find.text(_firstBill.name), findsOneWidget);
+    expect(find.text('余额 ¥128.50'), findsOneWidget);
+    expect(
+        find.byKey(const ValueKey('campus-card-chart-plot')), findsOneWidget);
+    expect(cache.snapshot, same(snapshot));
+    expect(find.byType(SnackBar), findsNothing);
+  });
+
+  testWidgets('partial and empty progress cannot replace a completed snapshot',
+      (tester) async {
+    final cache = await _seedCampusCardCache();
+    final original = cache.snapshot!.recent;
+    final service = _ControlledCampusCardService();
+    await _pumpPage(tester, service,
+        cache: cache, initialCard: null, viewport: const Size(402, 1500));
+    final request = service.requests.single;
+    request.report(const [_currentBill]);
+    await tester.pump();
+    request.report(const []);
+    await tester.pump();
+    expect(find.text(_currentBill.name), findsNothing);
+    expect(find.text(_firstBill.name), findsOneWidget);
+    request.result.completeError(StateError('failed last batch'));
+    await tester.pumpAndSettle();
+    expect(find.text(_firstBill.name), findsOneWidget);
+    expect(cache.snapshot!.recent, same(original));
+  });
+
+  testWidgets('successful empty responses replace nonempty cached sections',
+      (tester) async {
+    final cache = await _seedCampusCardCache();
+    final service = _ControlledCampusCardService(pendingChart: true);
+    await _pumpPage(tester, service,
+        cache: cache, initialCard: null, viewport: const Size(402, 1500));
+    service.requests.single.complete(const []);
+    service.chartRequests.single.complete(const []);
+    await tester.pumpAndSettle();
+    expect(find.text(_firstBill.name), findsNothing);
+    expect(find.text('近一年暂无记录，可前往历史记录选择其他日期。'), findsOneWidget);
+    expect(cache.snapshot!.recent!.bills, isEmpty);
+    expect(cache.snapshot!.recent!.balances, isEmpty);
+    expect(cache.snapshot!.chart!.bills, isEmpty);
+  });
+
+  testWidgets(
+      'new ledger never inherits cached row balances after card failure',
+      (tester) async {
+    final cache = await _seedCampusCardCache();
+    final pendingCard = Completer<CampusCardInfo>();
+    final service = _ControlledCampusCardService(pendingCard: pendingCard);
+    await _pumpPage(tester, service,
+        cache: cache, initialCard: null, viewport: const Size(402, 1500));
+    expect(find.text('余额 ¥128.50'), findsOneWidget);
+    pendingCard.completeError(StateError('balance unavailable'));
+    service.requests.single.complete(const [_firstBill]);
+    await tester.pumpAndSettle();
+    expect(find.text(_firstBill.name), findsOneWidget);
+    expect(find.text('¥ 128.50'), findsOneWidget);
+    expect(find.text('余额 ¥128.50'), findsNothing);
+    expect(find.text('余额 —'), findsOneWidget);
+    expect(cache.snapshot!.recent!.balances, [null]);
+    expect(cache.snapshot!.recent!.balance, isNull);
+  });
+
+  testWidgets('account mismatch clears cached data and ignores late results',
+      (tester) async {
+    final cache = await _seedCampusCardCache();
+    final pendingCard = Completer<CampusCardInfo>();
+    final service = _ControlledCampusCardService(
+        pendingCard: pendingCard, pendingChart: true);
+    await _pumpPage(tester, service,
+        cache: cache, initialCard: null, viewport: const Size(402, 1500));
+    pendingCard.completeError(
+        const CampusCardException('accountMismatch', 'private identity'));
+    await tester.pumpAndSettle();
+    expect(find.text(_firstBill.name), findsNothing);
+    expect(find.text('¥ 128.50'), findsNothing);
+    expect(cache.snapshot, isNull);
+    expect(service.requests.single.isCancelled, isTrue);
+    expect(service.chartRequests.single.isCancelled, isTrue);
+    service.requests.single.complete(const [_staleResultBill]);
+    service.chartRequests.single.complete(const [_updatedChartBill]);
+    await tester.pumpAndSettle();
+    expect(cache.snapshot, isNull);
+    expect(
+        (await SharedPreferences.getInstance())
+            .getString(SecureAppStore.campusCardSnapshotKey),
+        isNull);
+  });
+
+  testWidgets(
+      'disposing does not save progress or results from retired requests',
+      (tester) async {
+    final cache = await _seedCampusCardCache();
+    final snapshot = cache.snapshot;
+    final pendingCard = Completer<CampusCardInfo>();
+    final service = _ControlledCampusCardService(
+        pendingCard: pendingCard, pendingChart: true);
+    await _pumpPage(tester, service,
+        cache: cache, initialCard: null, viewport: const Size(402, 1500));
+    service.requests.single.report(const [_currentBill]);
+    await tester.pumpWidget(const SizedBox.shrink());
+    pendingCard.complete(_card);
+    service.requests.single.complete(const [_staleResultBill]);
+    service.chartRequests.single.complete(const [_updatedChartBill]);
+    await tester.pumpAndSettle();
+    expect(cache.snapshot, same(snapshot));
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('first-visit partial rows are visible but are not cached',
+      (tester) async {
+    SharedPreferences.setMockInitialValues({
+      AcademicAccountStore.studentIdKey: _card.studentId,
+    });
+    final cache = CampusCardCache()..selectAccount(_card.studentId);
+    final service = _ControlledCampusCardService();
+    await _pumpPage(tester, service,
+        cache: cache, initialCard: null, viewport: const Size(402, 1500));
+    service.requests.single.report(const [_firstBill]);
+    await tester.pump();
+    expect(find.text(_firstBill.name), findsOneWidget);
+    expect(cache.snapshot!.recent, isNull);
+    service.requests.single.result
+        .completeError(StateError('failed last batch'));
+    await tester.pumpAndSettle();
+    expect(find.text(_firstBill.name), findsOneWidget);
+    expect(cache.snapshot!.recent, isNull);
+  });
+
   test('running balances reverse debits and credits without losing cents', () {
     const bills = [
       CampusCardBill(name: '充值', payTime: '2026-10-22 12:00:00', amount: -10),
@@ -145,7 +421,7 @@ void main() {
     expect(balance.style!.color, colors.textTertiary);
   });
 
-  testWidgets('home refresh keeps balances and stages rows until card loads',
+  testWidgets('home refresh keeps its snapshot until the whole ledger loads',
       (tester) async {
     const updated = CampusCardInfo(
       studentId: 'TEST-IDENTITY-999',
@@ -177,11 +453,13 @@ void main() {
     pendingCard.complete(updated);
     await tester.pump();
     await tester.pump();
+    expect(find.text(_currentBill.name), findsNothing);
+    expect(find.text('余额 ¥128.50'), findsOneWidget);
+    request.complete(const [_currentBill, _firstBill]);
+    await tester.pumpAndSettle();
     expect(find.text(_currentBill.name), findsOneWidget);
     expect(find.text('余额 ¥200.00'), findsOneWidget);
     expect(find.text('余额 ¥202.50'), findsOneWidget);
-    request.complete(const [_currentBill, _firstBill]);
-    await tester.pumpAndSettle();
     expect(find.text('余额 —'), findsNothing);
   });
 
@@ -337,7 +615,7 @@ void main() {
     service.requests.last.complete(const []);
     await tester.pumpAndSettle();
     expect(tester.widget<Text>(updateLabel).data, expected);
-    expect(find.text('余额加载失败'), findsOneWidget);
+    expect(find.text('刷新失败'), findsOneWidget);
   });
 
   testWidgets(
@@ -485,7 +763,7 @@ void main() {
     service.requests.last.complete(const []);
     await tester.pumpAndSettle();
     expect(find.text('¥ 128.50'), findsOneWidget);
-    expect(find.text('余额加载失败'), findsOneWidget);
+    expect(find.text('刷新失败'), findsOneWidget);
     expect(find.widgetWithText(TextButton, '重试'), findsOneWidget);
     expect(find.byType(SnackBar), findsNothing);
     expect(tester.takeException(), isNull);
@@ -1041,10 +1319,39 @@ void main() {
   }
 }
 
+Future<CampusCardCache> _seedCampusCardCache() async {
+  SharedPreferences.setMockInitialValues({
+    AcademicAccountStore.studentIdKey: _card.studentId,
+  });
+  final cache = CampusCardCache()..selectAccount(_card.studentId);
+  final time = DateTime.now().subtract(const Duration(days: 1));
+  await cache.rememberBalance(_card, time, revision: cache.revision);
+  await cache.rememberRecent(
+    CampusCardRecentSnapshot(
+      bills: const [_firstBill],
+      balances: const [128.5],
+      startDate: DateTime(time.year - 1, time.month, time.day),
+      endDate: DateUtils.dateOnly(time),
+      queriedAt: time,
+      balance: CampusCardBalanceSnapshot(balance: 128.5, queriedAt: time),
+    ),
+    revision: cache.revision,
+  );
+  await cache.rememberChart(
+    CampusCardChartSnapshot(
+        bills: const [_chartBill],
+        endDate: DateUtils.dateOnly(time),
+        queriedAt: time),
+    revision: cache.revision,
+  );
+  return cache;
+}
+
 Future<void> _pumpPage(
   WidgetTester tester,
   _ControlledCampusCardService service, {
   CampusCardInfo? initialCard = _card,
+  CampusCardCache? cache,
   String themeId = ShuYoThemes.defaultId,
   void Function(CampusCardInfo, DateTime)? onCardUpdated,
   Future<bool> Function()? onLogin,
@@ -1064,6 +1371,7 @@ Future<void> _pumpPage(
     localizationsDelegates: GlobalMaterialLocalizations.delegates,
     theme: ShuYoThemes.byId(themeId).themeData(),
     home: CampusCardPage(
+      cache: cache,
       serviceFactory: () => service,
       onLogin: onLogin ?? () async => false,
       onAuthRequired: onAuthRequired,
@@ -1176,4 +1484,17 @@ class _BillRequest {
   void report(List<CampusCardBill> snapshot) => onProgress?.call(snapshot);
 
   void complete(List<CampusCardBill> bills) => result.complete(bills);
+}
+
+class _DelayedCampusCardStore extends SecureAppStore {
+  final readResult = Completer<String?>();
+
+  @override
+  Future<String?> read(String key) => readResult.future;
+
+  @override
+  Future<void> write(String key, String value) async {}
+
+  @override
+  Future<void> delete(String key) async {}
 }

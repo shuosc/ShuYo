@@ -79,6 +79,7 @@
 		A10000000000000000000004 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		A10000000000000000000005 /* ScheduleWidget.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = ScheduleWidget.entitlements; sourceTree = "<group>"; };
 		A10000000000000000000006 /* ScheduleWidget.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = ScheduleWidget.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		A10000000000000000000020 /* Widget.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Widget.xcconfig; sourceTree = "<group>"; };
 		A10000000000000000000009 /* Runner.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Runner.entitlements; sourceTree = "<group>"; };
 		1498D2321E8E86230040F4C2 /* GeneratedPluginRegistrant.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = GeneratedPluginRegistrant.h; sourceTree = "<group>"; };
 		1498D2331E8E89220040F4C2 /* GeneratedPluginRegistrant.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = GeneratedPluginRegistrant.m; sourceTree = "<group>"; };
@@ -129,6 +130,7 @@
 		A10000000000000000000011 /* ScheduleWidget */ = {
 			isa = PBXGroup;
 			children = (
+				A10000000000000000000020 /* Widget.xcconfig */,
 				C30000000000000000000004 /* PrivacyInfo.xcprivacy */,
 				A10000000000000000000003 /* ScheduleWidget.swift */,
 				B20000000000000000000006 /* CourseLiveActivity.swift */,
@@ -441,7 +443,7 @@
 /* Begin XCBuildConfiguration section */
 		A10000000000000000000017 /* Debug */ = {
 			isa = XCBuildConfiguration;
-			baseConfigurationReference = 9740EEB21CF90195004384FC /* Debug.xcconfig */;
+			baseConfigurationReference = A10000000000000000000020 /* Widget.xcconfig */;
 			buildSettings = {
 				APPLICATION_EXTENSION_API_ONLY = YES;
 				CODE_SIGN_ENTITLEMENTS = ScheduleWidget/ScheduleWidget.entitlements;
@@ -464,7 +466,7 @@
 		};
 		A10000000000000000000018 /* Release */ = {
 			isa = XCBuildConfiguration;
-			baseConfigurationReference = 7AFA3C8E1D35360C0083082E /* Release.xcconfig */;
+			baseConfigurationReference = A10000000000000000000020 /* Widget.xcconfig */;
 			buildSettings = {
 				APPLICATION_EXTENSION_API_ONLY = YES;
 				CODE_SIGN_ENTITLEMENTS = ScheduleWidget/ScheduleWidget.entitlements;
@@ -485,7 +487,7 @@
 		};
 		A10000000000000000000019 /* Profile */ = {
 			isa = XCBuildConfiguration;
-			baseConfigurationReference = 7AFA3C8E1D35360C0083082E /* Release.xcconfig */;
+			baseConfigurationReference = A10000000000000000000020 /* Widget.xcconfig */;
 			buildSettings = {
 				APPLICATION_EXTENSION_API_ONLY = YES;
 				CODE_SIGN_ENTITLEMENTS = ScheduleWidget/ScheduleWidget.entitlements;

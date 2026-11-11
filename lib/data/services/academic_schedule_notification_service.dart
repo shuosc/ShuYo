@@ -291,7 +291,7 @@ class AcademicScheduleNotificationService {
     final schedule =
         settings.enabled ? await _repository.loadCachedSchedule() : null;
     final alarms = <_EarlyClassAlarm>[];
-    if (schedule != null) {
+    if (schedule != null && await _repository.primaryCalendarConfigured()) {
       final weekState = await _repository.loadWeekState();
       alarms.addAll(
         _upcomingEarlyClassAlarms(
@@ -304,6 +304,7 @@ class AcademicScheduleNotificationService {
       );
     }
     final count = await _alarmChannel.invokeMethod<int>('sync', {
+          'enabled': settings.enabled,
           'alarms': alarms.map((alarm) => alarm.toMap()).toList(),
         }) ??
         0;
@@ -333,7 +334,9 @@ class AcademicScheduleNotificationService {
     final instant = now ?? DateTime.now();
     try {
       await syncEarlyClassAlarms();
-    } on PlatformException {
+    } on PlatformException catch (error) {
+      debugPrint(
+          'Early class alarm sync failed: ${error.code}: ${error.message}');
       // Local notification syncing remains independent of AlarmKit.
     }
     await _ensureInitialized();
@@ -364,7 +367,7 @@ class AcademicScheduleNotificationService {
     }
 
     final schedule = await _repository.loadCachedSchedule();
-    if (schedule == null) {
+    if (schedule == null || !await _repository.primaryCalendarConfigured()) {
       return 0;
     }
     final weekState = await _repository.loadWeekState(
@@ -512,7 +515,7 @@ class AcademicScheduleNotificationService {
       }
       final session = earliest.session;
       final fireTime = earliest.start.subtract(Duration(minutes: leadMinutes));
-      if (fireTime.isAfter(now.add(const Duration(seconds: 30)))) {
+      if (fireTime.isAfter(now)) {
         yield _EarlyClassAlarm(
           id: earliest.id,
           title: session.courseName.isEmpty ? '早课' : session.courseName,
@@ -551,7 +554,7 @@ class AcademicScheduleNotificationService {
     DateTime now,
   ) async {
     final schedule = await _repository.loadCachedSchedule();
-    if (schedule == null) {
+    if (schedule == null || !await _repository.primaryCalendarConfigured()) {
       return const [];
     }
     final weekState = await _repository.loadWeekState(

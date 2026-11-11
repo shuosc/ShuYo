@@ -104,18 +104,18 @@ void main() {
           findsNothing);
       expect(find.text('消费'), findsOneWidget);
       expect(find.text('充值'), findsOneWidget);
-      expect(find.semantics.byLabel(RegExp(r'^202[56]年.*，消费 ¥ ')),
+      expect(find.semantics.byLabel(RegExp(r'^202[56]年.*，充值入账 ¥ ')),
           findsExactly(7));
-      expect(find.semantics.byLabel('2025年12月10日，消费 ¥ 12.00，充值入账 ¥ 0.00'),
+      expect(find.semantics.byLabel('2025年12月10日，充值入账 ¥ 0.00，消费 ¥ 12.00'),
           findsNothing);
 
       await tester
           .tap(find.byKey(const ValueKey('campus-card-chart-range-30')));
       await tester.pump();
-      expect(find.semantics.byLabel(RegExp(r'^202[56]年.*，消费 ¥ ')),
+      expect(find.semantics.byLabel(RegExp(r'^202[56]年.*，充值入账 ¥ ')),
           findsExactly(30));
       final olderDay =
-          find.semantics.byLabel('2025年12月10日，消费 ¥ 12.00，充值入账 ¥ 0.00');
+          find.semantics.byLabel('2025年12月10日，充值入账 ¥ 0.00，消费 ¥ 12.00');
       final node = olderDay.evaluate().single;
       node.owner!.performAction(node.id, SemanticsAction.tap);
       await tester.pump();
@@ -134,7 +134,10 @@ void main() {
 
   testWidgets('tap and horizontal drag select dates at both plot edges',
       (tester) async {
-    await _pump(tester, bills: _bills());
+    await _pump(tester, bills: [
+      ..._bills(),
+      _bill('2025-12-28 12:00:00', -20),
+    ]);
     final plot = find.byKey(const ValueKey('campus-card-chart-plot'));
     final bounds = tester.getRect(plot);
     final chart = find.byKey(const ValueKey('campus-card-spending-chart'));
@@ -151,28 +154,35 @@ void main() {
         lessThanOrEqualTo(bounds.top));
     expect(find.text('2025-12-28'), findsOneWidget);
     expect(_selectedValue(tester, 'amount'), '¥ 2.50');
+    expect(_selectedValue(tester, 'credit-amount'), '¥ 20.00');
     final date = find.byKey(const ValueKey('campus-card-chart-selected-date'));
     final spending =
         find.byKey(const ValueKey('campus-card-chart-selected-amount-row'));
     final credit = find
         .byKey(const ValueKey('campus-card-chart-selected-credit-amount-row'));
     expect(tester.getTopRight(date).dx,
-        lessThanOrEqualTo(tester.getTopLeft(spending).dx));
+        lessThanOrEqualTo(tester.getTopLeft(credit).dx));
     expect(
         tester.getCenter(date).dy,
         closeTo(
-            (tester.getTopLeft(spending).dy + tester.getBottomLeft(credit).dy) /
+            (tester.getTopLeft(credit).dy + tester.getBottomLeft(spending).dy) /
                 2,
             0.01));
     final dateCenter = tester.getCenter(date).dx;
-    expect(tester.getTopLeft(credit).dy,
-        greaterThan(tester.getBottomLeft(spending).dy));
+    expect(tester.getTopLeft(spending).dy,
+        greaterThan(tester.getBottomLeft(credit).dy));
     expect(find.descendant(of: spending, matching: find.text('消费')),
         findsOneWidget);
     expect(
         find.descendant(of: credit, matching: find.text('充值')), findsOneWidget);
-    expect(find.byIcon(Icons.arrow_upward_rounded), findsWidgets);
-    expect(find.byIcon(Icons.arrow_downward_rounded), findsWidgets);
+    expect(
+        find.descendant(
+            of: credit, matching: find.byIcon(Icons.arrow_upward_rounded)),
+        findsOneWidget);
+    expect(
+        find.descendant(
+            of: spending, matching: find.byIcon(Icons.arrow_downward_rounded)),
+        findsOneWidget);
     expect(
         find.byKey(const ValueKey('campus-card-chart-currency')), findsNothing);
 
@@ -184,6 +194,7 @@ void main() {
     await tester.pump();
     expect(find.text('2026-01-03'), findsOneWidget);
     expect(_selectedValue(tester, 'amount'), '¥ 4.20');
+    expect(_selectedValue(tester, 'credit-amount'), '¥ 0.00');
     expect(tester.getCenter(date).dx, closeTo(dateCenter, 0.01));
     expect(tester.getRect(plot), bounds);
     expect(tester.getRect(chart), chartBounds);
@@ -215,9 +226,11 @@ void main() {
     expect(movingBars[5].color.a, lessThan(1));
     expect(movingBars[6].color.a, greaterThan(.55));
     expect(movingBars[6].color.a, lessThan(1));
-    final movingCredits = _recordedOutlines(tester);
-    expect(movingCredits[5].color.a, greaterThan(.75));
-    expect(movingCredits[5].color.a, lessThan(1));
+    final movingSpending = _recordedOutlines(tester);
+    expect(movingSpending[5].color.a, greaterThan(.75));
+    expect(movingSpending[5].color.a, lessThan(1));
+    expect(movingSpending[6].color.a, greaterThan(.75));
+    expect(movingSpending[6].color.a, lessThan(1));
 
     await tester.pumpAndSettle();
     final settled = _recordedUnderline(tester);
@@ -225,6 +238,8 @@ void main() {
     _expectUnderlineStyle(settled, original);
     expect(_recordedBars(tester)[5].color.a, 1);
     expect(_recordedBars(tester)[6].color.a, closeTo(.55, .001));
+    expect(_recordedOutlines(tester)[5].color.a, 1);
+    expect(_recordedOutlines(tester)[6].color.a, closeTo(.75, .001));
   });
 
   testWidgets('rapid taps retarget the underline from its current position',
@@ -465,11 +480,32 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets('screen readers announce recharge before spending',
+      (tester) async {
+    final semantics = tester.ensureSemantics();
+    try {
+      await _pump(tester, bills: [
+        _bill('2026-01-03', 10),
+        _bill('2026-01-03', -20),
+      ]);
+      final day = find.semantics.byLabel('2026年1月3日，充值入账 ¥ 20.00，消费 ¥ 10.00');
+      final node = day.evaluate().single;
+      node.owner!.performAction(node.id, SemanticsAction.tap);
+      await tester.pump();
+      expect(find.semantics.byLabel('2026-01-03，充值 ¥ 20.00，消费 ¥ 10.00'),
+          findsOneWidget);
+      expect(_selectedValue(tester, 'credit-amount'), '¥ 20.00');
+      expect(_selectedValue(tester, 'amount'), '¥ 10.00');
+    } finally {
+      semantics.dispose();
+    }
+  });
+
   testWidgets('screen readers can select a zero-spending day', (tester) async {
     final semantics = tester.ensureSemantics();
     try {
       await _pump(tester, bills: _bills());
-      final label = find.semantics.byLabel('2025年12月29日，消费 ¥ 0.00，充值入账 ¥ 0.00');
+      final label = find.semantics.byLabel('2025年12月29日，充值入账 ¥ 0.00，消费 ¥ 0.00');
       final node = label.evaluate().single;
       expect(node.getSemanticsData().hasAction(SemanticsAction.tap), isTrue);
       node.owner!.performAction(node.id, SemanticsAction.tap);
@@ -490,7 +526,8 @@ void main() {
     }
   });
 
-  testWidgets('initial loading reserves chart space and errors hide amounts',
+  testWidgets(
+      'initial loading reserves space and refresh errors keep the chart',
       (tester) async {
     var retries = 0;
     await _pump(tester, bills: null, loading: true);
@@ -514,9 +551,10 @@ void main() {
         bills: _bills(),
         error: StateError('private diagnostic'),
         onRetry: () => retries++);
-    expect(find.text('消费趋势暂时无法加载'), findsOneWidget);
+    expect(find.text('刷新失败'), findsOneWidget);
     expect(find.textContaining('private diagnostic'), findsNothing);
-    expect(find.byKey(const ValueKey('campus-card-chart-plot')), findsNothing);
+    expect(
+        find.byKey(const ValueKey('campus-card-chart-plot')), findsOneWidget);
     await tester.tap(find.byKey(const ValueKey('campus-card-chart-retry')));
     expect(retries, 1);
 
@@ -524,6 +562,48 @@ void main() {
     expect(
         find.byKey(const ValueKey('campus-card-chart-plot')), findsOneWidget);
     expect(find.text('消费'), findsOneWidget);
+  });
+
+  testWidgets(
+      'a failed initial request has concise feedback and a retry action',
+      (tester) async {
+    var retries = 0;
+    await _pump(tester,
+        bills: null,
+        error: StateError('private diagnostic'),
+        onRetry: () => retries++);
+    expect(find.text('刷新失败'), findsOneWidget);
+    expect(find.byKey(const ValueKey('campus-card-chart-plot')), findsNothing);
+    expect(
+        tester
+            .getSize(find.byKey(const ValueKey('campus-card-chart-error')))
+            .height,
+        greaterThanOrEqualTo(184));
+    await tester.tap(find.byKey(const ValueKey('campus-card-chart-retry')));
+    expect(retries, 1);
+  });
+
+  testWidgets('a failed refresh keeps the chart selection and completed data',
+      (tester) async {
+    final bills = _bills();
+    await _pump(tester, bills: bills);
+    final plot = find.byKey(const ValueKey('campus-card-chart-plot'));
+    final bounds = tester.getRect(plot);
+    await tester.tapAt(Offset(bounds.left + 1, bounds.center.dy));
+    await tester.pump();
+    final selectedDate = tester
+        .widget<Text>(
+            find.byKey(const ValueKey('campus-card-chart-selected-date')))
+        .data;
+    await _pump(tester, bills: bills, error: StateError('refresh failed'));
+    expect(plot, findsOneWidget);
+    expect(find.text('刷新失败'), findsOneWidget);
+    expect(
+        tester
+            .widget<Text>(
+                find.byKey(const ValueKey('campus-card-chart-selected-date')))
+            .data,
+        selectedDate);
   });
 
   testWidgets('refresh retains completed chart, selection and painter data',
@@ -589,6 +669,11 @@ void main() {
           bills: _bills(), error: error, onRetry: () => logins++);
       expect(find.text('登录校园账户'), findsOneWidget);
       expect(find.text('重试'), findsNothing);
+      expect(
+          find.byKey(const ValueKey('campus-card-chart-plot')),
+          error is CampusCardAuthRequiredException
+              ? findsOneWidget
+              : findsNothing);
       expect(find.byKey(const ValueKey('campus-card-chart-selected-amount')),
           findsNothing);
       await tester.tap(find.byKey(const ValueKey('campus-card-chart-retry')));
@@ -597,7 +682,8 @@ void main() {
     expect(logins, 2);
   });
 
-  testWidgets('empty and incoming-only data preserve both series',
+  testWidgets(
+      'empty and single-series data preserve recharge and spending styles',
       (tester) async {
     await _pump(tester, bills: const []);
     expect(find.text('近7天暂无收支'), findsOneWidget);
@@ -610,6 +696,13 @@ void main() {
     expect(find.byKey(const ValueKey('campus-card-chart-empty')), findsNothing);
     expect(_selectedValue(tester, 'amount'), '¥ 0.00');
     expect(_selectedValue(tester, 'credit-amount'), '¥ 120.00');
+    expect(_recordedBars(tester), hasLength(1));
+    expect(_recordedOutlines(tester), isEmpty);
+
+    await _pump(tester, bills: [_bill('2026-01-03', 120)]);
+    await _selectLastDay(tester);
+    expect(_selectedValue(tester, 'amount'), '¥ 120.00');
+    expect(_selectedValue(tester, 'credit-amount'), '¥ 0.00');
     expect(_recordedBars(tester), isEmpty);
     expect(_recordedOutlines(tester), hasLength(1));
     expect(tester.takeException(), isNull);
@@ -658,8 +751,8 @@ void main() {
     expect(find.text('充值'), findsOneWidget);
     final spending = find.byKey(const ValueKey('campus-card-chart-legend-消费'));
     final credit = find.byKey(const ValueKey('campus-card-chart-legend-充值'));
-    expect(tester.getTopLeft(credit).dy,
-        greaterThan(tester.getBottomLeft(spending).dy));
+    expect(tester.getTopLeft(spending).dy,
+        greaterThan(tester.getBottomLeft(credit).dy));
     expect(tester.getTopLeft(credit).dx, tester.getTopLeft(spending).dx);
     expect(
         find.byKey(const ValueKey('campus-card-chart-currency')), findsNothing);
@@ -688,11 +781,12 @@ void main() {
         find.byKey(const ValueKey('campus-card-chart-legend-消费')));
     final creditLegend = tester.widget<Container>(
         find.byKey(const ValueKey('campus-card-chart-legend-充值')));
-    expect((spendingLegend.decoration! as BoxDecoration).border, isNull);
-    expect((creditLegend.decoration! as BoxDecoration).border, isNotNull);
-    expect((creditLegend.decoration! as BoxDecoration).color, isNull);
+    expect((creditLegend.decoration! as BoxDecoration).border, isNull);
+    expect((creditLegend.decoration! as BoxDecoration).color, colors.accent);
+    expect((spendingLegend.decoration! as BoxDecoration).border, isNotNull);
+    expect((spendingLegend.decoration! as BoxDecoration).color, isNull);
     expect(
-        ((creditLegend.decoration! as BoxDecoration).border! as Border)
+        ((spendingLegend.decoration! as BoxDecoration).border! as Border)
             .top
             .color
             .toARGB32(),
@@ -706,11 +800,12 @@ void main() {
             .color!
             .toARGB32(),
         colors.accent.toARGB32());
-    final creditShape =
+    final creditShape = bars.single.shape;
+    final spendingShape =
         outlines.single.shape.inflate(outlines.single.strokeWidth / 2);
-    expect(bars[0].shape.bottom, closeTo(creditShape.bottom, 0.001));
-    expect(bars[0].shape.height / creditShape.height, closeTo(0.5, 0.001));
-    expect(bars[0].shape.right, lessThan(creditShape.left));
+    expect(creditShape.bottom, closeTo(spendingShape.bottom, 0.001));
+    expect(spendingShape.height / creditShape.height, closeTo(0.5, 0.001));
+    expect(creditShape.right, lessThan(spendingShape.left));
     final plot = find.byKey(const ValueKey('campus-card-chart-plot'));
     expect(plot, paintsExactlyCountTimes(#drawPath, 0));
     expect(plot, paintsExactlyCountTimes(#drawCircle, 0));
@@ -765,7 +860,11 @@ void main() {
       expect(outline.strokeWidth, greaterThan(0));
       expect(outline.shape.width, greaterThan(outline.strokeWidth));
       expect(outline.shape.height, greaterThan(outline.strokeWidth));
-      expect(bars[index].shape.right, lessThan(outline.shape.left));
+      final spendingShape = outline.shape.inflate(outline.strokeWidth / 2);
+      expect(bars[index].shape.right, lessThan(spendingShape.left));
+      expect(bars[index].shape.bottom, closeTo(spendingShape.bottom, .001));
+      expect(
+          spendingShape.height / bars[index].shape.height, closeTo(.5, .001));
     }
     final width = tester.getSize(plot).width;
     for (var index = 0; index < bars.length; index++) {

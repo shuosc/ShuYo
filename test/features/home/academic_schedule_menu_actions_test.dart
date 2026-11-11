@@ -70,7 +70,7 @@ void main() {
     await tester.tap(find.text('更新课表'));
     await tester.pumpAndSettle();
     expect(find.text('确认更新'), findsOneWidget);
-    expect(find.text('点击确定后将与教务系统中课表同步，不会保留本地编辑'), findsOneWidget);
+    expect(find.text('点击确定后将更新正在查看的这一学期，不会保留本地编辑。'), findsOneWidget);
     await tester.tap(find.text('取消'));
     await tester.pumpAndSettle();
     expect(repository.refreshCalls, 0);

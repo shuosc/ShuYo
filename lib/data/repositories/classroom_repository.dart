@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../../core/classroom_url_resolver.dart';
 import '../models/classroom.dart';
 import '../models/common.dart';
 import '../services/classroom_api_client.dart';
@@ -65,7 +66,9 @@ class ClassroomRepository {
 
   Future<ClassroomSearchOptions> loadOptions({
     bool forceRefresh = false,
+    ClassroomAccessMode? accessMode,
   }) async {
+    final mode = accessMode ?? ClassroomUrlResolver.accessMode;
     if (!forceRefresh && _memoryOptions != null) {
       return _memoryOptions!;
     }
@@ -75,7 +78,7 @@ class ClassroomRepository {
       return cached;
     }
     try {
-      final options = await _client.fetchSearchOptions();
+      final options = await _client.fetchSearchOptions(accessMode: mode);
       await _saveOptions(options);
       return options;
     } on Object {
@@ -90,11 +93,13 @@ class ClassroomRepository {
   Future<ClassroomAvailabilityResult> search(
     ClassroomAvailabilityQuery query, {
     bool forceRefresh = false,
+    ClassroomAccessMode? accessMode,
   }) async {
     final schedule = await _loadBuildingSchedule(
       building: query.building,
       date: query.date,
       forceRefresh: forceRefresh,
+      accessMode: accessMode ?? ClassroomUrlResolver.accessMode,
     );
     final floors = schedule.floors.map((floor) {
       final available = floor.rooms
@@ -119,8 +124,10 @@ class ClassroomRepository {
     required ClassroomBuilding building,
     required DateTime date,
     bool forceRefresh = false,
+    required ClassroomAccessMode accessMode,
   }) async {
-    final key = '${building.id}:${date.year}-${date.month}-${date.day}';
+    final key = '${accessMode.name}:${building.id}:'
+        '${date.year}-${date.month}-${date.day}';
     final cached = _scheduleCache[key];
     if (!forceRefresh &&
         cached != null &&
@@ -130,6 +137,7 @@ class ClassroomRepository {
     final schedule = await _client.fetchBuildingSchedule(
       building: building,
       date: date,
+      accessMode: accessMode,
     );
     _scheduleCache[key] = _CachedClassroomSchedule(
       schedule: schedule,

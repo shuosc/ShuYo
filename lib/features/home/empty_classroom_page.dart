@@ -4,8 +4,10 @@ import 'package:flutter/material.dart';
 
 import '../../core/classroom_url_resolver.dart';
 import '../../data/models/classroom.dart';
+import '../../data/models/client_backend.dart';
 import '../../data/repositories/classroom_repository.dart';
 import '../../data/services/classroom_api_client.dart';
+import '../../data/services/unified_account_service.dart';
 import '../../shared/shuyo_text_styles.dart';
 import '../../shared/theme/shuyo_theme.dart';
 import '../../shared/widgets/empty_state.dart';
@@ -18,13 +20,16 @@ class EmptyClassroomPage extends StatefulWidget {
     this.initialCampus = ClassroomCampus.defaultName,
     this.onWebVpnExpired,
     this.onWebVpnRecoveryRequired,
+    this.webVpnServiceStatus,
   });
 
   final ClassroomRepository repository;
   final DateTime? initialDate;
   final String initialCampus;
   final Future<void> Function()? onWebVpnExpired;
-  final Future<bool> Function(bool interactive)? onWebVpnRecoveryRequired;
+  final Future<WebVpnRecoveryOutcome> Function(bool interactive)?
+      onWebVpnRecoveryRequired;
+  final WebVpnServiceStatus Function()? webVpnServiceStatus;
 
   @override
   State<EmptyClassroomPage> createState() => _EmptyClassroomPageState();
@@ -42,6 +47,8 @@ class _EmptyClassroomPageState extends State<EmptyClassroomPage> {
   bool _refreshingOptions = false;
   String _keyword = '';
   bool _initialSelectionApplied = false;
+  ClassroomAccessMode? _retryingMode;
+  Object? _retryingError;
 
   @override
   void initState() {
@@ -80,7 +87,8 @@ class _EmptyClassroomPageState extends State<EmptyClassroomPage> {
         actions: [
           IconButton(
             tooltip: '刷新',
-            onPressed: _refreshingOptions ? null : _refresh,
+            onPressed:
+                _loadingOptions || _retryingMode != null ? null : _refresh,
             icon: _refreshingOptions
                 ? const SizedBox(
                     width: 20,
@@ -101,6 +109,10 @@ class _EmptyClassroomPageState extends State<EmptyClassroomPage> {
   Widget _loadedBody() {
     final options = _options;
     if (options == null) {
+      final retryingError = _retryingError;
+      if (retryingError != null) {
+        return _failureState(retryingError, initialLoad: true);
+      }
       return FutureBuilder<void>(
         future: _loadFuture,
         builder: (context, snapshot) {
@@ -109,18 +121,7 @@ class _EmptyClassroomPageState extends State<EmptyClassroomPage> {
                 child: CircularProgressIndicator(strokeWidth: 3));
           }
           if (snapshot.hasError) {
-            return EmptyState(
-              icon: Icons.meeting_room_outlined,
-              title: '空教室加载失败',
-              message: _friendlyError(snapshot.error!),
-              action: TextButton.icon(
-                onPressed: () {
-                  setState(() => _loadFuture = _loadOptions(force: true));
-                },
-                icon: const Icon(Icons.refresh),
-                label: const Text('重试'),
-              ),
-            );
+            return _failureState(snapshot.error!, initialLoad: true);
           }
           // Options arrive through setState; a finished load without them
           // cannot render the controls.
@@ -137,20 +138,26 @@ class _EmptyClassroomPageState extends State<EmptyClassroomPage> {
     }
     return Column(
       children: [
-        _SearchControls(
-          options: options,
-          selectedCampus: _selectedCampus,
-          selectedBuilding: _selectedBuilding,
-          selectedRange: _selectedRange,
-          selectedDate: _selectedDate,
-          ranges: widget.repository.defaultRanges(options.sections),
-          onCampusChanged: _setCampus,
-          onBuildingChanged: _setBuilding,
-          onRangeChanged: _setRange,
-          onPreviousRange: () => _stepRange(-1),
-          onNextRange: () => _stepRange(1),
-          onDateChanged: _setDate,
-          onKeywordChanged: (value) => setState(() => _keyword = value),
+        ExcludeFocus(
+          excluding: _retryingMode != null,
+          child: AbsorbPointer(
+            absorbing: _retryingMode != null,
+            child: _SearchControls(
+              options: options,
+              selectedCampus: _selectedCampus,
+              selectedBuilding: _selectedBuilding,
+              selectedRange: _selectedRange,
+              selectedDate: _selectedDate,
+              ranges: widget.repository.defaultRanges(options.sections),
+              onCampusChanged: _setCampus,
+              onBuildingChanged: _setBuilding,
+              onRangeChanged: _setRange,
+              onPreviousRange: () => _stepRange(-1),
+              onNextRange: () => _stepRange(1),
+              onDateChanged: _setDate,
+              onKeywordChanged: (value) => setState(() => _keyword = value),
+            ),
+          ),
         ),
         Expanded(child: _resultBody()),
       ],
@@ -158,6 +165,8 @@ class _EmptyClassroomPageState extends State<EmptyClassroomPage> {
   }
 
   Widget _resultBody() {
+    final retryingError = _retryingError;
+    if (retryingError != null) return _failureState(retryingError);
     final future = _resultFuture;
     if (future == null) {
       return const EmptyState(
@@ -184,23 +193,18 @@ class _EmptyClassroomPageState extends State<EmptyClassroomPage> {
           return const Center(child: CircularProgressIndicator(strokeWidth: 3));
         }
         if (snapshot.hasError) {
-          return EmptyState(
-            icon: Icons.error_outline,
-            title: '查询失败',
-            message: _friendlyError(snapshot.error!),
-            action: TextButton.icon(
-              onPressed: _search,
-              icon: const Icon(Icons.refresh),
-              label: const Text('重试'),
-            ),
-          );
+          return _failureState(snapshot.error!);
         }
         return const SizedBox.shrink();
       },
     );
   }
 
-  Future<void> _loadOptions({bool force = false}) async {
+  Future<void> _loadOptions({
+    bool force = false,
+    ClassroomAccessMode? accessMode,
+  }) async {
+    final mode = accessMode ?? ClassroomUrlResolver.accessMode;
     if (_loadingOptions) {
       return;
     }
@@ -213,7 +217,11 @@ class _EmptyClassroomPageState extends State<EmptyClassroomPage> {
     }
     try {
       final options = await _withWebVpnRecovery(
-        () => widget.repository.loadOptions(forceRefresh: force),
+        () => widget.repository.loadOptions(
+          forceRefresh: force,
+          accessMode: mode,
+        ),
+        accessMode: mode,
       );
       if (!mounted) {
         return;
@@ -233,39 +241,152 @@ class _EmptyClassroomPageState extends State<EmptyClassroomPage> {
           _selectedRange ??= widget.repository.defaultRangeFor(options);
         }
       });
-      _search(forceRefresh: force);
+      await _search(forceRefresh: force, accessMode: mode);
     } finally {
       _loadingOptions = false;
-      if (showRefreshSpinner && mounted) {
+      if (mounted) {
         setState(() => _refreshingOptions = false);
       }
     }
   }
 
   Future<void> _refresh() async {
-    await _loadOptions(force: true);
+    if (_retryingMode != null || _loadingOptions) return;
+    final future = _loadOptions(force: true);
+    setState(() {
+      _loadFuture = future;
+    });
+    // First-load failures are rendered by _loadFuture; keep toolbar retries
+    // from also escaping as unhandled asynchronous errors.
+    await future.then<void>((_) {}, onError: (_) {});
   }
 
-  Future<T> _withWebVpnRecovery<T>(Future<T> Function() operation) async {
+  Future<T> _withWebVpnRecovery<T>(
+    Future<T> Function() operation, {
+    required ClassroomAccessMode accessMode,
+  }) async {
     final accessRevision = ClassroomUrlResolver.revision;
     bool canRecover() =>
         mounted &&
+        accessMode == ClassroomAccessMode.webVpn &&
         ClassroomUrlResolver.usesWebVpn &&
         accessRevision == ClassroomUrlResolver.revision;
     try {
-      return await operation();
-    } on ClassroomWebVpnAuthException {
-      // A late failure must not undo a newer choice of network mode.
-      if (!canRecover()) rethrow;
-      final recover = widget.onWebVpnRecoveryRequired;
-      if (recover == null) {
-        await widget.onWebVpnExpired?.call();
-        rethrow;
+      try {
+        return await operation();
+      } on ClassroomWebVpnAuthException {
+        // A late failure must not undo a newer choice of network mode.
+        if (!canRecover()) rethrow;
+        if (_webVpnServiceUnavailable) {
+          throw const ClassroomApiException(
+            '暂时无法连接WebVPN，请稍后重试',
+            accessMode: ClassroomAccessMode.webVpn,
+          );
+        }
+        final recover = widget.onWebVpnRecoveryRequired;
+        if (recover == null) {
+          await widget.onWebVpnExpired?.call();
+          rethrow;
+        }
+        final interactive =
+            mounted && ModalRoute.of(context)?.isCurrent != false;
+        final outcome = await recover(interactive);
+        if (!canRecover()) rethrow;
+        switch (outcome) {
+          case WebVpnRecoveryOutcome.alreadyValid:
+          case WebVpnRecoveryOutcome.recovered:
+            // Reads can retry once. A second rejection reaches the error UI.
+            return await operation();
+          case WebVpnRecoveryOutcome.needsAuthentication:
+            rethrow;
+          case WebVpnRecoveryOutcome.unavailable:
+            throw const ClassroomApiException(
+              '暂时无法连接WebVPN，请稍后重试',
+              accessMode: ClassroomAccessMode.webVpn,
+            );
+          case WebVpnRecoveryOutcome.businessFailure:
+            throw const ClassroomApiException(
+              'WebVPN会话恢复失败，请稍后重试',
+              accessMode: ClassroomAccessMode.webVpn,
+            );
+        }
       }
-      final interactive = mounted && ModalRoute.of(context)?.isCurrent != false;
-      if (!await recover(interactive) || !canRecover()) rethrow;
-      // Reads can retry once. A second rejection reaches the existing error UI.
-      return operation();
+    } catch (error, stackTrace) {
+      Error.throwWithStackTrace(
+        ClassroomApiException.forRequest(error, accessMode: accessMode),
+        stackTrace,
+      );
+    }
+  }
+
+  bool get _webVpnServiceUnavailable =>
+      widget.webVpnServiceStatus?.call().effectiveStateAt(DateTime.now()) ==
+      WebVpnServiceState.unavailable;
+
+  Widget _failureState(Object error, {bool initialLoad = false}) {
+    final mode = error is ClassroomApiException
+        ? error.accessMode ?? ClassroomUrlResolver.accessMode
+        : ClassroomUrlResolver.accessMode;
+    final needsAuthentication =
+        error is ClassroomWebVpnAuthException && !_webVpnServiceUnavailable;
+    final state = EmptyState(
+      icon: initialLoad ? Icons.meeting_room_outlined : Icons.error_outline,
+      title: initialLoad ? '空教室加载失败' : '查询失败',
+      message: _friendlyError(error),
+      action: _ClassroomFailureActions(
+        accessMode: mode,
+        needsAuthentication: needsAuthentication,
+        retryingMode: _retryingMode,
+        onRetry: () =>
+            _retry(error, initialLoad: initialLoad, accessMode: mode),
+        onTryDirect: () => _retry(
+          error,
+          initialLoad: initialLoad,
+          accessMode: ClassroomAccessMode.direct,
+        ),
+      ),
+    );
+    return LayoutBuilder(
+      builder: (context, constraints) => SingleChildScrollView(
+        child: ConstrainedBox(
+          constraints: BoxConstraints(minHeight: constraints.maxHeight),
+          child: state,
+        ),
+      ),
+    );
+  }
+
+  Future<void> _retry(
+    Object error, {
+    required bool initialLoad,
+    required ClassroomAccessMode accessMode,
+  }) async {
+    if (_retryingMode != null || _loadingOptions) return;
+    setState(() {
+      _retryingError = error;
+      _retryingMode = accessMode;
+    });
+    try {
+      // Bypass query caches so choosing a transport really tries that route.
+      // The override belongs to this operation, never the global resolver.
+      if (initialLoad) {
+        final future = _loadOptions(force: true, accessMode: accessMode);
+        setState(() {
+          _loadFuture = future;
+        });
+        await future;
+      } else {
+        await _search(forceRefresh: true, accessMode: accessMode);
+      }
+    } on ClassroomApiException {
+      // _loadFuture and _resultFuture own the corresponding error UI.
+    } finally {
+      if (mounted) {
+        setState(() {
+          _retryingError = null;
+          _retryingMode = null;
+        });
+      }
     }
   }
 
@@ -352,7 +473,10 @@ class _EmptyClassroomPageState extends State<EmptyClassroomPage> {
     _search();
   }
 
-  Future<void> _search({bool forceRefresh = false}) async {
+  Future<void> _search({
+    bool forceRefresh = false,
+    ClassroomAccessMode? accessMode,
+  }) async {
     final range = _selectedRange;
     if (range == null) {
       return;
@@ -366,7 +490,9 @@ class _EmptyClassroomPageState extends State<EmptyClassroomPage> {
     final future = _searchBuildings(
       buildings: buildings,
       range: range,
+      date: _selectedDate,
       forceRefresh: forceRefresh,
+      accessMode: accessMode ?? ClassroomUrlResolver.accessMode,
     );
     setState(() {
       _resultFuture = future;
@@ -388,23 +514,29 @@ class _EmptyClassroomPageState extends State<EmptyClassroomPage> {
   Future<_ClassroomQueryResult> _searchBuildings({
     required List<ClassroomBuilding> buildings,
     required ClassroomSectionRange range,
+    required DateTime date,
     required bool forceRefresh,
+    required ClassroomAccessMode accessMode,
   }) async {
     final results = <ClassroomAvailabilityResult>[];
     for (final building in buildings) {
-      final result = await _withWebVpnRecovery(() => widget.repository.search(
-            ClassroomAvailabilityQuery(
-              building: building,
-              date: _selectedDate,
-              startSection: range.start,
-              endSection: range.end,
-            ),
-            forceRefresh: forceRefresh,
-          ));
+      final result = await _withWebVpnRecovery(
+        () => widget.repository.search(
+          ClassroomAvailabilityQuery(
+            building: building,
+            date: date,
+            startSection: range.start,
+            endSection: range.end,
+          ),
+          forceRefresh: forceRefresh,
+          accessMode: accessMode,
+        ),
+        accessMode: accessMode,
+      );
       results.add(result);
     }
     return _ClassroomQueryResult(
-      date: _selectedDate,
+      date: date,
       startSection: range.start,
       endSection: range.end,
       results: results,
@@ -412,14 +544,108 @@ class _EmptyClassroomPageState extends State<EmptyClassroomPage> {
   }
 
   String _friendlyError(Object error) {
-    if (error is ClassroomWebVpnAuthException) {
-      return error.message;
-    }
-    if (error is ClassroomApiException && ClassroomUrlResolver.usesWebVpn) {
-      return error.message;
+    final failure = error is ClassroomApiException ? error : null;
+    final mode = failure?.accessMode ?? ClassroomUrlResolver.accessMode;
+    if (mode == ClassroomAccessMode.webVpn) {
+      if (error is ClassroomWebVpnAuthException && !_webVpnServiceUnavailable) {
+        return error.message;
+      }
+      return ClassroomAccessWindow.webVpnFailureMessage(
+        detail: failure?.message,
+        serviceUnavailable: _webVpnServiceUnavailable,
+      );
     }
     return ClassroomAccessWindow.directFailureMessage(
-      detail: error is ClassroomApiException ? error.message : null,
+      detail: failure?.message,
+      webVpnEnabled: ClassroomUrlResolver.usesWebVpn,
+    );
+  }
+}
+
+class _ClassroomFailureActions extends StatelessWidget {
+  const _ClassroomFailureActions({
+    required this.accessMode,
+    required this.needsAuthentication,
+    required this.retryingMode,
+    required this.onRetry,
+    required this.onTryDirect,
+  });
+
+  final ClassroomAccessMode accessMode;
+  final bool needsAuthentication;
+  final ClassroomAccessMode? retryingMode;
+  final VoidCallback onRetry;
+  final VoidCallback onTryDirect;
+
+  Widget _icon(ClassroomAccessMode mode, IconData fallback) =>
+      retryingMode == mode
+          ? const SizedBox(
+              width: 18,
+              height: 18,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            )
+          : Icon(fallback, size: 18);
+
+  @override
+  Widget build(BuildContext context) {
+    final busy = retryingMode != null;
+    if (accessMode == ClassroomAccessMode.direct || needsAuthentication) {
+      return FilledButton.icon(
+        onPressed: busy ? null : onRetry,
+        icon: _icon(accessMode, Icons.refresh),
+        label: Text(needsAuthentication ? '恢复WebVPN登录' : '重试'),
+      );
+    }
+    final direct = OutlinedButton.icon(
+      onPressed: busy ? null : onTryDirect,
+      icon: _icon(ClassroomAccessMode.direct, Icons.swap_horiz),
+      label: const Text('尝试直连'),
+    );
+    final retry = FilledButton.icon(
+      onPressed: busy ? null : onRetry,
+      icon: _icon(ClassroomAccessMode.webVpn, Icons.refresh),
+      label: const Text('重试WebVPN'),
+    );
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        LayoutBuilder(builder: (context, constraints) {
+          double buttonWidth(String label) {
+            final painter = TextPainter(
+              text: TextSpan(
+                text: label,
+                style: Theme.of(context).textTheme.labelLarge,
+              ),
+              textDirection: Directionality.of(context),
+              textScaler: MediaQuery.textScalerOf(context),
+            )..layout();
+            final width = painter.width + 18 + 8 + 48;
+            painter.dispose();
+            return width;
+          }
+
+          final requiredWidth =
+              buttonWidth('尝试直连') + buttonWidth('重试WebVPN') + 12;
+          if (constraints.maxWidth < requiredWidth) {
+            return Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [direct, const SizedBox(height: 10), retry],
+            );
+          }
+          return Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [direct, const SizedBox(width: 12), retry],
+          );
+        }),
+        const SizedBox(height: 8),
+        Text(
+          '本次直连不改变全局WebVPN设置',
+          textAlign: TextAlign.center,
+          style: ShuYoTextStyles.meta(
+            color: context.shuyoColors.textSecondary,
+          ),
+        ),
+      ],
     );
   }
 }

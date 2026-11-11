@@ -5,8 +5,10 @@ import 'package:url_launcher/url_launcher.dart';
 
 import '../../core/wecom_constants.dart';
 import '../../data/models/campus_card.dart';
+import '../../data/models/campus_card_snapshot.dart';
 import '../../data/services/academic_account_store.dart';
 import '../../data/services/campus_card_service.dart';
+import '../../data/services/campus_card_cache.dart';
 import '../../shared/shuyo_text_styles.dart';
 import '../../shared/theme/shuyo_theme.dart';
 import '../../shared/navigation/shuyo_route.dart';
@@ -24,8 +26,10 @@ class CampusCardPage extends StatefulWidget {
     this.initialQueriedAt,
     this.onCardUpdated,
     this.onAuthRequired,
+    this.cache,
   });
 
+  final CampusCardCache? cache;
   final Future<bool> Function() onLogin;
   final CampusCardService Function()? serviceFactory;
   final Future<CampusCardInfo> Function()? fetchCardInfo;
@@ -42,7 +46,7 @@ class _CampusCardPageState extends State<CampusCardPage> {
   CampusCardService? _ownedService;
   CampusCardService get _service =>
       widget.serviceFactory?.call() ?? (_ownedService ??= CampusCardService());
-  static const _recentBillLimit = 5;
+  static const _recentBillLimit = CampusCardRecentSnapshot.limit;
   bool _historyOpen = false;
   bool _openingRecharge = false;
   final _scrollController = ScrollController();
@@ -51,6 +55,12 @@ class _CampusCardPageState extends State<CampusCardPage> {
       widget.initialCard == null ? null : widget.initialQueriedAt;
   List<CampusCardBill>? _bills;
   List<CampusCardBill>? _chartBills;
+  List<double?>? _billBalances;
+  DateTime? _billsQueriedAt;
+  DateTime? _chartQueriedAt;
+  bool _receivedCardData = false;
+  bool _receivedBillsData = false;
+  bool _receivedChartData = false;
   DateTime _chartEndDate = DateUtils.dateOnly(DateTime.now());
   Object? _cardError;
   Object? _billsError;
@@ -66,14 +76,52 @@ class _CampusCardPageState extends State<CampusCardPage> {
   int _chartRevision = 0;
   Completer<void>? _refreshSuperseded;
   final _authNotifications = <bool, Future<void>>{};
-  DateTimeRange? _billsRange;
-  bool _balanceSnapshotValid = false;
-  ({List<CampusCardBill>? bills, DateTimeRange range})? _pendingBalanceSnapshot;
+  ({
+    List<CampusCardBill>? bills,
+    DateTimeRange range,
+    DateTime? queriedAt,
+    int? cacheRevision,
+  })? _pendingBalanceSnapshot;
 
   @override
   void initState() {
     super.initState();
+    _restoreSnapshot(widget.cache?.snapshot);
+    unawaited(_restoreCachedSnapshot());
     unawaited(_refresh());
+  }
+
+  void _restoreSnapshot(CampusCardSnapshot? snapshot) {
+    if (snapshot == null) return;
+    final balance = snapshot.balance;
+    if (!_receivedCardData &&
+        balance != null &&
+        (_cardQueriedAt == null ||
+            balance.queriedAt.isAfter(_cardQueriedAt!))) {
+      _card = balance.toCard(snapshot.studentId);
+      _cardQueriedAt = balance.queriedAt;
+    }
+    final recent = snapshot.recent;
+    if (!_receivedBillsData && recent != null) {
+      _bills = recent.bills;
+      _billBalances = recent.balances;
+      _billsQueriedAt = recent.queriedAt;
+    }
+    final chart = snapshot.chart;
+    if (!_receivedChartData && chart != null) {
+      _chartBills = chart.bills;
+      _chartEndDate = chart.endDate;
+      _chartQueriedAt = chart.queriedAt;
+    }
+  }
+
+  Future<void> _restoreCachedSnapshot() async {
+    final cache = widget.cache;
+    if (cache == null) return;
+    final revision = cache.revision;
+    final snapshot = await cache.load();
+    if (!mounted || revision != cache.revision) return;
+    setState(() => _restoreSnapshot(snapshot));
   }
 
   @override
@@ -179,6 +227,11 @@ class _CampusCardPageState extends State<CampusCardPage> {
 
   Future<void> _loadCard() async {
     final revision = ++_cardRevision;
+    final cacheRevision = widget.cache?.revision;
+    bool isCurrent() =>
+        mounted &&
+        revision == _cardRevision &&
+        (widget.cache == null || cacheRevision == widget.cache!.revision);
     setState(() {
       _loadingCard = true;
       _cardError = null;
@@ -186,15 +239,21 @@ class _CampusCardPageState extends State<CampusCardPage> {
     try {
       final card =
           await (widget.fetchCardInfo?.call() ?? _service.fetchCardInfo());
-      if (!mounted || revision != _cardRevision) return;
+      if (!isCurrent()) return;
       final queriedAt = DateTime.now();
       setState(() {
         _card = card;
         _cardQueriedAt = queriedAt;
+        _receivedCardData = true;
       });
+      final cache = widget.cache;
+      if (cache != null) {
+        unawaited(
+            cache.rememberBalance(card, queriedAt, revision: cacheRevision!));
+      }
       widget.onCardUpdated?.call(card, queriedAt);
     } on Object catch (error) {
-      if (mounted && revision == _cardRevision) {
+      if (isCurrent()) {
         setState(() {
           _cardError = error;
           _clearMismatchedAccount(error);
@@ -202,13 +261,15 @@ class _CampusCardPageState extends State<CampusCardPage> {
         await _notifyAuthRequired(error);
       }
     } finally {
-      if (mounted && revision == _cardRevision) {
+      if (isCurrent()) {
         setState(() {
           _loadingCard = false;
           final pending = _pendingBalanceSnapshot;
           _pendingBalanceSnapshot = null;
           if (pending != null) {
-            _publishOrStageBills(pending.bills, pending.range);
+            _publishOrStageBills(pending.bills, pending.range,
+                queriedAt: pending.queriedAt,
+                cacheRevision: pending.cacheRevision);
           }
         });
       }
@@ -217,38 +278,45 @@ class _CampusCardPageState extends State<CampusCardPage> {
 
   Future<void> _loadBills() async {
     final revision = ++_billsRevision;
+    final cacheRevision = widget.cache?.revision;
+    bool isCurrent() =>
+        mounted &&
+        revision == _billsRevision &&
+        (widget.cache == null || cacheRevision == widget.cache!.revision);
     final range = _queryRange;
     var receivedProgress = false;
     setState(() {
       _loadingBills = true;
-      _balanceSnapshotValid = false;
       _pendingBalanceSnapshot = null;
-      if (_billsRange != range) _bills = null;
       _billsError = null;
     });
     try {
       final bills = await _service.fetchBills(
         startDate: range.start,
         endDate: range.end,
-        shouldCancel: () => !mounted || revision != _billsRevision,
+        shouldCancel: () => !isCurrent(),
         onProgress: (bills) {
-          if (!mounted || revision != _billsRevision) return;
-          // Keep an existing list during pull refresh until a batch arrives.
-          // An empty snapshot after progress resets a recovered session.
+          if (!isCurrent()) return;
+          // Completed snapshots stay on screen until the whole query succeeds.
+          // A first visit still streams cumulative progress from recent ranges.
+          if (_billsQueriedAt != null) return;
           if (bills.isEmpty && !receivedProgress) return;
           receivedProgress = true;
+          _receivedBillsData = true;
           setState(() {
             _publishOrStageBills(
                 bills.isEmpty ? null : sortCampusCardBills(bills), range);
           });
         },
       );
-      if (!mounted || revision != _billsRevision) return;
+      if (!isCurrent()) return;
       setState(() {
-        _publishOrStageBills(sortCampusCardBills(bills), range);
+        _receivedBillsData = true;
+        _publishOrStageBills(sortCampusCardBills(bills), range,
+            queriedAt: DateTime.now(), cacheRevision: cacheRevision);
       });
     } on Object catch (error) {
-      if (mounted && revision == _billsRevision) {
+      if (isCurrent()) {
         setState(() {
           _billsError = error;
           _clearMismatchedAccount(error);
@@ -256,24 +324,61 @@ class _CampusCardPageState extends State<CampusCardPage> {
         await _notifyAuthRequired(error);
       }
     } finally {
-      if (mounted && revision == _billsRevision) {
+      if (isCurrent()) {
         setState(() => _loadingBills = false);
       }
     }
   }
 
-  void _publishOrStageBills(List<CampusCardBill>? bills, DateTimeRange range) {
+  void _publishOrStageBills(List<CampusCardBill>? bills, DateTimeRange range,
+      {DateTime? queriedAt, int? cacheRevision}) {
     if (_loadingCard) {
-      _pendingBalanceSnapshot = (bills: bills, range: range);
+      _pendingBalanceSnapshot = (
+        bills: bills,
+        range: range,
+        queriedAt: queriedAt,
+        cacheRevision: cacheRevision,
+      );
       return;
     }
+    final canInferBalance = _card != null &&
+        _cardError == null &&
+        _cardQueriedAt != null &&
+        !DateUtils.dateOnly(_cardQueriedAt!).isAfter(range.end);
     _bills = bills;
-    _billsRange = range;
-    _balanceSnapshotValid = bills != null;
+    _billBalances = bills == null
+        ? null
+        : campusCardBalances(bills,
+            currentBalance: canInferBalance ? _card!.balance : null,
+            balanceTime: _cardQueriedAt);
+    if (queriedAt == null || bills == null) return;
+    _billsQueriedAt = queriedAt;
+    final cache = widget.cache;
+    if (cache != null && cacheRevision != null) {
+      unawaited(cache.rememberRecent(
+        CampusCardRecentSnapshot(
+          bills: bills,
+          balances: _billBalances!,
+          startDate: range.start,
+          endDate: range.end,
+          queriedAt: queriedAt,
+          balance: canInferBalance
+              ? CampusCardBalanceSnapshot(
+                  balance: _card!.balance, queriedAt: _cardQueriedAt!)
+              : null,
+        ),
+        revision: cacheRevision,
+      ));
+    }
   }
 
   Future<void> _loadChart() async {
     final revision = ++_chartRevision;
+    final cacheRevision = widget.cache?.revision;
+    bool isCurrent() =>
+        mounted &&
+        revision == _chartRevision &&
+        (widget.cache == null || cacheRevision == widget.cache!.revision);
     final today = DateUtils.dateOnly(DateTime.now());
     setState(() {
       _loadingChart = true;
@@ -285,17 +390,27 @@ class _CampusCardPageState extends State<CampusCardPage> {
       final bills = await _service.fetchBills(
         startDate: DateTime(today.year, today.month, today.day - 29),
         endDate: today,
-        shouldCancel: () => !mounted || revision != _chartRevision,
+        shouldCancel: () => !isCurrent(),
       );
-      if (!mounted || revision != _chartRevision) return;
+      if (!isCurrent()) return;
       setState(() {
         if (!_sameChartBills(_chartBills, bills)) {
           _chartBills = List.unmodifiable(bills);
         }
         _chartEndDate = today;
+        _chartQueriedAt = DateTime.now();
+        _receivedChartData = true;
       });
+      final cache = widget.cache;
+      if (cache != null) {
+        unawaited(cache.rememberChart(
+          CampusCardChartSnapshot(
+              bills: _chartBills!, endDate: today, queriedAt: _chartQueriedAt!),
+          revision: cacheRevision!,
+        ));
+      }
     } on Object catch (error) {
-      if (mounted && revision == _chartRevision) {
+      if (isCurrent()) {
         setState(() {
           _chartError = error;
           _clearMismatchedAccount(error);
@@ -303,7 +418,7 @@ class _CampusCardPageState extends State<CampusCardPage> {
         await _notifyAuthRequired(error);
       }
     } finally {
-      if (mounted && revision == _chartRevision) {
+      if (isCurrent()) {
         setState(() => _loadingChart = false);
       }
     }
@@ -336,8 +451,9 @@ class _CampusCardPageState extends State<CampusCardPage> {
     _cardQueriedAt = null;
     _bills = null;
     _chartBills = null;
-    _billsRange = null;
-    _balanceSnapshotValid = false;
+    _billBalances = null;
+    _billsQueriedAt = null;
+    _chartQueriedAt = null;
     _pendingBalanceSnapshot = null;
     _loadingCard = false;
     _loadingBills = false;
@@ -345,6 +461,7 @@ class _CampusCardPageState extends State<CampusCardPage> {
     _cardError = error;
     _billsError = error;
     _chartError = error;
+    unawaited(widget.cache?.clear());
   }
 
   Future<bool> _login({bool refreshAfterLogin = true}) async {
@@ -378,6 +495,7 @@ class _CampusCardPageState extends State<CampusCardPage> {
       if (loggedIn && mounted) {
         final studentId = await AcademicAccountStore().loadStudentId();
         if (!mounted) return false;
+        widget.cache?.selectAccount(studentId);
         if (_card?.studentId != studentId) {
           setState(() {
             ++_cardRevision;
@@ -388,11 +506,16 @@ class _CampusCardPageState extends State<CampusCardPage> {
             _bills = null;
             _chartBills = null;
             _loadingChart = false;
-            _billsRange = null;
-            _balanceSnapshotValid = false;
+            _billBalances = null;
+            _billsQueriedAt = null;
+            _chartQueriedAt = null;
+            _receivedCardData = false;
+            _receivedBillsData = false;
+            _receivedChartData = false;
             _pendingBalanceSnapshot = null;
           });
         }
+        unawaited(_restoreCachedSnapshot());
       }
     } on Object {
       loggedIn = false;
@@ -452,9 +575,11 @@ class _CampusCardPageState extends State<CampusCardPage> {
   String _errorMessage(Object error) =>
       error is CampusCardAuthRequiredException && error.ssoExpired
           ? '登录已失效，请重新登录'
-          : error is CampusCardException
-              ? error.message
-              : '查询失败，请检查网络后重试。';
+          : error is CampusCardAuthRequiredException ||
+                  error is CampusCardException &&
+                      error.code == 'accountMismatch'
+              ? '请登录校园账户'
+              : '刷新失败';
 
   Future<void> _openRecharge() async {
     if (_openingRecharge) return;
@@ -518,22 +643,8 @@ class _CampusCardPageState extends State<CampusCardPage> {
       for (var index = 0; index < billKeys.length; index++)
         billKeys[index]: index,
     };
-    final balances = bills == null
-        ? const <double?>[]
-        : campusCardBalances(
-            bills,
-            currentBalance: _loadingCard ||
-                    !_balanceSnapshotValid ||
-                    _cardError != null ||
-                    _billsError != null ||
-                    _billsRange == null ||
-                    _cardQueriedAt == null ||
-                    DateUtils.dateOnly(_cardQueriedAt!)
-                        .isAfter(_billsRange!.end)
-                ? null
-                : _card?.balance,
-            balanceTime: _cardQueriedAt,
-          );
+    final balances =
+        _billBalances ?? List<double?>.filled(bills?.length ?? 0, null);
     return Scaffold(
       appBar: AppBar(
         title: Row(
@@ -603,6 +714,11 @@ class _CampusCardPageState extends State<CampusCardPage> {
                             ? () => _login()
                             : _loadChart,
                   ),
+                  if (_chartQueriedAt != null) ...[
+                    const SizedBox(height: 4),
+                    _updatedAt(
+                        _chartQueriedAt!, 'campus-card-chart-updated-at'),
+                  ],
                   const SizedBox(height: 28),
                   Semantics(
                     header: true,
@@ -612,6 +728,11 @@ class _CampusCardPageState extends State<CampusCardPage> {
                           color: colors.textPrimary),
                     ),
                   ),
+                  if (_billsQueriedAt != null) ...[
+                    const SizedBox(height: 4),
+                    _updatedAt(
+                        _billsQueriedAt!, 'campus-card-bills-updated-at'),
+                  ],
                   if (!_loadingBills && _billsError != null) ...[
                     const SizedBox(height: 16),
                     _errorSection(_billsError!,
@@ -636,10 +757,6 @@ class _CampusCardPageState extends State<CampusCardPage> {
                       key: billKeys[index],
                       bill: _bills![index],
                       balanceAfter: balances[index],
-                      retainPreviousBalance: _loadingCard ||
-                          !_balanceSnapshotValid ||
-                          _cardError != null ||
-                          _billsError != null,
                     ),
                     separatorBuilder: (context, index) =>
                         const CampusCardBillSeparator(),
@@ -746,6 +863,12 @@ class _CampusCardPageState extends State<CampusCardPage> {
       ],
     );
   }
+
+  Widget _updatedAt(DateTime time, String key) => Text(
+        '更新时间：${_formatUpdateTime(time)}',
+        key: ValueKey(key),
+        style: ShuYoTextStyles.meta(color: context.shuyoColors.textTertiary),
+      );
 
   String _formatUpdateTime(DateTime? time) {
     if (time == null) return '—';

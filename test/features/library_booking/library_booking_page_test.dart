@@ -9,6 +9,7 @@ import 'package:shuyo/data/services/chaoxing_booking_client.dart';
 import 'package:shuyo/data/services/library_booking_cache.dart';
 import 'package:shuyo/data/services/there_booking_client.dart';
 import 'package:shuyo/data/services/unified_account_service.dart';
+import 'package:shuyo/features/library_booking/library_booking_list_tile.dart';
 import 'package:shuyo/features/library_booking/library_booking_page.dart';
 import 'package:shuyo/features/library_booking/library_booking_names.dart';
 import 'package:shuyo/features/library_booking/library_booking_resources.dart';
@@ -750,7 +751,8 @@ class _HomeWriteClient extends _BookingClient {
         'id': venue == BookingVenue.studySpace ? 'HOME_ACTION' : 'HOME_STABLE',
         'roomType': venue.roomType,
         'roomName': venue == BookingVenue.studySpace ? 'C-007' : '2E015',
-        'beginTime': '$day 08:30:00',
+        'beginTime':
+            '$day ${venue == BookingVenue.studySpace ? '09:00' : '08:30'}:00',
         'endTime':
             written && action == 'close' ? '$day 09:00:00' : '$day 10:30:00',
         'status': written ? 'CANCEL' : 'OPEN',
@@ -1031,6 +1033,77 @@ void main() {
       }
     }
 
+    testWidgets('home shows only the latest active booking across venues',
+        (tester) async {
+      final day = bookingDay();
+      clients[BookingVenue.library]!.records = [
+        {
+          ...record('CANCELLED_SEAT'),
+          'id': 'CANCELLED',
+          'roomType': BookingVenue.library.roomType,
+          'beginTime': '$day 12:00:00',
+          'endTime': '$day 13:00:00',
+          'status': 'CANCEL',
+        },
+        {
+          ...record('FINISHED_SEAT'),
+          'id': 'FINISHED',
+          'roomType': BookingVenue.library.roomType,
+          'beginTime': '$day 06:00:00',
+          'endTime': '$day 07:00:00',
+        },
+      ];
+      clients[BookingVenue.studySpace]!.records = [
+        {
+          ...record('ONGOING_SEAT'),
+          'id': 'ONGOING',
+          'beginTime': '$day 07:00:00',
+          'endTime': '$day 10:00:00',
+          'checkInAt': '$day 07:00:00',
+        },
+        {...record('LATEST_SEAT'), 'id': 'LATEST'},
+      ];
+      await open(tester);
+      final summary = find.byKey(const ValueKey('home-bookings-viewport'));
+      expect(
+          find.descendant(
+              of: summary, matching: find.byType(LibraryBookingListTile)),
+          findsOneWidget);
+      expect(find.byKey(const ValueKey<String>('home:LATEST')), findsOneWidget);
+      for (final id in ['ONGOING', 'CANCELLED', 'FINISHED']) {
+        expect(find.byKey(ValueKey<String>('home:$id')), findsNothing);
+      }
+      await history(tester);
+      for (final id in ['CANCELLED', 'LATEST', 'ONGOING', 'FINISHED']) {
+        final tile = find.byKey(ValueKey<String>('0:$id'));
+        await tester.scrollUntilVisible(tile, 120,
+            scrollable: find.byType(Scrollable).first);
+        expect(tile.hitTestable(), findsOneWidget);
+      }
+    });
+
+    testWidgets('partial refresh warnings and the home booking grow together',
+        (tester) async {
+      clients[BookingVenue.studySpace]!.records = [record('B-034')];
+      clients[BookingVenue.yanchang]!.failRecent = true;
+      await open(tester);
+      final summary = find.byKey(const ValueKey('home-bookings-viewport'));
+      final warning = find.text('部分预约状态暂时无法更新');
+      final tile = find.byKey(const ValueKey<String>('home:SNAPSHOT'));
+      expect(warning, findsOneWidget);
+      expect(tile.hitTestable(), findsOneWidget);
+      final bounds = tester.getRect(summary);
+      final minHeight =
+          tester.widget<ConstrainedBox>(summary).constraints.minHeight;
+      expect(bounds.height, greaterThan(minHeight));
+      expect(tester.getRect(warning).bottom,
+          lessThanOrEqualTo(tester.getRect(tile).top));
+      expect(tester.getRect(tile).bottom, lessThanOrEqualTo(bounds.bottom));
+      expect(find.descendant(of: summary, matching: find.byType(Scrollable)),
+          findsNothing);
+      expect(tester.takeException(), isNull);
+    });
+
     testWidgets(
         'fresh snapshots survive repeated history round trips without reads',
         (tester) async {
@@ -1290,13 +1363,21 @@ void main() {
   });
 
   for (final scenario in [
-    (name: 'empty', count: 0, fail: false, scale: 1.0),
-    (name: 'one', count: 1, fail: false, scale: 1.0),
-    (name: 'many', count: 4, fail: false, scale: 1.0),
-    (name: 'failed', count: 0, fail: true, scale: 1.0),
-    (name: 'large text', count: 4, fail: false, scale: 1.5),
+    (name: 'empty', count: 0, fail: false, scale: 1.0, longTitle: false),
+    (name: 'one', count: 1, fail: false, scale: 1.0, longTitle: false),
+    (name: 'many', count: 4, fail: false, scale: 1.0, longTitle: false),
+    (name: 'failed', count: 0, fail: true, scale: 1.0, longTitle: false),
+    (name: 'large text', count: 4, fail: false, scale: 1.5, longTitle: false),
+    (name: 'long title', count: 1, fail: false, scale: 1.0, longTitle: true),
+    (
+      name: 'large text with long title',
+      count: 1,
+      fail: false,
+      scale: 2.0,
+      longTitle: true
+    ),
   ]) {
-    testWidgets('${scenario.name} bookings keep the home layout stable',
+    testWidgets('${scenario.name} bookings show a non-scrolling home summary',
         (tester) async {
       tester.view.physicalSize = const Size(360, 1000);
       tester.view.devicePixelRatio = 1;
@@ -1326,6 +1407,7 @@ void main() {
       final viewport = find.byKey(const ValueKey('home-bookings-viewport'));
       final beforeViewport = tester.getRect(viewport);
       final beforeVenue = tester.getTopLeft(find.text('选择场馆'));
+      expect(find.text('加载中'), findsOneWidget);
       if (scenario.fail) {
         client.records.completeError(const ThereBookingException(
             ThereFailureKind.unreachable, '预约暂时无法加载'));
@@ -1336,36 +1418,69 @@ void main() {
             {
               'id': 'LAYOUT_$index',
               'roomType': BookingVenue.library.roomType,
-              'roomName': '2E00$index',
+              'roomName': scenario.longTitle
+                  ? '这是用于验证预约卡片自动增高的较长座位名称$index'
+                  : '2E00$index',
               'officeAreaName': '二楼东侧',
-              'beginTime': '$day 09:00:00',
-              'endTime': '$day 11:00:00',
+              'beginTime':
+                  '$day ${(9 + index).toString().padLeft(2, '0')}:00:00',
+              'endTime': '$day 13:00:00',
               'status': 'OPEN',
             },
         ]);
       }
       await pumpBookingPage(tester);
-      expect(tester.getRect(viewport), beforeViewport);
-      expect(tester.getTopLeft(find.text('选择场馆')), beforeVenue);
-      expect(tester.takeException(), isNull);
-      if (scenario.count > 1) {
-        final last = find.byKey(const ValueKey<String>('home:LAYOUT_3'));
-        expect(last.hitTestable(), findsNothing);
-        await tester.scrollUntilVisible(last, 120,
-            scrollable: find.descendant(
-                of: find.byKey(const ValueKey('home-bookings-scroll')),
-                matching: find.byType(Scrollable)));
-        await pumpBookingPage(tester);
-        expect(last.hitTestable(), findsOneWidget);
-        expect(tester.getTopLeft(find.text('选择场馆')), beforeVenue);
-        await tester.tap(last);
-        await pumpBookingPage(tester);
-        expect(find.byType(BottomSheet), findsOneWidget);
-        expect(find.text('there:LAYOUT_3'), findsNothing);
+      final afterViewport = tester.getRect(viewport);
+      expect(afterViewport.topLeft, beforeViewport.topLeft);
+      expect(afterViewport.height, greaterThanOrEqualTo(beforeViewport.height));
+      expect(
+          tester.getTopLeft(find.text('选择场馆')).dy,
+          closeTo(beforeVenue.dy + afterViewport.height - beforeViewport.height,
+              0.01));
+      if (scenario.longTitle) {
+        expect(afterViewport.height, greaterThan(beforeViewport.height));
       } else if (scenario.count == 0) {
-        expect(find.text(scenario.fail ? '预约列表暂时无法完整加载' : '暂无待履约或进行中的预约'),
+        expect(afterViewport, beforeViewport);
+      }
+      expect(find.descendant(of: viewport, matching: find.byType(Scrollable)),
+          findsNothing);
+      final tiles = find.descendant(
+          of: viewport, matching: find.byType(LibraryBookingListTile));
+      expect(tiles, scenario.count == 0 ? findsNothing : findsOneWidget);
+      if (scenario.count > 0) {
+        final latest =
+            find.byKey(ValueKey<String>('home:LAYOUT_${scenario.count - 1}'));
+        expect(latest.hitTestable(), findsOneWidget);
+        expect(tester.getRect(latest).bottom,
+            lessThanOrEqualTo(afterViewport.bottom));
+        for (var index = 0; index < scenario.count - 1; index++) {
+          expect(
+              find.byKey(ValueKey<String>('home:LAYOUT_$index')), findsNothing);
+        }
+        if (scenario.count > 1) {
+          await tester.tap(latest);
+          await pumpBookingPage(tester);
+          expect(find.byType(BottomSheet), findsOneWidget);
+          expect(find.text('there:LAYOUT_${scenario.count - 1}'), findsNothing);
+          await tester.tapAt(const Offset(20, 20));
+          await pumpBookingPage(tester);
+          await tester.ensureVisible(find.text('查看历史预约'));
+          await tester.tap(find.text('查看历史预约'));
+          await pumpBookingPage(tester);
+          for (var index = scenario.count - 1; index >= 0; index--) {
+            final record = find.byKey(ValueKey<String>('0:LAYOUT_$index'));
+            await tester.scrollUntilVisible(record, 120,
+                scrollable: find.byType(Scrollable).first);
+            expect(record.hitTestable(), findsOneWidget);
+          }
+        }
+      } else {
+        expect(
+            find.text(
+                scenario.fail ? '预约列表暂时无法完整加载，请检查是否连接校园网' : '暂无待履约或进行中的预约'),
             findsOneWidget);
       }
+      expect(tester.takeException(), isNull);
     });
   }
 
@@ -2792,13 +2907,11 @@ void main() {
       ),
     ));
     await pumpBookingPage(tester);
-    await tester.scrollUntilVisible(
-        find.byKey(const ValueKey<String>('home:cx:CX_QWC:1')), 180,
-        scrollable: find.byType(Scrollable).first);
-    for (final id in [1, 2, 3]) {
-      expect(
-          find.byKey(ValueKey<String>('home:cx:CX_QWC:$id')), findsOneWidget);
-    }
+    final homeTile = find.descendant(
+        of: find.byKey(const ValueKey('home-bookings-viewport')),
+        matching: find.byType(LibraryBookingListTile));
+    expect(homeTile, findsOneWidget);
+    expect(tester.widget<LibraryBookingListTile>(homeTile).status, '进行中');
     expect(
         find.byKey(const ValueKey<String>('home:cx:CX_QWC:4')), findsNothing);
     await tester.scrollUntilVisible(find.text('查看历史预约'), 180,
@@ -3286,7 +3399,7 @@ void main() {
         expect(find.byKey(const ValueKey<String>('home:HOME_ACTION')),
             findsOneWidget);
         expect(find.byKey(const ValueKey<String>('home:HOME_STABLE')),
-            findsOneWidget);
+            findsNothing);
         if (fromHistory) {
           await tester.ensureVisible(find.text('查看历史预约'));
           await tester.pump();
@@ -3305,11 +3418,7 @@ void main() {
         final actionTile = find.byKey(
             ValueKey<String>('${fromHistory ? '0' : 'home'}:HOME_ACTION'));
         await tester.scrollUntilVisible(actionTile, 120,
-            scrollable: fromHistory
-                ? find.byType(Scrollable).first
-                : find.descendant(
-                    of: find.byKey(const ValueKey('home-bookings-scroll')),
-                    matching: find.byType(Scrollable)));
+            scrollable: find.byType(Scrollable).first);
         await pumpBookingPage(tester);
         await tester.tap(actionTile);
         await pumpBookingPage(tester);

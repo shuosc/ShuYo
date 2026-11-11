@@ -36,6 +36,7 @@ class AcademicAccountStore {
       await secure.delete(SecureAppStore.campusCardSessionKey);
       if (await loadDataStudentId() != normalized) {
         await secure.delete(SecureAppStore.campusCardBalanceKey);
+        await secure.delete(SecureAppStore.campusCardSnapshotKey);
       }
     }
     await Future.wait([
@@ -123,6 +124,8 @@ class AcademicAccountStore {
     if (!sessionExpired) {
       await SecureAppStore(preferencesLoader: _preferencesLoader)
           .delete(SecureAppStore.campusCardBalanceKey);
+      await SecureAppStore(preferencesLoader: _preferencesLoader)
+          .delete(SecureAppStore.campusCardSnapshotKey);
     }
   }
 }

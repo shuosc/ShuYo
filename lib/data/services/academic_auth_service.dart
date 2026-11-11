@@ -195,7 +195,10 @@ class AcademicAuthService {
         final response = await request.close().timeout(HttpTimeout.normal);
         final location = response.headers.value(HttpHeaders.locationHeader);
         final statusCode = response.statusCode;
-        await response.drain<void>().timeout(HttpTimeout.normal);
+        final body = await response
+            .transform(const Utf8Decoder(allowMalformed: true))
+            .join()
+            .timeout(HttpTimeout.normal);
         _debug(
           'direct validation hop=$redirectCount status=$statusCode '
           'uri=${_describeUri(current)} '
@@ -209,16 +212,7 @@ class AcademicAuthService {
           current = next;
           continue;
         }
-        if (AcademicUrlResolver.isAcademicSessionUrl(current.toString())) {
-          return WebVpnSessionStatus.valid;
-        }
-        if (current.host.contains('newsso-shu-edu-cn') ||
-            current.host == 'newsso.shu.edu.cn' ||
-            statusCode == 401 ||
-            statusCode == 403) {
-          return WebVpnSessionStatus.loginRequired;
-        }
-        return WebVpnSessionStatus.unavailable;
+        return classifyDirectAcademicResponse(current, statusCode, body);
       }
       return WebVpnSessionStatus.unavailable;
     } on TimeoutException catch (error) {
@@ -240,6 +234,37 @@ class AcademicAuthService {
       deadline.cancel();
       client.close(force: true);
     }
+  }
+
+  @visibleForTesting
+  static WebVpnSessionStatus classifyDirectAcademicResponse(
+    Uri uri,
+    int statusCode,
+    String body,
+  ) {
+    if (statusCode == 401 || statusCode == 403 || statusCode == 901) {
+      return WebVpnSessionStatus.loginRequired;
+    }
+    if (statusCode < 200 || statusCode >= 300) {
+      return WebVpnSessionStatus.unavailable;
+    }
+    if (uri.host == 'newsso.shu.edu.cn' ||
+        uri.host.contains('newsso-shu-edu-cn') ||
+        uri.path.endsWith('/jwglxt/xtgl/login_slogin.html')) {
+      return WebVpnSessionStatus.loginRequired;
+    }
+    final lower = body.toLowerCase();
+    if (const [
+      '/oauth2/login',
+      'jwglxt/xtgl/login_slogin',
+      'name="yhm"',
+      "name='yhm'",
+    ].any(lower.contains)) {
+      return WebVpnSessionStatus.loginRequired;
+    }
+    return AcademicUrlResolver.isAcademicSessionUrl(uri.toString())
+        ? WebVpnSessionStatus.valid
+        : WebVpnSessionStatus.unavailable;
   }
 
   bool _isAllowedAcademicHost(String host) {

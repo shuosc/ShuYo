@@ -12,6 +12,76 @@ void main() {
     SharedPreferences.setMockInitialValues({});
   });
 
+  group('direct academic session validation', () {
+    final home = AcademicUrlResolver.homeUri;
+
+    test('only a successful authenticated page is a live session', () {
+      expect(
+        AcademicAuthService.classifyDirectAcademicResponse(
+            home, 200, '<html>教务系统</html>'),
+        WebVpnSessionStatus.valid,
+      );
+    });
+
+    for (final code in [401, 403, 901]) {
+      test('HTTP $code cannot pass validation just because its URL is jwxt',
+          () {
+        expect(
+          AcademicAuthService.classifyDirectAcademicResponse(home, code, ''),
+          WebVpnSessionStatus.loginRequired,
+        );
+      });
+    }
+
+    for (final code in [302, 404, 500, 503]) {
+      test('HTTP $code is an unavailable service, not an authenticated session',
+          () {
+        expect(
+          AcademicAuthService.classifyDirectAcademicResponse(home, code, ''),
+          WebVpnSessionStatus.unavailable,
+        );
+      });
+    }
+
+    for (final body in [
+      '<input name="yhm">',
+      "<input name='yhm'>",
+      '<form action="/jwglxt/xtgl/login_slogin.html">',
+      '<form action="https://newsso.shu.edu.cn/oauth2/login/">',
+    ]) {
+      test('a login page with HTTP 200 is not a live session: $body', () {
+        expect(
+          AcademicAuthService.classifyDirectAcademicResponse(home, 200, body),
+          WebVpnSessionStatus.loginRequired,
+        );
+      });
+    }
+
+    test('a redirect ending on SSO requires authentication', () {
+      expect(
+        AcademicAuthService.classifyDirectAcademicResponse(
+            Uri.parse('https://newsso.shu.edu.cn/oauth2/login/'), 200, ''),
+        WebVpnSessionStatus.loginRequired,
+      );
+    });
+
+    test('an SSO outage is not evidence that its session expired', () {
+      expect(
+        AcademicAuthService.classifyDirectAcademicResponse(
+            Uri.parse('https://newsso.shu.edu.cn/oauth2/login/'), 503, ''),
+        WebVpnSessionStatus.unavailable,
+      );
+    });
+
+    test('the ticket exchange alone does not establish a session', () {
+      expect(
+        AcademicAuthService.classifyDirectAcademicResponse(
+            Uri.parse('https://jwxt.shu.edu.cn/jwglxt/ticketlogin'), 200, ''),
+        WebVpnSessionStatus.unavailable,
+      );
+    });
+  });
+
   test('WebVPN user info distinguishes a session from an outage', () {
     expect(
       AcademicAuthService.classifyWebVpnUserInfo(

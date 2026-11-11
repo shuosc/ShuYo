@@ -7,6 +7,7 @@ import 'package:http/testing.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:shuyo/data/models/academic_schedule.dart';
 import 'package:shuyo/data/repositories/academic_schedule_repository.dart';
+import 'package:shuyo/data/services/academic_account_store.dart';
 import 'package:shuyo/data/services/schedule_share_service.dart';
 import 'package:shuyo/data/services/student_identity_service.dart';
 import 'package:shuyo/features/home/schedule_share_page.dart';
@@ -94,6 +95,89 @@ void main() {
     await tester.pumpAndSettle();
     expect(field.focusNode!.hasFocus, isFalse);
     expect(tester.testTextInput.isVisible, isFalse);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('generation shares the viewed term instead of the primary term',
+      (tester) async {
+    SharedPreferences.setMockInitialValues({});
+    final identity = _FakeIdentity();
+    addTearDown(identity.dispose);
+    await AcademicAccountStore().saveStudentId(identity.session.studentId);
+    AcademicSchedule scheduleFor(String year) => AcademicSchedule(
+          term: AcademicTerm(
+            yearCode: year,
+            termCode: '3',
+            academicYearName: '$year-${int.parse(year) + 1}',
+            termName: '秋',
+            studentName: '本人',
+            studentId: identity.session.studentId,
+            className: '一班',
+          ),
+          sessions: const [],
+          untimedCourses: [
+            UntimedCourse(
+              id: 'manual-$year',
+              courseName: '$year 本地课程',
+              teacherName: '老师',
+              campus: '校区',
+              weeks: const [1, 2],
+              weekText: '1-2周',
+              summary: '自主安排',
+              credit: '1',
+            ),
+          ],
+          fetchedAt: DateTime.utc(2026, 10, 8),
+        );
+    final repository = AcademicScheduleRepository();
+    final primary = scheduleFor('2026');
+    final viewed = scheduleFor('2025');
+    await repository.saveWorkingSchedule(primary);
+    await repository.saveWorkingSchedule(viewed);
+    final requests = <http.Request>[];
+    final client = MockClient((request) async {
+      requests.add(request);
+      return http.Response.bytes(
+        utf8.encode(jsonEncode({
+          'success': true,
+          'data': request.method == 'GET'
+              ? null
+              : {
+                  'id': 'share-history',
+                  'code': 'Ab3D4e',
+                  'expiresAt': DateTime.now()
+                      .add(const Duration(days: 14))
+                      .toUtc()
+                      .toIso8601String(),
+                  'termLabel': viewed.term.displayName,
+                  'includeNote': false,
+                },
+        })),
+        request.method == 'GET' ? 200 : 201,
+      );
+    });
+    addTearDown(client.close);
+    await tester.pumpWidget(MaterialApp(
+      theme: ShuYoThemes.byId(ShuYoThemes.defaultId).themeData(),
+      home: ScheduleSharePage(
+        ownSchedule: (await repository.loadTermRecord('2025:3'))!.schedule,
+        ownWeekState: await repository.loadTermWeekState('2025:3'),
+        scheduleRepository: repository,
+        identityService: identity,
+        shareApi: ScheduleShareApi(client: client),
+        importStore: _MemoryImports(),
+        calendarStore: _MemoryCalendar(),
+      ),
+    ));
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(TextButton, '生成'));
+    await tester.pumpAndSettle();
+    expect(find.text('Ab3D4e'), findsOneWidget);
+    final request = requests.singleWhere((item) => item.method == 'POST');
+    final body = jsonDecode(request.body) as Map<String, dynamic>;
+    expect(body['snapshot'], scheduleShareSnapshot(viewed, includeNote: false));
+    expect(await repository.loadPrimaryTermKey(), '2026:3');
+    expect((await repository.loadCachedSchedule())!.toJson(), primary.toJson());
     expect(tester.takeException(), isNull);
   });
 

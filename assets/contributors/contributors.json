@@ -1,16 +1,16 @@
 {
   "schemaVersion": 1,
   "repository": "shuosc/ShuYo",
-  "generatedAt": "2026-10-26T02:17:58.111196Z",
+  "generatedAt": "2026-10-29T12:09:20.967201Z",
   "contributors": [
     {
       "login": "Lilin-1024",
       "name": "Lilin",
       "avatarUrl": "https://avatars.githubusercontent.com/u/179945128?v=4",
       "profileUrl": "https://github.com/Lilin-1024",
-      "commits": 371,
-      "additions": 169213,
-      "deletions": 91215,
+      "commits": 377,
+      "additions": 170658,
+      "deletions": 93855,
       "statisticsMessage": null
     },
     {
@@ -18,9 +18,9 @@
       "name": "Preca",
       "avatarUrl": "https://avatars.githubusercontent.com/u/185678356?v=4",
       "profileUrl": "https://github.com/preca-hoshino",
-      "commits": 53,
-      "additions": 13875,
-      "deletions": 3272,
+      "commits": 77,
+      "additions": 29570,
+      "deletions": 8551,
       "statisticsMessage": null
     },
     {
@@ -31,6 +31,26 @@
       "commits": 11,
       "additions": 4537,
       "deletions": 364,
+      "statisticsMessage": null
+    },
+    {
+      "login": "Vanitas114",
+      "name": null,
+      "avatarUrl": "https://avatars.githubusercontent.com/u/107308065?v=4",
+      "profileUrl": "https://github.com/Vanitas114",
+      "commits": 2,
+      "additions": 29,
+      "deletions": 6,
+      "statisticsMessage": null
+    },
+    {
+      "login": "Aster6359",
+      "name": null,
+      "avatarUrl": "https://avatars.githubusercontent.com/u/216175905?v=4",
+      "profileUrl": "https://github.com/Aster6359",
+      "commits": 2,
+      "additions": 846,
+      "deletions": 58,
       "statisticsMessage": null
     },
     {
