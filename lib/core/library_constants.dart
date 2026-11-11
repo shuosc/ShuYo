@@ -36,6 +36,24 @@ class LibraryConstants {
   /// 今日推荐端点
   static const dailyRecommendPath = '/find/subscribe/dailyRecommend';
 
+  /// 热门借阅榜单
+  static const hotLoanPath = '/find/index/getHotLoan';
+
+  /// 热门收藏榜单
+  static const topSharePath = '/find/favorites/topShare';
+
+  /// 高分图书榜单
+  static const topScorePath = '/find/findUserEvaluation/getTopScoreList';
+
+  /// 新书速递端点
+  static const newBookPath = '/find/index/getNewBook';
+
+  /// 实体馆藏查询端点
+  static const physicalGroupItemsPath = '/find/physical/groupitems';
+
+  /// 书目详情端点
+  static const searchResultDetailPath = '/find/searchResultDetail/getDetail';
+
   /// 读秀封面图片地址端点
   static const duxiuCoverPath = '/find/book/getDuxiuImageUrl';
 
