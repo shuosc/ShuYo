@@ -95,6 +95,11 @@ void main() {
 
   testWidgets('home map row follows library booking and opens without login',
       (tester) async {
+    tester.view.physicalSize = const Size(800, 1000);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
     var opened = false;
     await tester.pumpWidget(MaterialApp(
       home: Scaffold(

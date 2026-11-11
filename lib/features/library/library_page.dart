@@ -2,17 +2,22 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 
+import '../../data/models/library_daily_recommend.dart';
+import '../../data/services/library_api_client.dart';
 import '../../data/services/library_auth_service.dart';
 import '../../shared/widgets/empty_state.dart';
+import 'library_daily_recommend_card.dart';
 
 class LibraryPage extends StatefulWidget {
   const LibraryPage({
     super.key,
     this.authService,
+    this.apiClient,
     this.onCampusSessionExpired,
   });
 
   final LibraryAuthService? authService;
+  final LibraryApiClient? apiClient;
   final Future<bool> Function(bool interactive)? onCampusSessionExpired;
 
   @override
@@ -22,20 +27,40 @@ class LibraryPage extends StatefulWidget {
 class _LibraryPageState extends State<LibraryPage> {
   late final LibraryAuthService _authService =
       widget.authService ?? LibraryAuthService();
-  bool _isAuthorizing = false;
+  late final LibraryApiClient _apiClient =
+      widget.apiClient ?? LibraryApiClient();
+  bool _isInitialAuthorizing = false;
   LibraryAuthSession? _session;
+  LibraryDailyRecommend? _dailyRecommend;
   Object? _error;
 
   @override
   void initState() {
     super.initState();
-    unawaited(_performAuthorization());
+    unawaited(_performAuthorization(isInitial: true));
   }
 
-  Future<void> _performAuthorization({bool force = false}) async {
-    if (_isAuthorizing) return;
+  Future<void> _loadDailyRecommend([LibraryAuthSession? session]) async {
+    final currentSession = session ?? _session;
+    try {
+      final book =
+          await _apiClient.fetchDailyRecommend(session: currentSession);
+      if (!mounted) return;
+      setState(() => _dailyRecommend = book);
+    } on Object {
+      // 今日推荐加载失败不阻断借阅主流程
+    }
+  }
+
+  Future<void> _performAuthorization({
+    bool force = false,
+    bool isInitial = false,
+  }) async {
+    if (_isInitialAuthorizing) return;
     setState(() {
-      _isAuthorizing = true;
+      if (isInitial) {
+        _isInitialAuthorizing = true;
+      }
       _error = null;
     });
 
@@ -46,6 +71,7 @@ class _LibraryPageState extends State<LibraryPage> {
         _session = session;
         _error = null;
       });
+      unawaited(_loadDailyRecommend(session));
     } on LibraryCampusAuthRequiredException catch (e) {
       if (!mounted) return;
       setState(() => _error = e);
@@ -53,15 +79,15 @@ class _LibraryPageState extends State<LibraryPage> {
         final recovered =
             await widget.onCampusSessionExpired?.call(true) ?? false;
         if (recovered && mounted) {
-          unawaited(_performAuthorization(force: true));
+          unawaited(_performAuthorization(force: true, isInitial: isInitial));
         }
       }
     } on Object catch (e) {
       if (!mounted) return;
       setState(() => _error = e);
     } finally {
-      if (mounted) {
-        setState(() => _isAuthorizing = false);
+      if (mounted && isInitial) {
+        setState(() => _isInitialAuthorizing = false);
       }
     }
   }
@@ -75,7 +101,7 @@ class _LibraryPageState extends State<LibraryPage> {
           preferredSize: const Size.fromHeight(2),
           child: SizedBox(
             height: 2,
-            child: _isAuthorizing
+            child: _isInitialAuthorizing
                 ? const LinearProgressIndicator(
                     key: ValueKey('library-auth-progress'),
                     minHeight: 2,
@@ -85,14 +111,18 @@ class _LibraryPageState extends State<LibraryPage> {
         ),
       ),
       body: RefreshIndicator(
-        onRefresh: () => _performAuthorization(force: true),
+        onRefresh: () async {
+          await _performAuthorization(force: true, isInitial: false);
+        },
         child: ListView(
           physics: const AlwaysScrollableScrollPhysics(),
+          padding: const EdgeInsets.symmetric(vertical: 8),
           children: [
-            SizedBox(
-              height: MediaQuery.sizeOf(context).height * 0.75,
-              child: _buildBody(),
-            ),
+            if (_dailyRecommend != null) ...[
+              LibraryDailyRecommendCard(book: _dailyRecommend!),
+              const SizedBox(height: 12),
+            ],
+            _buildBody(),
           ],
         ),
       ),
@@ -115,19 +145,6 @@ class _LibraryPageState extends State<LibraryPage> {
       );
     }
 
-    if (_isAuthorizing && _session == null) {
-      return const SizedBox.shrink();
-    }
-
-    final user = _session?.userName;
-    final hint = user != null && user.isNotEmpty
-        ? '欢迎你，$user。当前借阅列表为空。'
-        : '当前借阅列表为空，可前往图书馆借阅纸质书目。';
-
-    return EmptyState(
-      icon: Icons.auto_stories_outlined,
-      title: '暂无借阅记录',
-      message: hint,
-    );
+    return const SizedBox.shrink();
   }
 }
