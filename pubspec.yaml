@@ -54,3 +54,8 @@ flutter:
     - assets/library_booking/
     - assets/campus_map/
     - assets/campus_map/maps/
+
+  fonts:
+    - family: Twemoji
+      fonts:
+        - asset: assets/fonts/Twemoji.Mozilla.ttf
