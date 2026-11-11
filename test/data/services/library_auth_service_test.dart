@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
@@ -12,6 +13,32 @@ import 'package:shuyo/data/services/session_cookie_jar.dart';
 import 'package:shuyo/data/services/shu_sso_session_store.dart';
 
 typedef _SsoCookieEntry = ({Cookie cookie, String domain, String path});
+
+// exp 为 2099 年，保证缓存会话在测试里不会过期。
+const _jwt =
+    'eyJhbGciOiJIUzUxMiJ9.eyJzdWIiOiI0NDEyMjIiLCJleHAiOjQwNzAwOTA0MDB9.c2ln';
+const _expiredJwt =
+    'eyJhbGciOiJIUzUxMiJ9.eyJzdWIiOiI0NDEyMjIiLCJleHAiOjF9.c2ln';
+
+const _initPage = r'''
+<script>
+    window.location = "https:\/\/newsso.shu.edu.cn\/oauth\/authorize?response_type=code\u0026redirect_uri=https:\/\/tyrzfw.chaoxing.com\/OAuth2\/shu\/index\u0026client_id=sJ7Y27sGjMwOOaGPJJZW7M7JZ3777O37";
+</script>
+''';
+
+const _callbackPage = r'''
+<script>
+    var url = "\/OAuth2\/shu\/login";
+    var firstReferer = "https:\/\/findshu.libsp.cn\/find\/sso\/login\/shu\/0";
+    jQuery.ajax({ data: {
+        data: "",
+        time: 1794298118289,
+        enc: "B4FE9821886D77021390505D887FD0AC",
+        displayName: null,
+        userRole: 3
+    }});
+</script>
+''';
 
 class _FakeMemorySecureStore extends SecureAppStore {
   final Map<String, String> _map = {};
@@ -39,216 +66,322 @@ class _FakeAccountStore extends AcademicAccountStore {
   Future<String?> loadStudentId() async => _studentId;
 }
 
+_SsoCookieEntry _ssoCookie() => (
+      cookie: Cookie('SHU_OAUTH2', 'valid-sso-token')
+        ..domain = 'newsso.shu.edu.cn'
+        ..path = '/',
+      domain: 'newsso.shu.edu.cn',
+      path: '/',
+    );
+
+http.Response _json(Object body) => http.Response(
+      jsonEncode(body),
+      200,
+      headers: {'content-type': 'application/json; charset=utf-8'},
+    );
+
+http.Response _html(String body) => http.Response(
+      body,
+      200,
+      headers: {'content-type': 'text/html; charset=utf-8'},
+    );
+
+/// 复现真实站点的响应形态。[onUserInfo] 收到请求时可做断言。
+http.Response _libraryResponse(
+  http.Request request, {
+  List<String>? trace,
+  void Function(http.Request request)? onUserInfo,
+  String? libraryLocation,
+  String loginReply = '{"status":true}',
+}) {
+  final uri = request.url;
+  trace?.add('${uri.host}${uri.path}');
+  if (uri.host == 'tyrzfw.chaoxing.com' && uri.path == '/OAuth2/shu/init') {
+    return http.Response(_initPage, 200, headers: {
+      'content-type': 'text/html;charset=UTF-8',
+      'set-cookie':
+          'firstReferer=https://findshu.libsp.cn/find/sso/login/shu/0; '
+              'Max-Age=86400; Expires=Wed, 11-Nov-2099 08:08:11 GMT; Path=/, '
+              'route=abc; Path=/',
+    });
+  }
+  if (uri.host == 'newsso.shu.edu.cn' && uri.path == '/oauth/authorize') {
+    expect(request.headers['Cookie'], contains('SHU_OAUTH2=valid-sso-token'));
+    return http.Response('', 302, headers: {
+      'location':
+          'https://tyrzfw.chaoxing.com/OAuth2/shu/index?code=mock_code_123',
+    });
+  }
+  if (uri.host == 'tyrzfw.chaoxing.com' && uri.path == '/OAuth2/shu/index') {
+    expect(request.headers['Cookie'], contains('firstReferer='));
+    return _html(_callbackPage);
+  }
+  if (uri.host == 'tyrzfw.chaoxing.com' && uri.path == '/OAuth2/shu/login') {
+    expect(uri.queryParameters['time'], '1794298118289');
+    expect(uri.queryParameters['enc'], 'B4FE9821886D77021390505D887FD0AC');
+    expect(uri.queryParameters['userRole'], '3');
+    expect(request.headers['X-Requested-With'], 'XMLHttpRequest');
+    return http.Response(loginReply, 200,
+        headers: {'content-type': 'text/plain;charset=UTF-8'});
+  }
+  if (uri.host == 'findshu.libsp.cn' && uri.path == '/find/sso/login/shu/0') {
+    expect(uri.queryParameters['enc'], 'B4FE9821886D77021390505D887FD0AC');
+    return http.Response('', 302, headers: {
+      'location': libraryLocation ??
+          'https://findshu.libsp.cn/find/#/Home?jwt=$_jwt&jwtHeader=jwtOpacAuth',
+    });
+  }
+  if (uri.host == 'findshu.libsp.cn' &&
+      (uri.path == '/oga/userinfo' ||
+          uri.path == '/find/userInfo/getUserInfo')) {
+    onUserInfo?.call(request);
+    if (request.headers['jwtOpacAuth'] != _jwt) {
+      return http.Response('{"status":401}', 401);
+    }
+    return _json({
+      'success': true,
+      'data': {
+        'user': {
+          'userId': 10001,
+          'name': '测试用户',
+          'unit': '计算机学院',
+          'userGroupName': '本科生',
+        },
+      },
+    });
+  }
+  return http.Response('Not Found', 404);
+}
+
+MockClient _libraryServer({
+  List<String>? trace,
+  void Function(http.Request request)? onUserInfo,
+  String? libraryLocation,
+  String loginReply = '{"status":true}',
+}) {
+  return MockClient((request) async => _libraryResponse(
+        request,
+        trace: trace,
+        onUserInfo: onUserInfo,
+        libraryLocation: libraryLocation,
+        loginReply: loginReply,
+      ));
+}
+
 void main() {
   setUp(() {
     SharedPreferences.setMockInitialValues({});
   });
 
-  test('throws LibraryCampusAuthRequiredException when not signed in to campus',
-      () async {
-    final service = LibraryAuthService(
-      accountStore: _FakeAccountStore(null),
-      ssoSessionStore: _FakeSsoSessionStore(),
-    );
+  LibraryAuthService service(
+    http.Client client, {
+    String? studentId = '25120000',
+    List<_SsoCookieEntry> sso = const [],
+    LibrarySessionStore? sessionStore,
+  }) =>
+      LibraryAuthService(
+        client: client,
+        accountStore: _FakeAccountStore(studentId),
+        ssoSessionStore: _FakeSsoSessionStore(sso),
+        sessionStore: sessionStore ??
+            LibrarySessionStore(secureStore: _FakeMemorySecureStore()),
+      );
 
-    expect(
-      () => service.authorize(),
-      throwsA(isA<LibraryCampusAuthRequiredException>().having(
-        (e) => e.ssoExpired,
-        'ssoExpired',
-        isFalse,
-      )),
-    );
-  });
-
-  test('throws LibraryCampusAuthRequiredException when SSO cookie is missing',
-      () async {
-    final service = LibraryAuthService(
-      accountStore: _FakeAccountStore('25120000'),
-      ssoSessionStore: _FakeSsoSessionStore(const []),
-    );
-
-    expect(
-      () => service.authorize(),
-      throwsA(isA<LibraryCampusAuthRequiredException>().having(
-        (e) => e.ssoExpired,
-        'ssoExpired',
-        isTrue,
-      )),
+  test('asks for a campus login when no account is signed in', () async {
+    await expectLater(
+      service(_libraryServer(), studentId: null).authorize(),
+      throwsA(isA<LibraryCampusAuthRequiredException>()
+          .having((e) => e.ssoExpired, 'ssoExpired', isFalse)),
     );
   });
 
-  test('follows OAuth redirects and stores session cookies upon success',
-      () async {
-    final secureStore = _FakeMemorySecureStore();
-    final sessionStore = LibrarySessionStore(secureStore: secureStore);
-    final ssoStore = _FakeSsoSessionStore([
-      (
-        cookie: Cookie('SHU_OAUTH2', 'valid-sso-token')
-          ..domain = 'newsso.shu.edu.cn'
-          ..path = '/',
-        domain: 'newsso.shu.edu.cn',
-        path: '/',
-      ),
+  test('asks for a campus login when the SSO cookie is missing', () async {
+    await expectLater(
+      service(_libraryServer()).authorize(),
+      throwsA(isA<LibraryCampusAuthRequiredException>()
+          .having((e) => e.ssoExpired, 'ssoExpired', isTrue)),
+    );
+  });
+
+  test('walks the full chain and keeps the issued jwt', () async {
+    final trace = <String>[];
+    final sessionStore =
+        LibrarySessionStore(secureStore: _FakeMemorySecureStore());
+    final session = await service(
+      _libraryServer(trace: trace),
+      sso: [_ssoCookie()],
+      sessionStore: sessionStore,
+    ).authorize();
+
+    expect(trace, [
+      'tyrzfw.chaoxing.com/OAuth2/shu/init',
+      'newsso.shu.edu.cn/oauth/authorize',
+      'tyrzfw.chaoxing.com/OAuth2/shu/index',
+      'tyrzfw.chaoxing.com/OAuth2/shu/login',
+      'findshu.libsp.cn/find/sso/login/shu/0',
+      'findshu.libsp.cn/oga/userinfo',
     ]);
+    expect(session.userName, '测试用户');
+    expect(session.unit, '计算机学院');
+    expect(session.jwt, _jwt);
+    expect(session.jwtHeader, 'jwtOpacAuth');
 
+    final stored = await sessionStore.loadSession(studentId: '25120000');
+    expect(stored!.jwt, _jwt);
+    expect(stored.jwtHeader, 'jwtOpacAuth');
+  });
+
+  test('sends the jwt header and groupCode when confirming the login',
+      () async {
+    late http.Request seen;
+    await service(
+      _libraryServer(onUserInfo: (request) => seen = request),
+      sso: [_ssoCookie()],
+    ).authorize();
+
+    expect(seen.headers['jwtOpacAuth'], _jwt);
+    expect(seen.headers['groupCode'], '201578');
+    expect(seen.headers['mappingPath'], 'find');
+  });
+
+  test('falls back to jwt subject when user info request fails', () async {
+    final session = await service(
+      _libraryServer(onUserInfo: (_) => throw http.ClientException('fail')),
+      sso: [_ssoCookie()],
+    ).authorize();
+
+    expect(session.jwt, _jwt);
+    expect(session.userName, '441222');
+  });
+
+  test('reports the platform message when the code exchange is refused',
+      () async {
+    await expectLater(
+      service(
+        _libraryServer(loginReply: '{"msg":"参数错误","status":false}'),
+        sso: [_ssoCookie()],
+      ).authorize(),
+      throwsA(isA<LibraryAuthException>()
+          .having((e) => e.message, 'message', contains('参数错误'))),
+    );
+  });
+
+  test('refuses a return address outside the library host', () async {
     final client = MockClient((request) async {
       final uri = request.url;
-      if (uri.host == 'newsso.shu.edu.cn' && uri.path == '/oauth/authorize') {
-        expect(
-            request.headers['Cookie'], contains('SHU_OAUTH2=valid-sso-token'));
+      if (uri.path == '/OAuth2/shu/init') return _html(_initPage);
+      if (uri.host == 'newsso.shu.edu.cn') {
         return http.Response('', 302, headers: {
-          'location':
-              'https://tyrzfw.chaoxing.com/OAuth2/shu/index?code=mock_code_123',
+          'location': 'https://tyrzfw.chaoxing.com/OAuth2/shu/index?code=1',
         });
       }
-      if (uri.host == 'tyrzfw.chaoxing.com' &&
-          uri.path == '/OAuth2/shu/index') {
-        return http.Response('', 302, headers: {
-          'set-cookie': 'cx_auth=abc; Domain=tyrzfw.chaoxing.com; Path=/',
-          'location':
-              'https://findshu.libsp.cn/find/sso/login/shu/0?code=mock_code_123',
-        });
+      if (uri.path == '/OAuth2/shu/index') {
+        return _html(_callbackPage.replaceFirst(
+            r'https:\/\/findshu.libsp.cn\/find\/sso\/login\/shu\/0',
+            r'https:\/\/evil.example\/find\/sso\/login\/shu\/0'));
       }
-      if (uri.host == 'findshu.libsp.cn' &&
-          uri.path == '/find/sso/login/shu/0') {
-        return http.Response('', 302, headers: {
-          'set-cookie': 'token=mock_jwt_token; Domain=findshu.libsp.cn; Path=/',
-          'location': 'https://findshu.libsp.cn/find/#/Home',
-        });
-      }
-      if (uri.host == 'findshu.libsp.cn' && uri.path == '/find/') {
-        return http.Response('<html>OK</html>', 200);
-      }
-      if (uri.host == 'findshu.libsp.cn' &&
-          uri.path == '/find/userInfo/getUserInfo') {
-        expect(request.headers['groupCode'], '201578');
-        expect(request.headers['Cookie'], contains('token=mock_jwt_token'));
-        return http.Response(
-          jsonEncode({
-            'success': true,
-            'user': {
-              'userId': 10001,
-              'name': '测试用户',
-              'unit': '计算机学院',
-              'userGroupName': '本科生',
-            },
-          }),
-          200,
-          headers: {'content-type': 'application/json; charset=utf-8'},
-        );
-      }
+      if (uri.path == '/OAuth2/shu/login') return _json({'status': true});
       return http.Response('Not Found', 404);
     });
 
-    final service = LibraryAuthService(
-      client: client,
-      accountStore: _FakeAccountStore('25120000'),
-      ssoSessionStore: ssoStore,
-      sessionStore: sessionStore,
+    await expectLater(
+      service(client, sso: [_ssoCookie()]).authorize(),
+      throwsA(isA<LibraryAuthException>()),
     );
-
-    final session = await service.authorize();
-    expect(session.studentId, '25120000');
-    expect(session.userName, '测试用户');
-    expect(session.unit, '计算机学院');
-
-    final cached = await sessionStore.loadCookies(studentId: '25120000');
-    expect(cached, isNotEmpty);
-    expect(cached.any((c) => c.name == 'token' && c.value == 'mock_jwt_token'),
-        isTrue);
   });
 
-  test('validates existing cached session without repeating OAuth chain',
-      () async {
-    final secureStore = _FakeMemorySecureStore();
-    final sessionStore = LibrarySessionStore(secureStore: secureStore);
-    await sessionStore.saveCookies(
-      studentId: '25120000',
-      cookies: const [
-        SessionCookie(
-          name: 'token',
-          value: 'saved_token',
-          domain: 'findshu.libsp.cn',
-        ),
-      ],
-    );
-
-    var getUserInfoCalled = false;
+  test('upgrades a cleartext redirect on a trusted host to https', () async {
+    final schemes = <String>[];
     final client = MockClient((request) async {
-      if (request.url.path == '/find/userInfo/getUserInfo') {
-        getUserInfoCalled = true;
-        return http.Response(
-          jsonEncode({
-            'success': true,
-            'user': {
-              'userId': 10001,
-              'name': '已缓存用户',
-            },
-          }),
-          200,
-          headers: {'content-type': 'application/json; charset=utf-8'},
-        );
+      schemes.add(request.url.scheme);
+      if (request.url.path == '/oauth/authorize') {
+        return http.Response('', 302, headers: {
+          'location':
+              'http://tyrzfw.chaoxing.com/OAuth2/shu/index?code=mock_code_123',
+        });
+      }
+      return _libraryResponse(request);
+    });
+
+    final session = await service(client, sso: [_ssoCookie()]).authorize();
+
+    expect(session.jwt, _jwt);
+    expect(schemes.toSet(), {'https'});
+  });
+
+  test('refuses to follow a redirect to an untrusted host', () async {
+    final client = MockClient((request) async {
+      if (request.url.path == '/OAuth2/shu/init') {
+        return http.Response('', 302,
+            headers: {'location': 'https://evil.example/steal'});
       }
       throw StateError('Unexpected request: ${request.url}');
     });
 
-    final service = LibraryAuthService(
-      client: client,
-      accountStore: _FakeAccountStore('25120000'),
-      ssoSessionStore: _FakeSsoSessionStore(),
-      sessionStore: sessionStore,
+    await expectLater(
+      service(client, sso: [_ssoCookie()]).authorize(),
+      throwsA(isA<LibraryAuthException>()),
     );
-
-    final session = await service.authorize(force: false);
-    expect(getUserInfoCalled, isTrue);
-    expect(session.userName, '已缓存用户');
   });
 
-  test('deduplicates simultaneous in-flight authorize requests', () async {
-    final secureStore = _FakeMemorySecureStore();
-    final sessionStore = LibrarySessionStore(secureStore: secureStore);
-    var requestCount = 0;
-    final client = MockClient((request) async {
-      if (request.url.path == '/find/userInfo/getUserInfo') {
-        requestCount++;
-        await Future<void>.delayed(const Duration(milliseconds: 50));
-        return http.Response(
-          jsonEncode({
-            'success': true,
-            'user': {'userId': 10001, 'name': '并发测试用户'},
-          }),
-          200,
-          headers: {'content-type': 'application/json; charset=utf-8'},
-        );
-      }
-      return http.Response('Not Found', 404);
-    });
-
-    await sessionStore.saveCookies(
+  test('reuses a valid cached session without repeating the chain', () async {
+    final trace = <String>[];
+    final sessionStore =
+        LibrarySessionStore(secureStore: _FakeMemorySecureStore());
+    await sessionStore.saveSession(
       studentId: '25120000',
-      cookies: const [
-        SessionCookie(
-            name: 'token', value: 'token123', domain: 'findshu.libsp.cn'),
-      ],
+      session: const LibraryStoredSession(
+        jwt: _jwt,
+        jwtHeader: 'jwtOpacAuth',
+        cookies: [
+          SessionCookie(name: 'route', value: 'r1', domain: 'findshu.libsp.cn'),
+        ],
+      ),
     );
 
-    final service = LibraryAuthService(
-      client: client,
-      accountStore: _FakeAccountStore('25120000'),
-      ssoSessionStore: _FakeSsoSessionStore(),
+    final session = await service(
+      _libraryServer(trace: trace),
       sessionStore: sessionStore,
+    ).authorize();
+
+    expect(trace, ['findshu.libsp.cn/oga/userinfo']);
+    expect(session.userName, '测试用户');
+  });
+
+  test('discards an expired cached session and signs in again', () async {
+    final trace = <String>[];
+    final sessionStore =
+        LibrarySessionStore(secureStore: _FakeMemorySecureStore());
+    await sessionStore.saveSession(
+      studentId: '25120000',
+      session: const LibraryStoredSession(
+        jwt: _expiredJwt,
+        jwtHeader: 'jwtOpacAuth',
+      ),
     );
+
+    final session = await service(
+      _libraryServer(trace: trace),
+      sso: [_ssoCookie()],
+      sessionStore: sessionStore,
+    ).authorize();
+
+    expect(trace.first, 'tyrzfw.chaoxing.com/OAuth2/shu/init');
+    expect(session.jwt, _jwt);
+  });
+
+  test('deduplicates simultaneous authorize requests', () async {
+    final trace = <String>[];
+    final svc = service(_libraryServer(trace: trace), sso: [_ssoCookie()]);
 
     final results = await Future.wait([
-      service.authorize(),
-      service.authorize(),
-      service.authorize(),
+      svc.authorize(),
+      svc.authorize(),
+      svc.authorize(),
     ]);
 
-    expect(requestCount, 1);
-    expect(results[0].userName, '并发测试用户');
-    expect(results[1].userName, '并发测试用户');
-    expect(results[2].userName, '并发测试用户');
+    expect(
+        trace.where((item) => item.endsWith('/OAuth2/shu/init')), hasLength(1));
+    expect(results.map((item) => item.userName).toSet(), {'测试用户'});
   });
 }

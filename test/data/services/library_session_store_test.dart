@@ -25,44 +25,51 @@ void main() {
     sessionStore = LibrarySessionStore(secureStore: store);
   });
 
-  test('saves and loads cookies isolated by student ID', () async {
-    const cookies = [
-      SessionCookie(
-        name: 'token',
-        value: 'xyz123',
-        domain: 'findshu.libsp.cn',
-        path: '/',
+  test('saves and loads the credentials isolated by student ID', () async {
+    await sessionStore.saveSession(
+      studentId: '25120001',
+      session: const LibraryStoredSession(
+        jwt: 'a.b.c',
+        jwtHeader: 'jwtOpacAuth',
+        cookies: [
+          SessionCookie(
+            name: 'route',
+            value: 'xyz123',
+            domain: 'findshu.libsp.cn',
+          ),
+        ],
       ),
-    ];
+    );
 
-    await sessionStore.saveCookies(studentId: '25120001', cookies: cookies);
+    final loaded = await sessionStore.loadSession(studentId: '25120001');
+    expect(loaded, isNotNull);
+    expect(loaded!.jwt, 'a.b.c');
+    expect(loaded.jwtHeader, 'jwtOpacAuth');
+    expect(loaded.cookies.single.name, 'route');
+    expect(loaded.cookies.single.domain, 'findshu.libsp.cn');
 
-    final loadedSame = await sessionStore.loadCookies(studentId: '25120001');
-    expect(loadedSame, hasLength(1));
-    expect(loadedSame.first.name, 'token');
-    expect(loadedSame.first.value, 'xyz123');
-    expect(loadedSame.first.domain, 'findshu.libsp.cn');
-
-    final loadedOther = await sessionStore.loadCookies(studentId: '25120002');
-    expect(loadedOther, isEmpty);
+    expect(await sessionStore.loadSession(studentId: '25120002'), isNull);
   });
 
   test('clearSession removes the stored session', () async {
-    await sessionStore.saveCookies(
+    await sessionStore.saveSession(
       studentId: '25120001',
-      cookies: const [
-        SessionCookie(name: 'session', value: '1', domain: 'findshu.libsp.cn'),
-      ],
+      session: const LibraryStoredSession(jwt: 'a.b.c', jwtHeader: 'h'),
     );
 
     await sessionStore.clearSession();
 
-    final loaded = await sessionStore.loadCookies(studentId: '25120001');
-    expect(loaded, isEmpty);
+    expect(await sessionStore.loadSession(studentId: '25120001'), isNull);
   });
 
-  test('corrupted or invalid payload gracefully returns empty list', () async {
+  test('corrupted or incomplete payloads load as no session', () async {
     await store.write(LibrarySessionStore.storageKey, 'not-a-valid-json');
-    expect(await sessionStore.loadCookies(studentId: '25120001'), isEmpty);
+    expect(await sessionStore.loadSession(studentId: '25120001'), isNull);
+
+    await store.write(
+      LibrarySessionStore.storageKey,
+      '{"studentId":"25120001","cookies":[]}',
+    );
+    expect(await sessionStore.loadSession(studentId: '25120001'), isNull);
   });
 }

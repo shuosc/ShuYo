@@ -2,7 +2,10 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:shuyo/data/models/library_daily_recommend.dart';
+import 'package:shuyo/data/services/library_api_client.dart';
 import 'package:shuyo/data/services/library_auth_service.dart';
+import 'package:shuyo/features/library/library_book_detail_page.dart';
 import 'package:shuyo/features/library/library_page.dart';
 
 class _MockLibraryAuthService extends LibraryAuthService {
@@ -30,7 +33,24 @@ class _MockLibraryAuthService extends LibraryAuthService {
           userName: '张三',
           unit: '机自学院',
           userGroupName: '本科生',
+          jwt: 'a.b.c',
+          jwtHeader: 'jwtOpacAuth',
         );
+  }
+}
+
+class _MockLibraryApiClient extends LibraryApiClient {
+  _MockLibraryApiClient({this.recommendResult});
+
+  LibraryDailyRecommend? recommendResult;
+  int fetchCalls = 0;
+
+  @override
+  Future<LibraryDailyRecommend?> fetchDailyRecommend({
+    LibraryAuthSession? session,
+  }) async {
+    fetchCalls++;
+    return recommendResult;
   }
 }
 
@@ -58,9 +78,78 @@ void main() {
 
     // 授权结束后，进度条消失
     expect(find.byKey(const ValueKey('library-auth-progress')), findsNothing);
-    // 展示空页面与欢迎信息
-    expect(find.text('暂无借阅记录'), findsOneWidget);
-    expect(find.textContaining('欢迎你，张三'), findsOneWidget);
+    // 不再展示原本“暂无借阅记录”的占位
+    expect(find.text('暂无借阅记录'), findsNothing);
+  });
+
+  testWidgets('pull to refresh does not trigger app bar progress indicator',
+      (tester) async {
+    final authService = _MockLibraryAuthService();
+    await tester.pumpWidget(
+      MaterialApp(
+        home: LibraryPage(authService: authService),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final pending = Completer<void>();
+    authService.pendingSignal = pending;
+
+    // 触发下拉刷新
+    await tester.fling(find.byType(ListView), const Offset(0, 300), 1000);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 200));
+
+    // 下拉刷新期间，AppBar 底部不应展示进度条
+    expect(find.byKey(const ValueKey('library-auth-progress')), findsNothing);
+
+    // 完成刷新
+    pending.complete();
+    await tester.pumpAndSettle();
+
+    expect(authService.authorizeCalls, 2);
+  });
+
+  testWidgets(
+      'displays daily recommend card and navigates to book detail on tap',
+      (tester) async {
+    final authService = _MockLibraryAuthService();
+    const recommendBook = LibraryDailyRecommend(
+      recordId: 1132202,
+      title: '“傻瓜”计量经济学与Stata应用',
+      author: '习明明编著',
+      publisher: '经济科学出版社',
+      publishYear: '2024',
+      summary: '本书内容涵盖Stata的数据处理、图形绘制...',
+    );
+    final apiClient = _MockLibraryApiClient(recommendResult: recommendBook);
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: LibraryPage(
+          authService: authService,
+          apiClient: apiClient,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    // 检查“今日推荐”标题
+    expect(find.text('今日推荐'), findsOneWidget);
+    // 检查书目各行内容
+    expect(find.text('“傻瓜”计量经济学与Stata应用'), findsOneWidget);
+    expect(find.text('习明明编著'), findsOneWidget);
+    expect(find.textContaining('经济科学出版社'), findsOneWidget);
+    expect(find.textContaining('(2024)'), findsOneWidget);
+    expect(find.textContaining('本书内容涵盖Stata的数据处理'), findsOneWidget);
+
+    // 点击今日推荐卡片
+    await tester.tap(find.text('“傻瓜”计量经济学与Stata应用'));
+    await tester.pumpAndSettle();
+
+    // 验证跳转到了“图书详情”子页面
+    expect(find.byType(LibraryBookDetailPage), findsOneWidget);
+    expect(find.text('图书详情'), findsOneWidget);
   });
 
   testWidgets('displays error state and retries on action tapped',
@@ -86,7 +175,7 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(authService.authorizeCalls, 2);
-    expect(find.text('暂无借阅记录'), findsOneWidget);
+    expect(find.text('未能获取借阅授权'), findsNothing);
   });
 
   testWidgets('invokes onCampusSessionExpired on sso expiry', (tester) async {
