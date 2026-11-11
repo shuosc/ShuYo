@@ -352,6 +352,39 @@ class LibraryApiClient {
     }
   }
 
+  /// 获取图书全部单册馆藏原始列表
+  Future<List<Map<String, dynamic>>> fetchRawBookHoldings({
+    required int recordId,
+    LibraryAuthSession? session,
+  }) async {
+    try {
+      final uri = Uri.parse(
+        '${LibraryConstants.baseUrl}${LibraryConstants.physicalGroupItemsPath}',
+      );
+      final response = await _httpClient
+          .post(
+            uri,
+            headers: _buildHeaders(session: session),
+            body: jsonEncode({
+              'recordId': recordId,
+              'groupCode': LibraryConstants.groupCode,
+            }),
+          )
+          .timeout(HttpTimeout.normal);
+
+      if (response.statusCode != 200) return const [];
+      final dynamic decoded = jsonDecode(utf8.decode(response.bodyBytes));
+      if (decoded is! Map<String, dynamic> || decoded['success'] != true) {
+        return const [];
+      }
+      final data = decoded['data'];
+      if (data is! List) return const [];
+      return data.whereType<Map<String, dynamic>>().toList();
+    } on Object {
+      return const [];
+    }
+  }
+
   /// 获取图书完整书目详情（包含 baseMarcInfoDto、marcDetl、bean2List 等）
   Future<Map<String, dynamic>?> fetchBookDetail({
     required int recordId,
