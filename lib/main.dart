@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:home_widget/home_widget.dart';
+import 'package:media_kit/media_kit.dart';
 
 import 'app/shuyo_app.dart';
 import 'data/services/app_data_migration_service.dart';
@@ -13,6 +14,7 @@ import 'shared/theme/custom_background.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  MediaKit.ensureInitialized();
   if (!kIsWeb && Platform.isIOS) {
     try {
       await HomeWidget.setAppGroupId(

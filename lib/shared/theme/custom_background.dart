@@ -227,7 +227,9 @@ class CustomBackgroundLayer extends StatelessWidget {
     return Stack(
       fit: StackFit.expand,
       children: [
-        _BackgroundPaint(settings: settings, fallbackColor: fallbackColor),
+        RepaintBoundary(
+            child: _BackgroundPaint(
+                settings: settings, fallbackColor: fallbackColor)),
         child,
       ],
     );
@@ -251,14 +253,12 @@ class _BackgroundPaint extends StatelessWidget {
       children: [
         ColoredBox(color: settings.background),
         if (settings.hasPhoto && settings.opacity > 0)
-          Opacity(
-            opacity: settings.opacity / 100,
-            child: Image.file(
-              File(settings.imagePath),
-              fit: BoxFit.cover,
-              gaplessPlayback: true,
-              errorBuilder: (_, __, ___) => const SizedBox.expand(),
-            ),
+          Image.file(
+            File(settings.imagePath),
+            opacity: AlwaysStoppedAnimation(settings.opacity / 100),
+            fit: BoxFit.cover,
+            gaplessPlayback: true,
+            errorBuilder: (_, __, ___) => const SizedBox.expand(),
           ),
       ],
     );

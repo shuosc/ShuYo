@@ -100,7 +100,8 @@ class _LocalUnifiedAccount extends UnifiedAccountService {
   int academicAuthorizations = 0;
 
   @override
-  Future<WebVpnRecoveryOutcome> recoverWebVpn() async =>
+  Future<WebVpnRecoveryOutcome> recoverWebVpn(
+          {bool forceRefresh = false}) async =>
       WebVpnRecoveryOutcome.unavailable;
 
   @override

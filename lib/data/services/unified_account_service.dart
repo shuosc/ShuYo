@@ -75,7 +75,8 @@ class UnifiedAccountService {
     }
   }
 
-  Future<WebVpnRecoveryOutcome> recoverWebVpn() async {
+  Future<WebVpnRecoveryOutcome> recoverWebVpn(
+      {bool forceRefresh = false}) async {
     _lastWebVpnFailureMessage = null;
     final WebVpnSessionStatus existing;
     try {
@@ -83,7 +84,7 @@ class UnifiedAccountService {
     } on Object {
       return _finish(WebVpnRecoveryOutcome.unavailable);
     }
-    if (existing == WebVpnSessionStatus.valid) {
+    if (existing == WebVpnSessionStatus.valid && !forceRefresh) {
       return _finish(WebVpnRecoveryOutcome.alreadyValid);
     }
     if (existing == WebVpnSessionStatus.unavailable) {
