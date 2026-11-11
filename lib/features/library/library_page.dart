@@ -2,11 +2,16 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 
+import '../../data/models/library_book_item.dart';
 import '../../data/models/library_daily_recommend.dart';
 import '../../data/services/library_api_client.dart';
 import '../../data/services/library_auth_service.dart';
+import '../../shared/navigation/shuyo_route.dart';
 import '../../shared/widgets/empty_state.dart';
 import 'library_daily_recommend_card.dart';
+import 'library_daily_recommend_skeleton.dart';
+import 'library_rank_gallery.dart';
+import 'library_rank_list_page.dart';
 
 class LibraryPage extends StatefulWidget {
   const LibraryPage({
@@ -32,6 +37,9 @@ class _LibraryPageState extends State<LibraryPage> {
   bool _isInitialAuthorizing = false;
   LibraryAuthSession? _session;
   LibraryDailyRecommend? _dailyRecommend;
+  LibraryRankType _selectedRankType = LibraryRankType.hotLoan;
+  final Map<LibraryRankType, List<LibraryBookItem>> _rankLists = {};
+  final Map<LibraryRankType, bool> _rankLoading = {};
   Object? _error;
 
   @override
@@ -50,6 +58,49 @@ class _LibraryPageState extends State<LibraryPage> {
     } on Object {
       // 今日推荐加载失败不阻断借阅主流程
     }
+  }
+
+  Future<void> _loadRankList(
+    LibraryRankType type, {
+    LibraryAuthSession? session,
+    bool force = false,
+  }) async {
+    if (!force && _rankLists.containsKey(type)) return;
+    if (_rankLoading[type] == true) return;
+
+    final currentSession = session ?? _session;
+    setState(() => _rankLoading[type] = true);
+
+    try {
+      final books = await _apiClient.fetchRankList(
+        type: type,
+        page: 1,
+        rows: 10,
+        session: currentSession,
+      );
+      if (!mounted) return;
+      setState(() {
+        _rankLists[type] = books;
+      });
+    } on Object {
+      // 榜单加载失败不阻断主流程
+    } finally {
+      if (mounted) {
+        setState(() => _rankLoading[type] = false);
+      }
+    }
+  }
+
+  void _openRankListPage(LibraryRankType initialType) {
+    Navigator.of(context).push(
+      shuyoRoute(
+        builder: (context) => LibraryRankListPage(
+          apiClient: _apiClient,
+          session: _session,
+          initialType: initialType,
+        ),
+      ),
+    );
   }
 
   Future<void> _performAuthorization({
@@ -72,6 +123,8 @@ class _LibraryPageState extends State<LibraryPage> {
         _error = null;
       });
       unawaited(_loadDailyRecommend(session));
+      unawaited(
+          _loadRankList(_selectedRankType, session: session, force: force));
     } on LibraryCampusAuthRequiredException catch (e) {
       if (!mounted) return;
       setState(() => _error = e);
@@ -114,17 +167,35 @@ class _LibraryPageState extends State<LibraryPage> {
         onRefresh: () async {
           await _performAuthorization(force: true, isInitial: false);
         },
-        child: ListView(
-          physics: const AlwaysScrollableScrollPhysics(),
-          padding: const EdgeInsets.symmetric(vertical: 8),
-          children: [
-            if (_dailyRecommend != null) ...[
-              LibraryDailyRecommendCard(book: _dailyRecommend!),
-              const SizedBox(height: 12),
-            ],
-            _buildBody(),
-          ],
-        ),
+        child: _error != null
+            ? ListView(
+                physics: const AlwaysScrollableScrollPhysics(),
+                padding: const EdgeInsets.symmetric(vertical: 24),
+                children: [
+                  _buildBody(),
+                ],
+              )
+            : ListView(
+                physics: const AlwaysScrollableScrollPhysics(),
+                padding: const EdgeInsets.symmetric(vertical: 8),
+                children: [
+                  if (_dailyRecommend != null)
+                    LibraryDailyRecommendCard(book: _dailyRecommend!)
+                  else
+                    const LibraryDailyRecommendSkeleton(),
+                  const SizedBox(height: 14),
+                  LibraryRankGallery(
+                    selectedType: _selectedRankType,
+                    books: _rankLists[_selectedRankType] ?? const [],
+                    isLoading: _rankLoading[_selectedRankType] == true,
+                    onTypeChanged: (type) {
+                      setState(() => _selectedRankType = type);
+                      unawaited(_loadRankList(type));
+                    },
+                    onViewAll: () => _openRankListPage(_selectedRankType),
+                  ),
+                ],
+              ),
       ),
     );
   }

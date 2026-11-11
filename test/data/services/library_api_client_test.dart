@@ -4,6 +4,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:shuyo/core/library_constants.dart';
+import 'package:shuyo/data/models/library_book_item.dart';
 import 'package:shuyo/data/services/library_api_client.dart';
 import 'package:shuyo/data/services/library_auth_service.dart';
 
@@ -117,6 +118,55 @@ void main() {
         () => apiClient.fetchDailyRecommend(),
         throwsA(isA<LibraryApiException>()),
       );
+    });
+    test('fetchRankList parses hot loan books correctly', () async {
+      final client = MockClient((request) async {
+        if (request.url.path == LibraryConstants.hotLoanPath) {
+          expect(request.headers['groupCode'], LibraryConstants.groupCode);
+          return utf8Response(
+            jsonEncode({
+              'success': true,
+              'data': {
+                'result': [
+                  {
+                    'recordId': 796762,
+                    'title': '机器学习',
+                    'author': '周志华著',
+                    'publish': '清华大学出版社',
+                    'pubDate': '2016',
+                    'loanCount': 5,
+                    'isbn': '978-7-302-42328-7',
+                    'callNo': 'TP181/Z78J',
+                  }
+                ]
+              }
+            }),
+            200,
+          );
+        } else if (request.url.path == LibraryConstants.duxiuCoverPath) {
+          return utf8Response(
+            jsonEncode({
+              'success': true,
+              'data': 'https://cover.test/ml.jpg',
+            }),
+            200,
+          );
+        }
+        return utf8Response('Not Found', 404);
+      });
+
+      final apiClient = LibraryApiClient(httpClient: client);
+      final list = await apiClient.fetchRankList(
+        type: LibraryRankType.hotLoan,
+        loadCovers: true,
+      );
+
+      expect(list.length, 1);
+      expect(list.first.recordId, 796762);
+      expect(list.first.title, '机器学习');
+      expect(list.first.author, '周志华著');
+      expect(list.first.badgeText, '借阅 5 次');
+      expect(list.first.coverUrl, 'https://cover.test/ml.jpg');
     });
   });
 }
