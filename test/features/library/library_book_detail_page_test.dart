@@ -77,5 +77,24 @@ void main() {
       expect(find.text('APA'), findsOneWidget);
       expect(find.text('BibTex'), findsOneWidget);
     });
+
+    testWidgets('renders book detail layout, holdings and metadata with copy interaction', (tester) async {
+      await tester.pumpWidget(
+        const MaterialApp(
+          home: LibraryBookDetailPage(
+            recordId: 796762,
+            title: '机器学习',
+            author: '周志华著',
+            publisher: '清华大学出版社',
+            publishYear: '2016',
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('图书详情'), findsOneWidget);
+      expect(find.text('机器学习'), findsOneWidget);
+      expect(find.text('清华大学出版社 (2016)'), findsOneWidget);
+    });
   });
 }
