@@ -1,0 +1,2 @@
+// Keep Flutter version values without inheriting Runner's CocoaPods linker flags.
+#include "../Flutter/Generated.xcconfig"
