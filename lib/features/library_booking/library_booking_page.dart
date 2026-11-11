@@ -2418,7 +2418,7 @@ class _LibraryBookingPageState extends State<LibraryBookingPage> {
                               color: selectedRoomName == null
                                   ? colors.textMuted
                                   : null,
-                              fontWeight: FontWeight.w700,
+                              fontWeight: FontWeight.w600,
                             ),
                       ),
                       const SizedBox(height: 2),
