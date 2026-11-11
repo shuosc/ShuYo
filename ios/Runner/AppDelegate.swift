@@ -191,7 +191,7 @@ import UserNotifications
         return
       }
 
-      for (date, title) in pending {
+      schedulePendingAlarms: for (date, title) in pending.sorted(by: { $0.0 < $1.0 }) {
         guard date > Date() else { continue }
         let id = UUID()
         let localizedTitle = LocalizedStringResource(stringLiteral: title)
@@ -218,12 +218,38 @@ import UserNotifications
         )
 
         do {
-          try await manager.schedule(id: id, configuration: configuration)
-          scheduledIDs.insert(id.uuidString)
-          titles[id.uuidString] = title
-          persist()
-        } catch AlarmManager.AlarmError.maximumLimitReached {
-          break
+          while date > Date() {
+            do {
+              try await manager.schedule(id: id, configuration: configuration)
+              scheduledIDs.insert(id.uuidString)
+              titles[id.uuidString] = title
+              persist()
+              break
+            } catch AlarmManager.AlarmError.maximumLimitReached {
+              // Refresh after the await: an earlier snapshot may now be alerting.
+              let replacement = try manager.alarms.compactMap { alarm -> (id: UUID, date: Date)? in
+                guard
+                  scheduledIDs.contains(alarm.id.uuidString),
+                  alarm.state == .scheduled,
+                  case let .fixed(scheduledDate)? = alarm.schedule,
+                  scheduledDate > date
+                else { return nil }
+                return (alarm.id, scheduledDate)
+              }.max { $0.date < $1.date }
+
+              // Do not evict anything if this request expired while scheduling.
+              guard date > Date() else { break }
+              // All remaining reservations are earlier, due, or already ringing.
+              guard let replacement else { break schedulePendingAlarms }
+
+              // Free the farthest owned reservation and retry the nearer alarm.
+              // Each retry removes one candidate, so quota retries are bounded.
+              try manager.cancel(id: replacement.id)
+              scheduledIDs.remove(replacement.id.uuidString)
+              titles.removeValue(forKey: replacement.id.uuidString)
+              persist()
+            }
+          }
         } catch {
           persist()
           result(
