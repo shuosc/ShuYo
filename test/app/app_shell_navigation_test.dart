@@ -1,12 +1,12 @@
-import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:material_ui/material_ui.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:shuyo/app/app_shell.dart';
 import 'package:shuyo/core/app_tab.dart';
 import 'package:shuyo/data/services/academic_profile_preferences.dart';
 import 'package:shuyo/data/services/client_settings_service.dart';
-import 'package:shuyo/features/home/academic_schedule_page.dart';
 import 'package:shuyo/features/home/academic_progress_page.dart';
+import 'package:shuyo/features/home/academic_schedule_page.dart';
 import 'package:shuyo/features/home/shuyo_content_page.dart';
 import 'package:shuyo/features/library_booking/library_booking_page.dart';
 import 'package:shuyo/features/onboarding/startup_onboarding.dart';

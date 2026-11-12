@@ -13,11 +13,9 @@
 
 ## 开发环境
 
-ShuYo 使用 Dart 和 Flutter 开发，并跟随 Flutter `stable` 渠道的最新版本。请先参考 [README](README.md) 中的环境配置说明，并将本地 SDK 更新至最新的`stable`版本：
+ShuYo 使用 Dart 和 Flutter 开发，当前统一使用 **Flutter 3.50.0（stable）**。请参考 [README](README.md) 中的环境配置说明，安装对应版本，并确认本地 SDK 与 CI、发布流程一致：
 
 ```shell
-flutter channel stable
-flutter upgrade
 flutter --version
 ```
 

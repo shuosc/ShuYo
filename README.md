@@ -23,14 +23,11 @@ Android 版本可以打开 [release 页面](https://github.com/shuosc/ShuYo/rele
 
 本应用使用 [Dart](https://dart.dev/) 和 [Flutter](https://flutter.dev/) 开发。
 
-我们跟随 Flutter `stable` 渠道的最新版本，当前使用的编译版本为：
+本地开发、CI 和发布流程统一使用 Flutter **3.50.0（stable）**。升级 SDK 时，请同步更新工作流中的版本配置。
 
-```shell
-Flutter 3.47.7 • channel stable • https://github.com/flutter/flutter.git
-Framework • revision abaf9c5237 (2 days ago) • 2026-10-08 09:51:21 -0700
-Engine • hash d8a2d6c768c334d53e16277f837970ffa1e2de81 (revision deb287481e) (2 days ago) • 2026-10-07
-17:09:12.000Z
-Tools • Dart 3.13.5 • DevTools 2.60.0
+```text
+Flutter 3.50.0 • channel stable
+Dart 3.14.0 • DevTools 2.61.0
 ```
 
 为了构建本应用，您需要[下载](https://flutter.cn/docs/get-started/install)并安装 `Flutter SDK`，将 `flutter` 加入 PATH；

@@ -1,6 +1,8 @@
-import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:material_ui/material_ui.dart';
 import 'package:table_calendar/table_calendar.dart';
+
+import 'legacy_material_bridge.dart';
 
 /// Uses the same platform feedback policy as Flutter's [CalendarDatePicker].
 void shuYoDatePickerFeedback(BuildContext context) {
@@ -320,73 +322,75 @@ class _ShuYoCalendarDatePickerState extends State<ShuYoCalendarDatePicker> {
                         },
                       ),
                     )
-                  : TableCalendar<void>(
+                  : LegacyMaterialBridge(
                       key: const ValueKey('shuyo-calendar-day-view'),
-                      firstDay: _firstDate,
-                      lastDay: _lastDate,
-                      focusedDay: _focusedDay,
-                      locale: Localizations.localeOf(context).toString(),
-                      startingDayOfWeek: StartingDayOfWeek
-                          .values[(localizations.firstDayOfWeekIndex + 6) % 7],
-                      headerVisible: false,
-                      sixWeekMonthsEnforced: true,
-                      rowHeight: rowHeight,
-                      daysOfWeekHeight: rowHeight,
-                      calendarFormat: CalendarFormat.month,
-                      availableGestures: AvailableGestures.horizontalSwipe,
-                      pageAnimationEnabled:
-                          !MediaQuery.disableAnimationsOf(context),
-                      pageAnimationDuration:
-                          MediaQuery.disableAnimationsOf(context)
-                              ? Duration.zero
-                              : const Duration(milliseconds: 300),
-                      rangeSelectionMode: RangeSelectionMode.disabled,
-                      rangeStartDay: widget.rangeStart,
-                      rangeEndDay: widget.rangeEnd,
-                      selectedDayPredicate: (day) =>
-                          isSameDay(day, widget.selectedDate),
-                      enabledDayPredicate: _isSelectable,
-                      onDaySelected: (day, _) {
-                        if (!_yearMode && viewGeneration == _viewGeneration) {
-                          _selectDate(day);
-                        }
-                      },
-                      onPageChanged: (day) {
-                        if (!_yearMode && viewGeneration == _viewGeneration) {
-                          _showMonth(day);
-                        }
-                      },
-                      calendarStyle: CalendarStyle(
-                        outsideDaysVisible: false,
-                        cellMargin: const EdgeInsets.all(4),
-                        tablePadding:
-                            EdgeInsets.symmetric(horizontal: portrait ? 12 : 8),
-                        rangeHighlightColor:
-                            pickerTheme.rangeSelectionBackgroundColor ??
-                                defaults.rangeSelectionBackgroundColor!,
-                      ),
-                      calendarBuilders: CalendarBuilders<void>(
-                        dowBuilder: (_, day) => ExcludeSemantics(
-                          child: Center(
-                            child: FittedBox(
-                              fit: BoxFit.scaleDown,
-                              child: Text(
-                                localizations.narrowWeekdays[day.weekday % 7],
-                                maxLines: 1,
-                                softWrap: false,
-                                style: weekdayStyle,
+                      child: TableCalendar<void>(
+                        firstDay: _firstDate,
+                        lastDay: _lastDate,
+                        focusedDay: _focusedDay,
+                        locale: Localizations.localeOf(context).toString(),
+                        startingDayOfWeek: StartingDayOfWeek.values[
+                            (localizations.firstDayOfWeekIndex + 6) % 7],
+                        headerVisible: false,
+                        sixWeekMonthsEnforced: true,
+                        rowHeight: rowHeight,
+                        daysOfWeekHeight: rowHeight,
+                        calendarFormat: CalendarFormat.month,
+                        availableGestures: AvailableGestures.horizontalSwipe,
+                        pageAnimationEnabled:
+                            !MediaQuery.disableAnimationsOf(context),
+                        pageAnimationDuration:
+                            MediaQuery.disableAnimationsOf(context)
+                                ? Duration.zero
+                                : const Duration(milliseconds: 300),
+                        rangeSelectionMode: RangeSelectionMode.disabled,
+                        rangeStartDay: widget.rangeStart,
+                        rangeEndDay: widget.rangeEnd,
+                        selectedDayPredicate: (day) =>
+                            isSameDay(day, widget.selectedDate),
+                        enabledDayPredicate: _isSelectable,
+                        onDaySelected: (day, _) {
+                          if (!_yearMode && viewGeneration == _viewGeneration) {
+                            _selectDate(day);
+                          }
+                        },
+                        onPageChanged: (day) {
+                          if (!_yearMode && viewGeneration == _viewGeneration) {
+                            _showMonth(day);
+                          }
+                        },
+                        calendarStyle: CalendarStyle(
+                          outsideDaysVisible: false,
+                          cellMargin: const EdgeInsets.all(4),
+                          tablePadding: EdgeInsets.symmetric(
+                              horizontal: portrait ? 12 : 8),
+                          rangeHighlightColor:
+                              pickerTheme.rangeSelectionBackgroundColor ??
+                                  defaults.rangeSelectionBackgroundColor!,
+                        ),
+                        calendarBuilders: CalendarBuilders<void>(
+                          dowBuilder: (_, day) => ExcludeSemantics(
+                            child: Center(
+                              child: FittedBox(
+                                fit: BoxFit.scaleDown,
+                                child: Text(
+                                  localizations.narrowWeekdays[day.weekday % 7],
+                                  maxLines: 1,
+                                  softWrap: false,
+                                  style: weekdayStyle,
+                                ),
                               ),
                             ),
                           ),
+                          defaultBuilder: (_, day, __) => _calendarDay(day),
+                          selectedBuilder: (_, day, __) => _calendarDay(day),
+                          todayBuilder: (_, day, __) => _calendarDay(day),
+                          disabledBuilder: (_, day, __) =>
+                              _calendarDay(day, disabled: true),
+                          withinRangeBuilder: (_, day, __) => _calendarDay(day),
+                          rangeStartBuilder: (_, day, __) => _calendarDay(day),
+                          rangeEndBuilder: (_, day, __) => _calendarDay(day),
                         ),
-                        defaultBuilder: (_, day, __) => _calendarDay(day),
-                        selectedBuilder: (_, day, __) => _calendarDay(day),
-                        todayBuilder: (_, day, __) => _calendarDay(day),
-                        disabledBuilder: (_, day, __) =>
-                            _calendarDay(day, disabled: true),
-                        withinRangeBuilder: (_, day, __) => _calendarDay(day),
-                        rangeStartBuilder: (_, day, __) => _calendarDay(day),
-                        rangeEndBuilder: (_, day, __) => _calendarDay(day),
                       ),
                     ),
             ),
