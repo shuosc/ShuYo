@@ -17,6 +17,7 @@ jobs:
   analyze-and-test:
     name: Analyze and test
     runs-on: ubuntu-latest
+    timeout-minutes: 45
 
     steps:
       - name: Check out repository
@@ -62,17 +63,13 @@ jobs:
 
           echo "code=$code_changed" >> "$GITHUB_OUTPUT"
 
-      - name: Set up Flutter
+      - name: Set up project toolchain
         if: steps.changes.outputs.code == 'true'
-        uses: subosito/flutter-action@v2
-        with:
-          flutter-version: "3.50.0"
-          channel: stable
-          cache: true
+        uses: ./.github/actions/setup-toolchain
 
       - name: Install dependencies
         if: steps.changes.outputs.code == 'true'
-        run: flutter pub get
+        run: flutter pub get --enforce-lockfile
 
       - name: Analyze Dart and Flutter code
         if: steps.changes.outputs.code == 'true'

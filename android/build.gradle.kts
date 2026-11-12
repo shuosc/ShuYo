@@ -43,14 +43,15 @@ subprojects {
 }
 subprojects {
     plugins.withId("com.android.library") {
-        extensions.configure<com.android.build.gradle.LibraryExtension>("android") {
-            compileSdk = 36
-        }
-    }
-    afterEvaluate {
-        plugins.withId("com.android.library") {
-            extensions.configure<com.android.build.gradle.LibraryExtension>("android") {
-                compileSdk = 36
+        extensions.configure<com.android.build.api.variant.LibraryAndroidComponentsExtension>(
+            "androidComponents",
+        ) {
+            finalizeDsl { library ->
+                // Older plugins need API 36 for current AndroidX dependencies.
+                // Preserve any higher or preview SDK explicitly requested by a plugin.
+                if (library.compileSdkPreview == null) {
+                    library.compileSdk = maxOf(library.compileSdk ?: 0, 36)
+                }
             }
         }
     }
