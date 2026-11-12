@@ -144,7 +144,11 @@ void main() {
     await tester.pumpAndSettle();
     for (var i = 0; i < 2; i++) {
       final calendar = tester.widget<TableCalendar<void>>(
-          find.byKey(const ValueKey('shuyo-calendar-day-view')));
+        find.descendant(
+          of: find.byKey(const ValueKey('shuyo-calendar-day-view')),
+          matching: find.byType(TableCalendar<void>),
+        ),
+      );
       calendar.onDaySelected!(past, past);
       await tester.pumpAndSettle();
     }
