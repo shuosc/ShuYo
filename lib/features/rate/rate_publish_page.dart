@@ -26,7 +26,8 @@ class RatePublishPage extends StatefulWidget {
 }
 
 class _RatePublishPageState extends State<RatePublishPage> {
-  late Future<RateCatalogConfig> _config = widget.repository.config();
+  late Future<RateCatalogConfig> _config =
+      widget.repository.config(forceRefresh: true);
   late int _overall = widget.existing?.overall ?? 0;
   late final Map<String, List<String>> _answers = {
     for (final entry in (widget.existing?.answers ?? const {}).entries)
@@ -41,6 +42,9 @@ class _RatePublishPageState extends State<RatePublishPage> {
       future: _config,
       builder: (context, snapshot) {
         final questions = snapshot.data?.questions ?? const <RateQuestion>[];
+        final ready = snapshot.connectionState == ConnectionState.done &&
+            !snapshot.hasError &&
+            questions.isNotEmpty;
         return Scaffold(
           appBar: AppBar(
             title: Text(widget.existing == null ? '发布评价' : '修改评价'),
@@ -50,10 +54,10 @@ class _RatePublishPageState extends State<RatePublishPage> {
               : snapshot.hasError || questions.isEmpty
                   ? RateLoadError(
                       error: snapshot.error,
-                      onRetry: () =>
-                          setState(() => _config = widget.repository.config()))
+                      onRetry: () => setState(() => _config =
+                          widget.repository.config(forceRefresh: true)))
                   : _page(questions),
-          bottomNavigationBar: questions.isEmpty ? null : _actions(questions),
+          bottomNavigationBar: ready ? _actions(questions) : null,
         );
       },
     );
@@ -111,15 +115,11 @@ class _RatePublishPageState extends State<RatePublishPage> {
         Text(question.title,
             style: ShuYoTextStyles.title(
                 color: colors.textPrimary, size: 20, weight: FontWeight.w500)),
-        const SizedBox(height: 6),
-        Text(
-          question.isOverall
-              ? '必答'
-              : question.multiple
-                  ? '可多选，可跳过'
-                  : '单选，可跳过',
-          style: ShuYoTextStyles.meta(color: colors.textTertiary),
-        ),
+        if (question.displayDescription.isNotEmpty) ...[
+          const SizedBox(height: 6),
+          Text(question.displayDescription,
+              style: ShuYoTextStyles.meta(color: colors.textTertiary)),
+        ],
         const SizedBox(height: 24),
         if (question.isOverall)
           RateOverallPicker(
@@ -163,11 +163,6 @@ class _RatePublishPageState extends State<RatePublishPage> {
           const SizedBox(height: 12),
           Text('未作答：${skipped.map((q) => q.title).join('、')}',
               style: ShuYoTextStyles.meta(color: colors.textSecondary)),
-        ],
-        if (skipped.any((q) => q.key == 'grading')) ...[
-          const SizedBox(height: 6),
-          Text('给分倾向可以等出成绩后在个人中心补充。',
-              style: ShuYoTextStyles.meta(color: colors.textTertiary)),
         ],
         const SizedBox(height: 12),
         Text('评价匿名展示，其他同学只能看到汇总统计。',
@@ -221,7 +216,11 @@ class _RatePublishPageState extends State<RatePublishPage> {
     final total = questions.length;
     final atSummary = _index >= total;
     final current = atSummary ? null : questions[_index];
-    final needsOverall = current?.isOverall == true && _overall == 0;
+    final needsAnswer = current != null &&
+        current.required &&
+        (current.isOverall
+            ? _overall == 0
+            : (_answers[current.key] ?? const []).isEmpty);
     return SafeArea(
       minimum: const EdgeInsets.fromLTRB(16, 8, 16, 12),
       child: Row(
@@ -232,20 +231,22 @@ class _RatePublishPageState extends State<RatePublishPage> {
               child: const Text('上一题'),
             ),
           const Spacer(),
-          if (current != null && !current.isOverall)
+          if (current != null && !current.isOverall && !current.required)
             TextButton(
-              onPressed: () => setState(() {
-                _answers.remove(current.key);
-                _index++;
-              }),
+              onPressed: _submitting
+                  ? null
+                  : () => setState(() {
+                        _answers[current.key] = const [];
+                        _index++;
+                      }),
               child: const Text('跳过'),
             ),
           const SizedBox(width: 8),
           FilledButton(
-            onPressed: needsOverall || _submitting
+            onPressed: needsAnswer || _submitting
                 ? null
                 : atSummary
-                    ? _submit
+                    ? () => _submit(questions)
                     : () => setState(() => _index++),
             style: FilledButton.styleFrom(minimumSize: const Size(112, 44)),
             child: _submitting
@@ -264,16 +265,20 @@ class _RatePublishPageState extends State<RatePublishPage> {
     );
   }
 
-  Future<void> _submit() async {
-    if (_overall == 0) {
-      setState(() => _index = 0);
+  Future<void> _submit(List<RateQuestion> questions) async {
+    if (_submitting) return;
+    final draft = RateReviewDraft(overall: _overall, answers: Map.of(_answers));
+    final error = draft.validate(questions);
+    if (error != null) {
+      setState(() => _index = error.questionIndex);
+      showRateSnack(context, error.message);
       return;
     }
     setState(() => _submitting = true);
     try {
       await widget.repository.saveReview(
         widget.unit.id,
-        RateReviewDraft(overall: _overall, answers: _answers),
+        draft,
       );
       if (!mounted) return;
       showRateSnack(context, widget.existing == null ? '评价已发布' : '评价已更新');
@@ -305,18 +310,24 @@ class _RateEditReviewPageState extends State<RateEditReviewPage> {
   late Future<(RateCatalogConfig, RateMyReview?)> _future = _load();
   int _overall = 0;
   final Map<String, List<String>> _answers = {};
+  List<RateQuestion>? _questions;
   bool _submitting = false;
 
   Future<(RateCatalogConfig, RateMyReview?)> _load() async {
-    final config = await widget.repository.config();
+    _questions = null;
+    final config = await widget.repository.config(forceRefresh: true);
     final review = await widget.repository.myReview(widget.unit.id);
-    _overall = review?.overall ?? 0;
-    _answers
-      ..clear()
-      ..addAll({
-        for (final entry in (review?.answers ?? const {}).entries)
-          entry.key: [...entry.value],
-      });
+    if (!mounted) return (config, review);
+    setState(() {
+      _overall = review?.overall ?? 0;
+      _answers
+        ..clear()
+        ..addAll({
+          for (final entry in (review?.answers ?? const {}).entries)
+            entry.key: [...entry.value],
+        });
+      _questions = config.questions;
+    });
     return (config, review);
   }
 
@@ -332,7 +343,7 @@ class _RateEditReviewPageState extends State<RateEditReviewPage> {
             return const Center(
                 child: CircularProgressIndicator(strokeWidth: 3));
           }
-          if (snapshot.hasError) {
+          if (snapshot.hasError || snapshot.data!.$1.questions.isEmpty) {
             return RateLoadError(
                 error: snapshot.error,
                 onRetry: () => setState(() => _future = _load()));
@@ -347,19 +358,16 @@ class _RateEditReviewPageState extends State<RateEditReviewPage> {
               ),
               for (final question in questions) ...[
                 const SizedBox(height: 20),
-                Row(
-                  children: [
-                    Text(question.title,
-                        style: ShuYoTextStyles.title(
-                            color: colors.textPrimary,
-                            size: 15.5,
-                            weight: FontWeight.w500)),
-                    if (question.multiple) ...[
-                      const SizedBox(width: 6),
-                      const RateTag(text: '可多选'),
-                    ],
-                  ],
-                ),
+                Text(question.title,
+                    style: ShuYoTextStyles.title(
+                        color: colors.textPrimary,
+                        size: 15.5,
+                        weight: FontWeight.w500)),
+                if (question.displayDescription.isNotEmpty) ...[
+                  const SizedBox(height: 6),
+                  Text(question.displayDescription,
+                      style: ShuYoTextStyles.meta(color: colors.textTertiary)),
+                ],
                 const SizedBox(height: 10),
                 if (question.isOverall)
                   RateOverallPicker(
@@ -382,7 +390,12 @@ class _RateEditReviewPageState extends State<RateEditReviewPage> {
       bottomNavigationBar: SafeArea(
         minimum: const EdgeInsets.fromLTRB(16, 8, 16, 12),
         child: FilledButton(
-          onPressed: _overall == 0 || _submitting ? null : _submit,
+          onPressed: _questions == null ||
+                  _questions!.isEmpty ||
+                  _overall == 0 ||
+                  _submitting
+              ? null
+              : _submit,
           style: FilledButton.styleFrom(minimumSize: const Size.fromHeight(48)),
           child: Text(_submitting ? '保存中...' : '保存'),
         ),
@@ -391,11 +404,19 @@ class _RateEditReviewPageState extends State<RateEditReviewPage> {
   }
 
   Future<void> _submit() async {
+    final questions = _questions;
+    if (questions == null || questions.isEmpty || _submitting) return;
+    final draft = RateReviewDraft(overall: _overall, answers: Map.of(_answers));
+    final error = draft.validate(questions);
+    if (error != null) {
+      showRateSnack(context, error.message);
+      return;
+    }
     setState(() => _submitting = true);
     try {
       await widget.repository.saveReview(
         widget.unit.id,
-        RateReviewDraft(overall: _overall, answers: _answers),
+        draft,
       );
       if (!mounted) return;
       showRateSnack(context, '评价已更新');

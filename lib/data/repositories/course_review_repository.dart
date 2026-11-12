@@ -40,6 +40,7 @@ class CourseReviewRepository {
   final bool isDemo;
 
   Future<RateCatalogConfig>? _config;
+  Future<RateCatalogConfig>? _configRequest;
 
   void dispose() => _api.dispose();
 
@@ -59,12 +60,22 @@ class CourseReviewRepository {
     }
   }
 
-  /// Questions and categories rarely change; keep them for the app session
-  /// but retry after a failure.
-  Future<RateCatalogConfig> config() {
-    final pending = _config ??= _api.fetchConfig();
-    pending.then((_) {}, onError: (Object _) {
+  /// Browsing can reuse the session cache. Answering flows request a fresh
+  /// configuration on entry and keep that snapshot until they finish.
+  /// Concurrent callers share the same in-flight request, including refreshes.
+  Future<RateCatalogConfig> config({bool forceRefresh = false}) {
+    final inFlight = _configRequest;
+    if (inFlight != null) return inFlight;
+    final cached = _config;
+    if (!forceRefresh && cached != null) return cached;
+
+    final pending = _api.fetchConfig();
+    _config = _configRequest = pending;
+    pending.then((_) {
+      if (identical(_configRequest, pending)) _configRequest = null;
+    }, onError: (Object _) {
       if (identical(_config, pending)) _config = null;
+      if (identical(_configRequest, pending)) _configRequest = null;
     });
     return pending;
   }

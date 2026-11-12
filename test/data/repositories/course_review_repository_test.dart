@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shuyo/data/models/academic_schedule.dart';
 import 'package:shuyo/data/models/course_review.dart';
@@ -48,6 +50,15 @@ class _PrimaryScheduleRepository extends AcademicScheduleRepository {
 class _ReviewApi extends CourseReviewApiClient {
   final lookups = <List<RateScheduleCourse>>[];
 
+  final configRequests = <Completer<RateCatalogConfig>>[];
+
+  @override
+  Future<RateCatalogConfig> fetchConfig() {
+    final request = Completer<RateCatalogConfig>();
+    configRequests.add(request);
+    return request.future;
+  }
+
   @override
   Future<List<RateLookupResult>> lookup(
       List<RateScheduleCourse> courses) async {
@@ -89,6 +100,79 @@ void main() {
     addTearDown(result.dispose);
     return result;
   }
+
+  const firstConfig = RateCatalogConfig(
+    questions: [],
+    categories: [],
+    feedbackKinds: [],
+  );
+  final secondConfig = RateCatalogConfig.fromJson({
+    'questions': [
+      {'key': 'difficulty', 'title': '课程难度', 'multiple': false},
+    ],
+  });
+
+  test('configuration requests share in-flight work and cache success',
+      () async {
+    final repo = repository();
+    final pending = repo.config();
+    expect(repo.config(), same(pending));
+    expect(repo.config(forceRefresh: true), same(pending));
+    expect(api.configRequests, hasLength(1));
+    api.configRequests.single.complete(firstConfig);
+    expect(await pending, same(firstConfig));
+    expect(await repo.config(), same(firstConfig));
+    expect(api.configRequests, hasLength(1));
+  });
+
+  test('entry refresh replaces the cache and shares concurrent refreshes',
+      () async {
+    final repo = repository();
+    final initial = repo.config();
+    api.configRequests.single.complete(firstConfig);
+    await initial;
+
+    final refresh = repo.config(forceRefresh: true);
+    expect(api.configRequests, hasLength(2));
+    expect(repo.config(forceRefresh: true), same(refresh));
+    expect(repo.config(), same(refresh));
+    api.configRequests.last.complete(secondConfig);
+    expect(await refresh, same(secondConfig));
+    expect(await repo.config(), same(secondConfig));
+    expect(api.configRequests, hasLength(2));
+  });
+
+  test('a failed refresh is surfaced instead of silently using stale questions',
+      () async {
+    final repo = repository();
+    final initial = repo.config();
+    api.configRequests.single.complete(firstConfig);
+    await initial;
+
+    final refresh = repo.config(forceRefresh: true);
+    final failure = expectLater(refresh, throwsStateError);
+    api.configRequests.last
+        .completeError(StateError('configuration unavailable'));
+    await failure;
+
+    final retry = repo.config(forceRefresh: true);
+    expect(api.configRequests, hasLength(3));
+    api.configRequests.last.complete(secondConfig);
+    expect(await retry, same(secondConfig));
+  });
+
+  test('initial configuration failures can be retried', () async {
+    final repo = repository();
+    final pending = repo.config();
+    final failure = expectLater(pending, throwsStateError);
+    api.configRequests.single
+        .completeError(StateError('configuration unavailable'));
+    await failure;
+    final retry = repo.config();
+    expect(api.configRequests, hasLength(2));
+    api.configRequests.last.complete(firstConfig);
+    expect(await retry, same(firstConfig));
+  });
 
   test('the default source remains the primary schedule', () async {
     final courses = await repository().scheduleCourses();

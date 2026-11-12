@@ -384,16 +384,22 @@ class _QuestionStatCard extends StatelessWidget {
         children: [
           Row(
             children: [
-              Text(stat.title,
-                  style: ShuYoTextStyles.title(
-                      color: colors.textPrimary,
-                      size: 14.5,
-                      weight: FontWeight.w500)),
-              if (stat.multiple) ...[
-                const SizedBox(width: 6),
-                const RateTag(text: '可多选'),
-              ],
-              const Spacer(),
+              Expanded(
+                child: Wrap(
+                  spacing: 6,
+                  runSpacing: 4,
+                  crossAxisAlignment: WrapCrossAlignment.center,
+                  children: [
+                    Text(stat.title,
+                        style: ShuYoTextStyles.title(
+                            color: colors.textPrimary,
+                            size: 14.5,
+                            weight: FontWeight.w500)),
+                    if (stat.multiple) const RateTag(text: '可多选'),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 8),
               Text('${stat.answered} 人回答',
                   style: ShuYoTextStyles.meta(color: colors.textTertiary)),
             ],
