@@ -420,7 +420,7 @@ class _OptionStatRow extends StatelessWidget {
   Widget build(BuildContext context) {
     final colors = context.shuyoColors;
     final top = option.top;
-    final textColor = top ? colors.textPrimary : colors.textSecondary;
+    final textColor = top ? colors.accent : colors.textSecondary;
     final weight = top ? FontWeight.w500 : FontWeight.w400;
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 5),
