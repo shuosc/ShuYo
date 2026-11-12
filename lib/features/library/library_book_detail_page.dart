@@ -40,8 +40,11 @@ class LibraryBookDetailPage extends StatefulWidget {
   State<LibraryBookDetailPage> createState() => _LibraryBookDetailPageState();
 }
 
-class _LibraryBookDetailPageState extends State<LibraryBookDetailPage> {
+class _LibraryBookDetailPageState extends State<LibraryBookDetailPage>
+    with SingleTickerProviderStateMixin {
   late final LibraryApiClient _apiClient;
+  late final TabController _tabController;
+
   LibraryBookDetailModel? _detailModel;
   bool _isLoading = false;
   bool _summaryExpanded = false;
@@ -53,7 +56,17 @@ class _LibraryBookDetailPageState extends State<LibraryBookDetailPage> {
   void initState() {
     super.initState();
     _apiClient = widget.apiClient ?? LibraryApiClient();
+    _tabController = TabController(
+      length: LibraryHoldingCampus.values.length,
+      vsync: this,
+    );
     _loadDetail();
+  }
+
+  @override
+  void dispose() {
+    _tabController.dispose();
+    super.dispose();
   }
 
   Future<void> _loadDetail() async {
@@ -77,7 +90,8 @@ class _LibraryBookDetailPageState extends State<LibraryBookDetailPage> {
 
       var cover = widget.coverUrl;
       final isbn = detailData['baseMarcInfoDto']?['isbn'] as String?;
-      final bookTitle = detailData['baseMarcInfoDto']?['title'] as String? ?? widget.title;
+      final bookTitle =
+          detailData['baseMarcInfoDto']?['title'] as String? ?? widget.title;
       if (cover == null || cover.isEmpty) {
         cover = await _apiClient.fetchCoverUrl(
           isbn: isbn,
@@ -210,23 +224,53 @@ class _LibraryBookDetailPageState extends State<LibraryBookDetailPage> {
             )
           : RefreshIndicator(
               onRefresh: _loadDetail,
-              child: ListView(
+              child: CustomScrollView(
                 physics: const AlwaysScrollableScrollPhysics(),
-                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-                children: [
-                  _buildHeaderSection(colors),
-                  if (_detailModel?.summary != null &&
-                      _detailModel!.summary!.isNotEmpty) ...[
-                    const SizedBox(height: 20),
-                    _buildSummarySection(colors),
-                  ],
-                  const SizedBox(height: 22),
-                  _buildHoldingsSection(colors),
-                  if (_detailModel?.metadataList.isNotEmpty == true) ...[
-                    const SizedBox(height: 22),
-                    _buildMetadataSection(colors),
-                  ],
-                  const SizedBox(height: 28),
+                slivers: [
+                  SliverPadding(
+                    padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+                    sliver: SliverToBoxAdapter(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          _buildHeaderSection(colors),
+                          if (_detailModel?.summary != null &&
+                              _detailModel!.summary!.isNotEmpty) ...[
+                            const SizedBox(height: 20),
+                            _buildSummarySection(colors),
+                          ],
+                          const SizedBox(height: 22),
+                          Text(
+                            '馆藏分布',
+                            style: TextStyle(
+                              fontSize: 15,
+                              fontWeight: FontWeight.w600,
+                              color: colors.textPrimary,
+                            ),
+                          ),
+                          const SizedBox(height: 8),
+                        ],
+                      ),
+                    ),
+                  ),
+                  SliverPersistentHeader(
+                    pinned: true,
+                    delegate: _CampusStickyHeaderDelegate(
+                      tabController: _tabController,
+                      colors: colors,
+                    ),
+                  ),
+                  SliverPadding(
+                    padding: const EdgeInsets.symmetric(horizontal: 16),
+                    sliver: _buildHoldingsSliver(colors),
+                  ),
+                  if (_detailModel?.metadataList.isNotEmpty == true)
+                    SliverPadding(
+                      padding: const EdgeInsets.fromLTRB(16, 22, 16, 28),
+                      sliver: SliverToBoxAdapter(
+                        child: _buildMetadataSection(colors),
+                      ),
+                    ),
                 ],
               ),
             ),
@@ -396,9 +440,11 @@ class _LibraryBookDetailPageState extends State<LibraryBookDetailPage> {
             const Spacer(),
             if (summary.length > 120)
               GestureDetector(
-                onTap: () => setState(() => _summaryExpanded = !_summaryExpanded),
+                onTap: () =>
+                    setState(() => _summaryExpanded = !_summaryExpanded),
                 child: Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
                   child: Text(
                     _summaryExpanded ? '收起' : '展开',
                     style: TextStyle(
@@ -426,73 +472,48 @@ class _LibraryBookDetailPageState extends State<LibraryBookDetailPage> {
     );
   }
 
-  Widget _buildHoldingsSection(ShuYoColors colors) {
-    final holdings = _detailModel?.holdings ?? const [];
-    final onShelfCount = _detailModel?.onShelfHoldings ?? 0;
-    final totalCount = _detailModel?.totalHoldings ?? 0;
+  Widget _buildHoldingsSliver(ShuYoColors colors) {
+    return AnimatedBuilder(
+      animation: _tabController,
+      builder: (context, _) {
+        final currentCampus = LibraryHoldingCampus.values[_tabController.index];
+        final allHoldings = _detailModel?.holdings ?? const [];
+        final holdings =
+            allHoldings.where((h) => h.campus == currentCampus).toList();
 
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Row(
-          children: [
-            Text(
-              '馆藏分布',
-              style: TextStyle(
-                fontSize: 15,
-                fontWeight: FontWeight.w600,
-                color: colors.textPrimary,
-              ),
-            ),
-            const SizedBox(width: 8),
-            if (totalCount > 0)
-              Text.rich(
-                TextSpan(
-                  children: [
-                    TextSpan(
-                      text: '$onShelfCount',
-                      style: TextStyle(
-                        fontSize: 13,
-                        fontWeight: FontWeight.w600,
-                        color: colors.accent,
-                      ),
-                    ),
-                    TextSpan(
-                      text: '/$totalCount本可借',
-                      style: TextStyle(
-                        fontSize: 13,
-                        color: colors.textSecondary,
-                      ),
-                    ),
-                  ],
+        if (holdings.isEmpty) {
+          return SliverToBoxAdapter(
+            child: Padding(
+              padding: const EdgeInsets.symmetric(vertical: 36),
+              child: Center(
+                child: Text(
+                  '该校区暂无此藏书',
+                  style: TextStyle(
+                    fontSize: 13.5,
+                    color: colors.textMuted,
+                  ),
                 ),
               ),
-          ],
-        ),
-        const SizedBox(height: 10),
-        if (holdings.isEmpty)
-          Padding(
-            padding: const EdgeInsets.symmetric(vertical: 8),
-            child: Text(
-              '暂无在架馆藏单册信息',
-              style: TextStyle(
-                fontSize: 13,
-                color: colors.textMuted,
-              ),
             ),
-          )
-        else
-          ListView.separated(
-            shrinkWrap: true,
-            physics: const NeverScrollableScrollPhysics(),
-            itemCount: holdings.length,
-            separatorBuilder: (_, __) => const SizedBox(height: 8),
-            itemBuilder: (context, index) {
-              final item = holdings[index];
-              return _HoldingRow(colors: colors, item: item);
-            },
+          );
+        }
+
+        return SliverList.separated(
+          itemCount: holdings.length,
+          separatorBuilder: (_, __) => Divider(
+            height: 1,
+            color: colors.border.withValues(alpha: 0.35),
           ),
-      ],
+          itemBuilder: (context, index) {
+            final item = holdings[index];
+            return _HoldingRow(
+              colors: colors,
+              item: item,
+              index: index + 1,
+            );
+          },
+        );
+      },
     );
   }
 
@@ -521,100 +542,252 @@ class _LibraryBookDetailPageState extends State<LibraryBookDetailPage> {
   }
 }
 
-/// 单行馆藏信息条目（非包裹卡片，纯粹的极简行布局）
+/// 校区吸顶 Header Delegate
+class _CampusStickyHeaderDelegate extends SliverPersistentHeaderDelegate {
+  const _CampusStickyHeaderDelegate({
+    required this.tabController,
+    required this.colors,
+  });
+
+  final TabController tabController;
+  final ShuYoColors colors;
+
+  static const double _height = 42.0;
+
+  @override
+  double get minExtent => _height;
+
+  @override
+  double get maxExtent => _height;
+
+  @override
+  Widget build(
+    BuildContext context,
+    double shrinkOffset,
+    bool overlapsContent,
+  ) {
+    final theme = Theme.of(context);
+
+    return Material(
+      color: theme.scaffoldBackgroundColor,
+      child: Container(
+        height: _height,
+        decoration: BoxDecoration(
+          color: theme.scaffoldBackgroundColor,
+          border: Border(
+            bottom: BorderSide(
+              color:
+                  colors.border.withValues(alpha: overlapsContent ? 0.6 : 0.25),
+              width: 0.5,
+            ),
+          ),
+        ),
+        child: TabBar(
+          controller: tabController,
+          labelColor: colors.accent,
+          unselectedLabelColor: colors.textSecondary,
+          indicatorColor: colors.accent,
+          indicatorWeight: 2.5,
+          dividerColor: Colors.transparent,
+          labelStyle: const TextStyle(
+            fontSize: 13.5,
+            fontWeight: FontWeight.w600,
+          ),
+          unselectedLabelStyle: const TextStyle(
+            fontSize: 13.5,
+            fontWeight: FontWeight.w400,
+          ),
+          tabs: [
+            for (final campus in LibraryHoldingCampus.values)
+              Tab(text: campus.label),
+          ],
+        ),
+      ),
+    );
+  }
+
+  @override
+  bool shouldRebuild(_CampusStickyHeaderDelegate oldDelegate) =>
+      tabController != oldDelegate.tabController ||
+      colors != oldDelegate.colors;
+}
+
+/// 馆藏状态图标与颜色映射辅助函数
+(IconData, Color) _holdingStatusVisual(
+    HoldingStatusCategory category, ShuYoColors colors) {
+  switch (category) {
+    case HoldingStatusCategory.onShelf:
+      return (Icons.check_circle_outline_rounded, colors.accent);
+    case HoldingStatusCategory.borrowed:
+      return (Icons.schedule_rounded, colors.textSecondary);
+    case HoldingStatusCategory.reshelving:
+      return (Icons.sync_rounded, colors.accent);
+    case HoldingStatusCategory.inTransit:
+      return (Icons.local_shipping_outlined, colors.textSecondary);
+    case HoldingStatusCategory.unavailable:
+      return (Icons.remove_circle_outline_rounded, colors.textMuted);
+  }
+}
+
+/// 单行馆藏信息条目（可点击裸列表，左侧序号，中间地点+订阅类型+索书号/应还，右侧文字+状态图标）
 class _HoldingRow extends StatelessWidget {
   const _HoldingRow({
     required this.colors,
     required this.item,
+    required this.index,
   });
 
   final ShuYoColors colors;
   final LibraryBookHoldingItem item;
+  final int index;
 
   @override
   Widget build(BuildContext context) {
-    final isOnShelf = item.isOnShelf;
-    final location = item.curLocationName?.isNotEmpty == true
-        ? item.curLocationName!
-        : item.locationName;
+    final location = item.cleanLocationName;
+    final isBorrowed = item.statusCategory == HoldingStatusCategory.borrowed;
+    final returnTime = item.dueDate;
+    final (statusIcon, statusColor) =
+        _holdingStatusVisual(item.statusCategory, colors);
 
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 4),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-            decoration: BoxDecoration(
-              color: isOnShelf
-                  ? colors.accent.withValues(alpha: 0.12)
-                  : colors.surfaceAlt,
-              borderRadius: BorderRadius.circular(4),
-              border: Border.all(
-                color: isOnShelf
-                    ? colors.accent.withValues(alpha: 0.3)
-                    : colors.border.withValues(alpha: 0.5),
-              ),
-            ),
-            child: Text(
-              item.processType.isNotEmpty ? item.processType : (isOnShelf ? '在架' : '借出'),
-              style: TextStyle(
-                fontSize: 11,
-                fontWeight: FontWeight.w600,
-                color: isOnShelf ? colors.accent : colors.textMuted,
-              ),
-            ),
-          ),
-          const SizedBox(width: 8),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  location,
-                  style: TextStyle(
-                    fontSize: 13,
-                    fontWeight: FontWeight.w500,
-                    color: colors.textPrimary,
-                  ),
-                ),
-                const SizedBox(height: 2),
-                Row(
-                  children: [
-                    Text(
-                      '索书号 ${item.callNo}',
-                      style: TextStyle(
-                        fontSize: 11.5,
-                        color: colors.textSecondary,
-                      ),
-                    ),
-                    if (item.barcode.isNotEmpty) ...[
-                      const SizedBox(width: 10),
-                      Text(
-                        '条码 ${item.barcode}',
-                        style: TextStyle(
-                          fontSize: 11.5,
-                          color: colors.textMuted,
-                        ),
-                      ),
-                    ],
-                  ],
-                ),
-              ],
-            ),
-          ),
-          if (item.itemPolicyName != null && item.itemPolicyName!.isNotEmpty)
-            Padding(
-              padding: const EdgeInsets.only(left: 6),
+    final itemPolicy = item.itemPolicyName;
+    final hasSpecialPolicy = itemPolicy != null &&
+        itemPolicy.isNotEmpty &&
+        itemPolicy != '普通外借' &&
+        itemPolicy != '普通';
+
+    return InkWell(
+      onTap: () {
+        final buffer = StringBuffer();
+        if (hasSpecialPolicy) buffer.write('[$itemPolicy] ');
+        buffer.writeln(location);
+        if (isBorrowed && returnTime != null) {
+          buffer.writeln('应还日期: $returnTime');
+        } else {
+          buffer.writeln('索书号: ${item.callNo}');
+        }
+        if (item.barcode.isNotEmpty) buffer.writeln('条码: ${item.barcode}');
+        buffer.write('状态: ${item.displayStatus}');
+        Clipboard.setData(ClipboardData(text: buffer.toString()));
+      },
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 14),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.center,
+          children: [
+            // 左侧序号（参照录播剧集序号风格）
+            SizedBox(
+              width: 28,
               child: Text(
-                item.itemPolicyName!,
+                '$index',
                 style: TextStyle(
-                  fontSize: 11.5,
+                  fontSize: 13,
+                  fontWeight: FontWeight.w600,
                   color: colors.textMuted,
                 ),
               ),
             ),
-        ],
+            // 中间主要信息
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      if (hasSpecialPolicy) ...[
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 6, vertical: 2),
+                          margin: const EdgeInsets.only(right: 6),
+                          decoration: BoxDecoration(
+                            color: colors.accent.withValues(alpha: 0.12),
+                            borderRadius: BorderRadius.circular(4),
+                            border: Border.all(
+                              color: colors.accent.withValues(alpha: 0.35),
+                              width: 0.8,
+                            ),
+                          ),
+                          child: Text(
+                            itemPolicy,
+                            style: TextStyle(
+                              fontSize: 11,
+                              fontWeight: FontWeight.w600,
+                              color: colors.accent,
+                            ),
+                          ),
+                        ),
+                      ],
+                      Expanded(
+                        child: Text(
+                          location,
+                          style: TextStyle(
+                            fontSize: 13.5,
+                            fontWeight: FontWeight.w500,
+                            color: colors.textPrimary,
+                          ),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 5),
+                  Row(
+                    children: [
+                      if (isBorrowed && returnTime != null)
+                        Text(
+                          '应还 $returnTime',
+                          style: TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w500,
+                            color: colors.textSecondary,
+                          ),
+                        )
+                      else
+                        Text(
+                          '索书号 ${item.callNo}',
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: colors.textSecondary,
+                          ),
+                        ),
+                      if (item.barcode.isNotEmpty) ...[
+                        const SizedBox(width: 10),
+                        Text(
+                          '条码 ${item.barcode}',
+                          style: TextStyle(
+                            fontSize: 11.5,
+                            color: colors.textMuted,
+                          ),
+                        ),
+                      ],
+                    ],
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(width: 12),
+            // 右侧先文字，后状态图标（参照录播平台标准 20px / 22px 图标）
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  item.displayStatus,
+                  style: TextStyle(
+                    fontSize: 12.5,
+                    fontWeight: FontWeight.w600,
+                    color: statusColor,
+                  ),
+                ),
+                const SizedBox(width: 5),
+                Icon(
+                  statusIcon,
+                  size: 20,
+                  color: statusColor,
+                ),
+              ],
+            ),
+          ],
+        ),
       ),
     );
   }
