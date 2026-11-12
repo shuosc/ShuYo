@@ -48,6 +48,12 @@ final _rankings = [
     items: [_unit('general', '通识课程', 9.0, 17)],
   ),
   RateRankingPreview(
+    key: 'core_general',
+    title: '核心通识课',
+    total: 1,
+    items: [_unit('core_general', '核心通识课程', 9.0, 19)],
+  ),
+  RateRankingPreview(
     key: 'pe',
     title: '体育',
     total: 1,
@@ -72,6 +78,7 @@ class _FakeCourseReviewRepository extends CourseReviewRepository {
           scheduleRepository: AcademicScheduleRepository(),
         );
 
+  List<RateRankingPreview> rankings = _rankings;
   List<RateScheduleMatch> matches;
   final Future<List<RateScheduleMatch>> Function()? matchLoader;
   int homeCalls = 0;
@@ -83,15 +90,7 @@ class _FakeCourseReviewRepository extends CourseReviewRepository {
     homeCalls++;
     return RateHome(
       recent: [_recent],
-      rankings: [
-        ..._rankings,
-        RateRankingPreview(
-          key: 'seminar',
-          title: '新生研讨课',
-          total: 1,
-          items: [_unit('seminar', '研讨课程', 9.0, 31)],
-        ),
-      ],
+      rankings: rankings,
       colleges: const [],
     );
   }
@@ -111,7 +110,7 @@ class _FakeCourseReviewRepository extends CourseReviewRepository {
   @override
   Future<RateRankingResult> ranking(String category,
       {String sub = '', int page = 1}) async {
-    final ranking = _rankings.singleWhere((item) => item.key == category);
+    final ranking = rankings.singleWhere((item) => item.key == category);
     return RateRankingResult(
       key: ranking.key,
       title: ranking.title,
@@ -206,6 +205,30 @@ void main() {
     }
     expect(find.textContaining('份'), findsNothing);
     expect(find.text('新生研讨课'), findsNothing);
+    expect(tester.getTopLeft(find.text('通识课')).dy,
+        lessThan(tester.getTopLeft(find.text('核心通识课')).dy));
+    expect(tester.getTopLeft(find.text('核心通识课')).dy,
+        lessThan(tester.getTopLeft(find.text('体育')).dy));
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('homepage renders server categories without filtering seminar',
+      (tester) async {
+    final repo = _FakeCourseReviewRepository()
+      ..rankings = [
+        RateRankingPreview(
+          key: 'seminar',
+          title: '服务端下发的栏目',
+          total: 1,
+          items: [_unit('seminar', '服务端课程', 9.0, 31)],
+        ),
+      ];
+    await _pumpHome(tester, repository: repo);
+    expect(find.text('服务端下发的栏目'), findsOneWidget);
+    expect(find.text('1  服务端课程'), findsOneWidget);
+    await tester.tap(find.text('查看全部'));
+    await tester.pumpAndSettle();
+    expect(find.text('服务端下发的栏目'), findsWidgets);
     expect(tester.takeException(), isNull);
   });
 
@@ -596,7 +619,9 @@ void main() {
     final ranking = _rankings[index];
     testWidgets('${ranking.title} list retains review counts', (tester) async {
       await _pumpHome(tester);
-      await tester.tap(find.byType(RateMoreButton).at(index));
+      final more = find.byType(RateMoreButton).at(index);
+      await tester.ensureVisible(more);
+      await tester.tap(more);
       await tester.pumpAndSettle();
       expect(find.byType(RateRankingPage), findsOneWidget);
       expect(

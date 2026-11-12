@@ -218,8 +218,7 @@ class _RateHomePageState extends State<RateHomePage> {
               onTap: (unit) => openRateUnit(context, _repo, unit.id),
             ),
           ],
-          for (final ranking
-              in home.rankings.where((item) => item.key != 'seminar')) ...[
+          for (final ranking in home.rankings) ...[
             const SizedBox(height: 16),
             _section(
               ranking.title,

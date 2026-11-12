@@ -36,7 +36,7 @@ const _difficulty = RateQuestion(
 );
 const _tagOptions = [
   RateOption(key: 'a', label: '风趣幽默'),
-  RateOption(key: 'b', label: '条理清晰'),
+  RateOption(key: 'b', label: '严谨认真'),
   RateOption(key: 'c', label: '深入浅出'),
   RateOption(key: 'd', label: '启发思考'),
 ];
@@ -237,7 +237,7 @@ void main() {
     await _tap(tester, '启发思考');
     expect(selected, ['a', 'b', 'c']);
     expect(find.text('最多选择3项'), findsOneWidget);
-    await _tap(tester, '条理清晰');
+    await _tap(tester, '严谨认真');
     await _tap(tester, '启发思考');
     expect(selected, ['a', 'c', 'd']);
   });
@@ -375,6 +375,42 @@ void main() {
       'difficulty': ['hard'],
       'teacher_tags': ['c'],
     });
+  });
+
+  testWidgets(
+      'teacher tags retain rigorous when reordered and add kind separately',
+      (tester) async {
+    const tags = RateQuestion(
+      key: 'teacher_tags',
+      title: '你想送给老师的标签',
+      multiple: true,
+      required: false,
+      maxSelections: 3,
+      options: [
+        RateOption(key: 'humorous', label: '风趣幽默'),
+        RateOption(key: 'rigorous', label: '严谨认真'),
+        RateOption(key: 'accessible', label: '深入浅出'),
+        RateOption(key: 'inspiring', label: '启发思考'),
+        RateOption(key: 'by_the_book', label: '按部就班'),
+        RateOption(key: 'fast_paced', label: '节奏紧凑'),
+        RateOption(key: 'kind', label: '和蔼可亲'),
+        RateOption(key: 'respected', label: '令人尊敬'),
+      ],
+    );
+    final repo = repository([_overall, tags],
+        review: _review({
+          'teacher_tags': ['rigorous'],
+        }));
+    await _pumpPage(tester, RateEditReviewPage(repository: repo, unit: _unit));
+    expect(tester.widget<RateOptionGrid>(find.byType(RateOptionGrid)).selected,
+        ['rigorous']);
+    expect(find.text('条理清晰'), findsNothing);
+    expect(find.text('严谨认真'), findsOneWidget);
+    await _tap(tester, '和蔼可亲');
+    expect(tester.widget<RateOptionGrid>(find.byType(RateOptionGrid)).selected,
+        ['rigorous', 'kind']);
+    await _tap(tester, '保存');
+    expect(repo.saved.single.answers['teacher_tags'], ['rigorous', 'kind']);
   });
 
   testWidgets(
