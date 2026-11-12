@@ -69,19 +69,19 @@ class LibraryBookCitationBottomSheet extends StatelessWidget {
             name: 'GB/T 7714',
             content: citation.gb7714,
           ),
-          const SizedBox(height: 10),
+          const SizedBox(height: 8),
           _CitationRow(
             colors: colors,
             name: 'MLA',
             content: citation.mla,
           ),
-          const SizedBox(height: 10),
+          const SizedBox(height: 8),
           _CitationRow(
             colors: colors,
             name: 'APA',
             content: citation.apa,
           ),
-          const SizedBox(height: 20),
+          const SizedBox(height: 18),
           Divider(height: 1, color: colors.border.withValues(alpha: 0.6)),
           const SizedBox(height: 16),
           Text(
@@ -123,7 +123,7 @@ class LibraryBookCitationBottomSheet extends StatelessWidget {
   }
 }
 
-/// 单行引用条目（无边框卡片包裹，一行紧凑展示：格式名 + 内容 + 动效复制按钮）
+/// 引用条目（参照“播放器的播放链接”设计：标题独占一行，下方一整行展示引用内容 + 动效复制按钮，文字稍微放大）
 class _CitationRow extends StatefulWidget {
   const _CitationRow({
     required this.colors,
@@ -153,7 +153,7 @@ class _CitationRowState extends State<_CitationRow> {
     Clipboard.setData(ClipboardData(text: widget.content));
     setState(() => _copied = true);
     _timer?.cancel();
-    _timer = Timer(const Duration(seconds: 3), () {
+    _timer = Timer(const Duration(seconds: 1), () {
       if (mounted) setState(() => _copied = false);
     });
   }
@@ -163,38 +163,49 @@ class _CitationRowState extends State<_CitationRow> {
     final colors = widget.colors;
 
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 4),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.center,
+      padding: const EdgeInsets.symmetric(vertical: 2),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          SizedBox(
-            width: 76,
-            child: Text(
-              widget.name,
-              style: TextStyle(
-                fontSize: 13,
-                fontWeight: FontWeight.w600,
-                color: colors.textPrimary,
-              ),
+          Text(
+            widget.name,
+            style: TextStyle(
+              fontSize: 13.5,
+              fontWeight: FontWeight.w600,
+              color: colors.textPrimary,
             ),
           ),
-          const SizedBox(width: 8),
-          Expanded(
-            child: Text(
-              widget.content,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: TextStyle(
-                fontSize: 12.5,
-                color: colors.textSecondary,
+          const SizedBox(height: 3),
+          Material(
+            color: Colors.transparent,
+            child: InkWell(
+              onTap: _handleCopy,
+              borderRadius: BorderRadius.circular(6),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(vertical: 3, horizontal: 2),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.center,
+                  children: [
+                    Expanded(
+                      child: Text(
+                        widget.content,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontSize: 13,
+                          color: colors.textSecondary,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    _AnimatedCopyButton(
+                      colors: colors,
+                      copied: _copied,
+                    ),
+                  ],
+                ),
               ),
             ),
-          ),
-          const SizedBox(width: 8),
-          _AnimatedCopyButton(
-            colors: colors,
-            copied: _copied,
-            onTap: _handleCopy,
           ),
         ],
       ),
@@ -232,7 +243,7 @@ class _ExportTagButtonState extends State<_ExportTagButton> {
     Clipboard.setData(ClipboardData(text: widget.content));
     setState(() => _copied = true);
     _timer?.cancel();
-    _timer = Timer(const Duration(seconds: 3), () {
+    _timer = Timer(const Duration(seconds: 1), () {
       if (mounted) setState(() => _copied = false);
     });
   }
@@ -297,50 +308,41 @@ class _ExportTagButtonState extends State<_ExportTagButton> {
   }
 }
 
-/// 复制按钮：纯中性色（不用主题色），带 √ 动画，3 秒后平滑恢复
+/// 复制图标：纯中性色（不用主题色），带 √ 动画，1 秒后平滑恢复
 class _AnimatedCopyButton extends StatelessWidget {
   const _AnimatedCopyButton({
     required this.colors,
     required this.copied,
-    required this.onTap,
   });
 
   final ShuYoColors colors;
   final bool copied;
-  final VoidCallback onTap;
 
   @override
   Widget build(BuildContext context) {
-    return Material(
-      color: Colors.transparent,
-      child: InkWell(
-        onTap: onTap,
-        borderRadius: BorderRadius.circular(6),
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
-          child: AnimatedSwitcher(
-            duration: const Duration(milliseconds: 240),
-            switchInCurve: Curves.easeOutBack,
-            switchOutCurve: Curves.easeIn,
-            transitionBuilder: (child, animation) => ScaleTransition(
-              scale: animation,
-              child: FadeTransition(opacity: animation, child: child),
-            ),
-            child: copied
-                ? Icon(
-                    Icons.check_rounded,
-                    key: const ValueKey('copied'),
-                    size: 16,
-                    color: colors.textPrimary,
-                  )
-                : Icon(
-                    Icons.copy_rounded,
-                    key: const ValueKey('copy'),
-                    size: 16,
-                    color: colors.textMuted,
-                  ),
-          ),
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+      child: AnimatedSwitcher(
+        duration: const Duration(milliseconds: 240),
+        switchInCurve: Curves.easeOutBack,
+        switchOutCurve: Curves.easeIn,
+        transitionBuilder: (child, animation) => ScaleTransition(
+          scale: animation,
+          child: FadeTransition(opacity: animation, child: child),
         ),
+        child: copied
+            ? Icon(
+                Icons.check_rounded,
+                key: const ValueKey('copied'),
+                size: 16,
+                color: colors.textPrimary,
+              )
+            : Icon(
+                Icons.copy_rounded,
+                key: const ValueKey('copy'),
+                size: 16,
+                color: colors.textMuted,
+              ),
       ),
     );
   }
