@@ -7,6 +7,7 @@ import 'package:shuyo/data/services/student_identity_service.dart';
 import 'package:shuyo/features/rate/rate_detail_pages.dart';
 import 'package:shuyo/features/rate/rate_publish_page.dart';
 import 'package:shuyo/features/rate/rate_question_widgets.dart';
+import 'package:shuyo/shared/theme/shuyo_theme.dart';
 
 const _overall = RateQuestion(
   key: 'overall',
@@ -163,6 +164,52 @@ void main() {
     );
     addTearDown(repo.dispose);
     return repo;
+  }
+
+  for (final question in [_difficulty, _tags]) {
+    testWidgets(
+        '${question.multiple ? 'multiple' : 'single'}-choice options show circular checks only when selected',
+        (tester) async {
+      var selected = <String>[];
+      await _pumpPage(
+          tester,
+          Scaffold(
+            body: StatefulBuilder(
+                builder: (context, setState) => RateOptionGrid(
+                      question: question,
+                      selected: selected,
+                      onChanged: (value) => setState(() => selected = value),
+                    )),
+          ));
+
+      void expectIndicators() {
+        expect(find.byIcon(Icons.check_box_rounded), findsNothing);
+        expect(
+            find.byIcon(Icons.check_box_outline_blank_rounded), findsNothing);
+        final icons = find.byIcon(Icons.check_circle_rounded);
+        expect(icons, findsNWidgets(question.options.length));
+        final colors = tester.element(find.byType(RateOptionGrid)).shuyoColors;
+        expect(
+            tester.widgetList<Icon>(icons).map((icon) => icon.color).toList(), [
+          for (final option in question.options)
+            selected.contains(option.key) ? colors.accent : Colors.transparent,
+        ]);
+      }
+
+      expectIndicators();
+      final first = question.options[0];
+      final second = question.options[1];
+      await _tap(tester, first.label);
+      expect(selected, [first.key]);
+      expectIndicators();
+      await _tap(tester, second.label);
+      expect(
+          selected, question.multiple ? [first.key, second.key] : [second.key]);
+      expectIndicators();
+      await _tap(tester, second.label);
+      expect(selected, question.multiple ? [first.key] : <String>[]);
+      expectIndicators();
+    });
   }
 
   testWidgets(

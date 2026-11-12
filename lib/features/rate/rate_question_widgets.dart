@@ -107,7 +107,6 @@ class RateOptionGrid extends StatelessWidget {
               child: _OptionCell(
                 label: option.label,
                 selected: selected.contains(option.key),
-                multiple: question.multiple,
                 onTap: () => _toggle(context, option.key),
               ),
             ),
@@ -121,13 +120,11 @@ class _OptionCell extends StatelessWidget {
   const _OptionCell({
     required this.label,
     required this.selected,
-    required this.multiple,
     required this.onTap,
   });
 
   final String label;
   final bool selected;
-  final bool multiple;
   final VoidCallback onTap;
 
   @override
@@ -166,15 +163,9 @@ class _OptionCell extends StatelessWidget {
                 top: 6,
                 right: 6,
                 child: Icon(
-                  multiple
-                      ? (selected
-                          ? Icons.check_box_rounded
-                          : Icons.check_box_outline_blank_rounded)
-                      : Icons.check_circle_rounded,
+                  Icons.check_circle_rounded,
                   size: 16,
-                  color: selected
-                      ? colors.accent
-                      : (multiple ? colors.borderStrong : Colors.transparent),
+                  color: selected ? colors.accent : Colors.transparent,
                 ),
               ),
             ],
