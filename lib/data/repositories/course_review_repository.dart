@@ -21,11 +21,14 @@ class CourseReviewRepository {
   CourseReviewRepository({
     CourseReviewApiClient? apiClient,
     Future<SharedPreferences> Function()? preferencesLoader,
+    Future<AcademicSchedule?> Function()? scheduleLoader,
     required this.studentIdentityService,
     required this.scheduleRepository,
     this.isDemo = false,
   })  : _api = apiClient ?? CourseReviewApiClient(),
-        _preferencesLoader = preferencesLoader ?? SharedPreferences.getInstance;
+        _preferencesLoader = preferencesLoader ?? SharedPreferences.getInstance,
+        _scheduleLoader =
+            scheduleLoader ?? scheduleRepository.loadCachedSchedule;
 
   static const _scheduleCollapsedKey = 'rate.home.schedule.collapsed';
 
@@ -33,6 +36,7 @@ class CourseReviewRepository {
   final Future<SharedPreferences> Function() _preferencesLoader;
   final StudentIdentityService studentIdentityService;
   final AcademicScheduleRepository scheduleRepository;
+  final Future<AcademicSchedule?> Function() _scheduleLoader;
   final bool isDemo;
 
   Future<RateCatalogConfig>? _config;
@@ -51,7 +55,7 @@ class CourseReviewRepository {
   Future<void> saveScheduleCollapsed(bool collapsed) async {
     final preferences = await _preferencesLoader();
     if (!await preferences.setBool(_scheduleCollapsedKey, collapsed)) {
-      throw StateError('本学期课程折叠状态保存失败');
+      throw StateError('课表课程折叠状态保存失败');
     }
   }
 
@@ -87,11 +91,11 @@ class CourseReviewRepository {
   Future<List<RateCourseSummary>> collegeCourses(String college) =>
       _api.fetchCollegeCourses(college);
 
-  /// Distinct courses of the cached schedule, in timetable order.
+  /// Distinct courses of the supplied schedule, in timetable order.
   Future<List<RateScheduleCourse>> scheduleCourses() async {
     final AcademicSchedule? schedule;
     try {
-      schedule = await scheduleRepository.loadCachedSchedule();
+      schedule = await _scheduleLoader();
     } on Object {
       return const [];
     }

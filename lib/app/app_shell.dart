@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
@@ -14,6 +15,7 @@ import '../core/otp_url_resolver.dart';
 import '../data/demo/demo_data_bundle.dart';
 import '../data/demo/demo_repositories.dart';
 import '../data/models/client_backend.dart';
+import '../data/models/academic_schedule.dart';
 import '../data/models/campus_card.dart';
 import '../data/models/campus_card_snapshot.dart';
 import '../data/models/classroom.dart';
@@ -152,6 +154,10 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
   bool _rateTabInitialized = false;
   int _progressDataRevision = 0;
   int _scheduleDataRevision = 0;
+  int _rateScheduleRevision = 0;
+  bool _hasViewedSchedule = false;
+  AcademicSchedule? _viewedSchedule;
+  String? _viewedScheduleFingerprint;
   late bool _webVpnEnabled = widget.initialWebVpnEnabled;
   late bool _webVpnPendingRecovery = widget.initialWebVpnPendingRecovery;
   late bool _webVpnSessionReady = widget.initialWebVpnSessionReady;
@@ -227,8 +233,38 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
       _courseReviewRepositoryInstance ??= CourseReviewRepository(
         studentIdentityService: _studentIdentityService,
         scheduleRepository: _scheduleRepository,
+        scheduleLoader: _loadReviewSchedule,
         isDemo: widget.isDemo,
       );
+
+  // An applied empty view is authoritative; only an unseen view falls back.
+  Future<AcademicSchedule?> _loadReviewSchedule() async => _hasViewedSchedule
+      ? _viewedSchedule
+      : await _scheduleRepository.loadCachedSchedule();
+
+  void _viewedScheduleChanged(AcademicSchedule? schedule, int pageRevision) {
+    if (!mounted || pageRevision != _scheduleDataRevision) return;
+    if (schedule != null &&
+        _academicStudentId != null &&
+        schedule.term.studentId != _academicStudentId) {
+      return;
+    }
+    final fingerprint = schedule == null ? null : jsonEncode(schedule.toJson());
+    if (_hasViewedSchedule && fingerprint == _viewedScheduleFingerprint) return;
+    setState(() {
+      _hasViewedSchedule = true;
+      _viewedSchedule = schedule;
+      _viewedScheduleFingerprint = fingerprint;
+      _rateScheduleRevision++;
+    });
+  }
+
+  void _resetViewedSchedule() {
+    _hasViewedSchedule = false;
+    _viewedSchedule = null;
+    _viewedScheduleFingerprint = null;
+    _rateScheduleRevision++;
+  }
 
   @override
   void initState() {
@@ -368,6 +404,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
 
   @override
   Widget build(BuildContext context) {
+    final scheduleDataRevision = _scheduleDataRevision;
     return PopScope(
       canPop: false,
       onPopInvokedWithResult: (didPop, result) {
@@ -394,6 +431,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
                             key: ValueKey(_scheduleDataRevision),
                             repository: _courseReviewRepository,
                             active: _tab == AppTab.rate,
+                            scheduleRevision: _rateScheduleRevision,
                           )
                         : const SizedBox.expand(),
                     _progressTabInitialized
@@ -417,6 +455,9 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
                             ),
                             onPrimaryScheduleChanged:
                                 _refreshScheduleSummaryQuietly,
+                            onViewedScheduleChanged: (schedule) =>
+                                _viewedScheduleChanged(
+                                    schedule, scheduleDataRevision),
                             studentIdentityService: _studentIdentityService,
                             initialState: widget.initialOpenSchedule &&
                                     _scheduleDataRevision == 0
@@ -644,6 +685,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
         // Keep an in-flight schedule action alive while its session recovers.
         if (reloadSchedulePage || previousStudentId != _academicStudentId) {
           _scheduleDataRevision++;
+          _resetViewedSchedule();
         }
       });
       _syncOnboardingAccountStatus();
@@ -734,6 +776,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
     if (!mounted) return;
     _campusCardCache.selectAccount(studentId);
     setState(() {
+      if (_academicStudentId != studentId) _resetViewedSchedule();
       _academicStudentId = studentId;
       _nickname = nickname;
     });
@@ -799,6 +842,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
         setState(() {
           _scheduleSummaryText = summary.text;
           _scheduleDataRevision++;
+          _resetViewedSchedule();
         });
         _showSnack('校园账户已登录，课表已同步');
       }
@@ -1531,6 +1575,8 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
         _hasAcademicSession = false;
         _academicSessionExpired = false;
         _academicStudentId = null;
+        _scheduleDataRevision++;
+        _resetViewedSchedule();
         _nickname = null;
         _campusCardInfo = null;
         _campusCardInfoQueriedAt = null;

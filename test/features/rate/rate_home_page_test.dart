@@ -65,32 +65,42 @@ class _FakeCourseReviewRepository extends CourseReviewRepository {
   _FakeCourseReviewRepository({
     this.matches = const [],
     this.failPreferenceWrites = false,
+    this.matchLoader,
     super.preferencesLoader,
   }) : super(
           studentIdentityService: StudentIdentityService(),
           scheduleRepository: AcademicScheduleRepository(),
         );
 
-  final List<RateScheduleMatch> matches;
+  List<RateScheduleMatch> matches;
+  final Future<List<RateScheduleMatch>> Function()? matchLoader;
+  int homeCalls = 0;
+  int matchCalls = 0;
   final bool failPreferenceWrites;
 
   @override
-  Future<RateHome> home() async => RateHome(
-        recent: [_recent],
-        rankings: [
-          ..._rankings,
-          RateRankingPreview(
-            key: 'seminar',
-            title: '新生研讨课',
-            total: 1,
-            items: [_unit('seminar', '研讨课程', 9.0, 31)],
-          ),
-        ],
-        colleges: const [],
-      );
+  Future<RateHome> home() async {
+    homeCalls++;
+    return RateHome(
+      recent: [_recent],
+      rankings: [
+        ..._rankings,
+        RateRankingPreview(
+          key: 'seminar',
+          title: '新生研讨课',
+          total: 1,
+          items: [_unit('seminar', '研讨课程', 9.0, 31)],
+        ),
+      ],
+      colleges: const [],
+    );
+  }
 
   @override
-  Future<List<RateScheduleMatch>> matchSchedule() async => matches;
+  Future<List<RateScheduleMatch>> matchSchedule() async {
+    matchCalls++;
+    return matchLoader == null ? matches : await matchLoader!();
+  }
 
   @override
   Future<void> saveScheduleCollapsed(bool collapsed) async {
@@ -119,6 +129,8 @@ Future<void> _pumpHome(
   _FakeCourseReviewRepository? repository,
   bool settle = true,
   bool disableAnimations = false,
+  bool active = false,
+  int scheduleRevision = 0,
 }) async {
   tester.view.physicalSize = const Size(420, 1080);
   tester.view.devicePixelRatio = 1;
@@ -134,7 +146,11 @@ Future<void> _pumpHome(
             )
         : null,
     home: Scaffold(
-      body: RateHomePage(repository: repo, active: false),
+      body: RateHomePage(
+        repository: repo,
+        active: active,
+        scheduleRevision: scheduleRevision,
+      ),
     ),
   ));
   if (settle) await tester.pumpAndSettle();
@@ -151,7 +167,8 @@ double _scheduleArrowTurns(WidgetTester tester) => tester
 void main() {
   setUp(() => SharedPreferences.setMockInitialValues({}));
 
-  testWidgets('homepage rankings match recent cards and show stars without counts',
+  testWidgets(
+      'homepage rankings match recent cards and show stars without counts',
       (tester) async {
     await _pumpHome(tester);
     final recentCard = find.ancestor(
@@ -197,9 +214,9 @@ void main() {
     final unrated = _unit('unrated', '本学期暂无评价课程', null, 0);
     await _pumpHome(tester,
         repository: _FakeCourseReviewRepository(matches: [
-      _scheduleMatch(_scheduleUnit),
-      _scheduleMatch(unrated),
-    ]));
+          _scheduleMatch(_scheduleUnit),
+          _scheduleMatch(unrated),
+        ]));
     final scoredCard = find.ancestor(
       of: find.text(_scheduleUnit.course.name),
       matching: find.byType(RateCard),
@@ -253,7 +270,7 @@ void main() {
     final bounds = tester.getRect(header);
     final points = [
       bounds.centerLeft + const Offset(2, 0),
-      tester.getCenter(find.text('本学期课程')),
+      tester.getCenter(find.text('课表课程')),
       bounds.center,
       tester.getCenter(find.byIcon(Icons.expand_more)),
       bounds.centerRight - const Offset(2, 0),
@@ -280,7 +297,7 @@ void main() {
     expect(fullHeight, greaterThan(0));
     expect(_scheduleArrowTurns(tester), 0.5);
 
-    await tester.tap(find.text('本学期课程'));
+    await tester.tap(find.text('课表课程'));
     await tester.pump();
     expect(find.text(_scheduleUnit.course.name), findsOneWidget);
     await tester.pump(const Duration(milliseconds: 120));
@@ -297,7 +314,7 @@ void main() {
     expect(_scheduleArrowTurns(tester), 0);
     expect(find.text(_scheduleUnit.course.name), findsNothing);
 
-    await tester.tap(find.text('本学期课程'));
+    await tester.tap(find.text('课表课程'));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 120));
     expect(tester.getSize(content).height, inExclusiveRange(0, fullHeight));
@@ -317,14 +334,14 @@ void main() {
     await _pumpHome(tester, repository: repository);
     final content = find.byKey(const ValueKey('rate-schedule-content'));
     final fullHeight = tester.getSize(content).height;
-    await tester.tap(find.text('本学期课程'));
+    await tester.tap(find.text('课表课程'));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 90));
     final partialHeight = tester.getSize(content).height;
     final partialTurns = _scheduleArrowTurns(tester);
     expect(partialHeight, inExclusiveRange(0, fullHeight));
 
-    await tester.tap(find.text('本学期课程'));
+    await tester.tap(find.text('课表课程'));
     await tester.pump();
     expect(tester.getSize(content).height, closeTo(partialHeight, 0.01));
     expect(_scheduleArrowTurns(tester), closeTo(partialTurns, 0.001));
@@ -347,12 +364,12 @@ void main() {
         disableAnimations: true);
     final content = find.byKey(const ValueKey('rate-schedule-content'));
     final fullHeight = tester.getSize(content).height;
-    await tester.tap(find.text('本学期课程'));
+    await tester.tap(find.text('课表课程'));
     await tester.pump();
     expect(tester.getSize(content).height, 0);
     expect(_scheduleArrowTurns(tester), 0);
     expect(find.text(_scheduleUnit.course.name), findsNothing);
-    await tester.tap(find.text('本学期课程'));
+    await tester.tap(find.text('课表课程'));
     await tester.pump();
     expect(tester.getSize(content).height, fullHeight);
     expect(_scheduleArrowTurns(tester), 0.5);
@@ -366,14 +383,16 @@ void main() {
     final repository = _FakeCourseReviewRepository(matches: matches);
     await _pumpHome(tester, repository: repository);
     expect(find.text(_scheduleUnit.course.name), findsOneWidget);
-    await tester.tap(find.byTooltip('折叠本学期课程'));
+    await tester.tap(find.byTooltip('折叠课表课程'));
     await tester.pumpAndSettle();
-    expect(find.text('本学期课程'), findsOneWidget);
+    expect(find.text('课表课程'), findsOneWidget);
     expect(find.text(_scheduleUnit.course.name), findsNothing);
-    expect(find.byTooltip('展开本学期课程'), findsOneWidget);
+    expect(find.byTooltip('展开课表课程'), findsOneWidget);
     expect(await repository.loadScheduleCollapsed(), isTrue);
 
-    await tester.widget<RefreshIndicator>(find.byType(RefreshIndicator)).onRefresh();
+    await tester
+        .widget<RefreshIndicator>(find.byType(RefreshIndicator))
+        .onRefresh();
     await tester.pumpAndSettle();
     expect(find.text(_scheduleUnit.course.name), findsNothing);
 
@@ -381,7 +400,7 @@ void main() {
     await _pumpHome(tester,
         repository: _FakeCourseReviewRepository(matches: matches));
     expect(find.text(_scheduleUnit.course.name), findsNothing);
-    await tester.tap(find.byTooltip('展开本学期课程'));
+    await tester.tap(find.byTooltip('展开课表课程'));
     await tester.pumpAndSettle();
     expect(find.text(_scheduleUnit.course.name), findsOneWidget);
     expect(await repository.loadScheduleCollapsed(), isFalse);
@@ -390,7 +409,7 @@ void main() {
     await _pumpHome(tester,
         repository: _FakeCourseReviewRepository(matches: matches));
     expect(find.text(_scheduleUnit.course.name), findsOneWidget);
-    expect(find.byTooltip('折叠本学期课程'), findsOneWidget);
+    expect(find.byTooltip('折叠课表课程'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 
@@ -408,13 +427,13 @@ void main() {
         ),
         settle: false);
     await tester.pump();
-    expect(find.text('本学期课程'), findsNothing);
+    expect(find.text('课表课程'), findsNothing);
     expect(find.text(_scheduleUnit.course.name), findsNothing);
     ready.complete(preferences);
     await tester.pumpAndSettle();
-    expect(find.text('本学期课程'), findsOneWidget);
+    expect(find.text('课表课程'), findsOneWidget);
     expect(find.text(_scheduleUnit.course.name), findsNothing);
-    expect(find.byTooltip('展开本学期课程'), findsOneWidget);
+    expect(find.byTooltip('展开课表课程'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 
@@ -426,24 +445,150 @@ void main() {
           preferencesLoader: () async => throw StateError('unavailable'),
         ));
     expect(find.text(_scheduleUnit.course.name), findsOneWidget);
-    expect(find.byTooltip('折叠本学期课程'), findsOneWidget);
+    expect(find.byTooltip('折叠课表课程'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('failed collapse persistence shows an error and keeps the toggle usable',
+  testWidgets(
+      'failed collapse persistence shows an error and keeps the toggle usable',
       (tester) async {
     await _pumpHome(tester,
         repository: _FakeCourseReviewRepository(
           matches: [_scheduleMatch(_scheduleUnit)],
           failPreferenceWrites: true,
         ));
-    await tester.tap(find.byTooltip('折叠本学期课程'));
+    await tester.tap(find.byTooltip('折叠课表课程'));
     await tester.pumpAndSettle();
     expect(find.text('折叠状态保存失败，下次进入可能不会保留'), findsOneWidget);
-    expect(find.byTooltip('展开本学期课程'), findsOneWidget);
-    await tester.tap(find.byTooltip('展开本学期课程'));
+    expect(find.byTooltip('展开课表课程'), findsOneWidget);
+    await tester.tap(find.byTooltip('展开课表课程'));
     await tester.pumpAndSettle();
     expect(find.text(_scheduleUnit.course.name), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('schedule changes refresh on entry within the freshness window',
+      (tester) async {
+    final updated = _unit('history', '正在查看的历史课程', 8.0, 2);
+    final repository = _FakeCourseReviewRepository(
+      matches: [_scheduleMatch(_scheduleUnit)],
+    );
+    await _pumpHome(tester, repository: repository, active: true);
+    await _pumpHome(tester, repository: repository);
+    repository.matches = [_scheduleMatch(updated)];
+    await _pumpHome(tester, repository: repository, scheduleRevision: 1);
+    expect(repository.matchCalls, 1);
+    expect(find.text(_scheduleUnit.course.name), findsNothing);
+
+    await _pumpHome(tester,
+        repository: repository, active: true, scheduleRevision: 1);
+    expect(find.text(updated.course.name), findsOneWidget);
+    expect(find.text(_scheduleUnit.course.name), findsNothing);
+    expect(repository.matchCalls, 2);
+    expect(repository.homeCalls, 1);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('unchanged schedules do not reload on a quick tab round trip',
+      (tester) async {
+    final repository = _FakeCourseReviewRepository(
+      matches: [_scheduleMatch(_scheduleUnit)],
+    );
+    await _pumpHome(tester, repository: repository, active: true);
+    await _pumpHome(tester, repository: repository);
+    await _pumpHome(tester, repository: repository, active: true);
+    expect(repository.matchCalls, 1);
+    expect(repository.homeCalls, 1);
+    expect(find.text(_scheduleUnit.course.name), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('same-term course edits refresh without resetting collapse state',
+      (tester) async {
+    final updated = _unit('edited', '本地编辑后的课程', 8.0, 2);
+    final repository = _FakeCourseReviewRepository(
+      matches: [_scheduleMatch(_scheduleUnit)],
+    );
+    await _pumpHome(tester, repository: repository, active: true);
+    await tester.tap(find.byTooltip('折叠课表课程'));
+    await tester.pumpAndSettle();
+    repository.matches = [_scheduleMatch(updated)];
+    await _pumpHome(tester,
+        repository: repository, active: true, scheduleRevision: 1);
+    expect(find.byTooltip('展开课表课程'), findsOneWidget);
+    expect(find.text(updated.course.name), findsNothing);
+    expect(repository.homeCalls, 1);
+    await tester.tap(find.byTooltip('展开课表课程'));
+    await tester.pumpAndSettle();
+    expect(find.text(updated.course.name), findsOneWidget);
+    expect(find.text(_scheduleUnit.course.name), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('an empty selected schedule clears the previous course section',
+      (tester) async {
+    final repository = _FakeCourseReviewRepository(
+      matches: [_scheduleMatch(_scheduleUnit)],
+    );
+    await _pumpHome(tester, repository: repository, active: true);
+    repository.matches = const [];
+    await _pumpHome(tester,
+        repository: repository, active: true, scheduleRevision: 1);
+    expect(find.text('课表课程'), findsNothing);
+    expect(find.text(_scheduleUnit.course.name), findsNothing);
+    expect(repository.homeCalls, 1);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('late old matches cannot block or overwrite the new schedule',
+      (tester) async {
+    final oldMatches = Completer<List<RateScheduleMatch>>();
+    final updated = _unit('latest', '最新选择的课程', 8.0, 2);
+    var first = true;
+    final repository = _FakeCourseReviewRepository(matchLoader: () {
+      if (first) {
+        first = false;
+        return oldMatches.future;
+      }
+      return Future.value([_scheduleMatch(updated)]);
+    });
+    await _pumpHome(tester,
+        repository: repository, active: true, settle: false);
+    await tester.pumpAndSettle();
+    expect(find.text('最近评价'), findsOneWidget);
+    await _pumpHome(tester,
+        repository: repository, active: true, scheduleRevision: 1);
+    expect(find.text(updated.course.name), findsOneWidget);
+
+    oldMatches.complete([_scheduleMatch(_scheduleUnit)]);
+    await tester.pumpAndSettle();
+    expect(find.text(updated.course.name), findsOneWidget);
+    expect(find.text(_scheduleUnit.course.name), findsNothing);
+    expect(repository.homeCalls, 1);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets(
+      'failed matches after switching clear old courses and retry on entry',
+      (tester) async {
+    var fail = false;
+    final repository = _FakeCourseReviewRepository(matchLoader: () async {
+      if (fail) throw StateError('lookup unavailable');
+      return [_scheduleMatch(_scheduleUnit)];
+    });
+    await _pumpHome(tester, repository: repository, active: true);
+    fail = true;
+    await _pumpHome(tester,
+        repository: repository, active: true, scheduleRevision: 1);
+    expect(find.text(_scheduleUnit.course.name), findsNothing);
+    expect(find.text('课表课程'), findsNothing);
+    fail = false;
+    await _pumpHome(tester, repository: repository, scheduleRevision: 1);
+    await _pumpHome(tester,
+        repository: repository, active: true, scheduleRevision: 1);
+    expect(find.text(_scheduleUnit.course.name), findsOneWidget);
+    expect(repository.matchCalls, 3);
+    expect(repository.homeCalls, 1);
     expect(tester.takeException(), isNull);
   });
 

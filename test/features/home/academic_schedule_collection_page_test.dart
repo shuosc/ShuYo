@@ -133,6 +133,8 @@ void main() {
     String? themeId,
     Future<void> Function()? onLoginRequired,
     Future<bool> Function()? onRecoverSession,
+    ValueChanged<AcademicSchedule?>? onViewedScheduleChanged,
+    AcademicScheduleCacheState? initialState,
   }) async {
     await tester.pumpWidget(MaterialApp(
       theme: ShuYoThemes.byId(themeId ?? ShuYoThemes.defaultId).themeData(),
@@ -142,6 +144,8 @@ void main() {
         widgetService: widgets,
         onLoginRequired: onLoginRequired ?? () async {},
         onRecoverSession: onRecoverSession,
+        onViewedScheduleChanged: onViewedScheduleChanged,
+        initialState: initialState,
       ),
     ));
     await tester.pumpAndSettle();
@@ -211,6 +215,67 @@ void main() {
       expect(tester.takeException(), isNull);
     });
   }
+
+  testWidgets('publishes the displayed working copy when switching terms',
+      (tester) async {
+    final snapshots = <AcademicSchedule?>[];
+    await repository.saveWorkingSchedule(_schedule(_history, name: '历史课表本地修改'));
+    await showPage(tester, onViewedScheduleChanged: snapshots.add);
+    expect(snapshots.last!.term.yearCode, _current.yearCode);
+    await viewHistory(tester);
+    expect(snapshots.last!.term.yearCode, _history.yearCode);
+    expect(snapshots.last!.sessions.first.courseName, '历史课表本地修改');
+    expect(await repository.loadPrimaryTermKey(), _current.key);
+    expect((await repository.loadCachedSchedule())!.term.yearCode,
+        _current.yearCode);
+    expect(notifications.publishedYears, isEmpty);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('an initial view is published safely after the first frame',
+      (tester) async {
+    final snapshots = <AcademicSchedule?>[];
+    final initial = _schedule(_history, name: '启动时已加载的课程');
+    await showPage(tester,
+        onViewedScheduleChanged: snapshots.add,
+        initialState: AcademicScheduleCacheState(
+          schedule: initial,
+          weekState: await repository.loadTermWeekState(_history.key),
+        ));
+    expect(snapshots.last, same(initial));
+    expect(find.text('2025-2026 秋'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('refreshing the viewed term publishes its new course content',
+      (tester) async {
+    final snapshots = <AcademicSchedule?>[];
+    await showPage(tester, onViewedScheduleChanged: snapshots.add);
+    await viewHistory(tester);
+    api.historicalName = '刷新后的历史课程';
+    await refreshViewedTerm(tester);
+    expect(snapshots.last!.term.yearCode, _history.yearCode);
+    expect(snapshots.last!.sessions.first.courseName, '刷新后的历史课程');
+    expect(await repository.loadPrimaryTermKey(), _current.key);
+    expect(notifications.publishedYears, isEmpty);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('accepting an empty viewed term publishes an empty snapshot',
+      (tester) async {
+    final snapshots = <AcademicSchedule?>[];
+    await showPage(tester, onViewedScheduleChanged: snapshots.add);
+    await viewHistory(tester);
+    api.emptyTerms.add(_history.key);
+    await refreshViewedTerm(tester);
+    await tester.tap(find.text('替换'));
+    await tester.pumpAndSettle();
+    expect(snapshots.last!.term.yearCode, _history.yearCode);
+    expect(snapshots.last!.sessions, isEmpty);
+    expect(snapshots.last!.untimedCourses, isEmpty);
+    expect((await repository.loadCachedSchedule())!.sessions, isNotEmpty);
+    expect(tester.takeException(), isNull);
+  });
 
   testWidgets('management only offers view, update and primary actions',
       (tester) async {
@@ -980,14 +1045,21 @@ void main() {
 
   testWidgets('an in-flight primary update keeps the newly selected view',
       (tester) async {
-    await showPage(tester);
+    final snapshots = <AcademicSchedule?>[];
+    await showPage(tester, onViewedScheduleChanged: snapshots.add);
     api.refreshGate = Completer<void>();
     final requests = api.requests;
     await refreshViewedTerm(tester);
     await viewHistory(tester);
+    snapshots.clear();
     api.refreshGate!.complete();
     await tester.pumpAndSettle();
     expect(find.text('2025-2026 秋'), findsOneWidget);
+    expect(snapshots, isNotEmpty);
+    expect(
+        snapshots
+            .every((snapshot) => snapshot!.term.yearCode == _history.yearCode),
+        isTrue);
     expect(api.requests, requests + 1);
     expect(notifications.publishedYears, ['2026']);
     expect((await repository.loadCachedSchedule())!.term.yearCode, '2026');
