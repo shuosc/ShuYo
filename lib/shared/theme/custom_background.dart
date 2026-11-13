@@ -9,24 +9,37 @@ class CustomBackground {
   const CustomBackground({
     required this.imagePath,
     required this.opacity,
+    this.moduleOpacity = defaultModuleOpacity,
     required this.background,
     required this.surface,
     required this.text,
     required this.accent,
   });
 
+  static const int defaultModuleOpacity = 35;
+  static const int minModuleOpacity = 20;
+  static const int maxModuleOpacity = 100;
+
   final String imagePath;
   bool get hasPhoto => imagePath.isNotEmpty;
+  bool get hasVisiblePhoto => hasPhoto && opacity > 0;
   // 0 hides the photo; 100 shows the photo without a color veil.
   final int opacity;
+  // Applies to home module fills while a background photo is visible.
+  final int moduleOpacity;
   final Color background;
   final Color surface;
   final Color text;
   final Color accent;
 
+  Color get moduleSurface => surface.withValues(
+        alpha: hasVisiblePhoto ? moduleOpacity / 100 : 0.72,
+      );
+
   CustomBackground copyWith({
     String? imagePath,
     int? opacity,
+    int? moduleOpacity,
     Color? background,
     Color? surface,
     Color? text,
@@ -35,6 +48,7 @@ class CustomBackground {
       CustomBackground(
         imagePath: imagePath ?? this.imagePath,
         opacity: opacity ?? this.opacity,
+        moduleOpacity: moduleOpacity ?? this.moduleOpacity,
         background: background ?? this.background,
         surface: surface ?? this.surface,
         text: text ?? this.text,
@@ -53,6 +67,7 @@ class CustomBackground {
   Map<String, Object> toJson() => {
         'imagePath': imagePath,
         'opacity': opacity,
+        'moduleOpacity': moduleOpacity,
         'background': background.toARGB32(),
         'surface': surface.toARGB32(),
         'text': text.toARGB32(),
@@ -62,6 +77,7 @@ class CustomBackground {
   static CustomBackground? fromJson(Map<String, dynamic> json) {
     final path = json['imagePath'];
     final storedOpacity = json['opacity'];
+    final moduleOpacity = json['moduleOpacity'] ?? defaultModuleOpacity;
     final oldTransparency = json['transparency'];
     final int? opacity;
     if (storedOpacity is int) {
@@ -81,6 +97,9 @@ class CustomBackground {
         opacity == null ||
         opacity < 0 ||
         opacity > 100 ||
+        moduleOpacity is! int ||
+        moduleOpacity < minModuleOpacity ||
+        moduleOpacity > maxModuleOpacity ||
         background is! int ||
         surface is! int ||
         text is! int ||
@@ -90,6 +109,7 @@ class CustomBackground {
     return CustomBackground(
       imagePath: path,
       opacity: opacity,
+      moduleOpacity: moduleOpacity,
       background: Color(background),
       surface: Color(surface),
       text: Color(text),
@@ -250,7 +270,7 @@ class _BackgroundPaint extends StatelessWidget {
       fit: StackFit.expand,
       children: [
         ColoredBox(color: settings.background),
-        if (settings.hasPhoto && settings.opacity > 0)
+        if (settings.hasVisiblePhoto)
           Opacity(
             opacity: settings.opacity / 100,
             child: Image.file(

@@ -21,12 +21,80 @@ void main() {
     for (final entry in {0: 45, 25: 34, 50: 23, 75: 11, 100: 0}.entries) {
       final oldJson = Map<String, dynamic>.from(settings.toJson())
         ..remove('opacity')
+        ..remove('moduleOpacity')
         ..['transparency'] = entry.key;
-      expect(CustomBackground.fromJson(oldJson)?.opacity, entry.value);
+      final restored = CustomBackground.fromJson(oldJson);
+      expect(restored?.opacity, entry.value);
+      expect(restored?.moduleOpacity, 35);
     }
     expect(CustomBackground.fromJson(settings.toJson())?.opacity, 50);
     expect(CustomBackground.fromJson({...settings.toJson(), 'opacity': 101}),
         isNull);
+  });
+
+  test('module opacity defaults for old settings and persists independently',
+      () {
+    const settings = CustomBackground(
+      imagePath: 'unused.png',
+      opacity: 50,
+      background: Colors.white,
+      surface: Colors.white,
+      text: Colors.black,
+      accent: Colors.blue,
+    );
+    final oldJson = Map<String, dynamic>.from(settings.toJson())
+      ..remove('moduleOpacity');
+    final restored = CustomBackground.fromJson(oldJson)!;
+    expect(restored.opacity, 50);
+    expect(restored.moduleOpacity, 35);
+    expect(restored.moduleSurface, Colors.white.withValues(alpha: 0.35));
+
+    final edited = restored.copyWith(moduleOpacity: 60);
+    expect(edited.opacity, 50);
+    expect(edited.toJson()['moduleOpacity'], 60);
+    expect(CustomBackground.fromJson(edited.toJson())?.moduleOpacity, 60);
+    expect(edited.copyWith(opacity: 80).moduleOpacity, 60);
+    expect(edited.withBackgroundColor(Colors.black).moduleOpacity, 60);
+    expect(edited.copyWith(imagePath: '', opacity: 0).moduleOpacity, 60);
+
+    for (final opacity in [20, 35, 72, 100]) {
+      expect(
+        CustomBackground.fromJson({
+          ...settings.toJson(),
+          'moduleOpacity': opacity,
+        })?.moduleOpacity,
+        opacity,
+      );
+    }
+    for (final invalid in [-1, 0, 19, 101, 35.5, '35']) {
+      expect(
+        CustomBackground.fromJson({
+          ...settings.toJson(),
+          'moduleOpacity': invalid,
+        }),
+        isNull,
+      );
+    }
+  });
+
+  test('module opacity keeps the original fill without a visible photo', () {
+    const settings = CustomBackground(
+      imagePath: 'unused.png',
+      opacity: 50,
+      moduleOpacity: 20,
+      background: Colors.white,
+      surface: Colors.white,
+      text: Colors.black,
+      accent: Colors.blue,
+    );
+    expect(settings.hasVisiblePhoto, isTrue);
+    expect(settings.moduleSurface, Colors.white.withValues(alpha: 0.2));
+    final hidden = settings.copyWith(opacity: 0);
+    expect(hidden.hasVisiblePhoto, isFalse);
+    expect(hidden.moduleSurface, Colors.white.withValues(alpha: 0.72));
+    final cleared = settings.copyWith(imagePath: '');
+    expect(cleared.hasVisiblePhoto, isFalse);
+    expect(cleared.moduleSurface, Colors.white.withValues(alpha: 0.72));
   });
 
   testWidgets('photo opacity reaches both exact endpoints', (tester) async {
@@ -115,6 +183,7 @@ void main() {
     }))!;
 
     expect(settings.opacity, 50);
+    expect(settings.moduleOpacity, 35);
     expect(settings.theme.id, ShuYoThemes.customBackgroundId);
     expect(
         settings.theme.themeData().scaffoldBackgroundColor, Colors.transparent);

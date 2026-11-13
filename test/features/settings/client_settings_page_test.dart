@@ -29,6 +29,12 @@ void main() {
   setUp(() => SharedPreferences.setMockInitialValues({}));
   tearDown(() => debugDefaultTargetPlatformOverride = null);
 
+  final backgroundSlider =
+      find.byKey(const ValueKey('theme-background-opacity-slider'));
+  final moduleSlider =
+      find.byKey(const ValueKey('theme-module-opacity-slider'));
+  final modulePreview = find.byKey(const ValueKey('theme-module-preview-card'));
+
   testWidgets('privacy and deletion stay separate from authentication status',
       (tester) async {
     final identity = StudentIdentityService();
@@ -62,10 +68,14 @@ void main() {
 
     expect(saved?.hasPhoto, isFalse);
     expect(saved?.opacity, 0);
+    expect(saved?.moduleOpacity, 35);
+    expect(find.text('背景不透明度'), findsOneWidget);
+    expect(find.text('模块不透明度'), findsNothing);
+    expect(modulePreview, findsNothing);
     expect(find.text('选择照片'), findsOneWidget);
     expect(find.text('更换照片'), findsNothing);
     expect(find.text('清除'), findsNothing);
-    expect(tester.widget<Slider>(find.byType(Slider)).onChanged, isNull);
+    expect(tester.widget<Slider>(backgroundSlider).onChanged, isNull);
     expect(find.text('背景'), findsOneWidget);
     expect(find.text('文字'), findsOneWidget);
     expect(find.text('主题'), findsOneWidget);
@@ -93,20 +103,20 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.byType(Divider), findsNothing);
     await tester.scrollUntilVisible(find.text('自定义主题'), 180);
-    expect(find.text('不透明度'), findsNothing);
+    expect(find.text('背景不透明度'), findsNothing);
 
     await tester.tap(find.text('自定义主题'));
     await tester.pumpAndSettle();
-    expect(find.text('不透明度'), findsOneWidget);
+    expect(find.text('背景不透明度'), findsOneWidget);
     expect(find.text('更换照片'), findsOneWidget);
     expect(find.text('清除'), findsOneWidget);
     expect(find.text('面板'), findsNothing);
     expect(find.text('背景'), findsOneWidget);
     expect(find.text('文字'), findsOneWidget);
     expect(find.text('主题'), findsOneWidget);
-    await tester.ensureVisible(find.byType(Slider));
+    await tester.ensureVisible(backgroundSlider);
     await tester.pumpAndSettle();
-    final slider = find.byType(Slider);
+    final slider = backgroundSlider;
     expect(tester.widget<Slider>(slider).divisions, isNull);
     expect(tester.widget<Slider>(slider).label, '50%');
     expect(
@@ -126,26 +136,29 @@ void main() {
     await tester.pump();
     final previewOpacity = tester.widget<Slider>(slider).value.round();
     expect(
-      find.byWidgetPredicate((widget) =>
-          widget is CustomBackgroundLayer &&
-          widget.settings?.opacity == previewOpacity),
-      findsOneWidget,
+      tester
+          .widget<CustomBackgroundLayer>(
+              find.byKey(const ValueKey('theme-background-preview')))
+          .settings
+          ?.opacity,
+      previewOpacity,
     );
     await drag.up();
     await tester.pumpAndSettle();
     expect(saved?.opacity, inInclusiveRange(28, 33));
+    expect(saved?.moduleOpacity, 35);
 
     await tester.scrollUntilVisible(find.text('浅色'), -180);
     await tester.ensureVisible(find.text('浅色'));
     await tester.pumpAndSettle();
     await tester.tap(find.text('浅色'));
     await tester.pumpAndSettle();
-    expect(find.text('不透明度'), findsNothing);
+    expect(find.text('背景不透明度'), findsNothing);
     await tester.scrollUntilVisible(find.text('自定义主题'), 180);
     await tester.tap(find.text('自定义主题'));
     await tester.pumpAndSettle();
-    expect(find.text('不透明度'), findsOneWidget);
-    expect(tester.widget<Slider>(find.byType(Slider)).value, saved!.opacity);
+    expect(find.text('背景不透明度'), findsOneWidget);
+    expect(tester.widget<Slider>(backgroundSlider).value, saved!.opacity);
     expect(selected, [
       ShuYoThemes.customBackgroundId,
       ShuYoThemes.defaultId,
@@ -159,9 +172,170 @@ void main() {
     expect(saved?.hasPhoto, isFalse);
     expect(saved?.opacity, 0);
     expect(saved?.accent, background.accent);
+    expect(saved?.moduleOpacity, 35);
+    expect(find.text('模块不透明度'), findsNothing);
+    expect(modulePreview, findsNothing);
     expect(find.text('选择照片'), findsOneWidget);
     expect(find.text('清除'), findsNothing);
-    expect(tester.widget<Slider>(find.byType(Slider)).onChanged, isNull);
+    expect(tester.widget<Slider>(backgroundSlider).onChanged, isNull);
+  });
+
+  testWidgets('module opacity previews while dragging and saves on release',
+      (tester) async {
+    final saved = <CustomBackground>[];
+    const background = CustomBackground(
+      imagePath: 'assets/images/icon.png',
+      opacity: 50,
+      background: Color(0xFFF8F8F8),
+      surface: Colors.white,
+      text: Color(0xFF171717),
+      accent: Color(0xFF3478D4),
+    );
+    await _pumpSettings(
+      tester,
+      customBackground: background,
+      onCustomBackgroundChanged: (settings) async => saved.add(settings),
+    );
+    await tester.tap(find.text('主题切换'));
+    await tester.pumpAndSettle();
+    await tester.scrollUntilVisible(find.text('自定义主题'), 180);
+    await tester.tap(find.text('自定义主题'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('背景不透明度'), findsOneWidget);
+    expect(find.text('模块不透明度'), findsOneWidget);
+    final slider = tester.widget<Slider>(moduleSlider);
+    expect(slider.value, 35);
+    expect(slider.min, 20);
+    expect(slider.max, 100);
+    expect(slider.label, '35%');
+    expect(tester.widget<Card>(modulePreview).color,
+        background.surface.withValues(alpha: 0.35));
+
+    await tester.ensureVisible(moduleSlider);
+    await tester.pumpAndSettle();
+    final drag = await tester.startGesture(tester.getCenter(moduleSlider));
+    await drag.moveBy(Offset(tester.getSize(moduleSlider).width / 5, 0));
+    await tester.pump();
+    final draft = tester.widget<Slider>(moduleSlider).value.round();
+    expect(draft, greaterThan(35));
+    expect(saved, isEmpty);
+    expect(tester.widget<Slider>(backgroundSlider).value, 50);
+    expect(tester.widget<Card>(modulePreview).color,
+        background.surface.withValues(alpha: draft / 100));
+    expect(
+        tester.widget<Text>(find.text('今日课程')).style?.color, background.text);
+    expect(tester.widget<Text>(find.text('预览首页模块的显示效果')).style?.color,
+        background.text);
+
+    await drag.up();
+    await tester.pumpAndSettle();
+    expect(saved, hasLength(1));
+    expect(saved.single.moduleOpacity, draft);
+    expect(saved.single.opacity, 50);
+    expect(tester.widget<Slider>(moduleSlider).value, draft);
+
+    await tester.scrollUntilVisible(find.text('浅色'), -180);
+    await tester.tap(find.text('浅色'));
+    await tester.pumpAndSettle();
+    expect(find.text('模块不透明度'), findsNothing);
+    await tester.scrollUntilVisible(find.text('自定义主题'), 180);
+    await tester.tap(find.text('自定义主题'));
+    await tester.pumpAndSettle();
+    expect(tester.widget<Slider>(moduleSlider).value, draft);
+
+    await tester.ensureVisible(find.text('清除'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('清除'));
+    await tester.pumpAndSettle();
+    expect(saved.last.moduleOpacity, draft);
+    expect(saved.last.hasPhoto, isFalse);
+    expect(find.text('模块不透明度'), findsNothing);
+    expect(modulePreview, findsNothing);
+  });
+
+  testWidgets('module opacity disables during save and rolls back on failure',
+      (tester) async {
+    final saving = Completer<void>();
+    const background = CustomBackground(
+      imagePath: 'assets/images/icon.png',
+      opacity: 50,
+      background: Colors.white,
+      surface: Colors.white,
+      text: Colors.black,
+      accent: Colors.blue,
+    );
+    await _pumpSettings(
+      tester,
+      customBackground: background,
+      onCustomBackgroundChanged: (_) => saving.future,
+    );
+    await tester.tap(find.text('主题切换'));
+    await tester.pumpAndSettle();
+    await tester.scrollUntilVisible(find.text('自定义主题'), 180);
+    await tester.tap(find.text('自定义主题'));
+    await tester.pumpAndSettle();
+
+    tester.widget<Slider>(moduleSlider).onChanged!(60);
+    await tester.pump();
+    tester.widget<Slider>(moduleSlider).onChangeEnd!(60);
+    await tester.pump();
+    expect(tester.widget<Slider>(moduleSlider).onChanged, isNull);
+    expect(tester.widget<Slider>(backgroundSlider).onChanged, isNull);
+    expect(tester.widget<Card>(modulePreview).color,
+        background.surface.withValues(alpha: 0.6));
+
+    saving.completeError(StateError('save failed'));
+    await tester.pumpAndSettle();
+    expect(tester.widget<Slider>(moduleSlider).value, 35);
+    expect(tester.widget<Slider>(moduleSlider).onChanged, isNotNull);
+    expect(tester.widget<Card>(modulePreview).color,
+        background.surface.withValues(alpha: 0.35));
+    expect(find.textContaining('主题保存失败'), findsOneWidget);
+  });
+
+  testWidgets('hidden photo keeps module opacity for the next visible photo',
+      (tester) async {
+    CustomBackground? saved;
+    const background = CustomBackground(
+      imagePath: 'assets/images/icon.png',
+      opacity: 50,
+      moduleOpacity: 60,
+      background: Colors.white,
+      surface: Colors.white,
+      text: Colors.black,
+      accent: Colors.blue,
+    );
+    await _pumpSettings(
+      tester,
+      customBackground: background,
+      onCustomBackgroundChanged: (settings) async => saved = settings,
+    );
+    await tester.tap(find.text('主题切换'));
+    await tester.pumpAndSettle();
+    await tester.scrollUntilVisible(find.text('自定义主题'), 180);
+    await tester.tap(find.text('自定义主题'));
+    await tester.pumpAndSettle();
+
+    tester.widget<Slider>(backgroundSlider).onChanged!(0);
+    await tester.pump();
+    expect(find.text('模块不透明度'), findsNothing);
+    expect(modulePreview, findsNothing);
+    expect(saved, isNull);
+    tester.widget<Slider>(backgroundSlider).onChangeEnd!(0);
+    await tester.pumpAndSettle();
+    expect(saved?.opacity, 0);
+    expect(saved?.moduleOpacity, 60);
+
+    tester.widget<Slider>(backgroundSlider).onChanged!(100);
+    await tester.pump();
+    expect(tester.widget<Slider>(moduleSlider).value, 60);
+    expect(tester.widget<Card>(modulePreview).color,
+        background.surface.withValues(alpha: 0.6));
+    tester.widget<Slider>(backgroundSlider).onChangeEnd!(100);
+    await tester.pumpAndSettle();
+    expect(saved?.opacity, 100);
+    expect(saved?.moduleOpacity, 60);
   });
 
   testWidgets('switches away from custom on the first selection',
@@ -247,7 +421,7 @@ void main() {
     await tester.tap(find.text('自定义主题'));
     await tester.pumpAndSettle();
     expect(tester.widget<Switch>(find.byType(Switch)).value, isFalse);
-    expect(find.text('不透明度'), findsOneWidget);
+    expect(find.text('背景不透明度'), findsOneWidget);
 
     await tester.scrollUntilVisible(find.text('纸白'), -180);
     await tester.tap(find.text('纸白'));
@@ -261,7 +435,7 @@ void main() {
       ),
       findsOneWidget,
     );
-    expect(find.text('不透明度'), findsNothing);
+    expect(find.text('背景不透明度'), findsNothing);
   });
 
   testWidgets('custom color picker supports square, hue, and hex input',

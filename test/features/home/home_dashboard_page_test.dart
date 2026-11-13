@@ -13,6 +13,27 @@ void main() {
         .merge(tester.widget<Text>(finder).style);
   }
 
+  Widget customPage(CustomBackground settings) => MaterialApp(
+        theme: settings.theme.themeData(),
+        builder: (_, child) => CustomBackgroundFrame(
+          settings: settings,
+          child: child!,
+        ),
+        home: Scaffold(
+          body: HomeDashboardPage(
+            hasAcademicAccount: false,
+            isAcademicLoginCompleting: false,
+            onLogin: () {},
+            onOpenAcademicSystem: () {},
+            onOpenAnnouncements: () {},
+            onOpenEmptyClassroom: () {},
+            onOpenOtp: () {},
+            todayCourseContent: '今日无课',
+            announcementContent: '查看公告',
+          ),
+        ),
+      );
+
   testWidgets('custom photo keeps stronger home text without tap ripple',
       (tester) async {
     const background = CustomBackground(
@@ -23,26 +44,7 @@ void main() {
       text: Colors.black,
       accent: Colors.blue,
     );
-    await tester.pumpWidget(MaterialApp(
-      theme: background.theme.themeData(),
-      builder: (_, child) => CustomBackgroundFrame(
-        settings: background,
-        child: child!,
-      ),
-      home: Scaffold(
-        body: HomeDashboardPage(
-          hasAcademicAccount: false,
-          isAcademicLoginCompleting: false,
-          onLogin: () {},
-          onOpenAcademicSystem: () {},
-          onOpenAnnouncements: () {},
-          onOpenEmptyClassroom: () {},
-          onOpenOtp: () {},
-          todayCourseContent: '今日无课',
-          announcementContent: '查看公告',
-        ),
-      ),
-    ));
+    await tester.pumpWidget(customPage(background));
 
     expect(
       renderedTextStyle(tester, '查看可用教室').color,
@@ -58,6 +60,57 @@ void main() {
             .color,
         Colors.transparent);
     expect(find.byType(Divider), findsOneWidget);
+  });
+
+  testWidgets('photo module opacity changes only home card fills',
+      (tester) async {
+    const settings = CustomBackground(
+      imagePath: 'assets/images/icon.png',
+      opacity: 50,
+      background: Colors.white,
+      surface: Colors.white,
+      text: Colors.black,
+      accent: Colors.blue,
+    );
+    for (final opacity in [20, 35, 60, 100]) {
+      await tester.pumpWidget(customPage(
+        settings.copyWith(moduleOpacity: opacity),
+      ));
+      final cards = tester.widgetList<Card>(find.byType(Card));
+      expect(cards, hasLength(2));
+      for (final card in cards) {
+        expect(card.color, settings.surface.withValues(alpha: opacity / 100));
+        expect(card.elevation, 0);
+      }
+      expect(renderedTextStyle(tester, '今日课程').color, settings.text);
+      expect(renderedTextStyle(tester, '今日无课').color, settings.text);
+      expect(
+        tester.widget<Icon>(find.byIcon(Icons.event)).color,
+        settings.theme.colors.textSecondary,
+      );
+    }
+  });
+
+  testWidgets('home cards keep their fill when the photo is hidden or cleared',
+      (tester) async {
+    const settings = CustomBackground(
+      imagePath: 'assets/images/icon.png',
+      opacity: 50,
+      moduleOpacity: 20,
+      background: Colors.white,
+      surface: Colors.white,
+      text: Colors.black,
+      accent: Colors.blue,
+    );
+    for (final background in [
+      settings.copyWith(opacity: 0),
+      settings.copyWith(imagePath: ''),
+    ]) {
+      await tester.pumpWidget(customPage(background));
+      for (final card in tester.widgetList<Card>(find.byType(Card))) {
+        expect(card.color, settings.surface.withValues(alpha: 0.72));
+      }
+    }
   });
 
   Widget page(

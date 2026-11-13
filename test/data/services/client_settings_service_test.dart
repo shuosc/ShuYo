@@ -24,6 +24,7 @@ void main() {
     final restored = await service.loadCustomBackground();
     expect(restored?.hasPhoto, isFalse);
     expect(restored?.opacity, 0);
+    expect(restored?.moduleOpacity, 35);
     expect(await service.loadThemeId(), ShuYoThemes.customBackgroundId);
   });
 
@@ -41,6 +42,7 @@ void main() {
     final settings = CustomBackground(
       imagePath: photo.path,
       opacity: 75,
+      moduleOpacity: 60,
       background: const Color(0xFFFAFAFA),
       surface: Colors.white,
       text: const Color(0xFF101010),
@@ -58,21 +60,26 @@ void main() {
     final restored = await service.loadCustomBackground();
     expect(restored?.imagePath, photo.path);
     expect(restored?.opacity, 75);
+    expect(restored?.moduleOpacity, 60);
     expect(restored?.accent, settings.accent);
 
     final oldJson = Map<String, dynamic>.from(settings.toJson())
       ..remove('opacity')
+      ..remove('moduleOpacity')
       ..['transparency'] = 50;
     await prefs.setString(
       ClientSettingsService.customBackgroundKey,
       jsonEncode(oldJson),
     );
-    expect((await service.loadCustomBackground())?.opacity, 23);
+    final migrated = await service.loadCustomBackground();
+    expect(migrated?.opacity, 23);
+    expect(migrated?.moduleOpacity, 35);
 
     await photo.delete();
     final withoutPhoto = await service.loadCustomBackground();
     expect(withoutPhoto?.hasPhoto, isFalse);
     expect(withoutPhoto?.opacity, 23);
+    expect(withoutPhoto?.moduleOpacity, 35);
     expect(withoutPhoto?.background, settings.background);
     expect(withoutPhoto?.surface, settings.surface);
     expect(withoutPhoto?.text, settings.text);
