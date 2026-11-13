@@ -13,11 +13,9 @@
 
 ## 开发环境
 
-ShuYo 使用 Dart 和 Flutter 开发，并跟随 Flutter `stable` 渠道的最新版本。请先参考 [README](README.md) 中的环境配置说明，并将本地 SDK 更新至最新的`stable`版本：
+ShuYo 使用 Dart 和 Flutter 开发，推荐使用 **Flutter 3.50.0（stable）**。环境配置见 [README](README.md#编译说明)。
 
 ```shell
-flutter channel stable
-flutter upgrade
 flutter --version
 ```
 
@@ -29,7 +27,7 @@ flutter devices
 flutter run -d <device-id>
 ```
 
-Android 开发需要 Android Studio 和已配置的 Android SDK。iOS 开发需要 Xcode，以及可用的 Simulator 或真机设备。
+Android 开发需要 JDK 21 和已配置的 Android SDK。iOS 开发需要 Xcode，以及可用的 Simulator 或真机设备。
 
 ## 项目方向与功能建议
 

@@ -1,7 +1,7 @@
 import 'dart:async';
 
-import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
+import 'package:material_ui/material_ui.dart';
 
 import '../../data/models/course_review.dart';
 import '../../data/repositories/course_review_repository.dart';
@@ -15,12 +15,16 @@ class RateHomePage extends StatefulWidget {
     super.key,
     required this.repository,
     required this.active,
+    this.scheduleRevision = 0,
   });
 
   final CourseReviewRepository repository;
 
   /// Whether the course review tab is the visible tab.
   final bool active;
+
+  /// Changes when the timetable supplying the course section changes.
+  final int scheduleRevision;
 
   @override
   State<RateHomePage> createState() => _RateHomePageState();
@@ -37,6 +41,9 @@ class _RateHomePageState extends State<RateHomePage> {
   bool _savingScheduleCollapsed = false;
   late final Future<void> _schedulePreferenceReady;
   DateTime? _loadedAt;
+  int _scheduleRequest = 0;
+  int? _matchedScheduleRevision;
+  Future<void>? _scheduleLoad;
 
   CourseReviewRepository get _repo => widget.repository;
 
@@ -50,12 +57,25 @@ class _RateHomePageState extends State<RateHomePage> {
   @override
   void didUpdateWidget(covariant RateHomePage oldWidget) {
     super.didUpdateWidget(oldWidget);
+    final scheduleChanged =
+        oldWidget.scheduleRevision != widget.scheduleRevision ||
+            oldWidget.repository != widget.repository;
+    if (scheduleChanged) {
+      _scheduleRequest++;
+      _scheduleLoad = null;
+      _matchedScheduleRevision = null;
+      _matches = const [];
+    }
+    if (!widget.active) return;
+    final becameActive = !oldWidget.active;
     final loadedAt = _loadedAt;
-    if (widget.active &&
-        !oldWidget.active &&
+    if (becameActive &&
         (loadedAt == null ||
             DateTime.now().difference(loadedAt) > _staleAfter)) {
       unawaited(_load());
+    } else if (scheduleChanged ||
+        (becameActive && _matchedScheduleRevision != widget.scheduleRevision)) {
+      unawaited(_loadScheduleMatches());
     }
   }
 
@@ -80,20 +100,50 @@ class _RateHomePageState extends State<RateHomePage> {
     }
   }
 
+  Future<void> _loadScheduleMatches() {
+    final pending = _scheduleLoad;
+    if (pending != null) return pending;
+    final request = ++_scheduleRequest;
+    final load = _fetchScheduleMatches(request, widget.scheduleRevision)
+        .whenComplete(() {
+      if (request == _scheduleRequest) _scheduleLoad = null;
+    });
+    _scheduleLoad = load;
+    return load;
+  }
+
+  Future<void> _fetchScheduleMatches(int request, int revision) async {
+    try {
+      final matches = await _repo.matchSchedule();
+      await _schedulePreferenceReady;
+      if (!mounted ||
+          request != _scheduleRequest ||
+          revision != widget.scheduleRevision) {
+        return;
+      }
+      setState(() {
+        _matches = matches;
+        _matchedScheduleRevision = revision;
+      });
+    } on Object {
+      // Keep a successful result for this revision; changed sources are
+      // cleared immediately in didUpdateWidget and retried on next entry.
+    }
+  }
+
   Future<void> _load() async {
-    if (_loading) return;
+    if (_loading) {
+      await _loadScheduleMatches();
+      return;
+    }
     setState(() => _loading = true);
-    final matches = _repo.matchSchedule().then<List<RateScheduleMatch>?>(
-        (value) => value,
-        onError: (Object _) => null);
+    final scheduleLoad = _loadScheduleMatches();
     try {
       final home = await _repo.home();
-      final matched = await matches;
       await _schedulePreferenceReady;
       if (!mounted) return;
       setState(() {
         _home = home;
-        if (matched != null) _matches = matched;
         _error = null;
         _loadedAt = DateTime.now();
       });
@@ -102,6 +152,7 @@ class _RateHomePageState extends State<RateHomePage> {
     } finally {
       if (mounted) setState(() => _loading = false);
     }
+    await scheduleLoad;
   }
 
   @override
@@ -167,8 +218,7 @@ class _RateHomePageState extends State<RateHomePage> {
               onTap: (unit) => openRateUnit(context, _repo, unit.id),
             ),
           ],
-          for (final ranking
-              in home.rankings.where((item) => item.key != 'seminar')) ...[
+          for (final ranking in home.rankings) ...[
             const SizedBox(height: 16),
             _section(
               ranking.title,
@@ -208,7 +258,7 @@ class _RateHomePageState extends State<RateHomePage> {
           enabled: onToggle != null,
           expanded: !_scheduleCollapsed,
           child: Tooltip(
-            message: _scheduleCollapsed ? '展开本学期课程' : '折叠本学期课程',
+            message: _scheduleCollapsed ? '展开课表课程' : '折叠课表课程',
             child: InkWell(
               key: const ValueKey('rate-schedule-toggle'),
               onTap: onToggle,
@@ -216,7 +266,7 @@ class _RateHomePageState extends State<RateHomePage> {
               overlayColor:
                   const WidgetStatePropertyAll<Color>(Colors.transparent),
               child: _section(
-                '本学期课程',
+                '课表课程',
                 action: SizedBox(
                   width: 48,
                   child: Center(

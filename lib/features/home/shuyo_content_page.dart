@@ -1,8 +1,7 @@
 import 'dart:async';
 
-import 'package:flutter/material.dart';
-import 'package:flutter/rendering.dart' show ScrollCacheExtent;
 import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
+import 'package:material_ui/material_ui.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../../data/repositories/shuyo_content_repository.dart';
@@ -12,6 +11,7 @@ import '../../shared/theme/custom_background.dart';
 import '../../shared/theme/shuyo_theme.dart';
 import '../../shared/widgets/empty_state.dart';
 import '../../shared/widgets/fullscreen_image_page.dart';
+import '../../shared/widgets/legacy_material_bridge.dart';
 
 @visibleForTesting
 const shuyoTipImagePlaceholderKey = ValueKey('shuyo-tip-image-placeholder');
@@ -356,70 +356,72 @@ class ShuyoContentDetailPage extends StatelessWidget {
               Text(item.content,
                   style: const TextStyle(fontSize: 16, height: 1.65))
             else
-              MarkdownBody(
-                data: item.content,
-                selectable: true,
-                imageBuilder: (uri, title, alt) {
-                  final safe = _safeImage(uri);
-                  if (safe == null) return const Text('图片地址不可用');
-                  return Padding(
-                    padding: const EdgeInsets.symmetric(vertical: 10),
-                    child: GestureDetector(
-                      onTap: () => Navigator.of(context).push<void>(
-                        shuyoRoute(
-                          builder: (_) =>
-                              FullscreenImagePage(url: safe.toString()),
+              LegacyMaterialBridge(
+                child: MarkdownBody(
+                  data: item.content,
+                  selectable: true,
+                  imageBuilder: (uri, title, alt) {
+                    final safe = _safeImage(uri);
+                    if (safe == null) return const Text('图片地址不可用');
+                    return Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 10),
+                      child: GestureDetector(
+                        onTap: () => Navigator.of(context).push<void>(
+                          shuyoRoute(
+                            builder: (_) =>
+                                FullscreenImagePage(url: safe.toString()),
+                          ),
                         ),
-                      ),
-                      child: AnimatedSize(
-                        duration: const Duration(milliseconds: 180),
-                        curve: Curves.easeOutCubic,
-                        alignment: Alignment.topCenter,
-                        child: ClipRRect(
-                          borderRadius: BorderRadius.circular(8),
-                          child: Image.network(
-                            safe.toString(),
-                            fit: BoxFit.cover,
-                            cacheWidth: _imageDecodeWidth(context),
-                            frameBuilder: (context, child, frame,
-                                wasSynchronouslyLoaded) {
-                              if (wasSynchronouslyLoaded || frame != null) {
-                                return child;
-                              }
-                              final colors = context.shuyoColors;
-                              return Container(
-                                key: shuyoTipImagePlaceholderKey,
-                                height: 180,
-                                alignment: Alignment.center,
-                                color: colors.surfaceAlt,
-                                child: Icon(Icons.image_outlined,
-                                    size: 22, color: colors.textMuted),
-                              );
-                            },
-                            errorBuilder: (context, error, stack) {
-                              final colors = context.shuyoColors;
-                              return Container(
-                                height: 120,
-                                alignment: Alignment.center,
-                                color: colors.surfaceAlt,
-                                child: Text('图片加载失败',
-                                    style:
-                                        TextStyle(color: colors.textTertiary)),
-                              );
-                            },
+                        child: AnimatedSize(
+                          duration: const Duration(milliseconds: 180),
+                          curve: Curves.easeOutCubic,
+                          alignment: Alignment.topCenter,
+                          child: ClipRRect(
+                            borderRadius: BorderRadius.circular(8),
+                            child: Image.network(
+                              safe.toString(),
+                              fit: BoxFit.cover,
+                              cacheWidth: _imageDecodeWidth(context),
+                              frameBuilder: (context, child, frame,
+                                  wasSynchronouslyLoaded) {
+                                if (wasSynchronouslyLoaded || frame != null) {
+                                  return child;
+                                }
+                                final colors = context.shuyoColors;
+                                return Container(
+                                  key: shuyoTipImagePlaceholderKey,
+                                  height: 180,
+                                  alignment: Alignment.center,
+                                  color: colors.surfaceAlt,
+                                  child: Icon(Icons.image_outlined,
+                                      size: 22, color: colors.textMuted),
+                                );
+                              },
+                              errorBuilder: (context, error, stack) {
+                                final colors = context.shuyoColors;
+                                return Container(
+                                  height: 120,
+                                  alignment: Alignment.center,
+                                  color: colors.surfaceAlt,
+                                  child: Text('图片加载失败',
+                                      style: TextStyle(
+                                          color: colors.textTertiary)),
+                                );
+                              },
+                            ),
                           ),
                         ),
                       ),
-                    ),
-                  );
-                },
-                onTapLink: (text, href, title) {
-                  final uri = Uri.tryParse(href ?? '');
-                  if (uri?.scheme == 'https') {
-                    unawaited(
-                        launchUrl(uri!, mode: LaunchMode.externalApplication));
-                  }
-                },
+                    );
+                  },
+                  onTapLink: (text, href, title) {
+                    final uri = Uri.tryParse(href ?? '');
+                    if (uri?.scheme == 'https') {
+                      unawaited(launchUrl(uri!,
+                          mode: LaunchMode.externalApplication));
+                    }
+                  },
+                ),
               ),
           ],
         ),

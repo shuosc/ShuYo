@@ -4,7 +4,7 @@ import 'dart:async';
 import 'dart:math';
 
 import 'package:flutter/foundation.dart';
-import 'package:flutter/material.dart';
+import 'package:material_ui/material_ui.dart';
 
 import '../../data/models/academic_schedule.dart';
 import '../../data/models/academic_schedule_collection.dart';
@@ -46,6 +46,7 @@ class AcademicSchedulePage extends StatefulWidget {
     this.initialDisplayState,
     this.initialLoadError,
     this.onPrimaryScheduleChanged,
+    this.onViewedScheduleChanged,
   });
 
   final AcademicScheduleRepository repository;
@@ -58,6 +59,9 @@ class AcademicSchedulePage extends StatefulWidget {
   final AcademicScheduleDisplayState? initialDisplayState;
   final String? initialLoadError;
   final Future<void> Function()? onPrimaryScheduleChanged;
+
+  /// Reports the applied view, including local edits, after it is displayed.
+  final ValueChanged<AcademicSchedule?>? onViewedScheduleChanged;
 
   @override
   State<AcademicSchedulePage> createState() => _AcademicSchedulePageState();
@@ -84,6 +88,7 @@ class _AcademicSchedulePageState extends State<AcademicSchedulePage> {
   bool _calendarConfigured = true;
   int _discoveredCount = 0;
   bool _reloadingCollection = false;
+  bool _viewedScheduleNotificationPending = false;
 
   bool get _viewingPrimary =>
       _viewedTermKey == null || _viewedTermKey == _primaryTermKey;
@@ -426,11 +431,26 @@ class _AcademicSchedulePageState extends State<AcademicSchedulePage> {
     _courseColorValues = state.courseColorValues;
   }
 
+  void _setViewedSchedule(AcademicSchedule? schedule) {
+    _schedule = schedule;
+    if (widget.onViewedScheduleChanged == null ||
+        _viewedScheduleNotificationPending) {
+      return;
+    }
+    _viewedScheduleNotificationPending = true;
+    // Initial snapshots can be applied during initState. Notify the parent
+    // after this frame, and coalesce multiple changes to the displayed view.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _viewedScheduleNotificationPending = false;
+      if (mounted) widget.onViewedScheduleChanged?.call(_schedule);
+    });
+  }
+
   void _applyCachedState(
     AcademicSchedule? schedule,
     ScheduleWeekState weekState,
   ) {
-    _schedule = schedule;
+    _setViewedSchedule(schedule);
     _weekState = weekState;
     _displayedWeek = schedule == null || !_calendarConfigured
         ? 1
@@ -475,7 +495,7 @@ class _AcademicSchedulePageState extends State<AcademicSchedulePage> {
         // while it is in flight must not replace the newly selected view.
         if (_viewedTermKey == targetKey) {
           setState(() {
-            _schedule = schedule;
+            _setViewedSchedule(schedule);
             _weekState = weekState;
             _displayedWeek = _displayableWeek(
               widget.repository.activeWeekFromState(schedule, weekState),
@@ -740,7 +760,7 @@ class _AcademicSchedulePageState extends State<AcademicSchedulePage> {
       return;
     }
     setState(() {
-      _schedule = next;
+      _setViewedSchedule(next);
       _selectedManualSlot = null;
     });
     if (result.colorValue != null) {
@@ -1017,7 +1037,7 @@ class _AcademicSchedulePageState extends State<AcademicSchedulePage> {
       return;
     }
     setState(() {
-      _schedule = next;
+      _setViewedSchedule(next);
       _selectedManualSlot = null;
     });
     unawaited(
@@ -1109,7 +1129,7 @@ class _AcademicSchedulePageState extends State<AcademicSchedulePage> {
       return;
     }
     setState(() {
-      _schedule = next;
+      _setViewedSchedule(next);
       _selectedManualSlot = null;
     });
     if (result.colorValue != null) {
@@ -1183,7 +1203,7 @@ class _AcademicSchedulePageState extends State<AcademicSchedulePage> {
       return;
     }
     setState(() {
-      _schedule = next;
+      _setViewedSchedule(next);
       _selectedManualSlot = null;
     });
     unawaited(

@@ -3,9 +3,9 @@ import 'dart:ui' as ui;
 
 import 'package:crop_your_image/crop_your_image.dart';
 import 'package:flutter/foundation.dart';
-import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:material_ui/material_ui.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../../core/client_app_info.dart';
@@ -23,6 +23,7 @@ import '../../shared/theme/shuyo_theme.dart';
 import '../../shared/theme/custom_background.dart';
 import '../../shared/widgets/client_update_prompt.dart';
 import '../../shared/widgets/empty_state.dart';
+import '../../shared/widgets/legacy_material_bridge.dart';
 import '../../shared/widgets/webvpn_toggle.dart';
 import 'client_feedback_page.dart';
 import 'contributors_page.dart';
@@ -1467,21 +1468,23 @@ class _BackgroundCropPageState extends State<_BackgroundCropPage> {
       ),
       body: Stack(
         children: [
-          Crop(
-            image: widget.image,
-            controller: _controller,
-            aspectRatio: MediaQuery.sizeOf(context).aspectRatio,
-            interactive: true,
-            onCropped: (result) {
-              if (!mounted) return;
-              switch (result) {
-                case CropSuccess(:final croppedImage):
-                  Navigator.of(context).pop(croppedImage);
-                case CropFailure(:final cause):
-                  setState(() => _cropping = false);
-                  _showSnack(context, '裁剪失败：$cause');
-              }
-            },
+          LegacyMaterialBridge(
+            child: Crop(
+              image: widget.image,
+              controller: _controller,
+              aspectRatio: MediaQuery.sizeOf(context).aspectRatio,
+              interactive: true,
+              onCropped: (result) {
+                if (!mounted) return;
+                switch (result) {
+                  case CropSuccess(:final croppedImage):
+                    Navigator.of(context).pop(croppedImage);
+                  case CropFailure(:final cause):
+                    setState(() => _cropping = false);
+                    _showSnack(context, '裁剪失败：$cause');
+                }
+              },
+            ),
           ),
           if (_cropping) const Center(child: CircularProgressIndicator()),
         ],

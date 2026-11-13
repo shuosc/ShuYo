@@ -2,8 +2,8 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
-import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:material_ui/material_ui.dart';
 import 'package:shuyo/data/models/campus_map.dart';
 import 'package:shuyo/features/campus_map/campus_map_canvas.dart';
 import 'package:webview_flutter_android/webview_flutter_android.dart';
