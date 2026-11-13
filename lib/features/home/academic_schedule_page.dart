@@ -1086,6 +1086,8 @@ class _AcademicSchedulePageState extends State<AcademicSchedulePage> {
     final relatedSessions =
         schedule.sessions.where((item) => _sameCourse(item, session)).toList();
     final colorKey = _courseColorSeed(session);
+    final previousColorValue = _courseColorValues[colorKey] ??
+        _courseColor(context, colorKey).toARGB32();
     final result = await Navigator.of(context).push<ScheduleCourseEditorResult>(
       MaterialPageRoute(
         builder: (context) => ShuYoRouteSurface(
@@ -1124,6 +1126,11 @@ class _AcademicSchedulePageState extends State<AcademicSchedulePage> {
       ));
     }
     final next = schedule.copyWith(sessions: nextSessions);
+    final nextColorKey = _courseColorSeed(nextSessions.last);
+    // Automatic colors use the name for manual courses. Preserve their current
+    // color when renaming instead of generating another color from the new name.
+    final nextColorValue = result.colorValue ??
+        (nextColorKey != colorKey ? previousColorValue : null);
     await widget.repository.saveWorkingSchedule(next);
     if (!mounted) {
       return;
@@ -1131,19 +1138,18 @@ class _AcademicSchedulePageState extends State<AcademicSchedulePage> {
     setState(() {
       _setViewedSchedule(next);
       _selectedManualSlot = null;
+      if (nextColorValue != null) {
+        _courseColorValues = {
+          ..._courseColorValues,
+          nextColorKey: nextColorValue,
+        };
+      }
     });
-    if (result.colorValue != null) {
-      final nextColorKey = _courseColorSeed(nextSessions.last);
+    if (nextColorValue != null) {
       await _displaySettingsService.saveCourseColor(
         nextColorKey,
-        result.colorValue!,
+        nextColorValue,
       );
-      if (mounted) {
-        setState(() => _courseColorValues = {
-              ..._courseColorValues,
-              nextColorKey: result.colorValue!,
-            });
-      }
     }
     unawaited(
       widget.widgetService.syncFromCache(),
@@ -2798,7 +2804,7 @@ class _ManualCourseSheetState extends State<_ManualCourseSheet> {
     return await showDialog<bool>(
           context: context,
           builder: (context) => AlertDialog(
-            title: const Text('放弃未保存的修改？'),
+            title: const Text('未保存的修改'),
             content: const Text('当前修改尚未保存，确定要返回吗？'),
             actions: [
               TextButton(
@@ -3617,22 +3623,22 @@ class _CourseBlock extends StatelessWidget {
             final titleStyle = TextStyle(
               color: courseTextColor,
               fontWeight: FontWeight.w600,
-              fontSize: compact ? 8.5 : 11.5,
-              height: compact ? 1 : 1.2,
+              fontSize: 11.5,
+              height: 1.2,
             );
             final metaStyle = TextStyle(
               color: metaTextColor,
-              fontSize: compact ? 8 : 10.5,
-              height: compact ? 1 : null,
+              fontSize: 10.5,
             );
             final noteStyle = TextStyle(
               color: courseTextColor,
               fontWeight: FontWeight.w500,
-              fontSize: compact ? 8 : 10.5,
-              height: compact ? 1 : 1.2,
+              fontSize: 10.5,
+              height: 1.2,
             );
-            final textWidth = constraints.maxWidth - 6;
-            final innerHeight = constraints.maxHeight - verticalPadding * 2;
+            final textWidth = max(0.0, constraints.maxWidth - 6);
+            final innerHeight =
+                max(0.0, constraints.maxHeight - verticalPadding * 2);
             double textHeight(
                 String value, TextStyle style, int maxLines, double width) {
               final painter = TextPainter(
@@ -3650,48 +3656,62 @@ class _CourseBlock extends StatelessWidget {
               return height;
             }
 
-            var titleLines = compact ? 1 : 3;
+            var titleLines = compact ? 2 : 3;
             var noteLines = note.isEmpty ? 0 : 3;
+            final visibleMetaLines = [...courseMetaLines];
+            var showLocation = session.location.isNotEmpty;
             double contentHeight() {
               var height = textHeight(
                   session.courseName, titleStyle, titleLines, textWidth);
-              if (courseMetaLines.isNotEmpty) {
+              if (visibleMetaLines.isNotEmpty) {
                 height += gap;
-                for (final line in courseMetaLines) {
+                for (final line in visibleMetaLines) {
                   height += textHeight(line, metaStyle, 1, textWidth);
                 }
               }
               if (noteLines > 0) {
                 height += gap +
                     4 +
-                    textHeight(note, noteStyle, noteLines, textWidth - 4);
+                    textHeight(
+                        note, noteStyle, noteLines, max(0.0, textWidth - 4));
               }
-              if (session.location.isNotEmpty) {
+              if (showLocation) {
                 height += textHeight(session.location, metaStyle, 1, textWidth);
               }
               return height;
             }
 
-            while (noteLines > 1 && contentHeight() > innerHeight) {
+            // Preserve the title and location before optional course details.
+            while (noteLines > 0 && contentHeight() > innerHeight) {
               noteLines--;
+            }
+            while (
+                visibleMetaLines.isNotEmpty && contentHeight() > innerHeight) {
+              visibleMetaLines.removeLast();
             }
             while (titleLines > 1 && contentHeight() > innerHeight) {
               titleLines--;
             }
-            final needsScroll = contentHeight() > innerHeight;
+            if (contentHeight() > innerHeight) {
+              showLocation = false;
+            }
             final content = Column(
-              mainAxisSize: needsScroll ? MainAxisSize.min : MainAxisSize.max,
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(
-                  session.courseName,
-                  maxLines: titleLines,
-                  overflow: TextOverflow.ellipsis,
-                  style: titleStyle,
+                ConstrainedBox(
+                  constraints: BoxConstraints(maxHeight: innerHeight),
+                  child: ClipRect(
+                    child: Text(
+                      session.courseName,
+                      maxLines: titleLines,
+                      overflow: TextOverflow.ellipsis,
+                      style: titleStyle,
+                    ),
+                  ),
                 ),
-                if (courseMetaLines.isNotEmpty) ...[
+                if (visibleMetaLines.isNotEmpty) ...[
                   SizedBox(height: gap),
-                  for (final line in courseMetaLines)
+                  for (final line in visibleMetaLines)
                     Text(
                       line,
                       maxLines: 1,
@@ -3718,8 +3738,8 @@ class _CourseBlock extends StatelessWidget {
                     ),
                   ),
                 ],
-                if (!needsScroll) const Spacer(),
-                if (session.location.isNotEmpty)
+                const Spacer(),
+                if (showLocation)
                   Text(
                     session.location,
                     maxLines: 1,
@@ -3731,8 +3751,7 @@ class _CourseBlock extends StatelessWidget {
             return Padding(
               padding: EdgeInsets.symmetric(
                   horizontal: 3, vertical: verticalPadding),
-              child:
-                  needsScroll ? SingleChildScrollView(child: content) : content,
+              child: content,
             );
           },
         ),

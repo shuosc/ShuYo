@@ -1,3 +1,4 @@
+import 'package:flutter/rendering.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:material_ui/material_ui.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -250,17 +251,90 @@ void main() {
     );
   });
 
-  testWidgets('keeps selected fields and fits note above location',
+  testWidgets('uses the same text styles for single and multi-section courses',
       (tester) async {
-    final restoreFlutterError = _ignoreListTileBackgroundWarning();
-    addTearDown(restoreFlutterError);
-    final repository = AcademicScheduleRepository(
-      apiClient: AcademicScheduleApiClient(
-        authService: _FakeAcademicAuthService(),
-      ),
-    );
+    await _pumpCourseLayout(tester, [
+      for (final singleSection in [false, true])
+        _session(
+          id: singleSection ? 'one-section' : 'two-sections',
+          name: '课程',
+          weekday: singleSection ? 2 : 1,
+          weeks: const [1],
+          teacherName: '教师',
+          note: '备注',
+          endSection: singleSection ? 1 : 2,
+        ),
+    ]);
+
+    for (final value in ['课程', '教师', '备注']) {
+      final single = tester.widget<Text>(_courseText('one-section', value));
+      final multiple = tester.widget<Text>(_courseText('two-sections', value));
+      expect(single.style, multiple.style);
+      expect(single.style!.fontSize, value == '课程' ? 11.5 : 10.5);
+      if (value != '教师') expect(single.style!.height, 1.2);
+    }
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('ellipsizes long titles without shrinking the text',
+      (tester) async {
+    const name = '课程名称较长时应当自然换行并在超过行数后显示省略号';
+    await _pumpCourseLayout(tester, [
+      for (final singleSection in [false, true])
+        _session(
+          id: singleSection ? 'one-section' : 'two-sections',
+          name: name,
+          weekday: singleSection ? 2 : 1,
+          weeks: const [1],
+          location: 'A101',
+          endSection: singleSection ? 1 : 2,
+        ),
+    ]);
+
+    for (final id in ['one-section', 'two-sections']) {
+      final title = _courseText(id, name);
+      final text = tester.widget<Text>(title);
+      expect(text.style!.fontSize, 11.5);
+      expect(text.maxLines, id == 'one-section' ? 2 : 3);
+      expect(text.overflow, TextOverflow.ellipsis);
+      expect(tester.renderObject<RenderParagraph>(title).didExceedMaxLines,
+          isTrue);
+      expect(_courseText(id, 'A101'), findsOneWidget);
+      _expectCourseContentFits(tester, id);
+    }
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('uses remaining space for notes above the location',
+      (tester) async {
     const note = '带好实验报告并提前完成预习，课前检查设备和资料，课后提交实验记录';
-    final schedule = _schedule.copyWith(sessions: [
+    await _pumpCourseLayout(tester, [
+      _session(
+        id: 'one-section',
+        name: '课程',
+        weekday: 1,
+        weeks: const [1],
+        location: 'A101',
+        note: note,
+        endSection: 1,
+      ),
+    ]);
+
+    final noteText = _courseText('one-section', note);
+    expect(tester.widget<Text>(noteText).maxLines, inInclusiveRange(1, 2));
+    expect(
+      tester.getBottomRight(noteText).dy,
+      lessThanOrEqualTo(
+          tester.getTopLeft(_courseText('one-section', 'A101')).dy),
+    );
+    _expectCourseContentFits(tester, 'one-section');
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('hides notes and credit before the teacher or location',
+      (tester) async {
+    const note = '带好实验报告并提前完成预习，课前检查设备和资料，课后提交实验记录';
+    await _pumpCourseLayout(tester, [
       _session(
         id: 'two-sections',
         name: '课程',
@@ -273,7 +347,7 @@ void main() {
       ),
       _session(
         id: 'one-section',
-        name: '单节课程',
+        name: '单节课程名称需要占据两行',
         weekday: 2,
         weeks: const [1],
         teacherName: '李老师',
@@ -283,70 +357,140 @@ void main() {
         endSection: 1,
       ),
     ]);
-    await tester.pumpWidget(MaterialApp(
-      home: AcademicSchedulePage(
-        repository: repository,
-        notificationService:
-            AcademicScheduleNotificationService(repository: repository),
-        widgetService: AcademicScheduleWidgetService(repository: repository),
-        onLoginRequired: () async {},
-        initialState: AcademicScheduleCacheState(
-          schedule: schedule,
-          weekState: ScheduleWeekState(
-            currentWeek: 1,
-            anchorMonday:
-                AcademicScheduleRepository.startOfWeek(DateTime.now()),
-          ),
-        ),
-        initialDisplayState: const AcademicScheduleDisplayState(
-          settings: AcademicScheduleDisplaySettings(
-            colorful: true,
-            showTeacher: true,
-            showCredit: true,
-            showNote: true,
-          ),
-          courseColorValues: {},
-        ),
-      ),
-    ));
-    await tester.pump();
 
+    expect(tester.widget<Text>(_courseText('two-sections', note)).maxLines, 3);
+    expect(_courseText('two-sections', '张老师'), findsOneWidget);
+    expect(_courseText('two-sections', '2'), findsOneWidget);
+    expect(_courseText('two-sections', 'A101'), findsOneWidget);
+    expect(
+      tester.getBottomRight(_courseText('two-sections', note)).dy,
+      lessThanOrEqualTo(
+          tester.getTopLeft(_courseText('two-sections', 'A101')).dy),
+    );
+
+    expect(_courseText('one-section', note), findsNothing);
+    expect(_courseText('one-section', '1'), findsNothing);
+    expect(_courseText('one-section', '李老师'), findsOneWidget);
+    expect(_courseText('one-section', 'B202'), findsOneWidget);
     for (final id in ['two-sections', 'one-section']) {
-      final block = find.byKey(ValueKey('schedule-course-$id'));
-      final noteWidget = tester.widget<Text>(
-        find.descendant(of: block, matching: find.text(note)),
-      );
-      if (id == 'two-sections') {
-        expect(noteWidget.maxLines, 3);
-      } else {
-        expect(noteWidget.maxLines, lessThan(3));
-      }
-      expect(
-        find.descendant(
-            of: block,
-            matching: find.text(id == 'two-sections' ? '张老师' : '李老师')),
-        findsOneWidget,
-      );
-      expect(
-        find.descendant(
-            of: block, matching: find.text(id == 'two-sections' ? '2' : '1')),
-        findsOneWidget,
-      );
-      final location = find.descendant(
-        of: block,
-        matching: find.text(id == 'two-sections' ? 'A101' : 'B202'),
-      );
-      expect(location, findsOneWidget);
-      expect(
-          tester.getTopLeft(location).dy,
-          greaterThan(tester
-              .getTopLeft(find.descendant(of: block, matching: find.text(note)))
-              .dy));
-      expect(tester.getBottomRight(location).dy,
-          lessThanOrEqualTo(tester.getBottomRight(block).dy));
+      _expectCourseContentFits(tester, id);
+    }
+    expect(tester.takeException(), isNull);
+
+    await tester.tap(_courseBlock('one-section'));
+    await tester.pumpAndSettle();
+    final details = find.byType(BottomSheet);
+    for (final value in ['单节课程名称需要占据两行', '李老师', '1 学分', 'B202', note]) {
+      expect(find.descendant(of: details, matching: find.text(value)),
+          findsOneWidget);
     }
     expect(tester.takeException(), isNull);
   });
+
+  for (final textScale in [1.5, 6.0]) {
+    testWidgets('keeps narrow course blocks bounded at text scale $textScale',
+        (tester) async {
+      const name = '课程名称较长时应当使用省略号';
+      await _pumpCourseLayout(tester, [
+        _session(
+          id: 'one-section',
+          name: name,
+          weekday: 1,
+          weeks: const [1],
+          teacherName: '教师',
+          credit: '2',
+          location: 'A101',
+          note: '备注',
+          endSection: 1,
+        ),
+      ]);
+      final block = tester.widget<Widget>(_courseBlock('one-section'));
+
+      // Isolate the block from page headers when exercising extreme text scales.
+      await tester.pumpWidget(MaterialApp(
+        builder: (context, child) => MediaQuery(
+          data: MediaQuery.of(context)
+              .copyWith(textScaler: TextScaler.linear(textScale)),
+          child: child!,
+        ),
+        home: Scaffold(
+          body: Center(child: SizedBox(width: 40, height: 63, child: block)),
+        ),
+      ));
+
+      final title = tester.widget<Text>(_courseText('one-section', name));
+      expect(title.style!.fontSize, 11.5);
+      expect(title.maxLines, 1);
+      expect(title.overflow, TextOverflow.ellipsis);
+      expect(_courseText('one-section', '教师'), findsNothing);
+      expect(_courseText('one-section', '2'), findsNothing);
+      expect(_courseText('one-section', '备注'), findsNothing);
+      expect(_courseText('one-section', 'A101'),
+          textScale == 1.5 ? findsOneWidget : findsNothing);
+      _expectCourseContentFits(tester, 'one-section');
+      expect(tester.takeException(), isNull);
+    });
+  }
+}
+
+Future<void> _pumpCourseLayout(
+  WidgetTester tester,
+  List<CourseSession> sessions,
+) async {
+  tester.view.physicalSize = const Size(390, 844);
+  tester.view.devicePixelRatio = 1;
+  addTearDown(tester.view.resetPhysicalSize);
+  addTearDown(tester.view.resetDevicePixelRatio);
+  addTearDown(_ignoreListTileBackgroundWarning());
+  final repository = AcademicScheduleRepository(
+    apiClient:
+        AcademicScheduleApiClient(authService: _FakeAcademicAuthService()),
+  );
+  await tester.pumpWidget(MaterialApp(
+    home: AcademicSchedulePage(
+      repository: repository,
+      notificationService:
+          AcademicScheduleNotificationService(repository: repository),
+      widgetService: AcademicScheduleWidgetService(repository: repository),
+      onLoginRequired: () async {},
+      initialState: AcademicScheduleCacheState(
+        schedule: _schedule.copyWith(sessions: sessions),
+        weekState: ScheduleWeekState(
+          currentWeek: 1,
+          anchorMonday: AcademicScheduleRepository.startOfWeek(DateTime.now()),
+        ),
+      ),
+      initialDisplayState: const AcademicScheduleDisplayState(
+        settings: AcademicScheduleDisplaySettings(
+          colorful: true,
+          showTeacher: true,
+          showCredit: true,
+          showNote: true,
+        ),
+        courseColorValues: {},
+      ),
+    ),
+  ));
+  await tester.pump();
+}
+
+Finder _courseBlock(String id) => find.byKey(ValueKey('schedule-course-$id'));
+
+Finder _courseText(String id, String value) =>
+    find.descendant(of: _courseBlock(id), matching: find.text(value));
+
+void _expectCourseContentFits(WidgetTester tester, String id) {
+  final block = _courseBlock(id);
+  expect(
+      find.descendant(of: block, matching: find.byType(SingleChildScrollView)),
+      findsNothing);
+  final bounds = tester.getRect(block);
+  final texts = find.descendant(of: block, matching: find.byType(Text));
+  for (final element in texts.evaluate()) {
+    final rect = tester.getRect(find.byWidget(element.widget));
+    expect(rect.top, greaterThanOrEqualTo(bounds.top));
+    expect(rect.bottom, lessThanOrEqualTo(bounds.bottom + 0.01));
+  }
 }
 
 void Function() _ignoreListTileBackgroundWarning() {

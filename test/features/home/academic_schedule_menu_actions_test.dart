@@ -84,6 +84,159 @@ void main() {
     expect(repository.refreshCalls, 1);
     expect(tester.takeException(), isNull);
   });
+
+  testWidgets(
+      'manual courses keep their automatic color across repeated renames',
+      (tester) async {
+    SharedPreferences.setMockInitialValues({});
+    final repository = _ScheduleRepository();
+    await _pumpColorSchedule(tester, repository, _manualSchedule);
+    final originalColor = _courseFill(tester, 'manual:color-1');
+
+    for (final name in ['测试课程2', '测试课程3']) {
+      await _renameCourse(tester, name);
+      for (final id in ['manual:color-1', 'manual:color-2']) {
+        expect(_courseFill(tester, id), originalColor);
+      }
+      final colors =
+          await AcademicScheduleDisplaySettingsService().loadCourseColors();
+      expect(colors[name], originalColor.toARGB32());
+      final cached = await repository.loadCachedState();
+      expect(cached.schedule!.sessions.map((session) => session.courseName),
+          everyElement(name));
+    }
+
+    final cached = await repository.loadCachedState();
+    await tester.pumpWidget(const SizedBox.shrink());
+    await _pumpColorSchedule(tester, repository, cached.schedule!);
+    for (final id in ['manual:color-1', 'manual:color-2']) {
+      expect(_courseFill(tester, id), originalColor);
+    }
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('renaming with colorful display off preserves the assigned color',
+      (tester) async {
+    SharedPreferences.setMockInitialValues({});
+    final repository = _ScheduleRepository();
+    await _pumpColorSchedule(tester, repository, _manualSchedule);
+    final originalColor = _courseFill(tester, 'manual:color-1');
+
+    await tester.pumpWidget(const SizedBox.shrink());
+    await _pumpColorSchedule(tester, repository, _manualSchedule,
+        colorful: false);
+    await _renameCourse(tester, '测试课程2');
+    final colors =
+        await AcademicScheduleDisplaySettingsService().loadCourseColors();
+    expect(colors['测试课程2'], originalColor.toARGB32());
+
+    final cached = await repository.loadCachedState();
+    await tester.pumpWidget(const SizedBox.shrink());
+    await _pumpColorSchedule(tester, repository, cached.schedule!);
+    expect(_courseFill(tester, 'manual:color-1'), originalColor);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('renaming preserves custom colors and still accepts a new color',
+      (tester) async {
+    SharedPreferences.setMockInitialValues({});
+    final repository = _ScheduleRepository();
+    final palette =
+        ShuYoThemes.byId(ShuYoThemes.defaultId).colors.schedulePalette;
+    final service = AcademicScheduleDisplaySettingsService();
+    await service.saveCourseColor('测试课程1', palette[0].toARGB32());
+    await _pumpColorSchedule(tester, repository, _manualSchedule);
+
+    await _renameCourse(tester, '测试课程2');
+    expect(_courseFill(tester, 'manual:color-1'), palette[0]);
+    expect((await service.loadCourseColors())['测试课程2'], palette[0].toARGB32());
+
+    await _renameCourse(tester, '测试课程3', colorIndex: 1);
+    for (final id in ['manual:color-1', 'manual:color-2']) {
+      expect(_courseFill(tester, id), palette[1]);
+    }
+    expect((await service.loadCourseColors())['测试课程3'], palette[1].toARGB32());
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('saving an unchanged name does not pin its automatic color',
+      (tester) async {
+    SharedPreferences.setMockInitialValues({});
+    final repository = _ScheduleRepository();
+    await _pumpColorSchedule(tester, repository, _manualSchedule);
+    final originalColor = _courseFill(tester, 'manual:color-1');
+
+    await _renameCourse(tester, '测试课程1');
+    expect(_courseFill(tester, 'manual:color-1'), originalColor);
+    expect(await AcademicScheduleDisplaySettingsService().loadCourseColors(),
+        isEmpty);
+    expect(tester.takeException(), isNull);
+  });
+}
+
+Future<void> _pumpColorSchedule(
+  WidgetTester tester,
+  AcademicScheduleRepository repository,
+  AcademicSchedule schedule, {
+  bool colorful = true,
+}) async {
+  final display = await AcademicScheduleDisplaySettingsService().loadState();
+  await tester.pumpWidget(MaterialApp(
+    theme: ShuYoThemes.byId(ShuYoThemes.defaultId).themeData(),
+    home: AcademicSchedulePage(
+      repository: repository,
+      notificationService: _NoopNotifications(repository),
+      widgetService: _NoopWidget(repository),
+      onLoginRequired: () async {},
+      initialState: AcademicScheduleCacheState(
+        schedule: schedule,
+        weekState: ScheduleWeekState(
+          currentWeek: 1,
+          anchorMonday: AcademicScheduleRepository.startOfWeek(DateTime.now()),
+        ),
+      ),
+      initialDisplayState: AcademicScheduleDisplayState(
+        settings: display.settings.copyWith(colorful: colorful),
+        courseColorValues: display.courseColorValues,
+      ),
+    ),
+  ));
+  await tester.pumpAndSettle();
+}
+
+Color _courseFill(WidgetTester tester, String id) => tester
+    .widget<Material>(find
+        .descendant(
+          of: find.byKey(ValueKey('schedule-course-$id')),
+          matching: find.byType(Material),
+        )
+        .first)
+    .color!;
+
+Future<void> _renameCourse(
+  WidgetTester tester,
+  String name, {
+  int? colorIndex,
+}) async {
+  await tester
+      .tap(find.byKey(const ValueKey('schedule-course-manual:color-1')));
+  await tester.pumpAndSettle();
+  await tester.tap(find.text('编辑'));
+  await tester.pumpAndSettle();
+  await tester.enterText(find.byType(TextFormField), name);
+  if (colorIndex != null) {
+    await tester.tap(find.text('颜色'));
+    await tester.pumpAndSettle();
+    await tester.tap(find
+        .descendant(
+          of: find.byType(AlertDialog),
+          matching: find.byType(InkWell),
+        )
+        .at(colorIndex));
+    await tester.pumpAndSettle();
+  }
+  await tester.tap(find.widgetWithText(TextButton, '保存'));
+  await tester.pumpAndSettle();
 }
 
 class _ScheduleRepository extends AcademicScheduleRepository {
@@ -148,3 +301,23 @@ final _schedule = AcademicSchedule(
   untimedCourses: const [],
   fetchedAt: DateTime.utc(2026, 10, 8),
 );
+
+final _manualSchedule = _schedule.copyWith(sessions: [
+  for (var weekday = 1; weekday <= 2; weekday++)
+    CourseSession(
+      id: 'manual:color-$weekday',
+      courseName: '测试课程1',
+      courseCode: CourseSession.manualCode,
+      teacherName: '',
+      campus: '',
+      location: '',
+      weekday: weekday,
+      startSection: 1,
+      endSection: 1,
+      sections: const [1],
+      weeks: const [1, 2],
+      weekText: '1-2周',
+      credit: '',
+      note: '',
+    ),
+]);
