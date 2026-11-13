@@ -34,8 +34,11 @@ void main() {
     await _pumpEditor(tester, conflictValidator: (_) => const []);
     final courseName = find.byType(TextFormField);
     await tester.showKeyboard(courseName);
+    // Apply the focus-triggered rebuild that registers tap-outside callbacks.
+    await tester.pump();
     final focus = _inputFocus(tester, courseName);
     expect(focus.hasFocus, isTrue);
+    expect(tester.testTextInput.isVisible, isTrue);
 
     await tester.tap(find.text('时段1'));
     await tester.pumpAndSettle();
@@ -54,6 +57,7 @@ void main() {
         widget.keyboardType ==
             const TextInputType.numberWithOptions(decimal: true));
     await tester.showKeyboard(courseName);
+    await tester.pump();
     final nameFocus = _inputFocus(tester, courseName);
 
     await tester.tap(credit);
