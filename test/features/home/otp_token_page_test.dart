@@ -319,11 +319,54 @@ void main() {
     expect(find.byType(SnackBar), findsOneWidget);
     expect(find.text('网络连接失败，请检查网络后重试'), findsOneWidget);
     expect(find.text('重新加载'), findsNothing);
-    expect(find.byType(CircularProgressIndicator), findsOneWidget);
+    // Nothing has been read yet, so the placeholder layout stays with the app
+    // bar progress bar on and the copy button disabled.
+    expect(find.text('--- ---'), findsOneWidget);
+    expect(find.byKey(const ValueKey('otp-loading-progress')), findsOneWidget);
+    expect(find.byType(CircularProgressIndicator), findsNothing);
+    final button = tester.widget<FilledButton>(find.byType(FilledButton));
+    expect(button.onPressed, isNull);
 
     await tester.pump(const Duration(seconds: 1));
     await tester.pump();
 
     expect(repository.calls, 2);
+  });
+
+  testWidgets('lays out the page before the first code arrives',
+      (tester) async {
+    final repository = _PendingThenFreshRepository();
+
+    await tester.pumpWidget(
+      MaterialApp(home: OtpTokenPage(repository: repository)),
+    );
+    await tester.pump();
+
+    expect(find.text('--- ---'), findsOneWidget);
+    expect(find.text('正在获取动态口令…'), findsOneWidget);
+    expect(find.byKey(const ValueKey('otp-loading-progress')), findsOneWidget);
+    expect(tester.widget<FilledButton>(find.byType(FilledButton)).onPressed,
+        isNull);
+
+    repository.pending.complete(_token(code: '956370'));
+    await tester.pump();
+    await tester.pump();
+
+    expect(find.text('956 370'), findsOneWidget);
+    expect(find.text('--- ---'), findsNothing);
+    expect(find.textContaining('秒后自动更新'), findsOneWidget);
+    expect(find.byKey(const ValueKey('otp-loading-progress')), findsNothing);
+    expect(tester.widget<FilledButton>(find.byType(FilledButton)).onPressed,
+        isNotNull);
+  });
+
+  testWidgets('the hint names the systems that need the dynamic password',
+      (tester) async {
+    final repository = _FakeRepository(token: _token());
+
+    await tester.pumpWidget(
+      MaterialApp(home: OtpTokenPage(repository: repository)),
+    );
+    await tester.pump();
   });
 }

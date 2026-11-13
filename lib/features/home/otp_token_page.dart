@@ -274,10 +274,29 @@ class _OtpTokenPageState extends State<OtpTokenPage>
     _showSnack('已复制动态口令');
   }
 
+  /// True until the first code lands, which is the only state that shows the
+  /// placeholder layout along with the app bar progress bar.
+  bool get _awaitingFirstToken =>
+      _token == null && !_authenticationBlocked && !_recoveringAuthentication;
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('动态口令')),
+      appBar: AppBar(
+        title: const Text('动态口令'),
+        bottom: PreferredSize(
+          preferredSize: const Size.fromHeight(2),
+          child: SizedBox(
+            height: 2,
+            child: _awaitingFirstToken || _recoveringAuthentication
+                ? const LinearProgressIndicator(
+                    key: ValueKey('otp-loading-progress'),
+                    minHeight: 2,
+                  )
+                : null,
+          ),
+        ),
+      ),
       body: _buildBody(),
     );
   }
@@ -305,19 +324,20 @@ class _OtpTokenPageState extends State<OtpTokenPage>
         ),
       );
     }
-    final token = _token;
-    if (token == null) {
-      // Nothing has been read yet; a spinner stays until the first read lands.
-      return const Center(child: CircularProgressIndicator());
-    }
-    return _buildToken(token);
+    // The page is laid out before the first read lands, so nobody has to wait
+    // on a blank screen: the code slot shows dashes and the copy button stays
+    // greyed out until a real code arrives.
+    return _buildToken(_token);
   }
 
-  Widget _buildToken(OtpToken token) {
+  Widget _buildToken(OtpToken? token) {
     final colors = context.shuyoColors;
-    final remaining = token.remaining;
-    final ratio =
-        token.period <= 0 ? 0.0 : (remaining / token.period).clamp(0.0, 1.0);
+    final remaining = token?.remaining ?? 0;
+    final period = token?.period ?? 0;
+    final ratio = period <= 0 || token == null
+        ? 0.0
+        : (remaining / period).clamp(0.0, 1.0);
+    final hasToken = token != null;
 
     return ListView(
       padding: const EdgeInsets.fromLTRB(24, 48, 24, 32),
@@ -325,9 +345,10 @@ class _OtpTokenPageState extends State<OtpTokenPage>
         FittedBox(
           fit: BoxFit.scaleDown,
           child: Text(
-            token.groupedCode,
+            token?.groupedCode ?? '--- ---',
+            key: const ValueKey('otp-code'),
             style: TextStyle(
-              color: colors.textPrimary,
+              color: hasToken ? colors.textPrimary : colors.textMuted,
               fontSize: 52,
               height: 1.1,
               fontWeight: FontWeight.w500,
@@ -347,21 +368,46 @@ class _OtpTokenPageState extends State<OtpTokenPage>
           ),
         ),
         const SizedBox(height: 10),
-        Text(
-          '$remaining 秒后自动更新',
+        Text.rich(
+          TextSpan(
+            children: [
+              if (hasToken)
+                TextSpan(
+                  children: [
+                    // The number keeps changing, so it carries the accent
+                    // color while the wording stays quiet.
+                    TextSpan(
+                      text: '$remaining',
+                      style: TextStyle(
+                        color: colors.accent,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    TextSpan(
+                      text: ' 秒后自动更新',
+                      style: TextStyle(color: colors.textSecondary),
+                    ),
+                  ],
+                )
+              else
+                TextSpan(
+                  text: '正在获取动态口令…',
+                  style: TextStyle(color: colors.textSecondary),
+                ),
+            ],
+          ),
           textAlign: TextAlign.center,
           style: ShuYoTextStyles.bodyCompact(color: colors.textSecondary),
         ),
         const SizedBox(height: 36),
         FilledButton.icon(
-          onPressed: () => unawaited(_copy()),
+          onPressed: hasToken ? () => unawaited(_copy()) : null,
           icon: const Icon(Icons.copy_outlined),
           label: const Text('复制口令'),
         ),
         const SizedBox(height: 16),
         Text(
-          '在需要动态口令的系统中输入这 6 位数字。口令每 ${token.period} 秒'
-          '自动更新，请以页面显示的为准。',
+          '在需要动态口令的系统中输入这 6 位数字',
           textAlign: TextAlign.center,
           style: ShuYoTextStyles.bodyCompact(color: colors.textTertiary),
         ),
