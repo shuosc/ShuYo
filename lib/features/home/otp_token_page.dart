@@ -407,7 +407,7 @@ class _OtpTokenPageState extends State<OtpTokenPage>
         ),
         const SizedBox(height: 16),
         Text(
-          '登录 OpenVPN、EasyConnect 等系统时需要输入这 6 位动态数字。',
+          '在需要动态口令的系统中输入这 6 位数字',
           textAlign: TextAlign.center,
           style: ShuYoTextStyles.bodyCompact(color: colors.textTertiary),
         ),

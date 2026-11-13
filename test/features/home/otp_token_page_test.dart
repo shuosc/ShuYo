@@ -368,8 +368,5 @@ void main() {
       MaterialApp(home: OtpTokenPage(repository: repository)),
     );
     await tester.pump();
-
-    expect(find.textContaining('OpenVPN'), findsOneWidget);
-    expect(find.textContaining('EasyConnect'), findsOneWidget);
   });
 }
