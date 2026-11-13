@@ -287,7 +287,7 @@ class AcademicScheduleRepository {
 
     for (final course in todayCourses) {
       final end = sectionEndTime(course.endSection, now);
-      if (end == null || now.isAfter(end)) {
+      if (end == null || !now.isBefore(end)) {
         continue;
       }
       final start = sectionStartTime(course.startSection, now);

@@ -34,8 +34,9 @@ class AcademicScheduleWidgetService {
           ? await _repository.loadWeekState(now: now)
           : null;
       await syncSchedule(schedule: schedule, weekState: weekState, now: now);
-    } on Object {
-      // 小组件同步不能影响 App 内课表读取。
+    } on Object catch (error, stackTrace) {
+      debugPrint('Failed to load the cached widget schedule: $error');
+      debugPrintStack(stackTrace: stackTrace);
     }
   }
 
@@ -71,10 +72,9 @@ class AcademicScheduleWidgetService {
       }
     } on MissingPluginException {
       // 测试环境或不支持桌面小组件的运行时可能没有插件注册。
-    } on PlatformException {
-      // 系统小组件刷新失败时保留 App 内行为。
-    } on Object {
-      // 不让厂商桌面兼容问题影响主流程。
+    } on Object catch (error, stackTrace) {
+      debugPrint('Failed to sync the schedule widget: $error');
+      debugPrintStack(stackTrace: stackTrace);
     }
   }
 

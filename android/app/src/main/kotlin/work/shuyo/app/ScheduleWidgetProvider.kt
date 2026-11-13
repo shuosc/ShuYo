@@ -9,11 +9,7 @@ import android.view.View
 import android.widget.RemoteViews
 import es.antonborri.home_widget.HomeWidgetLaunchIntent
 import es.antonborri.home_widget.HomeWidgetProvider
-import org.json.JSONObject
-import java.time.LocalDate
 import java.time.LocalDateTime
-import java.time.temporal.ChronoUnit
-import java.util.Locale
 
 class ScheduleWidgetSmallProvider : ScheduleWidgetBaseProvider(
     layoutId = R.layout.schedule_widget_small,
@@ -51,16 +47,30 @@ abstract class ScheduleWidgetBaseProvider(
         appWidgetIds: IntArray,
         widgetData: SharedPreferences
     ) {
-        val schedule = WidgetSchedule.parse(widgetData.getString(KEY_SNAPSHOT, null))
-        for (appWidgetId in appWidgetIds) {
-            appWidgetManager.updateAppWidget(
-                appWidgetId,
-                buildViews(context, schedule)
-            )
-        }
+        ScheduleWidgetRefresh.refreshAll(context, "widget_update", widgetData)
     }
 
-    private fun buildViews(context: Context, schedule: WidgetSchedule?): RemoteViews {
+    override fun onDisabled(context: Context) {
+        super.onDisabled(context)
+        ScheduleWidgetRefresh.refreshAll(context, "widget_disabled")
+    }
+
+    internal fun renderWidgets(
+        context: Context,
+        appWidgetManager: AppWidgetManager,
+        appWidgetIds: IntArray,
+        schedule: WidgetSchedule?,
+        now: LocalDateTime
+    ) {
+        val views = buildViews(context, schedule, now)
+        appWidgetManager.updateAppWidget(appWidgetIds, views)
+    }
+
+    private fun buildViews(
+        context: Context,
+        schedule: WidgetSchedule?,
+        now: LocalDateTime
+    ): RemoteViews {
         val views = RemoteViews(context.packageName, layoutId)
         views.setOnClickPendingIntent(R.id.widget_root, launchIntent(context))
 
@@ -69,34 +79,17 @@ abstract class ScheduleWidgetBaseProvider(
             return views
         }
 
-        val now = LocalDateTime.now()
         val today = now.toLocalDate()
         val activeWeek = schedule.activeWeek(today)
         val isVacation = activeWeek < 1 || activeWeek > schedule.maxWeek
-        val todayCourses = if (isVacation) {
-            emptyList()
-        } else {
-            schedule.courses
-                .filter { course ->
-                    course.weekday == today.dayOfWeek.value &&
-                        course.occursInWeek(activeWeek)
-                }
-                .sortedWith(compareBy<WidgetCourse> { it.startMinute }.thenBy { it.name })
-        }
+        val todayCourses = schedule.coursesOn(today)
         val nowMinute = now.hour * 60 + now.minute
-        val upcoming = todayCourses.firstOrNull { it.endMinute >= nowMinute }
+        val upcoming = todayCourses.firstOrNull { it.hasNotEnded(nowMinute) }
 
         val tomorrow = today.plusDays(1)
         val tomorrowWeek = schedule.activeWeek(tomorrow)
-        val tomorrowCourses = if (
-            upcoming == null && tomorrowWeek in 1..schedule.maxWeek
-        ) {
-            schedule.courses
-                .filter { course ->
-                    course.weekday == tomorrow.dayOfWeek.value &&
-                        course.occursInWeek(tomorrowWeek)
-                }
-                .sortedWith(compareBy<WidgetCourse> { it.startMinute }.thenBy { it.name })
+        val tomorrowCourses = if (upcoming == null) {
+            schedule.coursesOn(tomorrow)
         } else {
             emptyList()
         }
@@ -122,7 +115,7 @@ abstract class ScheduleWidgetBaseProvider(
             tomorrowCourses.take(rowBindings.size)
         } else {
             todayCourses
-                .filter { it.endMinute >= nowMinute }
+                .filter { it.hasNotEnded(nowMinute) }
                 .take(rowBindings.size)
         }
         val displayWeek = if (showingTomorrow) tomorrowWeek else activeWeek
@@ -299,10 +292,6 @@ abstract class ScheduleWidgetBaseProvider(
             else -> ""
         }
     }
-
-    companion object {
-        private const val KEY_SNAPSHOT = "academic_schedule_widget_snapshot"
-    }
 }
 
 data class CourseRowBinding(
@@ -311,130 +300,3 @@ data class CourseRowBinding(
     val nameId: Int,
     val metaId: Int
 )
-
-private data class WidgetSchedule(
-    val term: String,
-    val maxWeek: Int,
-    val currentWeek: Int,
-    val anchorMonday: String,
-    val courses: List<WidgetCourse>
-) {
-    fun activeWeek(today: LocalDate): Int {
-        val vacationWeek = maxWeek + 1
-        val anchor = parseDate(anchorMonday)
-            ?: return currentWeek.coerceIn(0, vacationWeek)
-        val todayMonday = today.minusDays((today.dayOfWeek.value - 1).toLong())
-        val weekOffset = ChronoUnit.WEEKS.between(anchor, todayMonday).toInt()
-        return (currentWeek + weekOffset).coerceIn(0, vacationWeek.coerceAtLeast(2))
-    }
-
-    companion object {
-        fun parse(raw: String?): WidgetSchedule? {
-            if (raw.isNullOrBlank()) {
-                return null
-            }
-            return try {
-                val json = JSONObject(raw)
-                if (!json.optBoolean("hasSchedule", false)) {
-                    return null
-                }
-                val sessions = mutableListOf<WidgetCourse>()
-                val sessionJson = json.optJSONArray("sessions")
-                if (sessionJson != null) {
-                    for (index in 0 until sessionJson.length()) {
-                        val course = WidgetCourse.parse(
-                            sessionJson.optJSONObject(index) ?: continue
-                        )
-                        if (course != null) {
-                            sessions.add(course)
-                        }
-                    }
-                }
-                WidgetSchedule(
-                    term = json.optString("term", ""),
-                    maxWeek = json.optInt("maxWeek", 1).coerceAtLeast(1),
-                    currentWeek = json.optInt("currentWeek", 1).coerceAtLeast(0),
-                    anchorMonday = json.optString("anchorMonday", ""),
-                    courses = sessions
-                )
-            } catch (_: Exception) {
-                null
-            }
-        }
-    }
-}
-
-private data class WidgetCourse(
-    val name: String,
-    val room: String,
-    val meta: String,
-    val weekday: Int,
-    val weeks: Set<Int>,
-    val startMinute: Int,
-    val endMinute: Int,
-    val startText: String,
-    val endText: String,
-    val sectionText: String
-) {
-    fun occursInWeek(week: Int): Boolean = weeks.isEmpty() || weeks.contains(week)
-
-    fun isActive(minute: Int): Boolean = minute in startMinute..endMinute
-
-    companion object {
-        fun parse(json: JSONObject): WidgetCourse? {
-            val name = json.optString("name", "").trim()
-            val weekday = json.optInt("weekday", 0)
-            val startMinute = json.optInt("startMinute", -1)
-            val endMinute = json.optInt("endMinute", -1)
-            if (name.isBlank() ||
-                weekday !in 1..7 ||
-                startMinute < 0 ||
-                endMinute < startMinute
-            ) {
-                return null
-            }
-
-            val weeks = mutableSetOf<Int>()
-            val weekJson = json.optJSONArray("weeks")
-            if (weekJson != null) {
-                for (index in 0 until weekJson.length()) {
-                    val week = weekJson.optInt(index, 0)
-                    if (week > 0) {
-                        weeks.add(week)
-                    }
-                }
-            }
-
-            return WidgetCourse(
-                name = name,
-                room = json.optString("room", "").trim(),
-                meta = json.optString("meta", "").trim(),
-                weekday = weekday,
-                weeks = weeks,
-                startMinute = startMinute,
-                endMinute = endMinute,
-                startText = json.optString("startText", formatMinute(startMinute)),
-                endText = json.optString("endText", formatMinute(endMinute)),
-                sectionText = json.optString("sectionText", "").trim()
-            )
-        }
-
-        private fun formatMinute(minute: Int): String {
-            return String.format(
-                Locale.US,
-                "%02d:%02d",
-                minute / 60,
-                minute % 60
-            )
-        }
-    }
-}
-
-private fun parseDate(value: String): LocalDate? {
-    val datePart = value.substringBefore("T").ifBlank { return null }
-    return try {
-        LocalDate.parse(datePart)
-    } catch (_: Exception) {
-        null
-    }
-}

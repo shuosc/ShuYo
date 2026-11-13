@@ -78,6 +78,52 @@ void main() {
     }
   });
 
+  test('home summary and widget snapshot stop the course at its end time', () {
+    final schedule = _schedule.copyWith(sessions: const [
+      CourseSession(
+        id: 'morning',
+        courseName: '测试课程',
+        courseCode: '',
+        teacherName: '',
+        campus: '',
+        location: '',
+        weekday: DateTime.monday,
+        startSection: 1,
+        endSection: 2,
+        sections: [1, 2],
+        weeks: [1],
+        weekText: '',
+        credit: '',
+        note: '',
+      ),
+    ]);
+    final weekState = ScheduleWeekState(
+      currentWeek: 1,
+      anchorMonday: DateTime(2026, 11, 9),
+    );
+    for (final (now, expected) in [
+      (DateTime(2026, 11, 9, 7, 59, 59), '08:00 · 测试课程'),
+      (DateTime(2026, 11, 9, 8), '正在上课 · 测试课程'),
+      (DateTime(2026, 11, 9, 9, 39, 59), '正在上课 · 测试课程'),
+      (DateTime(2026, 11, 9, 9, 40), '今日的课程已全部结束'),
+      (DateTime(2026, 11, 9, 9, 40, 59), '今日的课程已全部结束'),
+    ]) {
+      expect(
+        AcademicScheduleRepository.summaryFor(schedule, week: 1, now: now),
+        expected,
+      );
+      final snapshot = AcademicScheduleWidgetService.buildSnapshot(
+        schedule: schedule,
+        weekState: weekState,
+        now: now,
+      );
+      expect(snapshot['summary'], expected);
+      final sessions = snapshot['sessions'] as List<Map<String, dynamic>>;
+      expect(sessions.single['startMinute'], 8 * 60);
+      expect(sessions.single['endMinute'], 9 * 60 + 40);
+    }
+  });
+
   test(
       'cached schedule remains after expiration and is hidden for another account',
       () async {

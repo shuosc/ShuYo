@@ -92,7 +92,7 @@ private struct WidgetCourse: Decodable, Identifiable {
   let sectionText: String?
 
   func occurs(in week: Int) -> Bool { weeks.isEmpty || weeks.contains(week) }
-  func isActive(at minute: Int) -> Bool { (startMinute...endMinute).contains(minute) }
+  func isActive(at minute: Int) -> Bool { startMinute <= minute && minute < endMinute }
 
   var timeText: String {
     "\(startDisplayText)-\(endDisplayText)"
@@ -156,7 +156,7 @@ private struct ScheduleProvider: TimelineProvider {
            start > now {
           dates.insert(start)
         }
-        if let end = calendar.date(byAdding: .minute, value: course.endMinute + 1, to: day),
+        if let end = calendar.date(byAdding: .minute, value: course.endMinute, to: day),
            end > now {
           dates.insert(end)
         }
@@ -184,7 +184,7 @@ private struct SchedulePresentation {
       + calendar.component(.minute, from: date)
     let week = snapshot.activeWeek(on: date, calendar: calendar)
     let todayCourses = snapshot.courses(on: date, calendar: calendar)
-    let remaining = todayCourses.filter { $0.endMinute >= nowMinute }
+    let remaining = todayCourses.filter { $0.endMinute > nowMinute }
     let tomorrow = calendar.date(byAdding: .day, value: 1, to: date) ?? date
     let tomorrowCourses = remaining.isEmpty
       ? snapshot.courses(on: tomorrow, calendar: calendar)
