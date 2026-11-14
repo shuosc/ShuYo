@@ -1,6 +1,7 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:material_ui/material_ui.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:shuyo/core/confirmation_window.dart';
 import 'package:shuyo/data/models/academic_schedule.dart';
 import 'package:shuyo/data/repositories/academic_schedule_repository.dart';
 import 'package:shuyo/data/services/academic_schedule_display_settings_service.dart';
@@ -47,6 +48,11 @@ void main() {
         lessThan(tester.getTopLeft(find.text('随机颜色')).dy));
     await tester.tap(find.text('随机颜色'));
     await tester.pumpAndSettle();
+    expect(find.text('确认随机颜色'), findsOneWidget);
+    expect(find.textContaining('点击确定后将为当前学期所有课程随机分配配色。'), findsOneWidget);
+    expect(find.textContaining('同时打开多彩显示。'), findsOneWidget);
+    await tester.tap(find.text('确定'));
+    await tester.pumpAndSettle();
     final state = await AcademicScheduleDisplaySettingsService().loadState();
     expect(state.settings.colorful, isTrue);
     final assigned = state.courseColorValues['MATH101'];
@@ -61,6 +67,8 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.text('随机颜色'));
     await tester.pumpAndSettle();
+    // Still inside the five-minute window opened by the confirmation above.
+    expect(find.text('确认随机颜色'), findsNothing);
     final second =
         await AcademicScheduleDisplaySettingsService().loadCourseColors();
     expect(second['MATH101'], isNot(assigned));
@@ -171,6 +179,136 @@ void main() {
     expect(await AcademicScheduleDisplaySettingsService().loadCourseColors(),
         isEmpty);
     expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('cancelling the color confirmation leaves colors untouched',
+      (tester) async {
+    SharedPreferences.setMockInitialValues({});
+    final repository = _ScheduleRepository();
+    await tester.pumpWidget(MaterialApp(
+      theme: ShuYoThemes.byId(ShuYoThemes.defaultId).themeData(),
+      home: AcademicSchedulePage(
+        repository: repository,
+        notificationService: _NoopNotifications(repository),
+        widgetService: _NoopWidget(repository),
+        onLoginRequired: () async {},
+        initialState: AcademicScheduleCacheState(
+          schedule: _schedule,
+          weekState: ScheduleWeekState(
+              currentWeek: 1,
+              anchorMonday:
+                  AcademicScheduleRepository.startOfWeek(DateTime.now())),
+        ),
+        initialDisplayState: const AcademicScheduleDisplayState(
+          settings: AcademicScheduleDisplaySettings(
+              colorful: true, showTeacher: true),
+          courseColorValues: {},
+        ),
+      ),
+    ));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('更多'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('随机颜色'));
+    await tester.pumpAndSettle();
+    expect(find.text('确认随机颜色'), findsOneWidget);
+    // Nothing has been overridden yet, so the warning line stays out.
+    expect(find.textContaining('已手动设置的颜色会被覆盖'), findsNothing);
+    await tester.tap(find.text('取消'));
+    await tester.pumpAndSettle();
+    expect(find.text('确认随机颜色'), findsNothing);
+    expect(await AcademicScheduleDisplaySettingsService().loadCourseColors(),
+        isEmpty);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('randomizing keeps colors of courses outside the viewing term',
+      (tester) async {
+    SharedPreferences.setMockInitialValues({});
+    final repository = _ScheduleRepository();
+    final palette =
+        ShuYoThemes.byId(ShuYoThemes.defaultId).colors.schedulePalette;
+    final otherTermColor = palette[3].toARGB32();
+    await AcademicScheduleDisplaySettingsService()
+        .saveCourseColor('OTHER999', otherTermColor);
+    await _pumpColorSchedule(tester, repository, _schedule);
+    await tester.tap(find.byTooltip('更多'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('随机颜色'));
+    await tester.pumpAndSettle();
+    // OTHER999 is not on screen, so nothing visible is being overwritten.
+    expect(find.textContaining('已手动设置的颜色会被覆盖'), findsNothing);
+    await tester.tap(find.text('确定'));
+    await tester.pumpAndSettle();
+    final colors =
+        await AcademicScheduleDisplaySettingsService().loadCourseColors();
+    expect(colors['OTHER999'], otherTermColor);
+    expect(
+        palette.map((color) => color.toARGB32()), contains(colors['MATH101']));
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('the snack bar undo restores colors and the color mode',
+      (tester) async {
+    SharedPreferences.setMockInitialValues({});
+    final repository = _ScheduleRepository();
+    final service = AcademicScheduleDisplaySettingsService();
+    final palette =
+        ShuYoThemes.byId(ShuYoThemes.defaultId).colors.schedulePalette;
+    final manual = palette[3].toARGB32();
+    await service.saveCourseColor('MATH101', manual);
+    await _pumpColorSchedule(tester, repository, _schedule, colorful: false);
+    await tester.tap(find.byTooltip('更多'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('随机颜色'));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('已手动设置的颜色会被覆盖'), findsOneWidget);
+    await tester.tap(find.text('确定'));
+    await tester.pumpAndSettle();
+    expect((await service.loadState()).settings.colorful, isTrue);
+    expect((await service.loadCourseColors())['MATH101'], isNot(manual));
+
+    expect(find.text('撤销'), findsOneWidget);
+    await tester.tap(find.text('撤销'));
+    await tester.pumpAndSettle();
+
+    expect((await service.loadCourseColors())['MATH101'], manual);
+    expect((await service.loadState()).settings.colorful, isFalse);
+    expect(tester.takeException(), isNull);
+  });
+
+  test('a confirmed reassignment covers the next five minutes only', () {
+    final confirmedAt = DateTime(2026, 11, 14, 12);
+    const window = Duration(minutes: 5);
+    expect(
+      isConfirmationFresh(confirmedAt: null, now: confirmedAt, window: window),
+      isFalse,
+    );
+    expect(
+      isConfirmationFresh(
+        confirmedAt: confirmedAt,
+        now: confirmedAt.add(const Duration(minutes: 4, seconds: 59)),
+        window: window,
+      ),
+      isTrue,
+    );
+    expect(
+      isConfirmationFresh(
+        confirmedAt: confirmedAt,
+        now: confirmedAt.add(const Duration(minutes: 5)),
+        window: window,
+      ),
+      isFalse,
+    );
+    // A clock that jumps backwards must not suppress the dialog.
+    expect(
+      isConfirmationFresh(
+        confirmedAt: confirmedAt,
+        now: confirmedAt.subtract(const Duration(seconds: 1)),
+        window: window,
+      ),
+      isFalse,
+    );
   });
 }
 
