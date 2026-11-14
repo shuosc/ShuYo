@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart' show ScrollCacheExtent;
 import 'package:flutter/services.dart';
@@ -39,21 +41,181 @@ class RecordingNotesPanel extends StatefulWidget {
 }
 
 class _RecordingNotesPanelState extends State<RecordingNotesPanel> {
+  static const _thumbnailCacheWidth = 312;
+
   late _PptImageHeaders _imageHeaders = _PptImageHeaders(widget.headersLoader);
+  final _scrollController = ScrollController();
+  final _animatedNotes = <String>{};
+  final _failedThumbnails = <Uri>{};
+  int _preloadGeneration = 0;
+  bool _thumbnailsReady = true;
+  bool _hasDependencies = false;
+
+  final _preloadedKeepAlive = <ImageStreamCompleterHandle>[];
+
+  @override
+  void initState() {
+    super.initState();
+    _prepareThumbnails();
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (!_hasDependencies) {
+      _hasDependencies = true;
+      if (!_thumbnailsReady) {
+        unawaited(_preloadAllThumbnails(_preloadGeneration));
+      }
+    }
+  }
 
   @override
   void didUpdateWidget(RecordingNotesPanel oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (!identical(oldWidget.slides, widget.slides) ||
-        oldWidget.headersLoader != widget.headersLoader) {
-      _imageHeaders = _PptImageHeaders(widget.headersLoader);
+        oldWidget.headersLoader != widget.headersLoader ||
+        oldWidget.loading != widget.loading ||
+        oldWidget.isLive != widget.isLive) {
+      if (!identical(oldWidget.slides, widget.slides) ||
+          oldWidget.headersLoader != widget.headersLoader) {
+        _imageHeaders = _PptImageHeaders(widget.headersLoader);
+        _animatedNotes.clear();
+        _failedThumbnails.clear();
+        _releasePreloadedKeepAlive();
+      }
+      _prepareThumbnails();
+      if (_hasDependencies && !_thumbnailsReady) {
+        unawaited(_preloadAllThumbnails(_preloadGeneration));
+      }
     }
   }
 
   @override
+  void dispose() {
+    _preloadGeneration++;
+    _releasePreloadedKeepAlive();
+    _scrollController.dispose();
+    super.dispose();
+  }
+
+  void _releasePreloadedKeepAlive() {
+    for (final handle in _preloadedKeepAlive) {
+      handle.dispose();
+    }
+    _preloadedKeepAlive.clear();
+  }
+
+  void _prepareThumbnails() {
+    _preloadGeneration++;
+    final urls = _thumbnailUrls();
+    if (widget.loading ||
+        widget.isLive ||
+        widget.error != null ||
+        urls.isEmpty) {
+      _thumbnailsReady = true;
+      return;
+    }
+    _thumbnailsReady = false;
+  }
+
+  List<Uri> _thumbnailUrls() => [
+        for (final slide in widget.slides)
+          if (slide.imageUrl case final url?) url,
+      ];
+
+  Future<void> _preloadAllThumbnails(int generation) async {
+    final urls = _thumbnailUrls();
+    if (urls.isEmpty) {
+      if (mounted && generation == _preloadGeneration && !_thumbnailsReady) {
+        setState(() => _thumbnailsReady = true);
+      }
+      return;
+    }
+    final dpr = MediaQuery.maybeDevicePixelRatioOf(context) ?? 1.0;
+    final decodeWidth = (104 * dpr).ceil().clamp(1, _thumbnailCacheWidth);
+    const concurrency = 6;
+    var nextIndex = 0;
+    Future<void> worker() async {
+      while (mounted &&
+          generation == _preloadGeneration &&
+          nextIndex < urls.length) {
+        final url = urls[nextIndex++];
+        await _preloadThumbnail(url, decodeWidth, generation);
+      }
+    }
+
+    final work = Future.wait<void>([
+      for (var i = 0; i < concurrency && i < urls.length; i++) worker(),
+    ]);
+    // Do not keep the notes panel indefinitely blocked if a CDN thumbnail hangs.
+    await work.timeout(const Duration(seconds: 6), onTimeout: () => const []);
+    if (mounted && generation == _preloadGeneration) {
+      setState(() => _thumbnailsReady = true);
+    }
+  }
+
+  Future<void> _preloadThumbnail(
+      Uri url, int decodeWidth, int generation) async {
+    final Map<String, String> headers;
+    try {
+      headers = await _imageHeaders.load(url);
+    } on Object {
+      if (mounted && generation == _preloadGeneration) {
+        _failedThumbnails.add(url);
+      }
+      return;
+    }
+    if (!mounted || generation != _preloadGeneration) return;
+    _failedThumbnails.remove(url);
+    final provider = ResizeImage(
+      NetworkImage(url.toString(), headers: headers),
+      width: decodeWidth,
+    );
+    // Only treat preloading as failed if header fetching itself throws;
+    // image decode errors still let Image.network try/render its errorBuilder
+    // and keep ResizeImage inspectable for tests and diagnostics.
+    try {
+      await _precacheProvider(provider, generation);
+    } on Object {
+      // Allow Image.network to attempt or handle image-level fallback cleanly.
+    }
+  }
+
+  Future<void> _precacheProvider(ImageProvider provider, int generation) {
+    final completer = Completer<void>();
+    final stream = provider.resolve(createLocalImageConfiguration(context));
+    late final ImageStreamListener listener;
+    listener = ImageStreamListener(
+      (ImageInfo info, bool synchronousCall) {
+        final keepAlive = stream.completer?.keepAlive();
+        stream.removeListener(listener);
+        if (keepAlive != null) {
+          if (mounted && generation == _preloadGeneration) {
+            _preloadedKeepAlive.add(keepAlive);
+          } else {
+            keepAlive.dispose();
+          }
+        }
+        if (!completer.isCompleted) completer.complete();
+      },
+      onError: (Object error, StackTrace? stackTrace) {
+        stream.removeListener(listener);
+        if (!completer.isCompleted) completer.completeError(error, stackTrace);
+      },
+    );
+    stream.addListener(listener);
+    return completer.future;
+  }
+
+  @override
   Widget build(BuildContext context) {
+    final effectiveLoading =
+        (widget.loading || (widget.error == null && !_thumbnailsReady)) &&
+            !widget.isLive;
     final scroll = CustomScrollView(
       key: const ValueKey('recording-notes-scroll'),
+      controller: widget.nested ? null : _scrollController,
       physics: const AlwaysScrollableScrollPhysics(),
       // Prepare nearby rows before they enter the viewport without loading
       // every attachment; resolved headers survive rows leaving the viewport.
@@ -65,7 +227,7 @@ class _RecordingNotesPanelState extends State<RecordingNotesPanel> {
               handle: NestedScrollView.sliverOverlapAbsorberHandleFor(context),
             ),
           ),
-        if (widget.loading && !widget.isLive)
+        if (effectiveLoading)
           const SliverFillRemaining(
             hasScrollBody: false,
             child: Center(
@@ -105,17 +267,31 @@ class _RecordingNotesPanelState extends State<RecordingNotesPanel> {
               // Rows already own their keyed paint boundary below.
               addRepaintBoundaries: false,
               itemCount: widget.slides.length,
-              itemBuilder: (context, index) => RepaintBoundary(
-                key: ValueKey('recording-note-${widget.slides[index].id}'),
-                child: _NoteEntry(
-                  slide: widget.slides[index],
-                  index: index,
-                  total: widget.slides.length,
-                  onSeek: widget.onSeek,
-                  canSeek: widget.canSeek,
-                  imageHeaders: _imageHeaders,
-                ),
-              ),
+              itemBuilder: (context, index) {
+                final slide = widget.slides[index];
+                final firstAppearance = _animatedNotes.add(slide.id);
+                final primaryScroll = widget.nested
+                    ? PrimaryScrollController.maybeOf(context)
+                    : _scrollController;
+                final scrolling = (primaryScroll?.hasClients ?? false) &&
+                    primaryScroll!.position.isScrollingNotifier.value;
+                return RepaintBoundary(
+                  key: ValueKey('recording-note-${slide.id}'),
+                  child: _NoteEntrance(
+                    index: index,
+                    animate: firstAppearance && !scrolling,
+                    child: _NoteEntry(
+                      slide: slide,
+                      index: index,
+                      total: widget.slides.length,
+                      onSeek: widget.onSeek,
+                      canSeek: widget.canSeek,
+                      imageHeaders: _imageHeaders,
+                      failedThumbnails: _failedThumbnails,
+                    ),
+                  ),
+                );
+              },
             ),
           ),
         ],
@@ -137,6 +313,7 @@ class _NoteEntry extends StatelessWidget {
     required this.onSeek,
     required this.canSeek,
     required this.imageHeaders,
+    required this.failedThumbnails,
   });
 
   final VodPptSlide slide;
@@ -145,6 +322,7 @@ class _NoteEntry extends StatelessWidget {
   final ValueChanged<Duration> onSeek;
   final bool canSeek;
   final _PptImageHeaders imageHeaders;
+  final Set<Uri> failedThumbnails;
 
   Duration get _position =>
       slide.position < Duration.zero ? Duration.zero : slide.position;
@@ -192,6 +370,8 @@ class _NoteEntry extends StatelessWidget {
                                     imageHeaders: imageHeaders,
                                     cacheWidth: 312,
                                     compact: true,
+                                    preloadedFailure:
+                                        failedThumbnails.contains(url),
                                   ),
                                 null => Semantics(
                                     label: '本条笔记暂无 PPT 截图',
@@ -296,7 +476,6 @@ class _NoteDetails extends StatelessWidget {
                         index: index,
                         total: total,
                         position: position,
-                        prefix: '笔记详情  ',
                         style:
                             RecordingPlayerTabs.labelStyleOf(context).copyWith(
                           color: colors.textPrimary,
@@ -401,7 +580,6 @@ class _NotePositionLabel extends StatelessWidget {
     required this.total,
     required this.position,
     required this.style,
-    this.prefix = '',
   });
 
   final Key labelKey;
@@ -409,7 +587,6 @@ class _NotePositionLabel extends StatelessWidget {
   final int total;
   final Duration position;
   final TextStyle style;
-  final String prefix;
 
   @override
   Widget build(BuildContext context) {
@@ -422,10 +599,6 @@ class _NotePositionLabel extends StatelessWidget {
       alignment: Alignment.centerLeft,
       child: Text.rich(
         TextSpan(children: [
-          if (prefix.isNotEmpty)
-            TextSpan(
-                text: prefix,
-                style: TextStyle(color: context.shuyoColors.textPrimary)),
           TextSpan(
               text: '${index + 1}',
               style: pageStyle.copyWith(
@@ -518,14 +691,16 @@ String _timestamp(Duration position) {
   return seconds >= 3600 ? '${seconds ~/ 3600}:$tail' : tail;
 }
 
-/// Obtains headers only when an attachment is built. FutureBuilder also ignores
-/// completions for an old URL after a lesson changes or the row is disposed.
+/// Obtains headers when needed and decodes to the actual display size.
+/// Compact card thumbnails are preloaded by [RecordingNotesPanel] before rows
+/// slide in, so they render immediately without per-card spinners.
 class _PptImage extends StatefulWidget {
   const _PptImage({
     required this.url,
     required this.imageHeaders,
     required this.cacheWidth,
     this.compact = false,
+    this.preloadedFailure = false,
   });
 
   final Uri url;
@@ -534,6 +709,7 @@ class _PptImage extends StatefulWidget {
   /// Decode ceiling; the actual width follows the rendered size and DPR.
   final int cacheWidth;
   final bool compact;
+  final bool preloadedFailure;
 
   @override
   State<_PptImage> createState() => _PptImageState();
@@ -552,12 +728,17 @@ class _PptImageState extends State<_PptImage> {
   void didUpdateWidget(covariant _PptImage oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.url != widget.url ||
-        oldWidget.imageHeaders != widget.imageHeaders) {
+        oldWidget.imageHeaders != widget.imageHeaders ||
+        oldWidget.preloadedFailure != widget.preloadedFailure) {
       _loadHeaders();
     }
   }
 
   void _loadHeaders() {
+    if (widget.preloadedFailure) {
+      _headers = null;
+      return;
+    }
     _headers = widget.imageHeaders.peek(widget.url) == null
         ? widget.imageHeaders.load(widget.url)
         : null;
@@ -565,8 +746,14 @@ class _PptImageState extends State<_PptImage> {
 
   @override
   Widget build(BuildContext context) {
+    if (widget.preloadedFailure) return _unavailable();
     final ready = widget.imageHeaders.peek(widget.url);
     if (ready != null) return _image(ready);
+    if (widget.compact) {
+      // Preloading failed or timed out for this thumbnail; avoid showing a
+      // separate per-card loading spinner inside the slid-in card.
+      return _unavailable();
+    }
     return FutureBuilder<Map<String, String>>(
       future: _headers,
       builder: (context, snapshot) {
@@ -584,9 +771,8 @@ class _PptImageState extends State<_PptImage> {
     );
   }
 
-  // Like PiliPlus's NetworkImgLayer, decode for the actual display size:
-  // https://github.com/bggRGjQaUbCoE/PiliPlus/blob/265f879fa85973b4bf885bde2562f1007f1013b8/lib/common/widgets/image/network_img_layer.dart
-  // Keep the existing ceilings; the full-screen image viewer uses the source.
+  // Decode for the actual display size while respecting the ceiling; the
+  // full-screen image viewer uses the source asset.
   Widget _image(Map<String, String> headers) => LayoutBuilder(
         builder: (context, constraints) {
           final cacheWidth = constraints.hasBoundedWidth
@@ -601,15 +787,17 @@ class _PptImageState extends State<_PptImage> {
             cacheWidth: cacheWidth,
             excludeFromSemantics: true,
             errorBuilder: (context, error, stackTrace) => _unavailable(),
-            frameBuilder: (context, child, frame, synchronouslyLoaded) =>
-                synchronouslyLoaded || frame != null
-                    ? child
-                    : const Center(
-                        child: SizedBox.square(
-                          dimension: 20,
-                          child: CircularProgressIndicator(strokeWidth: 2),
-                        ),
-                      ),
+            frameBuilder: widget.compact
+                ? null
+                : (context, child, frame, synchronouslyLoaded) =>
+                    synchronouslyLoaded || frame != null
+                        ? child
+                        : const Center(
+                            child: SizedBox.square(
+                              dimension: 20,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            ),
+                          ),
           );
         },
       );
@@ -632,4 +820,72 @@ class _PptImageState extends State<_PptImage> {
             ),
           ),
         );
+}
+
+class _NoteEntrance extends StatefulWidget {
+  const _NoteEntrance({
+    required this.index,
+    required this.animate,
+    required this.child,
+  });
+
+  final int index;
+  final bool animate;
+  final Widget child;
+
+  @override
+  State<_NoteEntrance> createState() => _NoteEntranceState();
+}
+
+class _NoteEntranceState extends State<_NoteEntrance>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController? _entrance = widget.animate
+      ? AnimationController(
+          vsync: this,
+          duration: const Duration(milliseconds: 280),
+        )
+      : null;
+  late final Animation<Offset>? _position = _entrance
+      ?.drive(CurveTween(curve: Curves.easeOutCubic))
+      .drive(Tween(begin: const Offset(0.12, 0), end: Offset.zero));
+  Timer? _timer;
+  bool _started = false;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final entrance = _entrance;
+    if (entrance == null) return;
+    if (MediaQuery.disableAnimationsOf(context)) {
+      _timer?.cancel();
+      entrance.value = 1;
+      _started = true;
+    } else if (!_started) {
+      _started = true;
+      if (widget.index == 0) {
+        entrance.forward();
+      } else {
+        _timer = Timer(Duration(milliseconds: (widget.index % 6) * 55), () {
+          if (mounted) entrance.forward();
+        });
+      }
+    }
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    _entrance?.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final entrance = _entrance;
+    if (entrance == null) return widget.child;
+    return SlideTransition(
+      position: _position!,
+      child: FadeTransition(opacity: entrance, child: widget.child),
+    );
+  }
 }

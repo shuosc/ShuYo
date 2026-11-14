@@ -157,22 +157,21 @@ void main() {
         findsOneWidget);
     final detailPosition = tester.widget<Text>(
         find.byKey(const ValueKey('recording-note-detail-position')));
-    expect(detailPosition.textSpan!.toPlainText(), '笔记详情  2/2 页  1:02:03');
+    expect(detailPosition.textSpan!.toPlainText(), '2/2 页  1:02:03');
     final detailSpans = (detailPosition.textSpan! as TextSpan).children!;
     final detailContext = tester
         .element(find.byKey(const ValueKey('recording-note-detail-position')));
-    expect(detailSpans[0].toPlainText(), '笔记详情  ');
-    expect(detailSpans[0].style!.color, detailContext.shuyoColors.textPrimary);
-    expect(detailSpans[1].toPlainText(), '2');
-    expect(detailSpans[1].style!.color,
+    expect(detailSpans[0].toPlainText(), '2');
+    expect(detailSpans[0].style!.color,
         Theme.of(detailContext).colorScheme.primary);
-    expect(detailSpans[2].toPlainText(), '/2 页  ');
-    expect(detailSpans[2].style!.color, detailContext.shuyoColors.textPrimary);
-    for (final span in detailSpans.sublist(1, 3)) {
+    expect(detailSpans[1].toPlainText(), '/2 页  ');
+    expect(detailSpans[1].style!.color, detailContext.shuyoColors.textPrimary);
+    for (final span in detailSpans.take(2)) {
       expect(span.style!.fontWeight, FontWeight.w600);
       expect(span.style!.fontSize, detailPosition.style!.fontSize! + 1);
     }
-    expect(detailSpans[3].style!.color, detailContext.shuyoColors.textTertiary);
+    expect(detailSpans[2].style!.color, detailContext.shuyoColors.textTertiary);
+    expect(find.textContaining('笔记详情'), findsNothing);
     expect(find.byType(SelectableText), findsOneWidget);
     expect(
         tester
@@ -242,6 +241,17 @@ void main() {
     final note =
         slide(1, text: List.filled(20, '这是一段完整的 PPT 识别内容。').join('\n'));
     await tester.pumpWidget(app(slides: [note]));
+    final entrySlide = find
+        .ancestor(
+          of: find.byKey(const ValueKey('recording-note-open-1')),
+          matching: find.byType(SlideTransition),
+        )
+        .first;
+    expect(tester.widget<SlideTransition>(entrySlide).position.value.dx,
+        greaterThan(0));
+    await tester.pumpAndSettle();
+    expect(
+        tester.widget<SlideTransition>(entrySlide).position.value, Offset.zero);
 
     final image = tester
         .getRect(find.byKey(const ValueKey('recording-note-thumbnail-1')));
@@ -391,27 +401,29 @@ void main() {
     }
   });
 
-  testWidgets('77 PPT attachments obtain credentials only as rows appear',
+  testWidgets(
+      'PPT thumbnails preload credentials and warm cache before sliding in',
       (tester) async {
     final requests = <Uri>[];
     final pending = Completer<Map<String, String>>();
     await tester.pumpWidget(app(
-      slides: List.generate(77, (index) => slide(index + 1, image: true)),
+      slides: List.generate(12, (index) => slide(index + 1, image: true)),
       headersLoader: (url) {
         requests.add(url);
         return pending.future;
       },
     ));
     await tester.pump();
-    expect(requests, isNotEmpty);
-    expect(requests.length, lessThan(15));
-    expect(find.byKey(const ValueKey('recording-note-77')), findsNothing);
-    final before = requests.length;
-    await tester.drag(find.byKey(const ValueKey('recording-notes-scroll')),
-        const Offset(0, -700));
-    await tester.pump();
-    expect(requests.length, greaterThan(before));
-    expect(requests.length, lessThan(30));
+    expect(
+        find.byKey(const ValueKey('recording-notes-loading')), findsOneWidget);
+    expect(find.byKey(const ValueKey('recording-note-1')), findsNothing);
+    expect(requests.length, lessThanOrEqualTo(6));
+
+    pending.complete(const {});
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('recording-notes-loading')), findsNothing);
+    expect(find.byKey(const ValueKey('recording-note-1')), findsOneWidget);
+    expect(requests.length, 12);
     expect(tester.takeException(), isNull);
   });
 
@@ -438,7 +450,6 @@ void main() {
     expect(find.byKey(const ValueKey('recording-note-open-1')), findsOneWidget);
     expect(requests[slides.first.imageUrl], 1);
     expect(requests.values, everyElement(1));
-    expect(requests.length, lessThan(slides.length));
     expect(tester.takeException(), isNull);
   });
 
@@ -557,9 +568,9 @@ void main() {
     oldHeaders.completeError(StateError('old lesson'));
     await tester.pump();
     expect(find.byIcon(Icons.broken_image_outlined), findsNothing);
-    expect(find.text('第 2 页：牛顿运动定律及其应用。'), findsOneWidget);
     newHeaders.completeError(StateError('new lesson'));
-    await tester.pump();
+    await tester.pumpAndSettle();
+    expect(find.text('第 2 页：牛顿运动定律及其应用。'), findsOneWidget);
     expect(find.byIcon(Icons.broken_image_outlined), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
