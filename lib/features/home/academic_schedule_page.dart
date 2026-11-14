@@ -33,6 +33,25 @@ const _nonCurrentWeekCourseFill = Color(0xFFBDBDBD);
 const _nonCurrentWeekCourseText = Color(0xFFFFFFFF);
 const _nonCurrentWeekCourseMetaText = Color(0xD9FFFFFF);
 
+/// How long a confirmed color reassignment keeps the dialog away, so colors can
+/// be re-rolled a few times in a row.
+const _randomizeConfirmWindow = Duration(minutes: 5);
+
+/// Whether a recent confirmation still covers another reassignment.
+///
+/// A clock that moved backwards counts as "no recent confirmation" so the
+/// dialog errs on the side of being shown.
+@visibleForTesting
+bool randomizeConfirmationSuppressed({
+  required DateTime? confirmedAt,
+  required DateTime now,
+  Duration window = _randomizeConfirmWindow,
+}) {
+  if (confirmedAt == null) return false;
+  final elapsed = now.difference(confirmedAt);
+  return !elapsed.isNegative && elapsed < window;
+}
+
 class AcademicSchedulePage extends StatefulWidget {
   const AcademicSchedulePage({
     super.key,
@@ -81,6 +100,9 @@ class _AcademicSchedulePageState extends State<AcademicSchedulePage> {
       const AcademicScheduleDisplaySettings(
           colorful: true, showTeacher: true, showCredit: false);
   Map<String, int> _courseColorValues = const {};
+  /// When the user last confirmed a color reassignment, used to keep the
+  /// dialog away while colors are re-rolled.
+  DateTime? _colorsConfirmedAt;
   late bool _usingInitialState;
   String? _initialLoadError;
   String? _viewedTermKey;
@@ -647,7 +669,12 @@ class _AcademicSchedulePageState extends State<AcademicSchedulePage> {
         .toSet()
         .toList()
       ..sort();
-    if (!await _confirmRandomizeColors(keys)) {
+    final now = DateTime.now();
+    if (!randomizeConfirmationSuppressed(
+          confirmedAt: _colorsConfirmedAt,
+          now: now,
+        ) &&
+        !await _confirmRandomizeColors(keys)) {
       return;
     }
     if (!mounted) {
@@ -665,6 +692,7 @@ class _AcademicSchedulePageState extends State<AcademicSchedulePage> {
       next[key] = available[random.nextInt(available.length)].toARGB32();
     }
     await _displaySettingsService.saveCourseColors(next);
+    _colorsConfirmedAt = now;
     AcademicScheduleDisplaySettings settings = _displaySettings;
     if (!settings.colorful) {
       settings = await _displaySettingsService.saveSettings(

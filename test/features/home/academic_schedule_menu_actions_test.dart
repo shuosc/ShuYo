@@ -67,9 +67,8 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.text('随机颜色'));
     await tester.pumpAndSettle();
-    expect(find.text('确认随机颜色'), findsOneWidget);
-    await tester.tap(find.text('确定'));
-    await tester.pumpAndSettle();
+    // Still inside the five-minute window opened by the confirmation above.
+    expect(find.text('确认随机颜色'), findsNothing);
     final second =
         await AcademicScheduleDisplaySettingsService().loadCourseColors();
     expect(second['MATH101'], isNot(assigned));
@@ -247,6 +246,36 @@ void main() {
     expect(palette.map((color) => color.toARGB32()),
         contains(colors['MATH101']));
     expect(tester.takeException(), isNull);
+  });
+
+  test('a confirmed reassignment covers the next five minutes only', () {
+    final confirmedAt = DateTime(2026, 11, 14, 12);
+    expect(
+      randomizeConfirmationSuppressed(confirmedAt: null, now: confirmedAt),
+      isFalse,
+    );
+    expect(
+      randomizeConfirmationSuppressed(
+        confirmedAt: confirmedAt,
+        now: confirmedAt.add(const Duration(minutes: 4, seconds: 59)),
+      ),
+      isTrue,
+    );
+    expect(
+      randomizeConfirmationSuppressed(
+        confirmedAt: confirmedAt,
+        now: confirmedAt.add(const Duration(minutes: 5)),
+      ),
+      isFalse,
+    );
+    // A clock that jumps backwards must not suppress the dialog.
+    expect(
+      randomizeConfirmationSuppressed(
+        confirmedAt: confirmedAt,
+        now: confirmedAt.subtract(const Duration(seconds: 1)),
+      ),
+      isFalse,
+    );
   });
 }
 
