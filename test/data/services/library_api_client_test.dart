@@ -283,6 +283,64 @@ void main() {
       );
     });
 
+    test('searchBooks forwards campusId and publish year range', () async {
+      final client = MockClient((request) async {
+        if (request.url.path == LibraryConstants.unifySearchPath) {
+          final body = jsonDecode(request.body) as Map<String, dynamic>;
+          expect(body['campusId'], ['1', '2', '3']);
+          expect(body['publishBegin'], '2023');
+          expect(body['publishEnd'], '2026');
+          return utf8Response(
+            jsonEncode({
+              'success': true,
+              'data': {'numFound': 0, 'searchResult': []},
+            }),
+            200,
+          );
+        }
+        return utf8Response('Not Found', 404);
+      });
+
+      final apiClient = LibraryApiClient(httpClient: client);
+      await apiClient.searchBooks(
+        keyword: '机器学习',
+        campusIds: LibraryCampusFilter.toSearchCampusIds({
+          LibraryCampusFilter.baoshan,
+          LibraryCampusFilter.jiading,
+        }),
+        publishBegin: '2023',
+        publishEnd: '2026',
+      );
+    });
+
+    test('fetchRankList sends selected campusIds for newBook without ALL',
+        () async {
+      final client = MockClient((request) async {
+        if (request.url.path == LibraryConstants.newBookPath) {
+          final body = jsonDecode(request.body) as Map<String, dynamic>;
+          expect(body['campusId'], [4, 3]);
+          return utf8Response(
+            jsonEncode({
+              'success': true,
+              'data': {'searchResult': []},
+            }),
+            200,
+          );
+        }
+        return utf8Response('Not Found', 404);
+      });
+
+      final apiClient = LibraryApiClient(httpClient: client);
+      await apiClient.fetchRankList(
+        type: LibraryRankType.newBook,
+        newBookCampuses: {
+          LibraryCampusFilter.yanchang,
+          LibraryCampusFilter.jiading,
+        },
+        loadCovers: false,
+      );
+    });
+
     test('LibraryBookSearchResult stops pagination at numFound boundary', () {
       const page1 = LibraryBookSearchResult(
         numFound: 40,

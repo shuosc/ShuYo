@@ -162,7 +162,7 @@ class LibraryApiClient {
     LibraryAuthSession? session,
     bool loadCovers = true,
     HotLoanSortType hotLoanSort = HotLoanSortType.loanCount,
-    NewBookCampus newBookCampus = NewBookCampus.all,
+    Set<LibraryCampusFilter> newBookCampuses = const {},
   }) async {
     final String path;
     switch (type) {
@@ -194,7 +194,7 @@ class LibraryApiClient {
     } else if (type == LibraryRankType.newBook) {
       requestBody['time'] = '1'; // 默认最近一周
       requestBody['docCode'] = '1';
-      requestBody['campusId'] = newBookCampus.campusIds;
+      requestBody['campusId'] = LibraryCampusFilter.toCampusIds(newBookCampuses);
     }
 
     final uri = Uri.parse('${LibraryConstants.baseUrl}$path');
@@ -310,11 +310,14 @@ class LibraryApiClient {
     return booksWithCover;
   }
 
-  /// 统一检索图书（限定 docCode = ["1"]，支持分页与批量封面/馆藏补全）
+  /// 统一检索图书（限定 docCode = ["1"]、resourceType = ["1"]，支持校区、出版年筛选与批量封面/馆藏补全）
   Future<LibraryBookSearchResult> searchBooks({
     required String keyword,
     int page = 1,
     int rows = 20,
+    List<String> campusIds = const [],
+    String? publishBegin,
+    String? publishEnd,
     LibraryAuthSession? session,
     bool loadSupplementary = true,
   }) async {
@@ -333,6 +336,8 @@ class LibraryApiClient {
     final uri = Uri.parse(
       '${LibraryConstants.baseUrl}${LibraryConstants.unifySearchPath}',
     );
+    final normalizedBegin = publishBegin?.trim();
+    final normalizedEnd = publishEnd?.trim();
     final requestBody = <String, dynamic>{
       'docCode': ['1'],
       'litCode': const [],
@@ -346,14 +351,20 @@ class LibraryApiClient {
       'eCollectionIds': const [],
       'neweCollectionIds': const [],
       'curLocationId': const [],
-      'campusId': const [],
+      'campusId': campusIds,
       'kindNo': const [],
       'collectionName': const [],
       'author': const [],
       'langCode': const [],
       'countryCode': const [],
-      'publishBegin': null,
-      'publishEnd': null,
+      'publishBegin':
+          normalizedBegin != null && normalizedBegin.isNotEmpty
+              ? normalizedBegin
+              : null,
+      'publishEnd':
+          normalizedEnd != null && normalizedEnd.isNotEmpty
+              ? normalizedEnd
+              : null,
       'coreInclude': const [],
       'ddType': const [],
       'verifyStatus': const [],

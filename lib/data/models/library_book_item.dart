@@ -319,14 +319,130 @@ enum HotLoanSortType {
   final String label;
 }
 
-/// 新书速递校区筛选
-enum NewBookCampus {
-  all('ALL', []),
+/// 新书速递 / 检索校区筛选选项（不再包含单独的 ALL 项，多选全部勾选或全部取消均代表全校区）
+enum LibraryCampusFilter {
   baoshan('宝山校区', [1, 2]),
   yanchang('延长校区', [4]),
   jiading('嘉定校区', [3]);
 
-  const NewBookCampus(this.label, this.campusIds);
+  const LibraryCampusFilter(this.label, this.campusIds);
   final String label;
   final List<int> campusIds;
+
+  static List<int> toCampusIds(Set<LibraryCampusFilter> selected) {
+    if (selected.isEmpty || selected.length == values.length) {
+      return const [];
+    }
+    return [
+      for (final campus in values)
+        if (selected.contains(campus)) ...campus.campusIds,
+    ];
+  }
+
+  static List<String> toSearchCampusIds(Set<LibraryCampusFilter> selected) =>
+      toCampusIds(selected).map((id) => id.toString()).toList(growable: false);
+
+  static String summaryLabel(Set<LibraryCampusFilter> selected) {
+    if (selected.isEmpty || selected.length == values.length) {
+      return '全部校区';
+    }
+    return [
+      for (final campus in values)
+        if (selected.contains(campus)) campus.label,
+    ].join('、');
+  }
+}
+
+@Deprecated('Use LibraryCampusFilter instead')
+typedef NewBookCampus = LibraryCampusFilter;
+
+enum LibraryPublishTimePreset {
+  all('全部时间'),
+  oneYear('1年内'),
+  threeYears('3年内'),
+  fiveYears('5年内'),
+  custom('自定义时间');
+
+  const LibraryPublishTimePreset(this.label);
+  final String label;
+}
+
+class LibraryPublishTimeFilter {
+  const LibraryPublishTimeFilter._({
+    required this.preset,
+    this.customBeginYear,
+    this.customEndYear,
+  });
+
+  const LibraryPublishTimeFilter.all()
+      : this._(preset: LibraryPublishTimePreset.all);
+
+  const LibraryPublishTimeFilter.preset(this.preset)
+      : assert(preset != LibraryPublishTimePreset.custom),
+        customBeginYear = null,
+        customEndYear = null;
+
+  const LibraryPublishTimeFilter.custom({
+    int? beginYear,
+    int? endYear,
+  }) : this._(
+          preset: LibraryPublishTimePreset.custom,
+          customBeginYear: beginYear,
+          customEndYear: endYear,
+        );
+
+  final LibraryPublishTimePreset preset;
+  final int? customBeginYear;
+  final int? customEndYear;
+
+  bool get isActive => preset != LibraryPublishTimePreset.all;
+
+  ({String? begin, String? end}) resolveYears({DateTime? now}) {
+    final currentYear = (now ?? DateTime.now()).year;
+    switch (preset) {
+      case LibraryPublishTimePreset.all:
+        return (begin: null, end: null);
+      case LibraryPublishTimePreset.oneYear:
+        return (begin: '${currentYear - 1}', end: '$currentYear');
+      case LibraryPublishTimePreset.threeYears:
+        return (begin: '${currentYear - 3}', end: '$currentYear');
+      case LibraryPublishTimePreset.fiveYears:
+        return (begin: '${currentYear - 5}', end: '$currentYear');
+      case LibraryPublishTimePreset.custom:
+        final b = customBeginYear;
+        final e = customEndYear;
+        if (b != null && e != null && b > e) {
+          return (begin: '$e', end: '$b');
+        }
+        return (
+          begin: b?.toString(),
+          end: e?.toString(),
+        );
+    }
+  }
+
+  String label({DateTime? now}) {
+    if (preset != LibraryPublishTimePreset.custom) {
+      return preset.label;
+    }
+    final resolved = resolveYears(now: now);
+    final b = resolved.begin;
+    final e = resolved.end;
+    if (b != null && e != null) return '$b–$e年';
+    if (b != null) return '$b年起';
+    if (e != null) return '$e年及以前';
+    return '自定义时间';
+  }
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is LibraryPublishTimeFilter &&
+          runtimeType == other.runtimeType &&
+          preset == other.preset &&
+          customBeginYear == other.customBeginYear &&
+          customEndYear == other.customEndYear;
+
+  @override
+  int get hashCode => Object.hash(preset, customBeginYear, customEndYear);
 }
