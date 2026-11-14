@@ -209,7 +209,7 @@ void main() {
             find.descendant(of: time, matching: find.byType(Text)));
         expect(label.textSpan!.toPlainText(), '1:05:00/1:30:00');
         expect(label.maxLines, 1);
-        expect(label.style!.fontWeight, FontWeight.w700);
+        expect(label.style!.fontWeight, FontWeight.w600);
         expect(label.style!.fontSize, fullscreen ? 14 : 13);
         final controls = tester
             .getRect(find.byKey(const ValueKey('recording-bottom-controls')));

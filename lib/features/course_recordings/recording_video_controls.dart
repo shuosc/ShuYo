@@ -1472,7 +1472,7 @@ class _RecordingVideoControlsState extends State<RecordingVideoControls>
                 style: TextStyle(
                     color: Colors.white,
                     fontSize: timeFontSize,
-                    fontWeight: FontWeight.w700,
+                    fontWeight: FontWeight.w600,
                     height: 1.4,
                     fontFamily: 'Monospace',
                     fontFeatures: const [FontFeature.tabularFigures()]),
