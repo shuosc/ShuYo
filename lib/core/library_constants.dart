@@ -57,6 +57,13 @@ class LibraryConstants {
   /// 读秀封面图片地址端点
   static const duxiuCoverPath = '/find/book/getDuxiuImageUrl';
 
+  /// 统一检索端点
+  static const unifySearchPath = '/find/unify/search';
+
+  /// 批量获取物理馆藏、在架数及读秀封面端点
+  static const batchBookSupplementaryPath =
+      '/find/unify/getPItemAndOnShelfCountAndDuxiuImageUrl';
+
   /// 授权必须从超星认证站的入口开始：它会先下发 `firstReferer` 等 Cookie，
   /// 再把浏览器带到 newsso。直接请求 newsso 会让回调缺少这些状态。
   static Uri get initUri => Uri.https(chaoxingAuthHost, chaoxingInitPath, {

@@ -310,6 +310,228 @@ class LibraryApiClient {
     return booksWithCover;
   }
 
+  /// 统一检索图书（限定 docCode = ["1"]，支持分页与批量封面/馆藏补全）
+  Future<LibraryBookSearchResult> searchBooks({
+    required String keyword,
+    int page = 1,
+    int rows = 20,
+    LibraryAuthSession? session,
+    bool loadSupplementary = true,
+  }) async {
+    final trimmed = keyword.trim();
+    final safeRows = rows.clamp(1, 50);
+    if (trimmed.isEmpty) {
+      return LibraryBookSearchResult(
+        numFound: 0,
+        page: page,
+        rows: safeRows,
+        books: const [],
+        rawResultCount: 0,
+      );
+    }
+
+    final uri = Uri.parse(
+      '${LibraryConstants.baseUrl}${LibraryConstants.unifySearchPath}',
+    );
+    final requestBody = <String, dynamic>{
+      'docCode': ['1'],
+      'litCode': const [],
+      'matchMode': '2',
+      'resourceType': ['1'],
+      'subject': const [],
+      'discode1': const [],
+      'publisher': const [],
+      'libCode': const [],
+      'locationId': const [],
+      'eCollectionIds': const [],
+      'neweCollectionIds': const [],
+      'curLocationId': const [],
+      'campusId': const [],
+      'kindNo': const [],
+      'collectionName': const [],
+      'author': const [],
+      'langCode': const [],
+      'countryCode': const [],
+      'publishBegin': null,
+      'publishEnd': null,
+      'coreInclude': const [],
+      'ddType': const [],
+      'verifyStatus': const [],
+      'group': const [],
+      'sortField': 'relevance',
+      'sortClause': 'asc',
+      'page': page,
+      'rows': safeRows,
+      'onlyOnShelf': null,
+      'searchItems': null,
+      'searchFieldContent': trimmed,
+      'searchField': 'keyWord',
+      'newCoreInclude': const [],
+      'customSub': const [],
+      'customSub0': const [],
+      'indexSearch': 1,
+    };
+
+    final response = await _httpClient
+        .post(
+          uri,
+          headers: _buildHeaders(session: session),
+          body: jsonEncode(requestBody),
+        )
+        .timeout(HttpTimeout.normal);
+
+    if (response.statusCode != 200) {
+      throw LibraryApiException(
+        '搜索图书失败',
+        statusCode: response.statusCode,
+      );
+    }
+
+    final dynamic decoded = jsonDecode(utf8.decode(response.bodyBytes));
+    if (decoded is! Map<String, dynamic> || decoded['success'] != true) {
+      throw LibraryApiException(
+        decoded is Map<String, dynamic>
+            ? (decoded['message'] as String? ?? '搜索图书失败')
+            : '搜索图书失败',
+      );
+    }
+
+    final data = decoded['data'];
+    if (data is! Map<String, dynamic>) {
+      return LibraryBookSearchResult(
+        numFound: 0,
+        page: page,
+        rows: safeRows,
+        books: const [],
+        rawResultCount: 0,
+      );
+    }
+
+    final numFound = (data['numFound'] as num?)?.toInt() ?? 0;
+    final rawList = (data['searchResult'] as List?) ?? const [];
+    final rawItems = rawList.whereType<Map<String, dynamic>>().toList();
+
+    final books = <LibraryBookItem>[];
+    for (final item in rawItems) {
+      final rawDocCode = item['docCode']?.toString().trim();
+      if (rawDocCode != null && rawDocCode.isNotEmpty && rawDocCode != '1') {
+        continue;
+      }
+      final book = LibraryBookItem.fromUnifySearch(item);
+      if (book.recordId > 0) {
+        books.add(book);
+      }
+    }
+
+    if (!loadSupplementary || books.isEmpty) {
+      return LibraryBookSearchResult(
+        numFound: numFound,
+        page: page,
+        rows: safeRows,
+        books: books,
+        rawResultCount: rawItems.length,
+      );
+    }
+
+    final supplemented = await _applyBatchBookSupplementary(
+      books,
+      session: session,
+    );
+    return LibraryBookSearchResult(
+      numFound: numFound,
+      page: page,
+      rows: safeRows,
+      books: supplemented,
+      rawResultCount: rawItems.length,
+    );
+  }
+
+  /// 批量获取图书封面和全馆馆藏数量（一页仅发一次请求）
+  Future<Map<int, ({String? coverUrl, int? pCount, int? onShelfCount, double? avgScore})>>
+      fetchBatchBookSupplementary(
+    List<LibraryBookItem> books, {
+    LibraryAuthSession? session,
+  }) async {
+    if (books.isEmpty) return const {};
+    try {
+      final uri = Uri.parse(
+        '${LibraryConstants.baseUrl}${LibraryConstants.batchBookSupplementaryPath}',
+      );
+      final payload = {
+        'items': [
+          for (final book in books)
+            {
+              'title': book.title,
+              'isbn': book.isbn ?? '',
+              'recordId': book.recordId,
+            },
+        ],
+      };
+
+      final response = await _httpClient
+          .post(
+            uri,
+            headers: _buildHeaders(session: session),
+            body: jsonEncode(payload),
+          )
+          .timeout(HttpTimeout.normal);
+
+      if (response.statusCode != 200) return const {};
+      final dynamic decoded = jsonDecode(utf8.decode(response.bodyBytes));
+      if (decoded is! Map<String, dynamic> || decoded['success'] != true) {
+        return const {};
+      }
+      final data = decoded['data'];
+      if (data is! Map<String, dynamic>) return const {};
+
+      final result = <int,
+          ({String? coverUrl, int? pCount, int? onShelfCount, double? avgScore})>{};
+      for (final entry in data.entries) {
+        final id = int.tryParse(entry.key);
+        if (id == null || entry.value is! Map<String, dynamic>) continue;
+        final info = entry.value as Map<String, dynamic>;
+        final rawCover = (info['duxiuImageUrl'] as String?)?.trim();
+        final coverUrl =
+            rawCover != null && rawCover.isNotEmpty ? rawCover : null;
+        final pCount = (info['pCount'] as num?)?.toInt();
+        final onShelfCount = (info['onShelfCount'] as num?)?.toInt();
+        final rawScore = info['avgScore'];
+        final score = rawScore is num
+            ? rawScore.toDouble()
+            : double.tryParse(rawScore?.toString() ?? '');
+        result[id] = (
+          coverUrl: coverUrl,
+          pCount: pCount,
+          onShelfCount: onShelfCount,
+          avgScore: score != null && score > 0 ? score : null,
+        );
+      }
+      return result;
+    } on Object {
+      return const {};
+    }
+  }
+
+  Future<List<LibraryBookItem>> _applyBatchBookSupplementary(
+    List<LibraryBookItem> books, {
+    LibraryAuthSession? session,
+  }) async {
+    final map = await fetchBatchBookSupplementary(books, session: session);
+    if (map.isEmpty) return books;
+    return books.map((book) {
+      final extra = map[book.recordId];
+      if (extra == null) return book;
+      return book.copyWith(
+        coverUrl: (book.coverUrl == null || book.coverUrl!.isEmpty)
+            ? extra.coverUrl
+            : null,
+        totalHolding: extra.pCount ?? book.totalHolding,
+        onShelfHolding: extra.onShelfCount ?? book.onShelfHolding,
+        rating: book.rating ?? extra.avgScore,
+      );
+    }).toList(growable: false);
+  }
+
   /// 获取单本书籍的在架与总馆藏数
   Future<({int onShelf, int total})?> fetchBookHoldings({
     required int recordId,

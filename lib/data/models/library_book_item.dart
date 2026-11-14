@@ -242,6 +242,62 @@ class LibraryBookItem {
       onShelfHolding: onShelf,
     );
   }
+
+  /// 解析统一检索结果项（限定图书）
+  factory LibraryBookItem.fromUnifySearch(Map<String, dynamic> json) {
+    final total = (json['physicalCount'] as num?)?.toInt() ??
+        (json['groupPhysicalCount'] as num?)?.toInt();
+    final onShelf = (json['onShelfCountI'] as num?)?.toInt() ??
+        (json['onShelfNum'] as num?)?.toInt();
+    final rawScore = json['avgScore'];
+    final score = rawScore is num
+        ? rawScore.toDouble()
+        : double.tryParse(rawScore?.toString() ?? '');
+    final rawPub = (json['publisher'] as String?)?.trim();
+    final rawYear = (json['publishYear'] as String?)?.trim();
+    final pubInfo = parsePublisherAndYear(rawPub, rawYear);
+    final rawPic = (json['pic'] as String?)?.trim();
+
+    return LibraryBookItem(
+      recordId: (json['recordId'] as num?)?.toInt() ?? 0,
+      title: (json['title'] as String?)?.trim() ?? '',
+      author: (json['author'] as String?)?.trim(),
+      publisher: pubInfo.publisher,
+      publishYear: pubInfo.year,
+      isbn: (json['isbn'] as String?)?.trim(),
+      callNo: (json['callNoOne'] as String?)?.trim() ??
+          (json['callNo'] is List && (json['callNo'] as List).isNotEmpty
+              ? (json['callNo'] as List).first.toString().trim()
+              : null),
+      coverUrl: rawPic != null && rawPic.isNotEmpty ? rawPic : null,
+      summary: (json['adstract'] as String?)?.trim(),
+      totalHolding: total,
+      onShelfHolding: onShelf,
+      rating: score != null && score > 0 ? score : null,
+    );
+  }
+}
+
+class LibraryBookSearchResult {
+  const LibraryBookSearchResult({
+    required this.numFound,
+    required this.page,
+    required this.rows,
+    required this.books,
+    this.rawResultCount,
+  });
+
+  final int numFound;
+  final int page;
+  final int rows;
+  final List<LibraryBookItem> books;
+  final int? rawResultCount;
+
+  bool hasMore(int loadedCount) {
+    final received = rawResultCount ?? books.length;
+    if (received == 0 || received < rows) return false;
+    return loadedCount < numFound && page * rows < numFound;
+  }
 }
 
 enum LibraryRankType {
