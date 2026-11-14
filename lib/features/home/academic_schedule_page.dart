@@ -6,6 +6,7 @@ import 'dart:math';
 import 'package:flutter/foundation.dart';
 import 'package:material_ui/material_ui.dart';
 
+import '../../core/confirmation_window.dart';
 import '../../data/models/academic_schedule.dart';
 import '../../data/models/academic_schedule_collection.dart';
 import '../../data/repositories/academic_schedule_repository.dart';
@@ -32,25 +33,7 @@ const _scheduleCourseRadius = 5.0;
 const _nonCurrentWeekCourseFill = Color(0xFFBDBDBD);
 const _nonCurrentWeekCourseText = Color(0xFFFFFFFF);
 const _nonCurrentWeekCourseMetaText = Color(0xD9FFFFFF);
-
-/// How long a confirmed color reassignment keeps the dialog away, so colors can
-/// be re-rolled a few times in a row.
 const _randomizeConfirmWindow = Duration(minutes: 5);
-
-/// Whether a recent confirmation still covers another reassignment.
-///
-/// A clock that moved backwards counts as "no recent confirmation" so the
-/// dialog errs on the side of being shown.
-@visibleForTesting
-bool randomizeConfirmationSuppressed({
-  required DateTime? confirmedAt,
-  required DateTime now,
-  Duration window = _randomizeConfirmWindow,
-}) {
-  if (confirmedAt == null) return false;
-  final elapsed = now.difference(confirmedAt);
-  return !elapsed.isNegative && elapsed < window;
-}
 
 class AcademicSchedulePage extends StatefulWidget {
   const AcademicSchedulePage({
@@ -622,20 +605,18 @@ class _AcademicSchedulePageState extends State<AcademicSchedulePage> {
     if (confirmed == true && mounted) await _refreshSchedule();
   }
 
-  /// Confirms before overwriting every course color, like the other
-  /// destructive actions on this page.
+  /// Confirms before overwriting the colors of the term on screen.
   Future<bool> _confirmRandomizeColors(List<String> keys) async {
     final overwritesManual = keys.any(_courseColorValues.containsKey);
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) {
-        final colors = context.shuyoColors;
         return AlertDialog(
           title: const Text('确认随机颜色'),
           content: Text(
             '点击确定后将为当前学期所有课程随机分配配色。'
-            '${overwritesManual ? '已手动设置的颜色会被覆盖，且无法撤销。' : ''}'
-            '${_displaySettings.colorful ? '' : '同时打开多彩显示。'}',
+            '${overwritesManual ? '已手动设置的颜色会被覆盖。' : ''}'
+            '${_displaySettings.colorful ? '' : '将同时打开多彩显示。'}',
           ),
           actions: [
             TextButton(
@@ -644,10 +625,6 @@ class _AcademicSchedulePageState extends State<AcademicSchedulePage> {
             ),
             FilledButton(
               onPressed: () => Navigator.of(context).pop(true),
-              style: FilledButton.styleFrom(
-                backgroundColor: colors.danger,
-                foregroundColor: Colors.white,
-              ),
               child: const Text('确定'),
             ),
           ],
@@ -670,9 +647,10 @@ class _AcademicSchedulePageState extends State<AcademicSchedulePage> {
         .toList()
       ..sort();
     final now = DateTime.now();
-    if (!randomizeConfirmationSuppressed(
+    if (!isConfirmationFresh(
           confirmedAt: _colorsConfirmedAt,
           now: now,
+          window: _randomizeConfirmWindow,
         ) &&
         !await _confirmRandomizeColors(keys)) {
       return;
@@ -680,6 +658,8 @@ class _AcademicSchedulePageState extends State<AcademicSchedulePage> {
     if (!mounted) {
       return;
     }
+    final previousColors = Map<String, int>.of(_courseColorValues);
+    final previousSettings = _displaySettings;
     final palette = context.shuyoColors.schedulePalette;
     final random = Random();
     // Colors assigned to courses outside the current term are kept as they are.
@@ -704,7 +684,30 @@ class _AcademicSchedulePageState extends State<AcademicSchedulePage> {
       _courseColorValues = next;
       _displaySettings = settings;
     });
-    _showSnack('已随机分配颜色');
+    _showSnack(
+      '已随机分配颜色',
+      action: SnackBarAction(
+        label: '撤销',
+        onPressed: () => unawaited(
+          _restoreColors(previousColors, previousSettings),
+        ),
+      ),
+    );
+  }
+
+  /// Puts back the colors and display settings captured before a
+  /// reassignment, used by the snack bar action.
+  Future<void> _restoreColors(
+    Map<String, int> colors,
+    AcademicScheduleDisplaySettings settings,
+  ) async {
+    await _displaySettingsService.saveCourseColors(colors);
+    final restored = await _displaySettingsService.saveSettings(settings);
+    if (!mounted) return;
+    setState(() {
+      _courseColorValues = colors;
+      _displaySettings = restored;
+    });
   }
 
   Future<bool> _recoverSession() async {
@@ -1708,12 +1711,21 @@ class _AcademicSchedulePageState extends State<AcademicSchedulePage> {
     return messages.isEmpty ? '通知设置已保存' : messages.join('；');
   }
 
-  void _showSnack(String message) {
+  void _showSnack(String message, {SnackBarAction? action}) {
     if (!mounted) {
       return;
     }
     ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(message)),
+      SnackBar(
+        content: Text(message),
+        action: action,
+        // SnackBar defaults `persist` to true whenever an action is present,
+        // which makes it ignore `duration` and stay until tapped.
+        persist: false,
+        duration: action == null
+            ? const Duration(seconds: 4)
+            : const Duration(seconds: 2),
+      ),
     );
   }
 

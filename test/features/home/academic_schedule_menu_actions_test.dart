@@ -1,6 +1,7 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:material_ui/material_ui.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:shuyo/core/confirmation_window.dart';
 import 'package:shuyo/data/models/academic_schedule.dart';
 import 'package:shuyo/data/repositories/academic_schedule_repository.dart';
 import 'package:shuyo/data/services/academic_schedule_display_settings_service.dart';
@@ -248,31 +249,65 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets('the snack bar undo restores colors and the color mode',
+      (tester) async {
+    SharedPreferences.setMockInitialValues({});
+    final repository = _ScheduleRepository();
+    final service = AcademicScheduleDisplaySettingsService();
+    final palette =
+        ShuYoThemes.byId(ShuYoThemes.defaultId).colors.schedulePalette;
+    final manual = palette[3].toARGB32();
+    await service.saveCourseColor('MATH101', manual);
+    await _pumpColorSchedule(tester, repository, _schedule, colorful: false);
+    await tester.tap(find.byTooltip('更多'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('随机颜色'));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('已手动设置的颜色会被覆盖'), findsOneWidget);
+    await tester.tap(find.text('确定'));
+    await tester.pumpAndSettle();
+    expect((await service.loadState()).settings.colorful, isTrue);
+    expect((await service.loadCourseColors())['MATH101'], isNot(manual));
+
+    expect(find.text('撤销'), findsOneWidget);
+    await tester.tap(find.text('撤销'));
+    await tester.pumpAndSettle();
+
+    expect((await service.loadCourseColors())['MATH101'], manual);
+    expect((await service.loadState()).settings.colorful, isFalse);
+    expect(tester.takeException(), isNull);
+  });
+
   test('a confirmed reassignment covers the next five minutes only', () {
     final confirmedAt = DateTime(2026, 11, 14, 12);
+    const window = Duration(minutes: 5);
     expect(
-      randomizeConfirmationSuppressed(confirmedAt: null, now: confirmedAt),
+      isConfirmationFresh(
+          confirmedAt: null, now: confirmedAt, window: window),
       isFalse,
     );
     expect(
-      randomizeConfirmationSuppressed(
+      isConfirmationFresh(
         confirmedAt: confirmedAt,
         now: confirmedAt.add(const Duration(minutes: 4, seconds: 59)),
+        window: window,
       ),
       isTrue,
     );
     expect(
-      randomizeConfirmationSuppressed(
+      isConfirmationFresh(
         confirmedAt: confirmedAt,
         now: confirmedAt.add(const Duration(minutes: 5)),
+        window: window,
       ),
       isFalse,
     );
     // A clock that jumps backwards must not suppress the dialog.
     expect(
-      randomizeConfirmationSuppressed(
+      isConfirmationFresh(
         confirmedAt: confirmedAt,
         now: confirmedAt.subtract(const Duration(seconds: 1)),
+        window: window,
       ),
       isFalse,
     );
