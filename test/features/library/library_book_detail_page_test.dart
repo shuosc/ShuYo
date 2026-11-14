@@ -1,10 +1,45 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shuyo/core/utils/library_book_citation.dart';
+import 'package:shuyo/data/models/library_book_detail.dart';
 import 'package:shuyo/features/library/library_book_citation_bottom_sheet.dart';
 import 'package:shuyo/features/library/library_book_detail_page.dart';
 
 void main() {
+  group('LibraryBookDetailModel', () {
+    test('prefers composite baseMarcInfoDto.titles over short base title', () {
+      final model = LibraryBookDetailModel.fromApiResponse(
+        recordId: 795684,
+        detailData: {
+          'baseMarcInfoDto': {
+            'title': '中国诗歌',
+            'titles': '中国诗歌.第69卷(2015年第九卷).水边的月亮',
+            'cleanAuthor': '主编阎志',
+            'publisher': '人民文学出版社',
+            'publishYear': '2015',
+            'isbn': '978-7-02-011146-6',
+          },
+        },
+      );
+
+      expect(model.title, '中国诗歌.第69卷(2015年第九卷).水边的月亮');
+    });
+
+    test('falls back to baseMarcInfoDto.title when titles is empty', () {
+      final model = LibraryBookDetailModel.fromApiResponse(
+        recordId: 796762,
+        detailData: {
+          'baseMarcInfoDto': {
+            'title': '机器学习',
+            'titles': '',
+          },
+        },
+      );
+
+      expect(model.title, '机器学习');
+    });
+  });
+
   group('LibraryBookCitation', () {
     test('formats GB/T 7714, MLA and APA correctly matching web standard', () {
       const citation = LibraryBookCitation(
@@ -95,7 +130,7 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.text('图书详情'), findsOneWidget);
-      expect(find.text('机器学习'), findsOneWidget);
+      expect(find.text('机器学习'), findsWidgets);
       expect(find.text('清华大学出版社 (2016)'), findsOneWidget);
       expect(find.text('宝山'), findsOneWidget);
       expect(find.text('嘉定'), findsOneWidget);
