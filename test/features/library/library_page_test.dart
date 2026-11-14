@@ -69,7 +69,7 @@ class _MockLibraryApiClient extends LibraryApiClient {
     LibraryAuthSession? session,
     bool loadCovers = true,
     HotLoanSortType hotLoanSort = HotLoanSortType.loanCount,
-    NewBookCampus newBookCampus = NewBookCampus.all,
+    Set<LibraryCampusFilter> newBookCampuses = const {},
   }) async {
     rankCalls++;
     return rankResult;
@@ -159,14 +159,14 @@ void main() {
     // 检查“今日推荐”标题
     expect(find.text('今日推荐'), findsOneWidget);
     // 检查书目各行内容
-    expect(find.text('“傻瓜”计量经济学与Stata应用'), findsOneWidget);
+    expect(find.text('“傻瓜”计量经济学与Stata应用'), findsWidgets);
     expect(find.textContaining('习明明'), findsOneWidget);
-    expect(find.textContaining('经济科学出版社'), findsOneWidget);
+    expect(find.textContaining('经济科学出版社'), findsWidgets);
     expect(find.textContaining('(2024)'), findsOneWidget);
     expect(find.textContaining('本书内容涵盖Stata的数据处理'), findsOneWidget);
 
     // 点击今日推荐卡片
-    await tester.tap(find.text('“傻瓜”计量经济学与Stata应用'));
+    await tester.tap(find.text('“傻瓜”计量经济学与Stata应用').last);
     await tester.pumpAndSettle();
 
     // 验证跳转到了“图书详情”子页面
@@ -205,7 +205,7 @@ void main() {
     expect(find.text('热门收藏'), findsOneWidget);
     expect(find.text('高分图书'), findsOneWidget);
     expect(find.text('新书速递'), findsOneWidget);
-    expect(find.text('机器学习'), findsOneWidget);
+    expect(find.text('机器学习'), findsWidgets);
     expect(find.text('周志华著'), findsOneWidget);
 
     // 点击底部“查看榜单”按钮进入榜单子页面

@@ -3,96 +3,119 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 
 import '../../data/models/library_book_item.dart';
+import '../../shared/theme/shuyo_theme.dart';
 
-/// 仿“课程录播”学期筛选弹窗 UI 的校区筛选弹窗
-Future<NewBookCampus?> showLibraryCampusMenu(
+/// 右上角滑入式多选校区弹窗，样式对齐校园卡历史记录 / 课程录播右上角筛选菜单。
+/// 支持实时切换勾选（或点击后直接返回最新选中集合），去掉 ALL。
+Future<Set<LibraryCampusFilter>?> showLibraryCampusMenu(
   BuildContext context, {
-  required NewBookCampus selectedCampus,
-}) {
-  return showGeneralDialog<NewBookCampus>(
+  required Set<LibraryCampusFilter> selectedCampuses,
+}) async {
+  var latest = Set<LibraryCampusFilter>.of(selectedCampuses);
+  var changed = false;
+
+  await showGeneralDialog<void>(
     context: context,
     barrierDismissible: true,
     barrierLabel: '关闭校区菜单',
     barrierColor: Colors.black54,
     transitionDuration: const Duration(milliseconds: 200),
-    transitionBuilder: (context, animation, secondaryAnimation, child) {
-      return SlideTransition(
-        position: Tween<Offset>(
-          begin: const Offset(0.18, 0),
-          end: Offset.zero,
-        ).animate(CurvedAnimation(
-          parent: animation,
-          curve: Curves.easeOutCubic,
-        )),
-        child: FadeTransition(opacity: animation, child: child),
-      );
-    },
-    pageBuilder: (menuContext, animation, secondaryAnimation) => SafeArea(
-      child: Align(
-        alignment: Alignment.topRight,
-        child: Padding(
-          padding: const EdgeInsets.only(top: kToolbarHeight + 8, right: 12),
-          child: _LibraryCampusMenu(
-            selectedCampus: selectedCampus,
-            onSelect: (campus) => Navigator.of(menuContext).pop(campus),
+    pageBuilder: (menuContext, animation, secondaryAnimation) {
+      final colors = menuContext.shuyoColors;
+      final size = MediaQuery.sizeOf(menuContext);
+      return SafeArea(
+        child: Align(
+          alignment: Alignment.topRight,
+          child: Padding(
+            padding: const EdgeInsets.only(top: kToolbarHeight + 8, right: 12),
+            child: SizedBox(
+              width: math.min(264, size.width * .68),
+              child: Material(
+                key: const ValueKey('library-campus-menu'),
+                elevation: 12,
+                color: colors.surface,
+                borderRadius: BorderRadius.circular(16),
+                clipBehavior: Clip.antiAlias,
+                child: ConstrainedBox(
+                  constraints: BoxConstraints(maxHeight: size.height * .72),
+                  child: _LibraryCampusMenuBody(
+                    initialSelected: latest,
+                    onChanged: (next) {
+                      latest = next;
+                      changed = true;
+                    },
+                  ),
+                ),
+              ),
+            ),
           ),
         ),
+      );
+    },
+    transitionBuilder: (context, animation, secondaryAnimation, child) =>
+        FadeTransition(
+      opacity: animation,
+      child: SlideTransition(
+        position:
+            Tween(begin: const Offset(.18, 0), end: Offset.zero).animate(
+          CurvedAnimation(parent: animation, curve: Curves.easeOutCubic),
+        ),
+        child: child,
       ),
     ),
   );
+
+  if (!changed) return null;
+  if (latest.length == selectedCampuses.length &&
+      latest.containsAll(selectedCampuses)) {
+    return null;
+  }
+  return Set<LibraryCampusFilter>.unmodifiable(latest);
 }
 
-class _LibraryCampusMenu extends StatelessWidget {
-  const _LibraryCampusMenu({
-    required this.selectedCampus,
-    required this.onSelect,
+class _LibraryCampusMenuBody extends StatefulWidget {
+  const _LibraryCampusMenuBody({
+    required this.initialSelected,
+    required this.onChanged,
   });
 
-  final NewBookCampus selectedCampus;
-  final ValueChanged<NewBookCampus> onSelect;
+  final Set<LibraryCampusFilter> initialSelected;
+  final ValueChanged<Set<LibraryCampusFilter>> onChanged;
+
+  @override
+  State<_LibraryCampusMenuBody> createState() => _LibraryCampusMenuBodyState();
+}
+
+class _LibraryCampusMenuBodyState extends State<_LibraryCampusMenuBody> {
+  late final Set<LibraryCampusFilter> _selected = {
+    ...widget.initialSelected,
+  };
+
+  void _toggle(LibraryCampusFilter campus) {
+    setState(() {
+      if (!_selected.add(campus)) {
+        _selected.remove(campus);
+      }
+    });
+    widget.onChanged(Set<LibraryCampusFilter>.of(_selected));
+  }
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final surface = theme.colorScheme.surface;
-    final primary = theme.colorScheme.primary;
-
-    return SizedBox(
-      key: const ValueKey('library-campus-menu'),
-      width: math.min(220.0, MediaQuery.sizeOf(context).width * 0.6),
-      child: Material(
-        elevation: 12,
-        borderRadius: BorderRadius.circular(16),
-        clipBehavior: Clip.antiAlias,
-        color: surface,
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const SizedBox(height: 8),
-            for (final campus in NewBookCampus.values)
-              ListTile(
-                key: ValueKey('library-campus-option:${campus.name}'),
-                dense: true,
-                contentPadding: const EdgeInsets.symmetric(horizontal: 16),
-                title: Text(
-                  campus.label,
-                  style: TextStyle(
-                    fontWeight: campus == selectedCampus
-                        ? FontWeight.w600
-                        : FontWeight.normal,
-                    color: campus == selectedCampus ? primary : null,
-                  ),
-                ),
-                trailing: campus == selectedCampus
-                    ? Icon(Icons.check, color: primary, size: 20)
-                    : null,
-                onTap: () => onSelect(campus),
-              ),
-            const SizedBox(height: 8),
-          ],
-        ),
-      ),
+    return ListView(
+      shrinkWrap: true,
+      padding: const EdgeInsets.symmetric(vertical: 8),
+      children: [
+        for (final campus in LibraryCampusFilter.values)
+          CheckboxListTile(
+            key: ValueKey('library-campus-option:${campus.name}'),
+            controlAffinity: ListTileControlAffinity.trailing,
+            value: _selected.contains(campus),
+            selected: _selected.contains(campus),
+            title: Text(campus.label),
+            onChanged: (_) => _toggle(campus),
+          ),
+      ],
     );
   }
 }

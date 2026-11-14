@@ -36,7 +36,7 @@ class _LibraryRankListPageState extends State<LibraryRankListPage>
   bool _isNavLoading = false;
 
   HotLoanSortType _hotLoanSort = HotLoanSortType.loanCount;
-  NewBookCampus _newBookCampus = NewBookCampus.all;
+  Set<LibraryCampusFilter> _newBookCampuses = const {};
 
   static const double _coverWidth = 76.0;
   static const double _coverHeight = 106.0;
@@ -85,18 +85,21 @@ class _LibraryRankListPageState extends State<LibraryRankListPage>
   }
 
   Future<void> _chooseNewBookCampus() async {
-    final campus = await showLibraryCampusMenu(
+    final campuses = await showLibraryCampusMenu(
       context,
-      selectedCampus: _newBookCampus,
+      selectedCampuses: _newBookCampuses,
     );
-    if (!mounted || campus == null || campus == _newBookCampus) return;
-    _selectNewBookCampus(campus);
+    if (!mounted || campuses == null) return;
+    if (campuses.length == _newBookCampuses.length &&
+        campuses.containsAll(_newBookCampuses)) {
+      return;
+    }
+    _selectNewBookCampuses(campuses);
   }
 
-  void _selectNewBookCampus(NewBookCampus campus) {
-    if (_newBookCampus == campus) return;
+  void _selectNewBookCampuses(Set<LibraryCampusFilter> campuses) {
     setState(() {
-      _newBookCampus = campus;
+      _newBookCampuses = campuses;
       _cachedLists.remove(LibraryRankType.newBook);
     });
     unawaited(_loadRank(LibraryRankType.newBook, showBarLoading: true));
@@ -121,7 +124,7 @@ class _LibraryRankListPageState extends State<LibraryRankListPage>
         rows: _pageSize,
         session: widget.session,
         hotLoanSort: _hotLoanSort,
-        newBookCampus: _newBookCampus,
+        newBookCampuses: _newBookCampuses,
       );
       if (!mounted) return;
       setState(() {
@@ -161,7 +164,7 @@ class _LibraryRankListPageState extends State<LibraryRankListPage>
         rows: _pageSize,
         session: widget.session,
         hotLoanSort: _hotLoanSort,
-        newBookCampus: _newBookCampus,
+        newBookCampuses: _newBookCampuses,
       );
       if (!mounted) return;
       setState(() {
@@ -222,23 +225,16 @@ class _LibraryRankListPageState extends State<LibraryRankListPage>
                 ),
               ),
             ),
-          if (currentType == LibraryRankType.newBook)
-            Padding(
-              padding: const EdgeInsets.only(right: 6),
-              child: IconButton(
-                key: const ValueKey('library-newbook-campus-filter'),
-                tooltip: '选择校区',
-                icon: Icon(
-                  _newBookCampus == NewBookCampus.all
-                      ? Icons.format_list_bulleted
-                      : Icons.filter_alt_rounded,
-                  color: _newBookCampus == NewBookCampus.all
-                      ? colors.textPrimary
-                      : colors.accent,
-                ),
-                onPressed: _chooseNewBookCampus,
-              ),
+          if (currentType == LibraryRankType.newBook) ...[
+            IconButton(
+              key: const ValueKey('library-newbook-campus-filter'),
+              tooltip:
+                  '选择校区：${LibraryCampusFilter.summaryLabel(_newBookCampuses)}',
+              icon: const Icon(Icons.format_list_bulleted),
+              onPressed: _chooseNewBookCampus,
             ),
+            const SizedBox(width: 2),
+          ],
         ],
         bottom: PreferredSize(
           preferredSize: const Size.fromHeight(kTextTabBarHeight + 3),
