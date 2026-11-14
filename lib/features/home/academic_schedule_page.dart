@@ -83,6 +83,7 @@ class _AcademicSchedulePageState extends State<AcademicSchedulePage> {
       const AcademicScheduleDisplaySettings(
           colorful: true, showTeacher: true, showCredit: false);
   Map<String, int> _courseColorValues = const {};
+
   /// When the user last confirmed a color reassignment, used to keep the
   /// dialog away while colors are re-rolled.
   DateTime? _colorsConfirmedAt;

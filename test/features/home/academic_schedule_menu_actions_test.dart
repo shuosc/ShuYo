@@ -49,8 +49,7 @@ void main() {
     await tester.tap(find.text('随机颜色'));
     await tester.pumpAndSettle();
     expect(find.text('确认随机颜色'), findsOneWidget);
-    expect(find.textContaining('点击确定后将为当前学期所有课程随机分配配色。'),
-        findsOneWidget);
+    expect(find.textContaining('点击确定后将为当前学期所有课程随机分配配色。'), findsOneWidget);
     expect(find.textContaining('同时打开多彩显示。'), findsOneWidget);
     await tester.tap(find.text('确定'));
     await tester.pumpAndSettle();
@@ -244,8 +243,8 @@ void main() {
     final colors =
         await AcademicScheduleDisplaySettingsService().loadCourseColors();
     expect(colors['OTHER999'], otherTermColor);
-    expect(palette.map((color) => color.toARGB32()),
-        contains(colors['MATH101']));
+    expect(
+        palette.map((color) => color.toARGB32()), contains(colors['MATH101']));
     expect(tester.takeException(), isNull);
   });
 
@@ -282,8 +281,7 @@ void main() {
     final confirmedAt = DateTime(2026, 11, 14, 12);
     const window = Duration(minutes: 5);
     expect(
-      isConfirmationFresh(
-          confirmedAt: null, now: confirmedAt, window: window),
+      isConfirmationFresh(confirmedAt: null, now: confirmedAt, window: window),
       isFalse,
     );
     expect(
