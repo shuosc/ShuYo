@@ -12,6 +12,7 @@ import 'library_daily_recommend_card.dart';
 import 'library_daily_recommend_skeleton.dart';
 import 'library_rank_gallery.dart';
 import 'library_rank_list_page.dart';
+import 'library_search_page.dart';
 
 class LibraryPage extends StatefulWidget {
   const LibraryPage({
@@ -103,6 +104,17 @@ class _LibraryPageState extends State<LibraryPage> {
     );
   }
 
+  void _openSearchPage() {
+    Navigator.of(context).push(
+      shuyoRoute(
+        builder: (context) => LibrarySearchPage(
+          apiClient: _apiClient,
+          session: _session,
+        ),
+      ),
+    );
+  }
+
   Future<void> _performAuthorization({
     bool force = false,
     bool isInitial = false,
@@ -150,6 +162,14 @@ class _LibraryPageState extends State<LibraryPage> {
     return Scaffold(
       appBar: AppBar(
         title: const Text('图书馆借阅'),
+        actions: [
+          IconButton(
+            key: const ValueKey('library-search'),
+            tooltip: '搜索图书',
+            onPressed: _openSearchPage,
+            icon: const Icon(Icons.search),
+          ),
+        ],
         bottom: PreferredSize(
           preferredSize: const Size.fromHeight(2),
           child: SizedBox(

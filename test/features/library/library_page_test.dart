@@ -9,6 +9,7 @@ import 'package:shuyo/data/services/library_auth_service.dart';
 import 'package:shuyo/features/library/library_book_detail_page.dart';
 import 'package:shuyo/features/library/library_page.dart';
 import 'package:shuyo/features/library/library_rank_list_page.dart';
+import 'package:shuyo/features/library/library_search_page.dart';
 
 class _MockLibraryAuthService extends LibraryAuthService {
   _MockLibraryAuthService({
@@ -263,5 +264,30 @@ void main() {
 
     expect(recoveryInvoked, isTrue);
     expect(find.text('未能获取借阅授权'), findsOneWidget);
+  });
+
+  testWidgets('tapping appbar search button opens LibrarySearchPage',
+      (tester) async {
+    final authService = _MockLibraryAuthService();
+    final apiClient = _MockLibraryApiClient();
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: LibraryPage(
+          authService: authService,
+          apiClient: apiClient,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final searchButton = find.byKey(const ValueKey('library-search'));
+    expect(searchButton, findsOneWidget);
+
+    await tester.tap(searchButton);
+    await tester.pumpAndSettle();
+
+    expect(find.byType(LibrarySearchPage), findsOneWidget);
+    expect(find.text('搜索图书'), findsOneWidget);
   });
 }
