@@ -226,6 +226,21 @@ Widget _panelHeading(BuildContext context, String title) => Padding(
       ]),
     );
 
+Future<bool> _copyText(BuildContext context, String text) async {
+  try {
+    await Clipboard.setData(ClipboardData(text: text));
+    return true;
+  } catch (error) {
+    debugPrint('Recording player copy failed: $error');
+    if (context.mounted) {
+      ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+        const SnackBar(content: Text('复制失败，请重试')),
+      );
+    }
+    return false;
+  }
+}
+
 class _CopyableMenuRow extends StatefulWidget {
   const _CopyableMenuRow({required this.entry});
 
@@ -245,9 +260,10 @@ class _CopyableMenuRowState extends State<_CopyableMenuRow> {
     super.dispose();
   }
 
-  void _handleCopy() {
-    unawaited(Clipboard.setData(
-        ClipboardData(text: '${widget.entry.title}\n${widget.entry.value}')));
+  Future<void> _handleCopy() async {
+    final copied = await _copyText(
+        context, '${widget.entry.title}\n${widget.entry.value}');
+    if (!mounted || !copied) return;
     setState(() => _copied = true);
     _timer?.cancel();
     _timer = Timer(const Duration(seconds: 1), () {
@@ -293,8 +309,9 @@ class _CopyableLinkRowState extends State<_CopyableLinkRow> {
     super.dispose();
   }
 
-  void _handleCopy() {
-    unawaited(Clipboard.setData(ClipboardData(text: widget.url)));
+  Future<void> _handleCopy() async {
+    final copied = await _copyText(context, widget.url);
+    if (!mounted || !copied) return;
     setState(() => _copied = true);
     _timer?.cancel();
     _timer = Timer(const Duration(seconds: 1), () {

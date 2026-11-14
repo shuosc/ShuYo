@@ -157,7 +157,8 @@ void main() {
         tester.element(address).shuyoColors.textSecondary);
     expect(find.descendant(of: link, matching: find.byIcon(Icons.copy_rounded)),
         findsOneWidget);
-    await tester.tap(link);
+    await tester.tap(
+        find.descendant(of: link, matching: find.byIcon(Icons.copy_rounded)));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 240));
     expect(copied, 'https://example.test/classroom.mp4?auth_key=synthetic');
@@ -198,6 +199,31 @@ void main() {
         findsOneWidget);
     expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('failed clipboard write does not show copied feedback',
+      (tester) async {
+    tester.binding.defaultBinaryMessenger
+        .setMockMethodCallHandler(SystemChannels.platform, (call) async {
+      if (call.method == 'Clipboard.setData') {
+        throw PlatformException(code: 'clipboard-error');
+      }
+      return null;
+    });
+    addTearDown(() => tester.binding.defaultBinaryMessenger
+        .setMockMethodCallHandler(SystemChannels.platform, null));
+    await tester.pumpWidget(harness());
+    await tester.tap(find.text('更多'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('播放链接'));
+    await tester.pumpAndSettle();
+    final link = find.byKey(const ValueKey('recording-playback-link-1'));
+    await tester.tap(
+        find.descendant(of: link, matching: find.byIcon(Icons.copy_rounded)));
+    await tester.pump();
+    expect(find.byIcon(Icons.check_rounded), findsNothing);
+    expect(find.text('复制失败，请重试'), findsOneWidget);
+    expect(tester.takeException(), isNull);
   });
 
   for (final fullscreen in [false, true]) {
