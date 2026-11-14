@@ -4554,7 +4554,8 @@ void main() {
     await tester.pump(const Duration(milliseconds: 800));
     await tester.pump();
     expect(ppt.seeks, [const Duration(seconds: 50)]);
-    expect(classroom.seeks, [const Duration(seconds: 50)]);
+    expect(classroom.seeks,
+        [const Duration(seconds: 50), const Duration(seconds: 50)]);
     expect(
         identical(
             tester
@@ -6453,6 +6454,84 @@ void main() {
     expect(time, findsOneWidget);
     expect(tester.widget<Text>(time).maxLines, 1);
     expect(find.byTooltip('退出全屏'), findsNWidgets(2));
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets(
+      'secondary view transparently snaps back to primary after repeated seek drift',
+      (tester) async {
+    final harness = _PlaybackHarness();
+    await tester.pumpWidget(
+        page(harness: harness, load: (lesson) async => playback(lesson)));
+    await tester.pumpAndSettle();
+    final secondary = harness.platforms[1];
+
+    final controls = tester
+        .widget<RecordingVideoControls>(find.byType(RecordingVideoControls));
+    await controls.onSeek!(const Duration(seconds: 40));
+    await tester.pump();
+    // Simulate a late stale position jump on secondary right after seeking.
+    secondary.seeks.clear();
+    secondary.emitPosition(const Duration(seconds: 15));
+    await tester.pumpAndSettle();
+
+    expect(secondary.seeks, [const Duration(seconds: 40)]);
+    expect(secondary.state.position, const Duration(seconds: 40));
+
+    // Also test sustained drift after cooldown clears via a second seek.
+    await tester.pump(const Duration(seconds: 2));
+    await controls.onSeek!(const Duration(seconds: 70));
+    await tester.pump();
+    secondary.seeks.clear();
+    secondary.emitPosition(const Duration(seconds: 55));
+    await tester.pumpAndSettle();
+    expect(secondary.seeks, [const Duration(seconds: 70)]);
+    expect(secondary.state.position, const Duration(seconds: 70));
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets(
+      'live mode keeps secondary synced on position drift and WebRTC pause',
+      (tester) async {
+    prepareNotesPortrait(tester);
+    final harness = _PlaybackHarness();
+    final lesson = VodLesson(
+      id: 106,
+      teachingClassId: 10,
+      name: course.name,
+      isLive: true,
+      isPlayable: true,
+    );
+    await tester.pumpWidget(page(
+      initial: lesson,
+      lessons: [lesson],
+      harness: harness,
+      load: (selected) async => VodPlayback(
+        lessonId: selected.id,
+        teachingClassId: 10,
+        title: course.name,
+        isLive: true,
+        views: playback(selected).views,
+      ),
+    ));
+    await tester.pumpAndSettle();
+    final primary = harness.platforms[0];
+    final secondary = harness.platforms[1];
+    expect(secondary.opened, hasLength(1));
+
+    // Simulate secondary falling behind primary by > 2s twice consecutively.
+    primary.emitPosition(const Duration(seconds: 30));
+    secondary.emitPosition(const Duration(seconds: 20));
+    await tester.pump();
+    primary.emitPosition(const Duration(seconds: 31));
+    await tester.pump();
+    secondary.emitPosition(const Duration(seconds: 20));
+    await tester.pumpAndSettle();
+
+    expect(secondary.opened, hasLength(2));
+    expect(primary.opened, hasLength(1));
     expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox.shrink());
   });

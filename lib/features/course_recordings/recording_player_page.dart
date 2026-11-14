@@ -215,6 +215,12 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
   bool _syncingSecondary = false;
   Completer<void>? _secondarySyncCompletion;
   bool _secondarySyncPending = false;
+  bool _hasObservedLiveSecondaryPosition = false;
+  bool _postSeekVerifyWindow = false;
+  Timer? _postSeekCooldownTimer;
+  Timer? _liveSyncWatchdogTimer;
+  DateTime? _lastLiveRecoverAt;
+  bool _liveSyncMismatchPending = false;
   String _aspect = '自动';
   VodLiveProtocol _liveProtocol = VodLiveProtocol.hls;
   bool _liveProtocolSelected = false;
@@ -568,6 +574,8 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
     _heartbeatTimer = null;
     _liveEndTimer?.cancel();
     _liveEndTimer = null;
+    _liveSyncWatchdogTimer?.cancel();
+    _liveSyncWatchdogTimer = null;
   }
 
   void _startLiveTimers(int revision) {
@@ -583,6 +591,17 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
     unawaited(_heartbeat(revision));
     _heartbeatTimer = Timer.periodic(
         const Duration(seconds: 60), (_) => unawaited(_heartbeat(revision)));
+    unawaited(_checkRtcSecondarySync());
+    // Periodic check for WebRTC or stalled secondary live decoders; never
+    // modifies position on recordings.
+    _liveSyncWatchdogTimer = Timer.periodic(const Duration(seconds: 5), (_) {
+      if (!mounted || !_foreground || revision != _loadRevision) return;
+      if (_isWebRtc) {
+        unawaited(_checkRtcSecondarySync());
+      } else {
+        unawaited(_alignSecondary());
+      }
+    });
     // A catalog refresh can extend or shorten the broadcast; prefer the
     // freshest lesson metadata over the cutoff captured when it was opened.
     final end = _lesson.liveEndTime ?? playback.liveEndTime ?? _lesson.endTime;
@@ -605,6 +624,11 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
         _heartbeatPending ||
         !(_isWebRtc ? _rtcPlaying : _player?.state.playing == true)) {
       return;
+    }
+    if (_isWebRtc) {
+      unawaited(_checkRtcSecondarySync());
+    } else {
+      unawaited(_alignSecondary());
     }
     _heartbeatPending = true;
     try {
@@ -690,7 +714,7 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
         if (!mounted || !_foreground || revision != _loadRevision) return;
         _resumeRecordingRevision = null;
         _lifecycleResumePending = false;
-        await _alignSecondary();
+        await _alignSecondary(forcePositionCheck: true);
       }
     });
   }
@@ -736,6 +760,8 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
     _loadRevision++;
     _notesController.dispose();
     _resetSeekSynchronization();
+    _postSeekCooldownTimer?.cancel();
+    _postSeekCooldownTimer = null;
     _catalogRevision++;
     _secondaryRevision++;
     _secondaryViewIndex = null;
@@ -802,6 +828,14 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
     _secondaryLoading = false;
     _secondaryWaitingForMain = false;
     _pendingViewIndex = null;
+    _postSeekVerifyWindow = false;
+    _postSeekCooldownTimer?.cancel();
+    _postSeekCooldownTimer = null;
+    _liveSyncWatchdogTimer?.cancel();
+    _liveSyncWatchdogTimer = null;
+    _hasObservedLiveSecondaryPosition = false;
+    _lastLiveRecoverAt = null;
+    _liveSyncMismatchPending = false;
     if (lesson.id != _lesson.id) _preferredView = '教室';
     _publish(() {
       _lesson = lesson;
@@ -1182,6 +1216,33 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
         if (rtcError != null) Error.throwWithStackTrace(rtcError, rtcStack!);
       });
 
+  Future<void> _checkRtcSecondarySync() async {
+    if (!mounted || !_foreground || !_isWebRtc || _rtcSessions.length < 2) {
+      return;
+    }
+    final primaryIndex = _viewIndex;
+    final secondaryIndex = primaryIndex == 0 ? 1 : 0;
+    if (secondaryIndex >= _rtcSessions.length) return;
+    final primary = _rtcSessions[primaryIndex];
+    final secondary = _rtcSessions[secondaryIndex];
+    if (primary.state.value == VodWebRtcState.playing &&
+        secondary.state.value == VodWebRtcState.paused) {
+      try {
+        await secondary.setAudioEnabled(false);
+        await secondary.play();
+      } on Object {
+        // Transparent best-effort recovery for the secondary stream.
+      }
+    } else if (primary.state.value == VodWebRtcState.paused &&
+        secondary.state.value == VodWebRtcState.playing) {
+      try {
+        await secondary.pause();
+      } on Object {
+        // Transparent best-effort recovery for the secondary stream.
+      }
+    }
+  }
+
   Future<void> _pauseRtc() async {
     for (final session in _rtcSessions.toList()) {
       await session.pause();
@@ -1189,6 +1250,10 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
   }
 
   Future<void> _playRtc() async {
+    final primaryIndex = _viewIndex;
+    for (var i = 0; i < _rtcSessions.length; i++) {
+      await _rtcSessions[i].setAudioEnabled(i == primaryIndex);
+    }
     for (final session in _rtcSessions.toList()) {
       await session.play();
     }
@@ -1292,6 +1357,9 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
                 state == VodWebRtcState.paused) &&
             _rtcRequestedView != null) {
           _drainRtcSwap(revision);
+        }
+        if (index == _viewIndex && state == VodWebRtcState.playing) {
+          unawaited(_checkRtcSecondarySync());
         }
       });
     }
@@ -1616,6 +1684,7 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
 
   void _finishSeekSynchronization({bool timedOut = false}) {
     final primary = _player;
+    final secondary = _secondaryPlayer;
     final timeline = _timelinePlayer;
     if (timedOut &&
         primary != null &&
@@ -1624,11 +1693,23 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
         _seekAwaitingPosition.contains(timeline)) {
       _publish(() => _timelinePlayer = primary);
     }
+    final secondaryTimedOut = timedOut &&
+        secondary != null &&
+        _seekAwaitingPosition.contains(secondary);
     _resetSeekSynchronization();
-    if (mounted) unawaited(_alignSecondary());
+    if (mounted && !_lesson.isLive) {
+      // Enable post-seek drift supervision. When secondary timed out while
+      // primary converged, immediately enforce a fallback seek onto secondary
+      // so the main view never rewinds and secondary snaps to primary.
+      _postSeekVerifyWindow = true;
+      unawaited(_alignSecondary(forcePositionCheck: secondaryTimedOut));
+    }
   }
 
   void _observeSeekPosition(Player player, Duration position) {
+    if (_lesson.isLive && identical(player, _secondaryPlayer)) {
+      _hasObservedLiveSecondaryPosition = true;
+    }
     final target = _seekSyncTarget;
     if (target == null || !recordingSeekPositionMatches(position, target)) {
       return;
@@ -1645,13 +1726,13 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
     if (primary == null || _lesson.isLive || _loading) return;
     _resetSeekSynchronization();
     final revision = _seekSyncRevision;
+    final includeSecondary = secondary != null &&
+        _secondaryViewIndex != null &&
+        !_secondaryLoading &&
+        !_secondaryFailed;
     final players = <Player>[
       primary,
-      if (secondary != null &&
-          _secondaryViewIndex != null &&
-          !_secondaryLoading &&
-          !_secondaryFailed)
-        secondary,
+      if (includeSecondary) secondary,
     ];
     _seekSyncTarget = position;
     _seekAwaitingPosition.addAll(players);
@@ -1822,6 +1903,12 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
       return;
     }
     final revision = ++_secondaryRevision;
+    _hasObservedLiveSecondaryPosition = false;
+    _postSeekVerifyWindow = false;
+    _postSeekCooldownTimer?.cancel();
+    _postSeekCooldownTimer = null;
+    _lastLiveRecoverAt = null;
+    _liveSyncMismatchPending = false;
     final view = playback.views[index];
     _publish(() {
       _secondaryLoading = true;
@@ -1925,8 +2012,30 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
     await _secondaryQueue;
   }
 
-  Future<void> _alignSecondary() async {
-    if (_isWebRtc) return;
+  static const _recordingSeekDriftTolerance = Duration(seconds: 1);
+  static const _livePositionTolerance = Duration(seconds: 2);
+  static const _positionCorrectionCooldown = Duration(milliseconds: 1200);
+  static const _liveRecoverCooldown = Duration(seconds: 10);
+
+  bool _shouldCorrectRecordingAfterSeek(
+    Player primary,
+    Player secondary, {
+    required bool force,
+  }) {
+    if (_lesson.isLive || !_postSeekVerifyWindow) return false;
+    if (!force && (primary.state.buffering || secondary.state.buffering)) {
+      return false;
+    }
+    if (_postSeekCooldownTimer?.isActive ?? false) return false;
+    final drift = (secondary.state.position - primary.state.position).abs();
+    return drift > _recordingSeekDriftTolerance;
+  }
+
+  Future<void> _alignSecondary({bool forcePositionCheck = false}) async {
+    if (_isWebRtc) {
+      await _checkRtcSecondarySync();
+      return;
+    }
     if (_syncingSecondary) {
       _secondarySyncPending = true;
       await _secondarySyncCompletion?.future;
@@ -1954,7 +2063,8 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
         identical(primary, _player) &&
         identical(secondary, _secondaryPlayer) &&
         _foreground &&
-        !_loading;
+        !_loading &&
+        !_seekingPlayers;
     try {
       final timeline = _lesson.isLive ? primary : _timelinePlayer ?? primary;
       final follower = identical(timeline, primary) ? secondary : primary;
@@ -1969,6 +2079,52 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
         } else {
           await follower.pause();
         }
+        if (!stillCurrent()) return;
+      }
+      if (!_lesson.isLive &&
+          _shouldCorrectRecordingAfterSeek(primary, secondary,
+              force: forcePositionCheck)) {
+        // Fallback: after a seek, if the secondary view diverged from the
+        // primary view, snap the secondary view to the primary position
+        // transparently without altering the primary playback.
+        final target = primary.state.position;
+        _postSeekVerifyWindow = false;
+        _postSeekCooldownTimer?.cancel();
+        _postSeekCooldownTimer = Timer(_positionCorrectionCooldown, () {
+          _postSeekCooldownTimer = null;
+        });
+        await secondary.seek(target);
+        if (!stillCurrent()) return;
+      } else if (_lesson.isLive &&
+          _playback != null &&
+          _secondaryViewIndex != null &&
+          !_secondaryLoading &&
+          !_secondaryFailed) {
+        final primaryPos = primary.state.position;
+        final secondaryPos = secondary.state.position;
+        if (_hasObservedLiveSecondaryPosition &&
+            primary.state.playing &&
+            !primary.state.buffering &&
+            !secondary.state.buffering &&
+            primaryPos > Duration.zero &&
+            secondaryPos > Duration.zero &&
+            (primaryPos - secondaryPos).abs() > _livePositionTolerance) {
+          if (_liveSyncMismatchPending) {
+            final now = DateTime.now();
+            if (_lastLiveRecoverAt == null ||
+                now.difference(_lastLiveRecoverAt!) >= _liveRecoverCooldown) {
+              _lastLiveRecoverAt = now;
+              _liveSyncMismatchPending = false;
+              // Reopen only the secondary stream silently at the live edge
+              // without interrupting the primary stream.
+              unawaited(_realignLiveSecondary());
+            }
+          } else {
+            _liveSyncMismatchPending = true;
+          }
+        } else {
+          _liveSyncMismatchPending = false;
+        }
       }
     } on Object {
       if (stillCurrent()) _publish(() => _secondaryFailed = true);
@@ -1978,12 +2134,52 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
       completion.complete();
       if (_secondarySyncPending) {
         _secondarySyncPending = false;
-        unawaited(_alignSecondary());
+        unawaited(_alignSecondary(forcePositionCheck: forcePositionCheck));
       }
       final pending = _pendingViewIndex;
       if (pending != null) {
         unawaited(_selectView(pending));
       }
+    }
+  }
+
+  Future<void> _realignLiveSecondary() async {
+    final playback = _playback;
+    final secondary = _secondaryPlayer;
+    final index = _secondaryViewIndex;
+    final revision = _secondaryRevision;
+    if (!mounted ||
+        !_foreground ||
+        !_lesson.isLive ||
+        _isWebRtc ||
+        playback == null ||
+        secondary == null ||
+        index == null ||
+        index < 0 ||
+        index >= playback.views.length ||
+        _secondaryLoading ||
+        _secondaryFailed) {
+      return;
+    }
+    try {
+      final view = playback.views[index];
+      final url =
+          _liveProxy != null ? await _liveProxy!.open(view.url) : view.url;
+      if (!mounted || revision != _secondaryRevision) return;
+      final openWork = secondary.open(
+        Media(
+          url.toString(),
+          httpHeaders: _liveProxy != null ? const {} : view.httpHeaders,
+        ),
+        play: _foreground && (_player?.state.playing ?? false),
+      );
+      _transport.trackOpen(openWork, secondary: true);
+      await openWork.timeout(const Duration(seconds: 25));
+      if (!mounted || revision != _secondaryRevision) return;
+      await secondary.setVolume(0);
+    } on Object {
+      // Transparent fallback: keep primary uninterrupted; if secondary stops
+      // recovering, leave it for user toggle or next natural reconnect.
     }
   }
 
@@ -2162,9 +2358,8 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
                 }
                 final portraitViewport = _portraitViewport;
                 final portraitMediaQuery = _portraitMediaQuery;
-                // PiliPlus keeps its MiniScaffold and tab view mounted behind
-                // fullscreen. Retain this entire tree too: keeping just offsets
-                // would still lose an open detail panel and its text position.
+                // Retain the portrait layout tree behind fullscreen so that an
+                // open detail panel and its scroll position are preserved.
                 return Stack(fit: StackFit.expand, children: [
                   if (portraitViewport != null && portraitMediaQuery != null)
                     Offstage(
