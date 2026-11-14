@@ -1153,6 +1153,7 @@ void main() {
     VodRepository? repository,
     VodLiveStreamProxy Function(VodRepository)? liveProxyFactory,
     VodWebRtcSession Function(VodWebRtcSource)? webRtcSessionFactory,
+    Future<void> Function(bool enable)? wakelockHandler,
     List<VodLesson>? lessons,
     EdgeInsets insets = EdgeInsets.zero,
     bool disableAnimations = true,
@@ -1175,6 +1176,7 @@ void main() {
           liveProxyFactory: liveProxyFactory ??
               (repository == null ? null : (_) => _FakeLiveProxy()),
           webRtcSessionFactory: webRtcSessionFactory,
+          wakelockHandler: wakelockHandler ?? (_) async {},
           loadNotes: loadNotes,
           onSessionExpired: login,
           onWebVpnSessionExpired: webVpnRecovery,
@@ -6534,5 +6536,81 @@ void main() {
     expect(primary.opened, hasLength(1));
     expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets(
+      'keep screen on follows playback state in portrait, fullscreen, pause, and background',
+      (tester) async {
+    final wakelockCalls = <bool>[];
+    final harness = _PlaybackHarness();
+    await tester.pumpWidget(page(
+      harness: harness,
+      wakelockHandler: (enable) async => wakelockCalls.add(enable),
+      load: (lesson) async => playback(lesson),
+    ));
+    await tester.pumpAndSettle();
+
+    // Playing on load with default keepScreenOn=true acquires wakelock.
+    expect(wakelockCalls.last, isTrue);
+
+    // Pausing releases wakelock in portrait.
+    await tester.tap(find.byTooltip('暂停'));
+    await tester.pumpAndSettle();
+    expect(wakelockCalls.last, isFalse);
+
+    // Resuming re-acquires wakelock.
+    await tester.tap(find.byTooltip('播放'));
+    await tester.pumpAndSettle();
+    expect(wakelockCalls.last, isTrue);
+
+    // Entering fullscreen maintains wakelock while playing, and toggling pause
+    // releases it in fullscreen too.
+    await tester
+        .widget<RecordingVideoControls>(find.byType(RecordingVideoControls))
+        .state
+        .enterFullscreen();
+    await tester.pumpAndSettle();
+    expect(wakelockCalls.last, isTrue);
+
+    await tester.tap(find.byTooltip('暂停'));
+    await tester.pumpAndSettle();
+    expect(wakelockCalls.last, isFalse);
+
+    await tester.tap(find.byTooltip('播放'));
+    await tester.pumpAndSettle();
+    expect(wakelockCalls.last, isTrue);
+
+    // Turning off "播放保持亮屏" releases wakelock immediately even while playing.
+    var controls = tester
+        .widget<RecordingVideoControls>(find.byType(RecordingVideoControls));
+    controls.onPreferencesChanged!(
+        controls.preferences.copyWith(keepScreenOn: false));
+    await tester.pumpAndSettle();
+    expect(wakelockCalls.last, isFalse);
+
+    // Turning it back on while playing re-acquires wakelock.
+    controls = tester
+        .widget<RecordingVideoControls>(find.byType(RecordingVideoControls));
+    controls.onPreferencesChanged!(
+        controls.preferences.copyWith(keepScreenOn: true));
+    await tester.pumpAndSettle();
+    expect(wakelockCalls.last, isTrue);
+
+    // Going to background releases wakelock; returning to foreground restores it.
+    final observer =
+        tester.state(find.byType(RecordingPlayerPage, skipOffstage: false))
+            as WidgetsBindingObserver;
+    observer.didChangeAppLifecycleState(AppLifecycleState.hidden);
+    await tester.pump();
+    expect(wakelockCalls.last, isFalse);
+
+    observer.didChangeAppLifecycleState(AppLifecycleState.resumed);
+    await tester.pumpAndSettle();
+    expect(wakelockCalls.last, isTrue);
+
+    await controls.state.exitFullscreen();
+    await tester.pumpAndSettle();
+    await tester.pumpWidget(const SizedBox.shrink());
+    expect(wakelockCalls.last, isFalse);
   });
 }

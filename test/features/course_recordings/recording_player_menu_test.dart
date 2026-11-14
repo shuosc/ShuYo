@@ -99,13 +99,16 @@ void main() {
     expect(find.text('播放链接'), findsOneWidget);
     await tester.tap(find.text('播放设置'));
     await tester.pumpAndSettle();
-    expect(find.byType(SwitchListTile), findsNWidgets(2));
+    expect(find.byType(SwitchListTile), findsNWidgets(3));
     expect(find.text('显示电量'), findsNothing);
     await tester.tap(find.text('显示现实时间'));
+    await tester.pump();
+    await tester.tap(find.text('播放保持亮屏'));
     await tester.pump();
     await tester.tap(find.text('第二视角浮窗'));
     await tester.pump();
     expect(changes.last.showClock, isFalse);
+    expect(changes.last.keepScreenOn, isFalse);
     expect(changes.last.secondaryView, isTrue);
     await tester.tap(find.text('完成'));
     await tester.pumpAndSettle();
@@ -329,9 +332,13 @@ void main() {
     SharedPreferences.setMockInitialValues({});
     final initial = await RecordingPlayerPreferences.load();
     expect(initial.showClock, isTrue);
-    await initial.copyWith(showClock: false, secondaryView: true).save();
+    expect(initial.keepScreenOn, isTrue);
+    await initial
+        .copyWith(showClock: false, keepScreenOn: false, secondaryView: true)
+        .save();
     final saved = await RecordingPlayerPreferences.load();
     expect(saved.showClock, isFalse);
+    expect(saved.keepScreenOn, isFalse);
     expect(saved.secondaryView, isTrue);
   });
 }

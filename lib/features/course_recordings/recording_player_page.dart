@@ -7,6 +7,7 @@ import 'package:flutter/rendering.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
+import 'package:wakelock_plus/wakelock_plus.dart';
 
 import '../../data/models/course_recording.dart';
 import '../../core/background_work_gate.dart';
@@ -63,6 +64,7 @@ class RecordingPlayerPage extends StatefulWidget {
     this.repository,
     this.onSessionExpired,
     this.onWebVpnSessionExpired,
+    this.wakelockHandler,
     this.playerFactory,
     this.videoControllerFactory,
     this.liveProxyFactory,
@@ -90,6 +92,8 @@ class RecordingPlayerPage extends StatefulWidget {
   final VodRepository? repository;
   final Future<bool> Function()? onSessionExpired;
   final Future<bool> Function()? onWebVpnSessionExpired;
+  @visibleForTesting
+  final Future<void> Function(bool enable)? wakelockHandler;
   @visibleForTesting
   final Player Function()? playerFactory;
   @visibleForTesting
@@ -233,6 +237,29 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
   bool get _rtcPlaying =>
       _viewIndex < _rtcSessions.length &&
       _rtcSessions[_viewIndex].state.value == VodWebRtcState.playing;
+  bool? _appliedWakelock;
+  Future<void> _wakelockQueue = Future<void>.value();
+
+  bool get _shouldHoldWakelock =>
+      mounted &&
+      _foreground &&
+      _playerPreferences.keepScreenOn &&
+      _failure == null &&
+      !_loading &&
+      (_isWebRtc
+          ? _rtcPlaying
+          : (_player?.state.playing ?? false) ||
+              (_timelinePlayer?.state.playing ?? false));
+
+  void _syncWakelock({bool forceDisable = false}) {
+    final desired = forceDisable ? false : _shouldHoldWakelock;
+    if (_appliedWakelock == desired) return;
+    _appliedWakelock = desired;
+    final handler = widget.wakelockHandler ??
+        (bool enable) => WakelockPlus.toggle(enable: enable);
+    _wakelockQueue =
+        _wakelockQueue.then((_) => handler(desired)).catchError((Object _) {});
+  }
 
   Widget? _webRtcResolutionLabel() {
     if (!_isWebRtc || _viewIndex >= _rtcSessions.length) return null;
@@ -673,6 +700,7 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
                   : ((_timelinePlayer ?? _player)?.state.playing ?? false)));
       _foreground = false;
       _stopLiveTimers();
+      _syncWakelock(forceDisable: true);
       final players = [_player, _secondaryPlayer].whereType<Player>().toList();
       final sessions = _rtcSessions.toList();
       final revision = _loadRevision;
@@ -686,6 +714,7 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
       return;
     }
     _foreground = true;
+    _syncWakelock();
     final resume = _resumePlayback;
     _resumePlayback = false;
     if (!resume) {
@@ -767,6 +796,7 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
     _secondaryViewIndex = null;
     WidgetsBinding.instance.removeObserver(this);
     _stopLiveTimers();
+    _syncWakelock(forceDisable: true);
     unawaited(_shutdownTransports().catchError((Object error) {
       debugPrint('ShuYoVOD transport teardown failure: ${error.runtimeType}');
     }));
@@ -788,6 +818,7 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
       lessons: _catalog,
       teachingClassId: widget.course.teachingClassId,
     );
+    _syncWakelock();
     setState(() {});
     _controlsRevision.value++;
   }
@@ -1046,8 +1077,11 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
             _observeSeekPosition(created, position);
             unawaited(_alignSecondary());
           }));
+          _syncSubscriptions.add(player.stream.playing.listen((_) {
+            _syncWakelock();
+            unawaited(_alignSecondary());
+          }));
           for (final stream in <Stream<dynamic>>[
-            player.stream.playing,
             player.stream.buffering,
             player.stream.rate
           ]) {
@@ -1284,8 +1318,11 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
         _observeSeekPosition(created, position);
         unawaited(_alignSecondary());
       }));
+      _syncSubscriptions.add(player.stream.playing.listen((_) {
+        _syncWakelock();
+        unawaited(_alignSecondary());
+      }));
       for (final stream in <Stream<dynamic>>[
-        player.stream.playing,
         player.stream.buffering,
         player.stream.rate
       ]) {
@@ -1942,8 +1979,10 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
             secondary.stream.buffering,
             secondary.stream.rate,
           ]) {
-            _syncSubscriptions
-                .add(stream.listen((_) => unawaited(_alignSecondary())));
+            _syncSubscriptions.add(stream.listen((_) {
+              _syncWakelock();
+              unawaited(_alignSecondary());
+            }));
           }
           _watchCacheRate(secondary);
           _publish(() {});
@@ -2229,6 +2268,7 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
                       : Video(
                           key: _videoKey,
                           controller: _hostVideoController!,
+                          wakelock: false,
                           pauseUponEnteringBackgroundMode: false,
                           resumeUponEnteringForegroundMode: false,
                           aspectRatio: switch (_aspect) {

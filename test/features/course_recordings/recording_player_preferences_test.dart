@@ -8,7 +8,7 @@ void main() {
 
   setUp(() => SharedPreferences.setMockInitialValues({}));
 
-  test('existing installs keep HLS as the default live stream', () async {
+  test('existing installs keep HLS and screen-on as defaults', () async {
     SharedPreferences.setMockInitialValues({
       'vod.player.showClock': false,
       'vod.player.secondaryView': true,
@@ -18,6 +18,7 @@ void main() {
 
     expect(preferences.defaultLiveProtocol, VodLiveProtocol.hls);
     expect(preferences.showClock, isFalse);
+    expect(preferences.keepScreenOn, isTrue);
     expect(preferences.secondaryView, isTrue);
   });
 
@@ -26,7 +27,7 @@ void main() {
         () async {
       final preferences = const RecordingPlayerPreferences()
           .copyWith(defaultLiveProtocol: protocol)
-          .copyWith(showClock: false, secondaryView: true);
+          .copyWith(showClock: false, keepScreenOn: false, secondaryView: true);
       await preferences.save();
 
       final loaded = await RecordingPlayerPreferences.load();
@@ -34,6 +35,7 @@ void main() {
 
       expect(loaded.defaultLiveProtocol, protocol);
       expect(loaded.showClock, isFalse);
+      expect(loaded.keepScreenOn, isFalse);
       expect(loaded.secondaryView, isTrue);
       expect(stored.getString('vod.player.defaultLiveProtocol'), protocol.name);
     });

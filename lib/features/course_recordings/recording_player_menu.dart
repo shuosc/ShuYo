@@ -69,6 +69,14 @@ Future<void> showRecordingPlayerMenu({
             ),
             SwitchListTile(
               dense: fullscreen,
+              title: Text('播放保持亮屏', style: itemStyle),
+              value: current.keepScreenOn,
+              onChanged: onPreferencesChanged == null
+                  ? null
+                  : (value) => update(current.copyWith(keepScreenOn: value)),
+            ),
+            SwitchListTile(
+              dense: fullscreen,
               title: Text('第二视角浮窗', style: itemStyle),
               value: current.secondaryView,
               onChanged: onPreferencesChanged == null || !secondaryAvailable
