@@ -10,6 +10,8 @@ import '../../shared/theme/shuyo_theme.dart';
 import '../../shared/widgets/empty_state.dart';
 import '../course_recordings/recording_list_presentation.dart';
 import 'library_book_list_tile.dart';
+import 'library_campus_menu.dart';
+import 'library_publish_time_menu.dart';
 import 'library_search_controller.dart';
 
 class LibrarySearchPage extends StatefulWidget {
@@ -34,6 +36,12 @@ class _LibrarySearchPageState extends State<LibrarySearchPage> {
   final _queryFocusNode = FocusNode();
   final _scrollController = ScrollController();
   final _searchBusy = ValueNotifier(false);
+  final _filterMenuState = ValueNotifier((
+    hasCampusFilter: false,
+    hasPublishTimeFilter: false,
+    campusLabel: '全部校区',
+    publishTimeLabel: '全部时间',
+  ));
   late final bool _ownsController = widget.controller == null;
   late final LibrarySearchController _searchController = widget.controller ??
       LibrarySearchController(widget.apiClient, session: widget.session);
@@ -74,6 +82,16 @@ class _LibrarySearchPageState extends State<LibrarySearchPage> {
   void _updateSearchChrome() {
     _searchBusy.value =
         _searchController.searching || _searchController.loadingMore;
+    final campuses = _searchController.selectedCampuses;
+    final hasCampusFilter = campuses.isNotEmpty &&
+        campuses.length < LibraryCampusFilter.values.length;
+    final publishTime = _searchController.publishTimeFilter;
+    _filterMenuState.value = (
+      hasCampusFilter: hasCampusFilter,
+      hasPublishTimeFilter: publishTime.isActive,
+      campusLabel: LibraryCampusFilter.summaryLabel(campuses),
+      publishTimeLabel: publishTime.label(),
+    );
   }
 
   @override
@@ -83,6 +101,7 @@ class _LibrarySearchPageState extends State<LibrarySearchPage> {
       _searchController.dispose();
     }
     _searchBusy.dispose();
+    _filterMenuState.dispose();
     _queryController.removeListener(_updateQueryState);
     _queryState.dispose();
     _queryController.dispose();
@@ -135,11 +154,54 @@ class _LibrarySearchPageState extends State<LibrarySearchPage> {
     return false;
   }
 
+  Future<void> _choosePublishTime() async {
+    final filter = await showLibraryPublishTimeMenu(
+      context,
+      selectedFilter: _searchController.publishTimeFilter,
+    );
+    if (!mounted || filter == null) return;
+    if (_scrollController.hasClients) _scrollController.jumpTo(0);
+    await _searchController.setPublishTimeFilter(filter);
+  }
+
+  Future<void> _chooseCampuses() async {
+    final campuses = await showLibraryCampusMenu(
+      context,
+      selectedCampuses: _searchController.selectedCampuses,
+    );
+    if (!mounted || campuses == null) return;
+    if (_scrollController.hasClients) _scrollController.jumpTo(0);
+    await _searchController.setCampuses(campuses);
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
         title: const Text('搜索图书'),
+        actions: [
+          ValueListenableBuilder(
+            valueListenable: _filterMenuState,
+            builder: (context, filterState, _) => Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                IconButton(
+                  key: const ValueKey('library-search-publish-time-filter'),
+                  tooltip: '出版时间：${filterState.publishTimeLabel}',
+                  onPressed: _choosePublishTime,
+                  icon: const Icon(Icons.date_range_outlined),
+                ),
+                IconButton(
+                  key: const ValueKey('library-search-campus-filter'),
+                  tooltip: '校区筛选：${filterState.campusLabel}',
+                  onPressed: _chooseCampuses,
+                  icon: const Icon(Icons.format_list_bulleted),
+                ),
+                const SizedBox(width: 2),
+              ],
+            ),
+          ),
+        ],
         bottom: PreferredSize(
           preferredSize: const Size.fromHeight(3),
           child: ValueListenableBuilder<bool>(
@@ -233,6 +295,15 @@ class _LibrarySearchPageState extends State<LibrarySearchPage> {
   Widget _buildSummary() {
     final colors = context.shuyoColors;
     final primary = Theme.of(context).colorScheme.primary;
+    final campusSummary =
+        LibraryCampusFilter.summaryLabel(_view.selectedCampuses);
+    final hasCustomCampus = _view.selectedCampuses.isNotEmpty &&
+        _view.selectedCampuses.length < LibraryCampusFilter.values.length;
+    final scopeParts = <String>[
+      if (hasCustomCampus) campusSummary else '图书',
+      if (_view.publishTimeFilter.isActive) _view.publishTimeFilter.label(),
+    ];
+    final scopeSummary = scopeParts.join(' · ');
     Widget number(String key, int value, Color color, double size) => Text(
           '$value',
           key: ValueKey(key),
@@ -258,13 +329,18 @@ class _LibrarySearchPageState extends State<LibrarySearchPage> {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  '馆藏范围',
+                  hasCustomCampus || _view.publishTimeFilter.isActive
+                      ? scopeSummary
+                      : '馆藏范围',
                   maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
                   style: ShuYoTextStyles.bodyCompact(color: colors.textPrimary)
                       .copyWith(fontWeight: FontWeight.w600),
                 ),
                 Text(
-                  _activeKeyword == null ? '仅检索图书' : '图书 · $_activeKeyword',
+                  _activeKeyword == null
+                      ? '仅检索图书'
+                      : '图书 · $_activeKeyword',
                   key: const ValueKey('library-search-keyword-label'),
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,

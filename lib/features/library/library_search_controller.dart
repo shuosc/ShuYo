@@ -12,6 +12,8 @@ class LibrarySearchViewData {
         books = List.unmodifiable(controller.books),
         numFound = controller.numFound,
         activeKeyword = controller.activeKeyword,
+        selectedCampuses = Set.unmodifiable(controller.selectedCampuses),
+        publishTimeFilter = controller.publishTimeFilter,
         error = controller.error,
         loadMoreError = controller.loadMoreError,
         searching = controller.searching,
@@ -23,6 +25,8 @@ class LibrarySearchViewData {
   final List<LibraryBookItem> books;
   final int numFound;
   final String? activeKeyword;
+  final Set<LibraryCampusFilter> selectedCampuses;
+  final LibraryPublishTimeFilter publishTimeFilter;
   final Object? error;
   final Object? loadMoreError;
   final bool searching;
@@ -52,6 +56,9 @@ class LibrarySearchController extends ChangeNotifier {
   int _currentPage = 0;
   int numFound = 0;
   String? activeKeyword;
+  Set<LibraryCampusFilter> selectedCampuses = const {};
+  LibraryPublishTimeFilter publishTimeFilter =
+      const LibraryPublishTimeFilter.all();
   Object? error;
   Object? loadMoreError;
   bool searching = false;
@@ -69,19 +76,49 @@ class LibrarySearchController extends ChangeNotifier {
     session = nextSession;
   }
 
-  void clear() {
+  void clear({bool keepFilters = true}) {
     revision++;
     books = const [];
     _seenRecordIds.clear();
     _currentPage = 0;
     numFound = 0;
     activeKeyword = null;
+    if (!keepFilters) {
+      selectedCampuses = const {};
+      publishTimeFilter = const LibraryPublishTimeFilter.all();
+    }
     error = null;
     loadMoreError = null;
     searching = false;
     loadingMore = false;
     hasMore = false;
     _publish();
+  }
+
+  Future<void> setCampuses(Set<LibraryCampusFilter> campuses) async {
+    if (_disposed) return;
+    if (campuses.length == selectedCampuses.length &&
+        campuses.containsAll(selectedCampuses)) {
+      return;
+    }
+    selectedCampuses = Set<LibraryCampusFilter>.unmodifiable(campuses);
+    final keyword = activeKeyword;
+    if (keyword != null && keyword.isNotEmpty) {
+      await search(keyword);
+    } else {
+      _publish();
+    }
+  }
+
+  Future<void> setPublishTimeFilter(LibraryPublishTimeFilter filter) async {
+    if (_disposed || filter == publishTimeFilter) return;
+    publishTimeFilter = filter;
+    final keyword = activeKeyword;
+    if (keyword != null && keyword.isNotEmpty) {
+      await search(keyword);
+    } else {
+      _publish();
+    }
   }
 
   Future<void> search(String keyword) async {
@@ -98,11 +135,17 @@ class LibrarySearchController extends ChangeNotifier {
     searching = true;
     _publish();
 
+    final years = publishTimeFilter.resolveYears();
+    final campusIds = LibraryCampusFilter.toSearchCampusIds(selectedCampuses);
+
     try {
       final result = await apiClient.searchBooks(
         keyword: trimmed,
         page: 1,
         rows: pageSize,
+        campusIds: campusIds,
+        publishBegin: years.begin,
+        publishEnd: years.end,
         session: session,
       );
       if (!_isCurrent(current)) return;
@@ -154,10 +197,16 @@ class LibrarySearchController extends ChangeNotifier {
       }
       if (!_isCurrent(current)) return;
 
+      final years = publishTimeFilter.resolveYears();
+      final campusIds = LibraryCampusFilter.toSearchCampusIds(selectedCampuses);
+
       final result = await apiClient.searchBooks(
         keyword: keyword,
         page: nextPage,
         rows: pageSize,
+        campusIds: campusIds,
+        publishBegin: years.begin,
+        publishEnd: years.end,
         session: session,
       );
       if (!_isCurrent(current)) return;

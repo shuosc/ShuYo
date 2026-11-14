@@ -24,21 +24,51 @@ LibraryBookItem _book(int id, {String? title, String? callNo}) =>
     );
 
 class _MockSearchApiClient extends LibraryApiClient {
-  Future<LibraryBookSearchResult> Function(String keyword, int page, int rows)?
-      searchHandler;
-  final calls = <({String keyword, int page, int rows})>[];
+  Future<LibraryBookSearchResult> Function(
+    String keyword,
+    int page,
+    int rows,
+    List<String> campusIds,
+    String? publishBegin,
+    String? publishEnd,
+  )? searchHandler;
+  final calls = <({
+    String keyword,
+    int page,
+    int rows,
+    List<String> campusIds,
+    String? publishBegin,
+    String? publishEnd,
+  })>[];
 
   @override
   Future<LibraryBookSearchResult> searchBooks({
     required String keyword,
     int page = 1,
     int rows = 20,
+    List<String> campusIds = const [],
+    String? publishBegin,
+    String? publishEnd,
     LibraryAuthSession? session,
     bool loadSupplementary = true,
   }) async {
-    calls.add((keyword: keyword, page: page, rows: rows));
+    calls.add((
+      keyword: keyword,
+      page: page,
+      rows: rows,
+      campusIds: campusIds,
+      publishBegin: publishBegin,
+      publishEnd: publishEnd,
+    ));
     if (searchHandler != null) {
-      return searchHandler!(keyword, page, rows);
+      return searchHandler!(
+        keyword,
+        page,
+        rows,
+        campusIds,
+        publishBegin,
+        publishEnd,
+      );
     }
     return LibraryBookSearchResult(
       numFound: 0,
@@ -126,7 +156,7 @@ void main() {
       (tester) async {
     final pending = Completer<LibraryBookSearchResult>();
     final apiClient = _MockSearchApiClient()
-      ..searchHandler = (_, __, ___) => pending.future;
+      ..searchHandler = (_, __, ___, ____, _____, ______) => pending.future;
     await _mount(tester, apiClient);
 
     await _submit(tester, '机器学习');
@@ -170,7 +200,7 @@ void main() {
     addTearDown(tester.view.resetPhysicalSize);
 
     final apiClient = _MockSearchApiClient()
-      ..searchHandler = (keyword, page, rows) async {
+      ..searchHandler = (keyword, page, rows, _, __, ___) async {
         if (page == 1) {
           return LibraryBookSearchResult(
             numFound: 15,
@@ -235,13 +265,14 @@ void main() {
 
   testWidgets('tapping book row opens LibraryBookDetailPage', (tester) async {
     final apiClient = _MockSearchApiClient()
-      ..searchHandler = (_, page, rows) async => LibraryBookSearchResult(
-            numFound: 1,
-            page: page,
-            rows: rows,
-            books: [_book(796762, title: '机器学习')],
-            rawResultCount: 1,
-          );
+      ..searchHandler =
+          (_, page, rows, __, ___, ____) async => LibraryBookSearchResult(
+                numFound: 1,
+                page: page,
+                rows: rows,
+                books: [_book(796762, title: '机器学习')],
+                rawResultCount: 1,
+              );
 
     await _mount(tester, apiClient);
     await _submit(tester, '机器学习');
@@ -265,7 +296,7 @@ void main() {
     var failFirst = true;
     var failSecondPage = true;
     final apiClient = _MockSearchApiClient()
-      ..searchHandler = (keyword, page, rows) async {
+      ..searchHandler = (keyword, page, rows, _, __, ___) async {
         if (page == 1 && failFirst) {
           throw const LibraryApiException('系统访问中断，请稍后再试！');
         }
@@ -334,13 +365,14 @@ void main() {
 
   testWidgets('clear button resets results and keyword', (tester) async {
     final apiClient = _MockSearchApiClient()
-      ..searchHandler = (_, page, rows) async => LibraryBookSearchResult(
-            numFound: 1,
-            page: page,
-            rows: rows,
-            books: [_book(796762, title: '机器学习')],
-            rawResultCount: 1,
-          );
+      ..searchHandler =
+          (_, page, rows, __, ___, ____) async => LibraryBookSearchResult(
+                numFound: 1,
+                page: page,
+                rows: rows,
+                books: [_book(796762, title: '机器学习')],
+                rawResultCount: 1,
+              );
 
     await _mount(tester, apiClient);
     await _submit(tester, '机器学习');
@@ -365,5 +397,103 @@ void main() {
           .data,
       '0',
     );
+  });
+
+  testWidgets(
+      'supports publish time presets, custom years, and multi-campus filter',
+      (tester) async {
+    final apiClient = _MockSearchApiClient()
+      ..searchHandler =
+          (_, page, rows, __, ___, ____) async => LibraryBookSearchResult(
+                numFound: 1,
+                page: page,
+                rows: rows,
+                books: [_book(796762, title: '机器学习')],
+                rawResultCount: 1,
+              );
+
+    await _mount(tester, apiClient);
+    await _submit(tester, '机器学习');
+    await tester.pumpAndSettle();
+
+    expect(
+      find.byKey(const ValueKey('library-search-publish-time-filter')),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(const ValueKey('library-search-campus-filter')),
+      findsOneWidget,
+    );
+
+    // 1. 选择出版时间：3年内
+    await tester
+        .tap(find.byKey(const ValueKey('library-search-publish-time-filter')));
+    await tester.pumpAndSettle();
+    await tester.tap(
+        find.byKey(const ValueKey('library-publish-time-option:threeYears')));
+    await tester.pumpAndSettle();
+
+    final currentYear = DateTime.now().year;
+    expect(apiClient.calls.last.publishBegin, '${currentYear - 3}');
+    expect(apiClient.calls.last.publishEnd, '$currentYear');
+    expect(apiClient.calls.last.campusIds, isEmpty);
+
+    // 2. 选择自定义时间（使用项目统一的 ShuYoDateRangePicker）
+    await tester
+        .tap(find.byKey(const ValueKey('library-search-publish-time-filter')));
+    await tester.pumpAndSettle();
+    await tester
+        .tap(find.byKey(const ValueKey('library-publish-time-option:custom')));
+    await tester.pumpAndSettle();
+    expect(find.text('自定义出版日期'), findsOneWidget);
+    expect(find.byKey(const ValueKey('date-range-start')), findsOneWidget);
+    expect(find.byKey(const ValueKey('date-range-end')), findsOneWidget);
+
+    // 直接确认当前选中范围 (3年内: currentYear - 3 到 currentYear)
+    await tester.tap(find.text('确定'));
+    await tester.pumpAndSettle();
+
+    expect(apiClient.calls.last.publishBegin, '${currentYear - 3}');
+    expect(apiClient.calls.last.publishEnd, '$currentYear');
+
+    // 3. 选择校区多选（确认无 ALL 选项、无底部按钮、点击遮罩应用勾选）
+    await tester
+        .tap(find.byKey(const ValueKey('library-search-campus-filter')));
+    await tester.pumpAndSettle();
+    expect(find.text('ALL'), findsNothing);
+    expect(find.byType(CheckboxListTile), findsNWidgets(3));
+    await tester
+        .tap(find.byKey(const ValueKey('library-campus-option:baoshan')));
+    await tester
+        .tap(find.byKey(const ValueKey('library-campus-option:jiading')));
+    await tester.tapAt(const Offset(10, 10));
+    await tester.pumpAndSettle();
+
+    expect(apiClient.calls.last.campusIds, ['1', '2', '3']);
+    expect(apiClient.calls.last.publishBegin, '${currentYear - 3}');
+    expect(apiClient.calls.last.publishEnd, '$currentYear');
+  });
+
+  testWidgets('renders web-generated fallback cover when book has no coverUrl',
+      (tester) async {
+    final apiClient = _MockSearchApiClient()
+      ..searchHandler =
+          (_, page, rows, __, ___, ____) async => LibraryBookSearchResult(
+                numFound: 1,
+                page: page,
+                rows: rows,
+                books: [_book(795684, title: '中国诗歌. 第69卷(2015年第九卷), 水边的月亮')],
+                rawResultCount: 1,
+              );
+
+    await _mount(tester, apiClient);
+    await _submit(tester, '中国诗歌');
+    await tester.pumpAndSettle();
+
+    expect(
+      find.byKey(const ValueKey('library-web-fallback-cover:795684')),
+      findsOneWidget,
+    );
+    expect(find.byIcon(Icons.menu_book_outlined), findsNothing);
   });
 }
