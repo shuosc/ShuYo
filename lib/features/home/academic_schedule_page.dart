@@ -600,24 +600,65 @@ class _AcademicSchedulePageState extends State<AcademicSchedulePage> {
     if (confirmed == true && mounted) await _refreshSchedule();
   }
 
+  /// Confirms before overwriting every course color, like the other
+  /// destructive actions on this page.
+  Future<bool> _confirmRandomizeColors(List<String> keys) async {
+    final overwritesManual = keys.any(_courseColorValues.containsKey);
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) {
+        final colors = context.shuyoColors;
+        return AlertDialog(
+          title: const Text('确认随机颜色'),
+          content: Text(
+            '点击确定后将为当前学期所有课程随机分配配色。'
+            '${overwritesManual ? '已手动设置的颜色会被覆盖，且无法撤销。' : ''}'
+            '${_displaySettings.colorful ? '' : '同时打开多彩显示。'}',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(false),
+              child: const Text('取消'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.of(context).pop(true),
+              style: FilledButton.styleFrom(
+                backgroundColor: colors.danger,
+                foregroundColor: Colors.white,
+              ),
+              child: const Text('确定'),
+            ),
+          ],
+        );
+      },
+    );
+    return confirmed ?? false;
+  }
+
   Future<void> _randomizeColors() async {
     final schedule = _schedule;
     if (schedule == null || schedule.sessions.isEmpty) {
       _showSnack('暂无课程');
       return;
     }
-    final palette = context.shuyoColors.schedulePalette;
-    final random = Random();
     final keys = schedule.sessions
         .map(_courseColorSeed)
         .where((key) => key.isNotEmpty)
         .toSet()
         .toList()
       ..sort();
-    final next = <String, int>{};
+    if (!await _confirmRandomizeColors(keys)) {
+      return;
+    }
+    if (!mounted) {
+      return;
+    }
+    final palette = context.shuyoColors.schedulePalette;
+    final random = Random();
+    // Colors assigned to courses outside the current term are kept as they are.
+    final next = <String, int>{..._courseColorValues};
     for (final key in keys) {
-      final current =
-          _courseColorValues[key] ?? _courseColor(context, key).toARGB32();
+      final current = next[key] ?? _courseColor(context, key).toARGB32();
       final choices =
           palette.where((color) => color.toARGB32() != current).toList();
       final available = choices.isNotEmpty ? choices : palette;
