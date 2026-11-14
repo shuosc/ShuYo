@@ -44,7 +44,7 @@ void main() {
       DefaultTextStyle.of(tester.element(finder)).style;
 
   testWidgets(
-      'labels and count use the same PiliPlus typography in both states',
+      'labels and count use the same compact tab typography in both states',
       (tester) async {
     await tester.pumpWidget(app(noteCount: 57));
     await tester.pumpAndSettle();

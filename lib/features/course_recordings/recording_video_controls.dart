@@ -138,9 +138,9 @@ class _RecordingVideoControlsState extends State<RecordingVideoControls>
   static const _episodeItemExtent = 80.0;
   final _subscriptions = <StreamSubscription<dynamic>>[];
   final _loadingSubscriptions = <StreamSubscription<dynamic>>[];
-  // PiliPlus 265f879fa85973b4bf885bde2562f1007f1013b8 keeps displayed
-  // seconds separate from raw position listeners. Keep seek/slider precision,
-  // while publishing only changes to each independent UI projection.
+  // Keep displayed seconds separate from raw position listeners. Keep
+  // seek/slider precision, while publishing only changes to each independent
+  // UI projection.
   final _progressPresentation = ValueNotifier<_ProgressPresentation>(
       (maximum: 1, played: 0, buffered: 0));
   final _timePresentation =
@@ -623,8 +623,8 @@ class _RecordingVideoControlsState extends State<RecordingVideoControls>
         position:
             Tween<Offset>(begin: Offset(0, top ? -1 : 1.2), end: Offset.zero)
                 .animate(_controlsAnimation),
-        // Match PiliPlus's control-overlay paint isolation without changing
-        // texture ownership or the existing slide transition.
+        // Isolate control-overlay repaints without changing texture ownership
+        // or the slide transition.
         child: RepaintBoundary(child: child),
       );
 
@@ -1628,8 +1628,7 @@ class _RecordingVideoControlsState extends State<RecordingVideoControls>
                           height: 14,
                           child: SliderTheme(
                             data: SliderTheme.of(context).copyWith(
-                                // PiliPlus BottomControl uses a 25px glow at
-                                // alpha 80 around its 7px thumb.
+                                // 25px glow at alpha 80 around the 7px thumb.
                                 overlayColor: progressColor.withAlpha(80),
                                 trackHeight: 3.5,
                                 trackShape: const RoundedRectSliderTrackShape(),
@@ -1720,11 +1719,11 @@ class _RecordingVideoControlsState extends State<RecordingVideoControls>
   }
 }
 
-/// Shows a quality tier derived from the decoded frame's shorter edge.
+/// Shows a short quality tier derived from the decoded frame's shorter edge.
 ///
-/// Uses PiliPlus-style short labels, with local pixel thresholds because VOD
-/// does not provide a platform quality ID. Rotating a video keeps its tier.
-/// WebRTC renderers and media players share this presentation.
+/// Uses local pixel thresholds because VOD does not provide a platform quality
+/// ID. Rotating a video keeps its tier. WebRTC renderers and media players
+/// share this presentation.
 class RecordingVideoResolutionLabel extends StatelessWidget {
   const RecordingVideoResolutionLabel({
     super.key,

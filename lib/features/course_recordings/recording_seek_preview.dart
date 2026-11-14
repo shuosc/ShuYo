@@ -1,6 +1,4 @@
-// Adapted from PiliPlus's GPL-3.0 seek toast and centered preview:
-// https://github.com/bggRGjQaUbCoE/PiliPlus/blob/265f879fa85973b4bf885bde2562f1007f1013b8/lib/plugin/pl_player/view/view.dart
-// https://github.com/bggRGjQaUbCoE/PiliPlus/blob/265f879fa85973b4bf885bde2562f1007f1013b8/lib/plugin/pl_player/view/widgets.dart
+// Reuses the seek toast and centered preview layout pattern.
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';

@@ -192,11 +192,9 @@ class _RecordingPlayerLayoutState extends State<RecordingPlayerLayout> {
     final pinned =
         (widget.loading || (_playing || _buffering) && widget.canResume) &&
             !_expanding;
-    // PiliPlus keeps the header's child stable while its render object handles
-    // the scroll geometry (265f879fa85973b4bf885bde2562f1007f1013b8):
-    // https://github.com/bggRGjQaUbCoE/PiliPlus/blob/265f879fa85973b4bf885bde2562f1007f1013b8/lib/common/widgets/sliver/video_header.dart
-    // Keep our existing sliver geometry, but share one toolbar across delegate
-    // rebuilds. Only its opacity and hit testing depend on the scroll offset.
+    // Keep the header child stable while its render object handles scroll
+    // geometry, sharing one toolbar across delegate rebuilds. Only its opacity
+    // and hit testing depend on the scroll offset.
     final collapsedToolbar = _RecordingCollapsedToolbar(
       canResume: widget.canResume,
       completed: widget.player?.state.completed ?? false,

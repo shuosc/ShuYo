@@ -1,10 +1,9 @@
-// Matches PiliPlus's GPL-3.0 video detail tab bar, using Flutter's public APIs:
-// https://github.com/bggRGjQaUbCoE/PiliPlus/blob/main/lib/pages/video/view.dart
-// See the repository LICENSE for the GNU General Public License, version 3.
-
 import 'package:flutter/material.dart';
 
-/// The compact introduction and notes tabs below the portrait player.
+/// Compact introduction and notes tabs below the portrait player.
+///
+/// The layout and typography follow material titleSmall metrics with a 13px
+/// font size, keeping the note count inline with the label.
 class RecordingPlayerTabs extends StatelessWidget
     implements PreferredSizeWidget {
   const RecordingPlayerTabs({
@@ -24,8 +23,8 @@ class RecordingPlayerTabs extends StatelessWidget
   /// Shared typography for the player tabs and the note detail title.
   static TextStyle labelStyleOf(BuildContext context) {
     final theme = Theme.of(context);
-    // PiliPlus uses the Material 3 titleSmall metrics with a 13-pixel override.
-    // Its count is part of the same Text, rather than a smaller numeric badge.
+    // Use Material 3 titleSmall metrics at 13px so the inline count matches
+    // the tab label weight and height.
     return (TabBarTheme.of(context).labelStyle ??
             Typography.dense2021.titleSmall!)
         .copyWith(

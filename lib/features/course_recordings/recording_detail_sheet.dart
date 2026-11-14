@@ -1,9 +1,3 @@
-// The interaction follows PiliPlus's GPL-3.0 MiniScaffold, BottomSheet_, and
-// CommonSlidePage, reimplemented with public Flutter APIs:
-// https://github.com/bggRGjQaUbCoE/PiliPlus/tree/main/lib/common/widgets/scaffold
-// https://github.com/bggRGjQaUbCoE/PiliPlus/blob/main/lib/pages/common/slide/common_slide_page.dart
-// See the repository LICENSE for the GNU General Public License, version 3.
-
 import 'dart:math' as math;
 
 import 'package:flutter/gestures.dart';
@@ -31,8 +25,8 @@ abstract class RecordingDetailSheet {
 /// Keeps detail sheets below [topInset], without a route, scrim, or rounded card.
 ///
 /// Only the first 45 logical pixels of a sheet accept a downward sheet drag.
-/// Its body owns its scroll gestures. The 30-pixel side edges also accept the
-/// inward swipe used by PiliPlus's comment detail panel.
+/// Its body owns its scroll gestures. The 30-pixel side edges also accept an
+/// inward swipe to close the detail panel.
 class RecordingDetailSheetHost extends StatefulWidget {
   const RecordingDetailSheetHost({
     super.key,
