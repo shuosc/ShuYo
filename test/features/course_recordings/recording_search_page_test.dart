@@ -855,10 +855,9 @@ void main() {
     await _mount(tester, repository);
     await _submit(tester, '程序');
     await tester.pumpAndSettle();
-    await tester.tap(find.byKey(const ValueKey('vod-search-show-unavailable')));
-    await tester.pumpAndSettle();
     final row = find.byKey(const ValueKey('vod-search-course:7:101'));
-    expect(tester.widget<ListTile>(row).onTap, isNull);
+    expect(row, findsNothing);
+    expect(find.text('没有可播放的课程'), findsOneWidget);
     // Results no longer refresh by pulling; the search button is the only
     // manual refresh entry point.
     expect(find.byType(RefreshIndicator), findsNothing);
@@ -1162,7 +1161,7 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('generating-only search course stays hidden until requested',
+  testWidgets('generating-only search course stays hidden without toggle',
       (tester) async {
     final pending = _result(2, playable: false);
     final repository = _Repository()
@@ -1174,10 +1173,9 @@ void main() {
     final row = find.byKey(const ValueKey('vod-search-course:7:101'));
     expect(row, findsNothing);
     expect(find.text('没有可播放的课程'), findsOneWidget);
-    await tester.tap(find.byKey(const ValueKey('vod-search-show-unavailable')));
-    await tester.pumpAndSettle();
-    expect(tester.widget<ListTile>(row).enabled, isFalse);
-    expect(tester.widget<ListTile>(row).onTap, isNull);
+    expect(find.text('显示无法播放的课程'), findsNothing);
+    expect(find.byKey(const ValueKey('vod-search-show-unavailable')),
+        findsNothing);
     expect(find.byType(RecordingPlayerPage), findsNothing);
     expect(repository.playbackRequests, isEmpty);
     expect(repository.verificationRequests, isEmpty);
@@ -1186,7 +1184,7 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('unavailable courses toggle is an app bar icon with state',
+  testWidgets('unavailable courses remain filtered out from search results',
       (tester) async {
     final playable = _result(1);
     final disabled = _result(2, classId: 102, playable: false);
@@ -1198,39 +1196,12 @@ void main() {
     await _submit(tester, '程序');
     await tester.pumpAndSettle();
 
-    final toggle = find.byKey(const ValueKey('vod-search-show-unavailable'));
+    expect(find.byKey(const ValueKey('vod-search-show-unavailable')),
+        findsNothing);
     final playableRow = find.byKey(const ValueKey('vod-search-course:7:101'));
     final disabledRow = find.byKey(const ValueKey('vod-search-course:7:102'));
     expect(playableRow, findsOneWidget);
     expect(disabledRow, findsNothing);
-    // Icon-only toggle: no extra app bar text is rendered.
-    expect(
-        find.descendant(of: toggle, matching: find.byType(Text)), findsNothing);
-    // The glyph is a play triangle with a small cross in its bottom-right.
-    final triangle = find.descendant(
-        of: toggle, matching: find.byIcon(Icons.play_arrow_rounded));
-    final cross =
-        find.descendant(of: toggle, matching: find.byIcon(Icons.close_rounded));
-    expect(triangle, findsOneWidget);
-    expect(cross, findsOneWidget);
-    final crossCenter = tester.getCenter(cross);
-    final triangleRect = tester.getRect(triangle);
-    expect(crossCenter.dx, greaterThan(triangleRect.center.dx));
-    expect(crossCenter.dy, greaterThan(triangleRect.center.dy));
-    expect(tester.widget<IconButton>(toggle).isSelected, isFalse);
-    expect(tester.widget<IconButton>(toggle).tooltip, '显示无法播放的课程');
-
-    await tester.tap(toggle);
-    await tester.pumpAndSettle();
-    expect(disabledRow, findsOneWidget);
-    expect(tester.widget<ListTile>(disabledRow).enabled, isFalse);
-    expect(tester.widget<IconButton>(toggle).isSelected, isTrue);
-    expect(tester.widget<IconButton>(toggle).tooltip, '隐藏无法播放的课程');
-
-    await tester.tap(toggle);
-    await tester.pumpAndSettle();
-    expect(disabledRow, findsNothing);
-    expect(playableRow, findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 
@@ -1238,7 +1209,7 @@ void main() {
     VodRecordingAvailability.unavailable,
     VodRecordingAvailability.unknown,
   ]) {
-    testWidgets('one source candidate with $availability URLs is disabled',
+    testWidgets('one source candidate with $availability URLs stays hidden',
         (tester) async {
       final repository = _Repository()
         ..searchLoader = ((_, __) async => [_result(1)])
@@ -1247,14 +1218,9 @@ void main() {
       await _mount(tester, repository, disableAnimations: true);
       await _submit(tester, '程序');
       await tester.pumpAndSettle();
-      await tester
-          .tap(find.byKey(const ValueKey('vod-search-show-unavailable')));
-      await tester.pumpAndSettle();
       final row = find.byKey(const ValueKey('vod-search-course:7:101'));
-      expect(tester.widget<ListTile>(row).enabled, isFalse);
-      expect(tester.widget<ListTile>(row).onTap, isNull);
-      expect(find.byKey(const ValueKey('vod-search-lesson-count:7:101')),
-          findsNothing);
+      expect(row, findsNothing);
+      expect(find.text('没有可播放的课程'), findsOneWidget);
       expect(
           tester
               .widget<Text>(

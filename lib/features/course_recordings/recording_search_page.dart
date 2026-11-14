@@ -70,8 +70,6 @@ class _RecordingSearchPageState extends State<RecordingSearchPage> {
   bool _loggingIn = false;
   bool _recoveringWebVpn = false;
   bool _openingLesson = false;
-  // Unplayable courses stay out of the list until the user asks to see them.
-  bool _showUnavailable = false;
   int get _revision => _searchController.revision;
 
   @override
@@ -289,19 +287,6 @@ class _RecordingSearchPageState extends State<RecordingSearchPage> {
         title: const Text('搜索录播'),
         actions: [
           IconButton(
-            key: const ValueKey('vod-search-show-unavailable'),
-            tooltip: _showUnavailable ? '隐藏无法播放的课程' : '显示无法播放的课程',
-            isSelected: _showUnavailable,
-            onPressed: _loggingIn
-                ? null
-                : () => setState(() => _showUnavailable = !_showUnavailable),
-            icon: _UnavailableCoursesIcon(
-              color: _showUnavailable
-                  ? Theme.of(context).colorScheme.primary
-                  : context.shuyoColors.textMuted,
-            ),
-          ),
-          IconButton(
             key: const ValueKey('vod-search-term-filter'),
             tooltip: '选择搜索学期',
             onPressed: widget.terms.isEmpty || _loggingIn ? null : _chooseTerm,
@@ -491,15 +476,13 @@ class _RecordingSearchPageState extends State<RecordingSearchPage> {
     final view = _view;
     final loadedCourses = view.courses;
     // A course is playable once its lessons contain a selectable episode.
-    final courses = _showUnavailable
-        ? loadedCourses
-        : [
-            for (final course in loadedCourses)
-              if (view.courseLessons[(course.termId, course.teachingClassId)]
-                      ?.any(recordingLessonCanSelect) ??
-                  false)
-                course,
-          ];
+    final courses = [
+      for (final course in loadedCourses)
+        if (view.courseLessons[(course.termId, course.teachingClassId)]
+                ?.any(recordingLessonCanSelect) ??
+            false)
+          course,
+    ];
     // A preview can insert a course before rows that are already on screen.
     // Let the sliver relocate their keyed elements instead of disposing their
     // entrance animations and rebuilding the rows at their new indexes.
@@ -547,17 +530,10 @@ class _RecordingSearchPageState extends State<RecordingSearchPage> {
     } else if (_loadingCourses && _visibleCourseCount == 0) {
       state = const Center(child: Text('正在加载课程…'));
     } else if (_visibleCourseCount > 0 && courses.isEmpty) {
-      // Every loaded course is unplayable and currently filtered out.
-      final toggleColor = Theme.of(context).colorScheme.primary;
-      state = EmptyState(
+      state = const EmptyState(
         icon: Icons.play_disabled_outlined,
         title: '没有可播放的课程',
-        message: '${loadedCourses.length} 门课程暂不可播放，可在右上角切换显示。',
-        action: TextButton.icon(
-          onPressed: () => setState(() => _showUnavailable = true),
-          icon: _UnavailableCoursesIcon(color: toggleColor),
-          label: const Text('显示无法播放的课程'),
-        ),
+        message: '搜索到的课程当前暂无可播放内容。',
       );
     } else if (!_view.hasResults) {
       state = EmptyState(
@@ -685,38 +661,6 @@ class _RecordingSearchPageState extends State<RecordingSearchPage> {
         : error is VodAuthException
             ? error.message
             : '暂时无法连接录播平台，请稍后重试。';
-  }
-}
-
-/// A play triangle with a small cross in its bottom-right corner: "courses that
-/// cannot be played". The cross is knocked out with a surface ring so it stays
-/// legible on any background; the caller's color carries the active state.
-class _UnavailableCoursesIcon extends StatelessWidget {
-  const _UnavailableCoursesIcon({required this.color});
-
-  final Color color;
-
-  @override
-  Widget build(BuildContext context) {
-    return SizedBox(
-      width: 24,
-      height: 24,
-      child: Stack(clipBehavior: Clip.none, children: [
-        Icon(Icons.play_arrow_rounded, size: 22, color: color),
-        Positioned(
-          right: 0,
-          bottom: 1,
-          child: Container(
-            padding: const EdgeInsets.all(1),
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              color: Theme.of(context).colorScheme.surface,
-            ),
-            child: Icon(Icons.close_rounded, size: 10, color: color),
-          ),
-        ),
-      ]),
-    );
   }
 }
 
