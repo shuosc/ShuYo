@@ -43,6 +43,33 @@ import 'recording_video_controls.dart';
 
 export 'recording_video_controls.dart';
 
+class _RecordingWakelockCoordinator {
+  final _owners = <Object>{};
+  Future<void> _queue = Future<void>.value();
+  bool _enabled = false;
+
+  void update(Object owner, bool enabled, Future<void> Function(bool) handler) {
+    if (enabled) {
+      _owners.add(owner);
+    } else {
+      _owners.remove(owner);
+    }
+    _queue = _queue.then((_) async {
+      final desired = _owners.isNotEmpty;
+      if (_enabled == desired) return;
+      try {
+        await handler(desired);
+        _enabled = desired;
+      } catch (error) {
+        debugPrint('Recording player wakelock update failed: $error');
+      }
+    });
+  }
+}
+
+final _recordingWakelock = _RecordingWakelockCoordinator();
+final _testWakelocks = Expando<_RecordingWakelockCoordinator>();
+
 /// A route for account-authorized live lessons and recordings.
 ///
 /// Sources are refreshed from the server for every lesson change and retry.
@@ -237,9 +264,6 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
   bool get _rtcPlaying =>
       _viewIndex < _rtcSessions.length &&
       _rtcSessions[_viewIndex].state.value == VodWebRtcState.playing;
-  bool? _appliedWakelock;
-  Future<void> _wakelockQueue = Future<void>.value();
-
   bool get _shouldHoldWakelock =>
       mounted &&
       _foreground &&
@@ -248,17 +272,19 @@ class _RecordingPlayerPageState extends State<RecordingPlayerPage>
       !_loading &&
       (_isWebRtc
           ? _rtcPlaying
-          : (_player?.state.playing ?? false) ||
-              (_timelinePlayer?.state.playing ?? false));
+          : ((_lesson.isLive ? _player : _timelinePlayer ?? _player)
+                  ?.state
+                  .playing ??
+              false));
 
   void _syncWakelock({bool forceDisable = false}) {
     final desired = forceDisable ? false : _shouldHoldWakelock;
-    if (_appliedWakelock == desired) return;
-    _appliedWakelock = desired;
-    final handler = widget.wakelockHandler ??
-        (bool enable) => WakelockPlus.toggle(enable: enable);
-    _wakelockQueue =
-        _wakelockQueue.then((_) => handler(desired)).catchError((Object _) {});
+    final testHandler = widget.wakelockHandler;
+    final coordinator = testHandler == null
+        ? _recordingWakelock
+        : (_testWakelocks[testHandler] ??= _RecordingWakelockCoordinator());
+    coordinator.update(this, desired,
+        testHandler ?? (bool enable) => WakelockPlus.toggle(enable: enable));
   }
 
   Widget? _webRtcResolutionLabel() {

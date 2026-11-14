@@ -6613,4 +6613,61 @@ void main() {
     await tester.pumpWidget(const SizedBox.shrink());
     expect(wakelockCalls.last, isFalse);
   });
+
+  testWidgets('a disposed player cannot release a newer player wakelock',
+      (tester) async {
+    final firstEnable = Completer<void>();
+    final calls = <bool>[];
+    Future<void> handler(bool enable) async {
+      calls.add(enable);
+      if (enable && calls.length == 1) await firstEnable.future;
+    }
+
+    await tester.pumpWidget(KeyedSubtree(
+      key: const ValueKey('first-player'),
+      child: page(
+        harness: _PlaybackHarness(),
+        wakelockHandler: handler,
+        load: (lesson) async => playback(lesson),
+      ),
+    ));
+    await tester.pumpAndSettle();
+    expect(calls, [true]);
+
+    await tester.pumpWidget(KeyedSubtree(
+      key: const ValueKey('second-player'),
+      child: page(
+        harness: _PlaybackHarness(),
+        wakelockHandler: handler,
+        load: (lesson) async => playback(lesson),
+      ),
+    ));
+    await tester.pumpAndSettle();
+    firstEnable.complete();
+    await tester.pumpAndSettle();
+    expect(calls, [true]);
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pump();
+    expect(calls, [true, false]);
+  });
+
+  testWidgets('failed wakelock enable is retried on a later update',
+      (tester) async {
+    var attempts = 0;
+    await tester.pumpWidget(page(
+      harness: _PlaybackHarness(),
+      wakelockHandler: (enable) async {
+        if (enable && ++attempts == 1) throw StateError('enable failed');
+      },
+      load: (lesson) async => playback(lesson),
+    ));
+    await tester.pumpAndSettle();
+    final observer = tester.state(find.byType(RecordingPlayerPage))
+        as WidgetsBindingObserver;
+    observer.didChangeAppLifecycleState(AppLifecycleState.resumed);
+    await tester.pumpAndSettle();
+    expect(attempts, greaterThanOrEqualTo(2));
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pump();
+  });
 }
