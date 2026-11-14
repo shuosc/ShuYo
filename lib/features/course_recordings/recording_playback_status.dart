@@ -35,16 +35,18 @@ class RecordingPlaybackLoading extends StatelessWidget {
               ),
             ),
             child: Column(mainAxisSize: MainAxisSize.min, children: [
-              Image.asset(
-                'assets/images/recording_player_loading.webp',
-                width: compact ? 20 : 25,
-                height: compact ? 20 : 25,
-                color: Colors.white,
-                excludeFromSemantics: true,
+              SizedBox.square(
+                dimension: compact ? 20 : 25,
+                child: CircularProgressIndicator(
+                  strokeWidth: compact ? 2 : 2.5,
+                  color: Colors.white,
+                ),
               ),
-              if (buffering && !compact)
+              if (buffering && !compact) ...[
+                const SizedBox(height: 6),
                 Text(label,
                     style: const TextStyle(color: Colors.white, fontSize: 12)),
+              ],
             ]),
           ),
         ),
