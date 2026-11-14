@@ -4,6 +4,7 @@ import '../../data/models/library_daily_recommend.dart';
 import '../../shared/navigation/shuyo_route.dart';
 import '../../shared/theme/shuyo_theme.dart';
 import 'library_author_text.dart';
+import 'library_book_cover.dart';
 import 'library_book_detail_page.dart';
 
 class LibraryDailyRecommendCard extends StatelessWidget {
@@ -137,41 +138,14 @@ class LibraryDailyRecommendCard extends StatelessWidget {
   }
 
   Widget _buildCover(BuildContext context, ShuYoColors colors) {
-    final coverUrl = book.coverUrl;
-    final placeholder = Container(
+    return LibraryBookCover(
+      recordId: book.recordId,
+      title: book.title,
+      publisher: book.publisher,
+      coverUrl: book.coverUrl,
       width: _coverWidth,
       height: _coverHeight,
-      decoration: BoxDecoration(
-        color: colors.surfaceAlt,
-        borderRadius: BorderRadius.circular(6),
-        border: Border.all(color: colors.border.withValues(alpha: 0.6)),
-      ),
-      child: Center(
-        child: Icon(
-          Icons.menu_book_outlined,
-          color: colors.textMuted,
-          size: 28,
-        ),
-      ),
-    );
-
-    if (coverUrl == null || coverUrl.isEmpty) {
-      return placeholder;
-    }
-
-    return ClipRRect(
-      borderRadius: BorderRadius.circular(6),
-      child: Image.network(
-        coverUrl,
-        width: _coverWidth,
-        height: _coverHeight,
-        fit: BoxFit.cover,
-        errorBuilder: (context, error, stackTrace) => placeholder,
-        loadingBuilder: (context, child, loadingProgress) {
-          if (loadingProgress == null) return child;
-          return placeholder;
-        },
-      ),
+      borderRadius: 6,
     );
   }
 

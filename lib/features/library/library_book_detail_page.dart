@@ -13,6 +13,7 @@ import '../../data/services/library_auth_service.dart';
 import '../../shared/theme/shuyo_theme.dart';
 import 'library_author_text.dart';
 import 'library_book_citation_bottom_sheet.dart';
+import 'library_book_cover.dart';
 
 class LibraryBookDetailPage extends StatefulWidget {
   const LibraryBookDetailPage({
@@ -289,7 +290,12 @@ class _LibraryBookDetailPageState extends State<LibraryBookDetailPage>
     return Row(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        _buildCoverImage(colors, coverUrl),
+        _buildCoverImage(
+          colors,
+          coverUrl,
+          title: title,
+          publisher: publisher,
+        ),
         const SizedBox(width: 14),
         Expanded(
           child: Column(
@@ -348,41 +354,21 @@ class _LibraryBookDetailPageState extends State<LibraryBookDetailPage>
     );
   }
 
-  Widget _buildCoverImage(ShuYoColors colors, String? coverUrl) {
-    final placeholder = Container(
+  Widget _buildCoverImage(
+    ShuYoColors colors,
+    String? coverUrl, {
+    required String title,
+    required String publisher,
+  }) {
+    return LibraryBookCover(
+      recordId: widget.recordId ?? 0,
+      title: title,
+      publisher: publisher,
+      coverUrl: coverUrl,
       width: _coverWidth,
       height: _coverHeight,
-      decoration: BoxDecoration(
-        color: colors.surfaceAlt,
-        borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: colors.border.withValues(alpha: 0.6)),
-      ),
-      child: Center(
-        child: Icon(
-          Icons.menu_book_outlined,
-          color: colors.textMuted,
-          size: 32,
-        ),
-      ),
-    );
-
-    if (coverUrl == null || coverUrl.isEmpty) {
-      return placeholder;
-    }
-
-    return ClipRRect(
-      borderRadius: BorderRadius.circular(8),
-      child: Image.network(
-        coverUrl,
-        width: _coverWidth,
-        height: _coverHeight,
-        fit: BoxFit.cover,
-        errorBuilder: (_, __, ___) => placeholder,
-        loadingBuilder: (context, child, progress) {
-          if (progress == null) return child;
-          return placeholder;
-        },
-      ),
+      borderRadius: 8,
+      isLarge: true,
     );
   }
 

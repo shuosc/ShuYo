@@ -64,6 +64,19 @@ class LibraryConstants {
   static const batchBookSupplementaryPath =
       '/find/unify/getPItemAndOnShelfCountAndDuxiuImageUrl';
 
+  /// Web 端无封面时使用的 4 张静态封面底图（按 recordId % 4 选择）
+  static const webFallbackCoverUrls = [
+    'https://static12.libsp.cn/static/img/index1.2d5bd70.jpg',
+    'https://static12.libsp.cn/static/img/index2.c9ad5db.jpg',
+    'https://static12.libsp.cn/static/img/index3.6121e78.jpg',
+    'https://static12.libsp.cn/static/img/index4.9d504b0.jpg',
+  ];
+
+  static String webFallbackCoverUrl(int recordId) {
+    final index = recordId.abs() % webFallbackCoverUrls.length;
+    return webFallbackCoverUrls[index];
+  }
+
   /// 授权必须从超星认证站的入口开始：它会先下发 `firstReferer` 等 Cookie，
   /// 再把浏览器带到 newsso。直接请求 newsso 会让回调缺少这些状态。
   static Uri get initUri => Uri.https(chaoxingAuthHost, chaoxingInitPath, {
