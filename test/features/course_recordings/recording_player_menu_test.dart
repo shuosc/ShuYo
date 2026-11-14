@@ -115,7 +115,8 @@ void main() {
     expect(find.byType(BottomSheet), findsNothing);
   });
 
-  testWidgets('fullscreen links use the right panel and copy the full source',
+  testWidgets(
+      'fullscreen links and playback info use right-side animated copy icon without snackbar',
       (tester) async {
     tester.view.physicalSize = const Size(873, 393);
     tester.view.devicePixelRatio = 1;
@@ -154,12 +155,47 @@ void main() {
         lessThan(tester.getTopLeft(address).dy));
     expect(tester.widget<Text>(address).style?.color,
         tester.element(address).shuyoColors.textSecondary);
+    expect(find.descendant(of: link, matching: find.byIcon(Icons.copy_rounded)),
+        findsOneWidget);
     await tester.tap(link);
     await tester.pump();
+    await tester.pump(const Duration(milliseconds: 240));
     expect(copied, 'https://example.test/classroom.mp4?auth_key=synthetic');
+    expect(find.byType(SnackBar), findsNothing);
+    expect(
+        find.descendant(of: link, matching: find.byIcon(Icons.check_rounded)),
+        findsOneWidget);
+    await tester.pump(const Duration(seconds: 1));
+    await tester.pumpAndSettle();
+    expect(find.descendant(of: link, matching: find.byIcon(Icons.copy_rounded)),
+        findsOneWidget);
     await tester.tapAt(const Offset(100, 180));
     await tester.pumpAndSettle();
     expect(link, findsNothing);
+
+    // Also verify playback information rows have animated copy icons without snackbar.
+    await tester.tap(find.text('更多'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('播放信息'));
+    await tester.pumpAndSettle();
+    final resRow = find.ancestor(
+        of: find.text('Resolution'), matching: find.byType(ListTile));
+    expect(
+        find.descendant(of: resRow, matching: find.byIcon(Icons.copy_rounded)),
+        findsOneWidget);
+    await tester.tap(resRow);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 240));
+    expect(copied, 'Resolution\n1920x1080');
+    expect(find.byType(SnackBar), findsNothing);
+    expect(
+        find.descendant(of: resRow, matching: find.byIcon(Icons.check_rounded)),
+        findsOneWidget);
+    await tester.pump(const Duration(seconds: 1));
+    await tester.pumpAndSettle();
+    expect(
+        find.descendant(of: resRow, matching: find.byIcon(Icons.copy_rounded)),
+        findsOneWidget);
     expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox.shrink());
   });

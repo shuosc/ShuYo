@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
@@ -161,12 +162,8 @@ Future<void> showRecordingPlayerMenu({
               }
               return Column(mainAxisSize: MainAxisSize.min, children: [
                 for (final entry in snapshot.data!)
-                  ListTile(
-                    dense: true,
-                    title: Text(entry.title),
-                    subtitle: Text(entry.value),
-                    onTap: () =>
-                        _copy(context, '${entry.title}\n${entry.value}'),
+                  _CopyableMenuRow(
+                    entry: entry,
                   ),
               ]);
             },
@@ -196,18 +193,11 @@ Future<void> showRecordingPlayerMenu({
                       padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
                       child: Text(view.label),
                     ),
-                    ListTile(
-                      key: ValueKey(
+                    _CopyableLinkRow(
+                      rowKey: ValueKey(
                           'recording-playback-link-${view.viewNumber}'),
+                      url: view.url.toString(),
                       dense: fullscreen,
-                      title: Text(view.url.toString(),
-                          maxLines: 3,
-                          overflow: TextOverflow.ellipsis,
-                          style: TextStyle(
-                              fontSize: 13,
-                              color: context.shuyoColors.textSecondary)),
-                      trailing: const Icon(Icons.copy_outlined, size: 20),
-                      onTap: () => _copy(context, view.url.toString()),
                     ),
                   ],
                   Padding(
@@ -236,11 +226,131 @@ Widget _panelHeading(BuildContext context, String title) => Padding(
       ]),
     );
 
-Future<void> _copy(BuildContext context, String value) async {
-  await Clipboard.setData(ClipboardData(text: value));
-  if (context.mounted) {
-    ScaffoldMessenger.maybeOf(context)
-        ?.showSnackBar(const SnackBar(content: Text('已复制')));
+class _CopyableMenuRow extends StatefulWidget {
+  const _CopyableMenuRow({required this.entry});
+
+  final RecordingPlaybackInfoEntry entry;
+
+  @override
+  State<_CopyableMenuRow> createState() => _CopyableMenuRowState();
+}
+
+class _CopyableMenuRowState extends State<_CopyableMenuRow> {
+  bool _copied = false;
+  Timer? _timer;
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    super.dispose();
+  }
+
+  void _handleCopy() {
+    unawaited(Clipboard.setData(
+        ClipboardData(text: '${widget.entry.title}\n${widget.entry.value}')));
+    setState(() => _copied = true);
+    _timer?.cancel();
+    _timer = Timer(const Duration(seconds: 1), () {
+      if (mounted) setState(() => _copied = false);
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = context.shuyoColors;
+    return ListTile(
+      dense: true,
+      title: Text(widget.entry.title),
+      subtitle: Text(widget.entry.value),
+      trailing: _AnimatedCopyIcon(colors: colors, copied: _copied),
+      onTap: _handleCopy,
+    );
+  }
+}
+
+class _CopyableLinkRow extends StatefulWidget {
+  const _CopyableLinkRow({
+    required this.rowKey,
+    required this.url,
+    required this.dense,
+  });
+
+  final Key rowKey;
+  final String url;
+  final bool dense;
+
+  @override
+  State<_CopyableLinkRow> createState() => _CopyableLinkRowState();
+}
+
+class _CopyableLinkRowState extends State<_CopyableLinkRow> {
+  bool _copied = false;
+  Timer? _timer;
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    super.dispose();
+  }
+
+  void _handleCopy() {
+    unawaited(Clipboard.setData(ClipboardData(text: widget.url)));
+    setState(() => _copied = true);
+    _timer?.cancel();
+    _timer = Timer(const Duration(seconds: 1), () {
+      if (mounted) setState(() => _copied = false);
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = context.shuyoColors;
+    return ListTile(
+      key: widget.rowKey,
+      dense: widget.dense,
+      title: Text(widget.url,
+          maxLines: 3,
+          overflow: TextOverflow.ellipsis,
+          style: TextStyle(fontSize: 13, color: colors.textSecondary)),
+      trailing: _AnimatedCopyIcon(colors: colors, copied: _copied),
+      onTap: _handleCopy,
+    );
+  }
+}
+
+class _AnimatedCopyIcon extends StatelessWidget {
+  const _AnimatedCopyIcon({
+    required this.colors,
+    required this.copied,
+  });
+
+  final ShuYoColors colors;
+  final bool copied;
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedSwitcher(
+      duration: const Duration(milliseconds: 240),
+      switchInCurve: Curves.easeOutBack,
+      switchOutCurve: Curves.easeIn,
+      transitionBuilder: (child, animation) => ScaleTransition(
+        scale: animation,
+        child: FadeTransition(opacity: animation, child: child),
+      ),
+      child: copied
+          ? Icon(
+              Icons.check_rounded,
+              key: const ValueKey('copied'),
+              size: 18,
+              color: colors.textPrimary,
+            )
+          : Icon(
+              Icons.copy_rounded,
+              key: const ValueKey('copy'),
+              size: 18,
+              color: colors.textMuted,
+            ),
+    );
   }
 }
 
