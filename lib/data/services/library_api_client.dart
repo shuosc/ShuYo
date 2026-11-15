@@ -9,17 +9,30 @@ import '../../core/client_user_agent.dart';
 import '../../core/library_constants.dart';
 import '../models/library_book_item.dart';
 import '../models/library_daily_recommend.dart';
+import '../models/library_loan_item.dart';
 import 'http_timeout.dart';
 import 'library_auth_service.dart';
 
 class LibraryApiException implements Exception {
-  const LibraryApiException(this.message, {this.statusCode});
+  const LibraryApiException(
+    this.message, {
+    this.statusCode,
+    this.isAuthRequired = false,
+  });
 
   final String message;
   final int? statusCode;
+  final bool isAuthRequired;
 
   @override
   String toString() => statusCode != null ? '$message ($statusCode)' : message;
+}
+
+class LibraryApiAuthRequiredException extends LibraryApiException {
+  const LibraryApiAuthRequiredException(
+    super.message, {
+    super.statusCode,
+  }) : super(isAuthRequired: true);
 }
 
 class LibraryApiClient {
@@ -37,6 +50,14 @@ class LibraryApiClient {
   }
 
   Map<String, String> _buildHeaders({LibraryAuthSession? session}) {
+    final cookieHeader = session == null || session.cookies.isEmpty
+        ? ''
+        : [
+            for (final c in session.cookies)
+              if (c.name.isNotEmpty &&
+                  (c.domain.isEmpty || c.domain == LibraryConstants.host))
+                '${c.name}=${c.value}',
+          ].join('; ');
     return {
       'Content-Type': 'application/json;charset=utf-8',
       'groupCode': LibraryConstants.groupCode,
@@ -48,6 +69,7 @@ class LibraryApiClient {
       'Accept': 'application/json, text/plain, */*',
       if (session != null && session.jwt.isNotEmpty)
         session.jwtHeader: session.jwt,
+      if (cookieHeader.isNotEmpty) 'Cookie': cookieHeader,
     };
   }
 
@@ -194,7 +216,8 @@ class LibraryApiClient {
     } else if (type == LibraryRankType.newBook) {
       requestBody['time'] = '1'; // 默认最近一周
       requestBody['docCode'] = '1';
-      requestBody['campusId'] = LibraryCampusFilter.toCampusIds(newBookCampuses);
+      requestBody['campusId'] =
+          LibraryCampusFilter.toCampusIds(newBookCampuses);
     }
 
     final uri = Uri.parse('${LibraryConstants.baseUrl}$path');
@@ -357,14 +380,12 @@ class LibraryApiClient {
       'author': const [],
       'langCode': const [],
       'countryCode': const [],
-      'publishBegin':
-          normalizedBegin != null && normalizedBegin.isNotEmpty
-              ? normalizedBegin
-              : null,
-      'publishEnd':
-          normalizedEnd != null && normalizedEnd.isNotEmpty
-              ? normalizedEnd
-              : null,
+      'publishBegin': normalizedBegin != null && normalizedBegin.isNotEmpty
+          ? normalizedBegin
+          : null,
+      'publishEnd': normalizedEnd != null && normalizedEnd.isNotEmpty
+          ? normalizedEnd
+          : null,
       'coreInclude': const [],
       'ddType': const [],
       'verifyStatus': const [],
@@ -458,8 +479,15 @@ class LibraryApiClient {
   }
 
   /// 批量获取图书封面和全馆馆藏数量（一页仅发一次请求）
-  Future<Map<int, ({String? coverUrl, int? pCount, int? onShelfCount, double? avgScore})>>
-      fetchBatchBookSupplementary(
+  Future<
+      Map<
+          int,
+          ({
+            String? coverUrl,
+            int? pCount,
+            int? onShelfCount,
+            double? avgScore
+          })>> fetchBatchBookSupplementary(
     List<LibraryBookItem> books, {
     LibraryAuthSession? session,
   }) async {
@@ -496,7 +524,12 @@ class LibraryApiClient {
       if (data is! Map<String, dynamic>) return const {};
 
       final result = <int,
-          ({String? coverUrl, int? pCount, int? onShelfCount, double? avgScore})>{};
+          ({
+        String? coverUrl,
+        int? pCount,
+        int? onShelfCount,
+        double? avgScore
+      })>{};
       for (final entry in data.entries) {
         final id = int.tryParse(entry.key);
         if (id == null || entry.value is! Map<String, dynamic>) continue;
@@ -645,5 +678,313 @@ class LibraryApiClient {
     } on Object {
       return null;
     }
+  }
+
+  /// 获取当前在借图书列表（POST /find/loanInfo/loanList，不启用本地缓存）。
+  Future<LibraryLoanPageResult> fetchLoanList({
+    int page = 1,
+    int rows = 50,
+    LibraryAuthSession? session,
+  }) async {
+    return _fetchLoanCollection(
+      path: LibraryConstants.loanListPath,
+      page: page,
+      rows: rows,
+      isHistory: false,
+      fallbackMessage: '获取当前借阅列表失败',
+      session: session,
+    );
+  }
+
+  /// 获取全部当前在借图书（按服务端 numFound 与去重兜底翻页拉全，不启用本地缓存）。
+  Future<List<LibraryLoanItem>> fetchAllActiveLoans({
+    LibraryAuthSession? session,
+  }) async {
+    final first = await fetchLoanList(page: 1, rows: 50, session: session);
+    final result = <LibraryLoanItem>[];
+    final seen = <String>{};
+    for (final item in first.items) {
+      if (seen.add(item.stableKey)) {
+        result.add(item);
+      }
+    }
+    var page = 2;
+    while (result.length < first.numFound && first.items.isNotEmpty) {
+      final next = await fetchLoanList(page: page, rows: 50, session: session);
+      var added = 0;
+      for (final item in next.items) {
+        if (seen.add(item.stableKey)) {
+          result.add(item);
+          added++;
+        }
+      }
+      if (next.items.isEmpty || added == 0) break;
+      page++;
+    }
+    return result;
+  }
+
+  /// 获取历史借阅列表（POST /find/loanInfo/loanHistoryList，不启用本地缓存）。
+  Future<LibraryLoanPageResult> fetchLoanHistoryList({
+    int page = 1,
+    int rows = 20,
+    LibraryAuthSession? session,
+  }) async {
+    return _fetchLoanCollection(
+      path: LibraryConstants.loanHistoryListPath,
+      page: page,
+      rows: rows,
+      isHistory: true,
+      fallbackMessage: '获取历史借阅记录失败',
+      session: session,
+    );
+  }
+
+  Future<LibraryLoanPageResult> _fetchLoanCollection({
+    required String path,
+    required int page,
+    required int rows,
+    required bool isHistory,
+    required String fallbackMessage,
+    LibraryAuthSession? session,
+  }) async {
+    final safePage = page < 1 ? 1 : page;
+    final safeRows = rows.clamp(1, 50);
+    final uri = Uri.parse('${LibraryConstants.baseUrl}$path');
+    final response = await _httpClient
+        .post(
+          uri,
+          headers: _buildHeaders(session: session),
+          body: jsonEncode({
+            'page': safePage,
+            'rows': safeRows,
+          }),
+        )
+        .timeout(HttpTimeout.normal);
+
+    final payload = _decodePersonalPayload(
+      response,
+      fallbackMessage: fallbackMessage,
+    );
+    if (payload is! Map<String, dynamic>) {
+      return LibraryLoanPageResult(
+        items: const [],
+        numFound: 0,
+        page: safePage,
+        rows: safeRows,
+      );
+    }
+
+    final rawList = (payload['searchResult'] as List?) ??
+        (payload['list'] as List?) ??
+        (payload['result'] as List?) ??
+        const [];
+    final items = rawList
+        .whereType<Map<String, dynamic>>()
+        .map((item) => LibraryLoanItem.fromJson(item, isHistory: isHistory))
+        .toList(growable: false);
+    final numFound = (payload['numFound'] as num?)?.toInt() ?? items.length;
+    return LibraryLoanPageResult(
+      items: items,
+      numFound: numFound,
+      page: safePage,
+      rows: safeRows,
+    );
+  }
+
+  /// 获取待办提醒计数（预约请求、逾期在借、未处理违章），非借阅额度。
+  Future<LibraryTodoCounts> fetchUserLimit({
+    LibraryAuthSession? session,
+  }) async {
+    final uri = Uri.parse(
+      '${LibraryConstants.baseUrl}${LibraryConstants.userLimitPath}',
+    );
+    final response = await _httpClient
+        .get(
+          uri,
+          headers: _buildHeaders(session: session),
+        )
+        .timeout(HttpTimeout.normal);
+
+    final payload = _decodePersonalPayload(
+      response,
+      fallbackMessage: '获取借阅提醒状态失败',
+    );
+    if (payload is Map<String, dynamic>) {
+      return LibraryTodoCounts.fromJson(payload);
+    }
+    return const LibraryTodoCounts();
+  }
+
+  /// 获取读者借阅规则与可借上限（POST /find/userInfo/UserLoanRules）。
+  Future<List<LibraryLoanRule>> fetchLoanRules({
+    LibraryAuthSession? session,
+  }) async {
+    final uri = Uri.parse(
+      '${LibraryConstants.baseUrl}${LibraryConstants.loanRulesPath}',
+    );
+    final response = await _httpClient
+        .post(
+          uri,
+          headers: _buildHeaders(session: session),
+          body: '{}',
+        )
+        .timeout(HttpTimeout.normal);
+
+    final payload = _decodePersonalPayload(
+      response,
+      fallbackMessage: '获取借阅规则失败',
+    );
+    final List<dynamic> rawList;
+    if (payload is List) {
+      rawList = payload;
+    } else if (payload is Map<String, dynamic>) {
+      rawList = (payload['list'] as List?) ??
+          (payload['rules'] as List?) ??
+          (payload['data'] as List?) ??
+          const [];
+    } else {
+      rawList = const [];
+    }
+    return rawList
+        .whereType<Map<String, dynamic>>()
+        .map(LibraryLoanRule.fromJson)
+        .toList(growable: false);
+  }
+
+  /// 获取读者证基础信息（GET /find/userInfo/getUserInfo）。
+  Future<LibraryReaderCardInfo?> fetchReaderCardInfo({
+    LibraryAuthSession? session,
+  }) async {
+    final uri = Uri.parse(
+      '${LibraryConstants.baseUrl}${LibraryConstants.checkFlagUserInfoPath}',
+    );
+    final response = await _httpClient
+        .get(
+          uri,
+          headers: _buildHeaders(session: session),
+        )
+        .timeout(HttpTimeout.normal);
+
+    final payload = _decodePersonalPayload(
+      response,
+      fallbackMessage: '获取读者证状态失败',
+    );
+    if (payload is Map<String, dynamic>) {
+      return LibraryReaderCardInfo.fromJson(payload);
+    }
+    return null;
+  }
+
+  /// 续借当前在借图书（POST /find/lendbook/reNew，失败原样透出服务端报错原因）。
+  Future<String?> renewLoan({
+    required String barcode,
+    int? loanId,
+    LibraryAuthSession? session,
+  }) async {
+    final trimmedBarcode = barcode.trim();
+    if (trimmedBarcode.isEmpty && loanId == null) {
+      throw const LibraryApiException('缺少册条码，无法发起续借');
+    }
+    final uri = Uri.parse(
+      '${LibraryConstants.baseUrl}${LibraryConstants.renewLoanPath}',
+    );
+    final body = <String, dynamic>{
+      if (trimmedBarcode.isNotEmpty) 'barcode': trimmedBarcode,
+      if (loanId != null) 'loanId': loanId,
+    };
+    final response = await _httpClient
+        .post(
+          uri,
+          headers: _buildHeaders(session: session),
+          body: jsonEncode(body),
+        )
+        .timeout(HttpTimeout.normal);
+
+    final envelope = _decodeRawEnvelope(
+      response,
+      fallbackMessage: '续借失败',
+    );
+    if (envelope is Map<String, dynamic>) {
+      final msg = (envelope['message'] as String?)?.trim();
+      return msg != null && msg.isNotEmpty ? msg : null;
+    }
+    return null;
+  }
+
+  Object? _decodePersonalPayload(
+    http.Response response, {
+    required String fallbackMessage,
+  }) {
+    final raw = _decodeRawEnvelope(
+      response,
+      fallbackMessage: fallbackMessage,
+    );
+    if (raw is Map<String, dynamic> && raw.containsKey('success')) {
+      final data = raw['data'];
+      if (data != null) return data;
+      if (raw.containsKey('searchResult') ||
+          raw.containsKey('user') ||
+          raw.containsKey('userRequestNum')) {
+        return raw;
+      }
+      return null;
+    }
+    return raw;
+  }
+
+  Object? _decodeRawEnvelope(
+    http.Response response, {
+    required String fallbackMessage,
+  }) {
+    if (response.statusCode == 401 || response.statusCode == 403) {
+      throw LibraryApiAuthRequiredException(
+        '图书馆登录状态已失效，请重新验证校园身份',
+        statusCode: response.statusCode,
+      );
+    }
+    if (response.statusCode != 200) {
+      throw LibraryApiException(
+        fallbackMessage,
+        statusCode: response.statusCode,
+      );
+    }
+
+    final Object? decoded;
+    try {
+      decoded = jsonDecode(utf8.decode(response.bodyBytes));
+    } on FormatException {
+      throw LibraryApiException(fallbackMessage);
+    }
+
+    if (decoded is Map<String, dynamic> && decoded.containsKey('success')) {
+      if (decoded['success'] != true) {
+        final rawCode = decoded['errCode'] ?? decoded['errorCode'];
+        final codeInt =
+            rawCode is num ? rawCode.toInt() : int.tryParse('$rawCode');
+        final failReason = (decoded['failReason'] as String?)?.trim();
+        final message = (decoded['message'] as String?)?.trim();
+        final effectiveMessage = (failReason != null && failReason.isNotEmpty)
+            ? failReason
+            : (message != null && message.isNotEmpty
+                ? message
+                : fallbackMessage);
+
+        final lower = effectiveMessage.toLowerCase();
+        if (codeInt == 401 ||
+            codeInt == 403 ||
+            effectiveMessage.contains('未登录') ||
+            effectiveMessage.contains('请先登录') ||
+            effectiveMessage.contains('登录失效') ||
+            lower.contains('token') && lower.contains('invalid')) {
+          throw LibraryApiAuthRequiredException(
+            effectiveMessage,
+            statusCode: codeInt,
+          );
+        }
+        throw LibraryApiException(effectiveMessage, statusCode: codeInt);
+      }
+    }
+    return decoded;
   }
 }

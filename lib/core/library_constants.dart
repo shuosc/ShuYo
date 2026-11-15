@@ -54,6 +54,21 @@ class LibraryConstants {
   /// 书目详情端点
   static const searchResultDetailPath = '/find/searchResultDetail/getDetail';
 
+  /// 个人借阅：当前借阅列表端点
+  static const loanListPath = '/find/loanInfo/loanList';
+
+  /// 个人借阅：历史借阅列表端点
+  static const loanHistoryListPath = '/find/loanInfo/loanHistoryList';
+
+  /// 个人借阅：借阅规则端点
+  static const loanRulesPath = '/find/userInfo/UserLoanRules';
+
+  /// 个人借阅：待办提醒计数端点（预约/逾期/待处理行为）
+  static const userLimitPath = '/find/user/userLimit';
+
+  /// 个人借阅：图书续借端点
+  static const renewLoanPath = '/find/lendbook/reNew';
+
   /// 读秀封面图片地址端点
   static const duxiuCoverPath = '/find/book/getDuxiuImageUrl';
 
