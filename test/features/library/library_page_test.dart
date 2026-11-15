@@ -4,9 +4,13 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shuyo/data/models/library_book_item.dart';
 import 'package:shuyo/data/models/library_daily_recommend.dart';
+import 'package:shuyo/data/models/library_loan_item.dart';
 import 'package:shuyo/data/services/library_api_client.dart';
 import 'package:shuyo/data/services/library_auth_service.dart';
+import 'package:shuyo/features/library/library_book_cover.dart';
 import 'package:shuyo/features/library/library_book_detail_page.dart';
+import 'package:shuyo/features/library/library_loan_history_page.dart';
+import 'package:shuyo/features/library/library_loan_list_tile.dart';
 import 'package:shuyo/features/library/library_page.dart';
 import 'package:shuyo/features/library/library_rank_list_page.dart';
 import 'package:shuyo/features/library/library_search_page.dart';
@@ -46,12 +50,30 @@ class _MockLibraryApiClient extends LibraryApiClient {
   _MockLibraryApiClient({
     this.recommendResult,
     this.rankResult = const [],
+    this.loanListResult = const LibraryLoanPageResult(
+      items: [],
+      numFound: 0,
+      page: 1,
+      rows: 50,
+    ),
+    this.todoCounts = const LibraryTodoCounts(),
   });
 
   LibraryDailyRecommend? recommendResult;
   List<LibraryBookItem> rankResult;
+  LibraryLoanPageResult loanListResult;
+  LibraryLoanPageResult historyResult = const LibraryLoanPageResult(
+    items: [],
+    numFound: 0,
+    page: 1,
+    rows: 20,
+  );
+  LibraryTodoCounts todoCounts;
+  Object? renewError;
   int fetchCalls = 0;
   int rankCalls = 0;
+  int loanCalls = 0;
+  int renewCalls = 0;
 
   @override
   Future<LibraryDailyRecommend?> fetchDailyRecommend({
@@ -73,6 +95,43 @@ class _MockLibraryApiClient extends LibraryApiClient {
   }) async {
     rankCalls++;
     return rankResult;
+  }
+
+  @override
+  Future<LibraryLoanPageResult> fetchLoanList({
+    int page = 1,
+    int rows = 50,
+    LibraryAuthSession? session,
+  }) async {
+    loanCalls++;
+    return loanListResult;
+  }
+
+  @override
+  Future<LibraryLoanPageResult> fetchLoanHistoryList({
+    int page = 1,
+    int rows = 20,
+    LibraryAuthSession? session,
+  }) async {
+    return historyResult;
+  }
+
+  @override
+  Future<LibraryTodoCounts> fetchUserLimit({
+    LibraryAuthSession? session,
+  }) async {
+    return todoCounts;
+  }
+
+  @override
+  Future<String?> renewLoan({
+    required String barcode,
+    int? loanId,
+    LibraryAuthSession? session,
+  }) async {
+    renewCalls++;
+    if (renewError != null) throw renewError!;
+    return '续借成功';
   }
 }
 
@@ -209,6 +268,8 @@ void main() {
     expect(find.text('周志华著'), findsOneWidget);
 
     // 点击底部“查看榜单”按钮进入榜单子页面
+    await tester.ensureVisible(find.text('查看榜单'));
+    await tester.pumpAndSettle();
     await tester.tap(find.text('查看榜单'));
     await tester.pumpAndSettle();
 
@@ -289,5 +350,150 @@ void main() {
 
     expect(find.byType(LibrarySearchPage), findsOneWidget);
     expect(find.text('搜索图书'), findsOneWidget);
+  });
+
+  testWidgets(
+      'displays current loans without cover, opens detail sheet and navigates to history',
+      (tester) async {
+    final now = DateTime(2026, 11, 15);
+    final authService = _MockLibraryAuthService();
+    final loans = [
+      LibraryLoanItem(
+        recordId: 201,
+        loanId: 11,
+        title: '正常在借图书',
+        author: '作者甲',
+        callNo: 'TP311/1',
+        locationName: '宝山流通库',
+        barcode: 'Z0001',
+        loanDate: DateTime(2026, 11, 1),
+        loanDateText: '2026-11-01',
+        dueDate: DateTime(2026, 12, 10),
+        dueDateText: '2026-12-10',
+        renewTimes: 0,
+        surplusRenewTimes: 2,
+      ),
+      LibraryLoanItem(
+        recordId: 202,
+        loanId: 12,
+        title: '已逾期图书',
+        author: '作者乙',
+        callNo: 'TP312/2',
+        locationName: '嘉定流通库',
+        barcode: 'Z0002',
+        loanDate: DateTime(2026, 9, 20),
+        loanDateText: '2026-09-20',
+        dueDate: DateTime(2026, 11, 12),
+        dueDateText: '2026-11-12',
+        renewTimes: 2,
+        surplusRenewTimes: 0,
+      ),
+      LibraryLoanItem(
+        recordId: 203,
+        loanId: 13,
+        title: '即将到期图书',
+        author: '作者丙',
+        callNo: 'TP313/3',
+        locationName: '宝山流通库',
+        barcode: 'Z0003',
+        loanDate: DateTime(2026, 10, 20),
+        loanDateText: '2026-10-20',
+        dueDate: DateTime(2026, 11, 17),
+        dueDateText: '2026-11-17',
+        renewTimes: 0,
+        surplusRenewTimes: 1,
+      ),
+      LibraryLoanItem(
+        recordId: 204,
+        loanId: 14,
+        title: '第四本在借图书',
+        author: '作者丁',
+        callNo: 'TP314/4',
+        locationName: '延长流通库',
+        barcode: 'Z0004',
+        loanDate: DateTime(2026, 11, 5),
+        loanDateText: '2026-11-05',
+        dueDate: DateTime(2027, 1, 5),
+        dueDateText: '2027-01-05',
+        renewTimes: 0,
+        surplusRenewTimes: 1,
+      ),
+    ];
+    final apiClient = _MockLibraryApiClient(
+      loanListResult: LibraryLoanPageResult(
+        items: loans,
+        numFound: 4,
+        page: 1,
+        rows: 50,
+      ),
+      todoCounts: const LibraryTodoCounts(expiredNum: 1),
+    );
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: LibraryPage(
+          authService: authService,
+          apiClient: apiClient,
+          now: now,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('我的借阅'), findsOneWidget);
+    expect(find.text('在借 4 本'), findsOneWidget);
+    expect(find.byKey(const ValueKey('library-home-overdue-banner')),
+        findsOneWidget);
+
+    // 只显示最多 3 本，且在借条目中不包含封面组件
+    expect(find.byType(LibraryLoanListTile), findsNWidgets(3));
+    expect(find.byType(LibraryBookCover), findsNothing);
+    expect(find.text('已逾期 3 天'), findsOneWidget);
+    expect(find.text('剩 2 天'), findsOneWidget);
+    expect(find.text('剩 25 天'), findsOneWidget);
+    expect(find.text('还有 1 本在借图书'), findsOneWidget);
+
+    // 排序确认：最紧急（逾期）在最前，第四本应还最晚被折叠
+    expect(find.text('第四本在借图书'), findsNothing);
+
+    // 点击其中可续借图书，打开底部详情弹窗并完成二次确认续借
+    await tester.tap(find.text('正常在借图书'));
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const ValueKey('library-loan-detail-sheet')),
+        findsOneWidget);
+    expect(find.text('TP311/1'), findsOneWidget);
+    expect(find.text('Z0001'), findsOneWidget);
+
+    final copyCallNoSize = tester.getSize(
+      find.byKey(const ValueKey('library-loan-copy-索书号')),
+    );
+    expect(copyCallNoSize.width, greaterThanOrEqualTo(48));
+    expect(copyCallNoSize.height, greaterThanOrEqualTo(48));
+
+    final renewBtn = find.byKey(const ValueKey('library-loan-detail-renew'));
+    await tester.ensureVisible(renewBtn);
+    await tester.tap(renewBtn);
+    await tester.pumpAndSettle();
+
+    // 二次确认框
+    expect(find.text('确认续借'), findsWidgets);
+    await tester.tap(find.text('确认续借').last);
+    await tester.pumpAndSettle();
+
+    expect(apiClient.renewCalls, 1);
+    expect(find.text('续借成功'), findsOneWidget);
+
+    // 点击底表右上角关闭按钮后点击“查看历史借阅”
+    await tester.tap(find.byKey(const ValueKey('library-loan-detail-close')));
+    await tester.pumpAndSettle();
+
+    final historyBtn = find.byKey(const ValueKey('library-loan-history'));
+    await tester.ensureVisible(historyBtn);
+    await tester.tap(historyBtn);
+    await tester.pumpAndSettle();
+
+    expect(find.byType(LibraryLoanHistoryPage), findsOneWidget);
+    expect(find.text('借阅记录'), findsOneWidget);
   });
 }
