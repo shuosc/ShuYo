@@ -21,11 +21,14 @@ class CourseReviewRepository {
   CourseReviewRepository({
     CourseReviewApiClient? apiClient,
     Future<SharedPreferences> Function()? preferencesLoader,
+    Future<AcademicSchedule?> Function()? scheduleLoader,
     required this.studentIdentityService,
     required this.scheduleRepository,
     this.isDemo = false,
   })  : _api = apiClient ?? CourseReviewApiClient(),
-        _preferencesLoader = preferencesLoader ?? SharedPreferences.getInstance;
+        _preferencesLoader = preferencesLoader ?? SharedPreferences.getInstance,
+        _scheduleLoader =
+            scheduleLoader ?? scheduleRepository.loadCachedSchedule;
 
   static const _scheduleCollapsedKey = 'rate.home.schedule.collapsed';
 
@@ -33,9 +36,11 @@ class CourseReviewRepository {
   final Future<SharedPreferences> Function() _preferencesLoader;
   final StudentIdentityService studentIdentityService;
   final AcademicScheduleRepository scheduleRepository;
+  final Future<AcademicSchedule?> Function() _scheduleLoader;
   final bool isDemo;
 
   Future<RateCatalogConfig>? _config;
+  Future<RateCatalogConfig>? _configRequest;
 
   void dispose() => _api.dispose();
 
@@ -51,16 +56,26 @@ class CourseReviewRepository {
   Future<void> saveScheduleCollapsed(bool collapsed) async {
     final preferences = await _preferencesLoader();
     if (!await preferences.setBool(_scheduleCollapsedKey, collapsed)) {
-      throw StateError('本学期课程折叠状态保存失败');
+      throw StateError('课表课程折叠状态保存失败');
     }
   }
 
-  /// Questions and categories rarely change; keep them for the app session
-  /// but retry after a failure.
-  Future<RateCatalogConfig> config() {
-    final pending = _config ??= _api.fetchConfig();
-    pending.then((_) {}, onError: (Object _) {
+  /// Browsing can reuse the session cache. Answering flows request a fresh
+  /// configuration on entry and keep that snapshot until they finish.
+  /// Concurrent callers share the same in-flight request, including refreshes.
+  Future<RateCatalogConfig> config({bool forceRefresh = false}) {
+    final inFlight = _configRequest;
+    if (inFlight != null) return inFlight;
+    final cached = _config;
+    if (!forceRefresh && cached != null) return cached;
+
+    final pending = _api.fetchConfig();
+    _config = _configRequest = pending;
+    pending.then((_) {
+      if (identical(_configRequest, pending)) _configRequest = null;
+    }, onError: (Object _) {
       if (identical(_config, pending)) _config = null;
+      if (identical(_configRequest, pending)) _configRequest = null;
     });
     return pending;
   }
@@ -87,11 +102,11 @@ class CourseReviewRepository {
   Future<List<RateCourseSummary>> collegeCourses(String college) =>
       _api.fetchCollegeCourses(college);
 
-  /// Distinct courses of the cached schedule, in timetable order.
+  /// Distinct courses of the supplied schedule, in timetable order.
   Future<List<RateScheduleCourse>> scheduleCourses() async {
     final AcademicSchedule? schedule;
     try {
-      schedule = await scheduleRepository.loadCachedSchedule();
+      schedule = await _scheduleLoader();
     } on Object {
       return const [];
     }

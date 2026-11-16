@@ -1,8 +1,8 @@
 import 'dart:async';
 
 import 'package:flutter/foundation.dart';
-import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:material_ui/material_ui.dart';
 import 'package:shuyo/core/client_app_info.dart';
 import 'package:shuyo/features/settings/third_party_licenses_page.dart';
 import 'package:shuyo/shared/navigation/shuyo_route.dart';

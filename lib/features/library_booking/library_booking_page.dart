@@ -1,8 +1,8 @@
 import 'dart:async';
 import 'dart:math';
 
-import 'package:flutter/cupertino.dart' show CupertinoPicker;
-import 'package:flutter/material.dart';
+import 'package:cupertino_ui/cupertino_ui.dart' show CupertinoPicker;
+import 'package:material_ui/material_ui.dart';
 
 import '../../data/models/classroom.dart';
 import '../../data/services/academic_account_store.dart';
@@ -2418,7 +2418,7 @@ class _LibraryBookingPageState extends State<LibraryBookingPage> {
                               color: selectedRoomName == null
                                   ? colors.textMuted
                                   : null,
-                              fontWeight: FontWeight.w700,
+                              fontWeight: FontWeight.w600,
                             ),
                       ),
                       const SizedBox(height: 2),

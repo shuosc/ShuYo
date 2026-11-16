@@ -1,4 +1,4 @@
-import 'package:flutter/material.dart';
+import 'package:material_ui/material_ui.dart';
 
 import '../../data/models/course_review.dart';
 import '../../data/repositories/course_review_repository.dart';

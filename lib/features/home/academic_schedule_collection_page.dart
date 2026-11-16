@@ -1,6 +1,6 @@
 import 'dart:async';
 
-import 'package:flutter/material.dart';
+import 'package:material_ui/material_ui.dart';
 
 import '../../data/models/academic_schedule_collection.dart';
 import '../../data/repositories/academic_schedule_repository.dart';

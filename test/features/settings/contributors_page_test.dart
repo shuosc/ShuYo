@@ -1,7 +1,7 @@
 import 'dart:async';
 
-import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:material_ui/material_ui.dart';
 import 'package:shuyo/data/models/github_contributor.dart';
 import 'package:shuyo/data/services/github_contributors_service.dart';
 import 'package:shuyo/features/settings/contributors_page.dart';

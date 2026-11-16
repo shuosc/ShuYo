@@ -1,6 +1,6 @@
-import 'package:flutter/material.dart';
 import 'package:flutter/semantics.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:material_ui/material_ui.dart';
 import 'package:shuyo/data/models/campus_card.dart';
 import 'package:shuyo/data/services/campus_card_service.dart'
     show CampusCardAuthRequiredException, CampusCardException;

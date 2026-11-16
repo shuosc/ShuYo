@@ -1,6 +1,6 @@
 import 'dart:collection';
 
-import 'package:flutter/material.dart';
+import 'package:material_ui/material_ui.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
@@ -156,6 +156,38 @@ void main() {
     expect(unknown.newer, isNull);
     expect(unknown.older, isNull);
     expect(unknown.panelIndexByLessonId[99], isNull);
+  });
+
+  testWidgets('fullscreen controls supply their own Material surface',
+      (tester) async {
+    final player = Player(platformPlayer: _TimelinePlayer());
+    addTearDown(player.dispose);
+    // A media_kit fullscreen route does not provide standalone Material.
+    await tester.pumpWidget(MaterialApp(
+      home: RecordingVideoControls(
+        state: _VideoState(),
+        player: player,
+        title: '课程录播',
+        loading: false,
+        failure: null,
+        views: const [],
+        selectedView: 0,
+        fullscreen: true,
+      ),
+    ));
+    await tester.pump();
+
+    final slider = find.byType(Slider);
+    expect(slider, findsOneWidget);
+    expect(
+      find.ancestor(
+        of: slider,
+        matching: find.byWidgetPredicate((widget) =>
+            widget is Material && widget.type == MaterialType.transparency),
+      ),
+      findsOneWidget,
+    );
+    expect(tester.takeException(), isNull);
   });
 
   testWidgets(

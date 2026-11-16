@@ -1,6 +1,6 @@
 import 'dart:async';
 
-import 'package:flutter/material.dart';
+import 'package:material_ui/material_ui.dart';
 
 import '../../data/models/course_review.dart';
 import '../../data/repositories/course_review_repository.dart';
@@ -384,16 +384,22 @@ class _QuestionStatCard extends StatelessWidget {
         children: [
           Row(
             children: [
-              Text(stat.title,
-                  style: ShuYoTextStyles.title(
-                      color: colors.textPrimary,
-                      size: 14.5,
-                      weight: FontWeight.w500)),
-              if (stat.multiple) ...[
-                const SizedBox(width: 6),
-                const RateTag(text: '可多选'),
-              ],
-              const Spacer(),
+              Expanded(
+                child: Wrap(
+                  spacing: 6,
+                  runSpacing: 4,
+                  crossAxisAlignment: WrapCrossAlignment.center,
+                  children: [
+                    Text(stat.title,
+                        style: ShuYoTextStyles.title(
+                            color: colors.textPrimary,
+                            size: 14.5,
+                            weight: FontWeight.w500)),
+                    if (stat.multiple) const RateTag(text: '可多选'),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 8),
               Text('${stat.answered} 人回答',
                   style: ShuYoTextStyles.meta(color: colors.textTertiary)),
             ],
@@ -420,7 +426,7 @@ class _OptionStatRow extends StatelessWidget {
   Widget build(BuildContext context) {
     final colors = context.shuyoColors;
     final top = option.top;
-    final textColor = top ? colors.textPrimary : colors.textSecondary;
+    final textColor = top ? colors.accent : colors.textSecondary;
     final weight = top ? FontWeight.w500 : FontWeight.w400;
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 5),

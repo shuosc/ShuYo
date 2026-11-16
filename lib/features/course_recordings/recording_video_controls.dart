@@ -1,7 +1,7 @@
 import 'dart:async';
 import 'dart:math' as math;
 
-import 'package:flutter/material.dart';
+import 'package:material_ui/material_ui.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/services.dart';
 import 'package:media_kit/media_kit.dart';
@@ -704,7 +704,14 @@ class _RecordingVideoControlsState extends State<RecordingVideoControls>
   }
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context) => Material(
+        // media_kit's fullscreen route supplies the legacy SDK Material.
+        // Our standalone Material controls need their own transparent surface.
+        type: MaterialType.transparency,
+        child: _buildControls(context),
+      );
+
+  Widget _buildControls(BuildContext context) {
     final fullscreen = widget.fullscreen;
     final selectedLesson =
         widget.selectedLesson ?? _episodeNavigation.selectedLesson;

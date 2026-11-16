@@ -3,9 +3,9 @@ import 'dart:ui' as ui;
 
 import 'package:crop_your_image/crop_your_image.dart';
 import 'package:flutter/foundation.dart';
-import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:material_ui/material_ui.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../../core/client_app_info.dart';
@@ -23,6 +23,7 @@ import '../../shared/theme/shuyo_theme.dart';
 import '../../shared/theme/custom_background.dart';
 import '../../shared/widgets/client_update_prompt.dart';
 import '../../shared/widgets/empty_state.dart';
+import '../../shared/widgets/legacy_material_bridge.dart';
 import '../../shared/widgets/webvpn_toggle.dart';
 import 'client_feedback_page.dart';
 import 'contributors_page.dart';
@@ -948,6 +949,7 @@ class _ThemeSettingsPageState extends State<_ThemeSettingsPage> {
   bool _savingCustom = false;
   CustomBackground? _customBackground;
   double? _opacityDraft;
+  double? _moduleOpacityDraft;
 
   @override
   void initState() {
@@ -1024,13 +1026,20 @@ class _ThemeSettingsPageState extends State<_ThemeSettingsPage> {
             _customBackground != null
         ? _customBackground!.copyWith(opacity: _opacityDraft!.round())
         : null;
-    return CustomBackgroundLayer(settings: preview, child: page);
+    return CustomBackgroundLayer(
+      key: const ValueKey('theme-background-preview'),
+      settings: preview,
+      child: page,
+    );
   }
 
   Widget _buildCustomBackgroundRow(BuildContext context) {
     final selected = !_followSystemTheme &&
         _selectedThemeId == ShuYoThemes.customBackgroundId;
-    final settings = _customBackground;
+    final settings = _customBackground?.copyWith(
+      opacity: _opacityDraft?.round(),
+      moduleOpacity: _moduleOpacityDraft?.round(),
+    );
     final colors = context.shuyoColors;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -1077,8 +1086,6 @@ class _ThemeSettingsPageState extends State<_ThemeSettingsPage> {
                   ],
                 ),
                 const SizedBox(height: 8),
-                const Text('不透明度'),
-                const SizedBox(height: 8),
                 SliderTheme(
                   data: SliderTheme.of(context).copyWith(
                     showValueIndicator: ShowValueIndicator.onDrag,
@@ -1086,23 +1093,63 @@ class _ThemeSettingsPageState extends State<_ThemeSettingsPage> {
                     disabledInactiveTrackColor: Colors.grey.shade400,
                     disabledThumbColor: Colors.grey.shade600,
                   ),
-                  child: Slider(
-                    value: _opacityDraft ?? settings.opacity.toDouble(),
-                    min: 0,
-                    max: 100,
-                    label: '${(_opacityDraft ?? settings.opacity).round()}%',
-                    semanticFormatterCallback: (value) => '${value.round()}%',
-                    onChanged: _savingCustom || !settings.hasPhoto
-                        ? null
-                        : (value) => setState(() => _opacityDraft = value),
-                    onChangeEnd: _savingCustom || !settings.hasPhoto
-                        ? null
-                        : (value) {
-                            setState(() => _opacityDraft = null);
-                            _saveCustom(
-                              settings.copyWith(opacity: value.round()),
-                            );
-                          },
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text('背景不透明度'),
+                      const SizedBox(height: 8),
+                      Slider(
+                        key: const ValueKey('theme-background-opacity-slider'),
+                        value: _opacityDraft ?? settings.opacity.toDouble(),
+                        min: 0,
+                        max: 100,
+                        label:
+                            '${(_opacityDraft ?? settings.opacity).round()}%',
+                        semanticFormatterCallback: (value) =>
+                            '${value.round()}%',
+                        onChanged: _savingCustom || !settings.hasPhoto
+                            ? null
+                            : (value) => setState(() => _opacityDraft = value),
+                        onChangeEnd: _savingCustom || !settings.hasPhoto
+                            ? null
+                            : (value) {
+                                setState(() => _opacityDraft = null);
+                                _saveCustom(
+                                  settings.copyWith(opacity: value.round()),
+                                );
+                              },
+                      ),
+                      if (settings.hasVisiblePhoto) ...[
+                        const SizedBox(height: 16),
+                        const Text('模块不透明度'),
+                        const SizedBox(height: 8),
+                        Slider(
+                          key: const ValueKey('theme-module-opacity-slider'),
+                          value: _moduleOpacityDraft ??
+                              settings.moduleOpacity.toDouble(),
+                          min: CustomBackground.minModuleOpacity.toDouble(),
+                          max: CustomBackground.maxModuleOpacity.toDouble(),
+                          label:
+                              '${(_moduleOpacityDraft ?? settings.moduleOpacity).round()}%',
+                          semanticFormatterCallback: (value) =>
+                              '${value.round()}%',
+                          onChanged: _savingCustom
+                              ? null
+                              : (value) =>
+                                  setState(() => _moduleOpacityDraft = value),
+                          onChangeEnd: _savingCustom
+                              ? null
+                              : (value) {
+                                  setState(() => _moduleOpacityDraft = null);
+                                  _saveCustom(settings.copyWith(
+                                    moduleOpacity: value.round(),
+                                  ));
+                                },
+                        ),
+                        const SizedBox(height: 8),
+                        _buildModulePreview(settings),
+                      ],
+                    ],
                   ),
                 ),
                 const SizedBox(height: 16),
@@ -1124,6 +1171,62 @@ class _ThemeSettingsPageState extends State<_ThemeSettingsPage> {
             ),
           ),
       ],
+    );
+  }
+
+  Widget _buildModulePreview(CustomBackground settings) {
+    final colors = settings.theme.colors;
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(12),
+      child: Stack(
+        children: [
+          Positioned.fill(
+            child: CustomBackgroundLayer(
+              settings: settings,
+              child: const SizedBox.expand(),
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 20),
+            child: Card(
+              key: const ValueKey('theme-module-preview-card'),
+              margin: EdgeInsets.zero,
+              color: settings.moduleSurface,
+              elevation: 0,
+              surfaceTintColor: Colors.transparent,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(12),
+              ),
+              clipBehavior: Clip.antiAlias,
+              child: ListTile(
+                contentPadding:
+                    const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                leading:
+                    Icon(Icons.event, size: 24, color: colors.textSecondary),
+                title: Text(
+                  '今日课程',
+                  style: TextStyle(
+                    color: colors.textPrimary,
+                    fontSize: 15.5,
+                    fontWeight: FontWeight.w500,
+                    height: 1.5,
+                    letterSpacing: 0.5,
+                  ),
+                ),
+                subtitle: Text(
+                  '预览首页模块的显示效果',
+                  style: TextStyle(
+                    color: colors.textTertiary,
+                    fontSize: 14,
+                    height: 1.43,
+                    letterSpacing: 0.25,
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
     );
   }
 
@@ -1250,10 +1353,11 @@ class _ThemeSettingsPageState extends State<_ThemeSettingsPage> {
       if (cropped == null || !mounted) return;
       newFile =
           await widget.settingsService.createCustomBackgroundPhoto(cropped);
-      final settings = await CustomBackground.fromImage(
+      final settings = (await CustomBackground.fromImage(
         imagePath: newFile.path,
         provider: MemoryImage(cropped),
-      );
+      ))
+          .copyWith(moduleOpacity: _customBackground?.moduleOpacity);
       await widget.onCustomBackgroundChanged!(settings);
       // The saved configuration owns this file, even if the page has closed.
       newFile = null;
@@ -1467,21 +1571,23 @@ class _BackgroundCropPageState extends State<_BackgroundCropPage> {
       ),
       body: Stack(
         children: [
-          Crop(
-            image: widget.image,
-            controller: _controller,
-            aspectRatio: MediaQuery.sizeOf(context).aspectRatio,
-            interactive: true,
-            onCropped: (result) {
-              if (!mounted) return;
-              switch (result) {
-                case CropSuccess(:final croppedImage):
-                  Navigator.of(context).pop(croppedImage);
-                case CropFailure(:final cause):
-                  setState(() => _cropping = false);
-                  _showSnack(context, '裁剪失败：$cause');
-              }
-            },
+          LegacyMaterialBridge(
+            child: Crop(
+              image: widget.image,
+              controller: _controller,
+              aspectRatio: MediaQuery.sizeOf(context).aspectRatio,
+              interactive: true,
+              onCropped: (result) {
+                if (!mounted) return;
+                switch (result) {
+                  case CropSuccess(:final croppedImage):
+                    Navigator.of(context).pop(croppedImage);
+                  case CropFailure(:final cause):
+                    setState(() => _cropping = false);
+                    _showSnack(context, '裁剪失败：$cause');
+                }
+              },
+            ),
           ),
           if (_cropping) const Center(child: CircularProgressIndicator()),
         ],

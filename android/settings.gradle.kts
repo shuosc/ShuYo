@@ -22,8 +22,9 @@ pluginManagement {
 
 plugins {
     id("dev.flutter.flutter-plugin-loader") version "1.0.0"
-    id("com.android.application") version "9.1.0" apply false
-    id("org.jetbrains.kotlin.android") version "2.4.0" apply false
+    id("com.android.application") version "9.3.3" apply false
+    // Pin Kotlin for AGP built-in Kotlin and the plugins sharing its classpath.
+    id("org.jetbrains.kotlin.android") version "2.4.21" apply false
 }
 
 include(":app")

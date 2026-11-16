@@ -1,8 +1,8 @@
 import 'dart:async';
 
 import 'package:flutter/foundation.dart';
-import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:material_ui/material_ui.dart';
 
 import '../../core/academic_url_resolver.dart';
 import '../../core/wecom_constants.dart';
@@ -251,7 +251,7 @@ class _NativeLoginPageState extends State<NativeLoginPage> {
                         style: Theme.of(context)
                             .textTheme
                             .headlineLarge
-                            ?.copyWith(fontWeight: FontWeight.w700),
+                            ?.copyWith(fontWeight: FontWeight.w600),
                       ),
                       const SizedBox(height: 8),
                       Padding(
@@ -532,7 +532,7 @@ class _NativeLoginPageState extends State<NativeLoginPage> {
                         style: Theme.of(context)
                             .textTheme
                             .headlineLarge
-                            ?.copyWith(fontWeight: FontWeight.w700),
+                            ?.copyWith(fontWeight: FontWeight.w600),
                       ),
                       const SizedBox(height: 8),
                       Padding(

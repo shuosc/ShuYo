@@ -243,6 +243,8 @@ class RateQuestion {
     required this.multiple,
     required this.required,
     required this.options,
+    this.description,
+    this.maxSelections,
   });
 
   static const overallKey = 'overall';
@@ -252,16 +254,35 @@ class RateQuestion {
   final bool multiple;
   final bool required;
   final List<RateOption> options;
+  final String? description;
+  final int? maxSelections;
 
   bool get isOverall => key == overallKey;
 
-  factory RateQuestion.fromJson(JsonMap json) => RateQuestion(
-        key: stringValue(json['key']),
-        title: stringValue(json['title']),
-        multiple: boolValue(json['multiple']),
-        required: boolValue(json['required']),
-        options: _maps(json['options']).map(RateOption.fromJson).toList(),
-      );
+  /// An empty server description deliberately hides the hint. Only older
+  /// configurations without a description use the compatibility text.
+  String get displayDescription =>
+      description ??
+      (isOverall
+          ? (required ? '必答' : '可跳过')
+          : [
+              multiple ? '可多选' : '单选',
+              if (multiple && maxSelections != null) '最多$maxSelections项',
+              required ? '必答' : '可跳过',
+            ].join('，'));
+
+  factory RateQuestion.fromJson(JsonMap json) {
+    final maxSelections = intValue(json['maxSelections']);
+    return RateQuestion(
+      key: stringValue(json['key']),
+      title: stringValue(json['title']),
+      multiple: boolValue(json['multiple']),
+      required: boolValue(json['required']),
+      options: _maps(json['options']).map(RateOption.fromJson).toList(),
+      description: json['description'] as String?,
+      maxSelections: maxSelections > 0 ? maxSelections : null,
+    );
+  }
 }
 
 class RateCategory {
@@ -571,11 +592,43 @@ class RateReviewDraft {
   final int overall;
   final Map<String, List<String>> answers;
 
+  /// Validate the same question snapshot that was shown while answering.
+  /// Count unique option keys, matching the server's selection-limit rule.
+  ({int questionIndex, String message})? validate(
+      List<RateQuestion> questions) {
+    for (var index = 0; index < questions.length; index++) {
+      final question = questions[index];
+      final selected = (question.isOverall
+              ? (overall == 0 ? const <String>[] : ['$overall'])
+              : answers[question.key] ?? const <String>[])
+          .toSet();
+      final limit = question.maxSelections;
+      final allowed = question.options.map((option) => option.key).toSet();
+      final String? message;
+      if (question.required && selected.isEmpty) {
+        message = '请回答“${question.title}”';
+      } else if (!question.multiple && selected.length > 1) {
+        message = '“${question.title}”只能选择一项';
+      } else if (question.multiple &&
+          limit != null &&
+          selected.length > limit) {
+        message = '“${question.title}”最多选择$limit项';
+      } else if (selected.any((key) => !allowed.contains(key))) {
+        message = '“${question.title}”包含无效选项，请重新选择';
+      } else {
+        message = null;
+      }
+      if (message != null) return (questionIndex: index, message: message);
+    }
+    return null;
+  }
+
   JsonMap toJson() => {
         'overall': overall,
+        // Missing keys preserve newer answers on the server; [] explicitly
+        // clears an answer. Never add keys for questions the client did not load.
         'answers': {
-          for (final entry in answers.entries)
-            if (entry.value.isNotEmpty) entry.key: entry.value,
+          for (final entry in answers.entries) entry.key: entry.value,
         },
       };
 }

@@ -1,7 +1,7 @@
 import 'dart:math';
 
-import 'package:flutter/material.dart';
 import 'package:lunar/calendar/Lunar.dart';
+import 'package:material_ui/material_ui.dart';
 
 import '../../data/models/home_layout.dart';
 import '../../shared/theme/shuyo_theme.dart';
@@ -365,10 +365,11 @@ class _HomeCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colors = context.shuyoColors;
-    final custom = CustomBackgroundScope.maybeOf(context) != null;
-    final lightCard = !custom && colors.brightness == Brightness.light;
-    final surface = custom
-        ? colors.surface.withValues(alpha: 0.72)
+    final customBackground = CustomBackgroundScope.maybeOf(context);
+    final lightCard =
+        customBackground == null && colors.brightness == Brightness.light;
+    final surface = customBackground != null
+        ? customBackground.moduleSurface
         : lightCard
             ? const Color(0xFFFFFEFC)
             : colors.surface;

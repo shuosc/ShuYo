@@ -1,5 +1,5 @@
-import 'package:flutter/cupertino.dart';
-import 'package:flutter/material.dart';
+import 'package:cupertino_ui/cupertino_ui.dart';
+import 'package:material_ui/material_ui.dart';
 
 import '../../data/models/academic_schedule.dart';
 import '../../shared/shuyo_text_styles.dart';
@@ -144,6 +144,8 @@ class _AcademicScheduleEditorPageState
             children: [
               TextFormField(
                 controller: _nameController,
+                onTapOutside: (_) =>
+                    FocusManager.instance.primaryFocus?.unfocus(),
                 decoration: const InputDecoration(
                   labelText: '课程名称',
                   border: OutlineInputBorder(),
@@ -296,7 +298,7 @@ class _AcademicScheduleEditorPageState
     final discard = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
-        title: const Text('放弃未保存的修改？'),
+        title: const Text('未保存的修改'),
         content: const Text('当前修改尚未保存，确定要返回吗？'),
         actions: [
           TextButton(
@@ -999,6 +1001,8 @@ class _EditorTextTile extends StatelessWidget {
               Expanded(
                 child: TextField(
                   controller: controller,
+                  onTapOutside: (_) =>
+                      FocusManager.instance.primaryFocus?.unfocus(),
                   keyboardType: keyboardType,
                   textAlign: TextAlign.end,
                   style: _editorValueStyle(colors.textPrimary),

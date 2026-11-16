@@ -23,19 +23,11 @@ Android 版本可以打开 [release 页面](https://github.com/shuosc/ShuYo/rele
 
 本应用使用 [Dart](https://dart.dev/) 和 [Flutter](https://flutter.dev/) 开发。
 
-我们跟随 Flutter `stable` 渠道的最新版本，当前使用的编译版本为：
-
-```shell
-Flutter 3.47.7 • channel stable • https://github.com/flutter/flutter.git
-Framework • revision abaf9c5237 (2 days ago) • 2026-10-08 09:51:21 -0700
-Engine • hash d8a2d6c768c334d53e16277f837970ffa1e2de81 (revision deb287481e) (2 days ago) • 2026-10-07
-17:09:12.000Z
-Tools • Dart 3.13.5 • DevTools 2.60.0
-```
+推荐使用 **Flutter 3.50.0（stable）**，Android 构建需要 **JDK 21**。
 
 为了构建本应用，您需要[下载](https://flutter.cn/docs/get-started/install)并安装 `Flutter SDK`，将 `flutter` 加入 PATH；
 
-如果您正在为 `Android` 平台构建，需要安装 [Android Studio](https://developer.android.google.cn/studio)、配置 Android SDK 与 [Android Command Line Tools](https://developer.android.google.cn/studio)，并准备好可用的 Android 模拟器或真机设备。
+Android 构建需要安装 [Android Studio 或 Android 命令行工具](https://developer.android.google.cn/studio)，并配置 Android SDK；运行与调试时需要模拟器或真机。
 
 如果您正在为 `iOS/iPadOS` 平台构建，您还需要[安装并配置](https://apps.apple.com/app/id497799835) `Xcode`，并准备可用的 Simulator 或真机进行调试。
 
@@ -47,10 +39,12 @@ flutter devices
 flutter run -d <device-id>
 ```
 
-运行测试：
+检查与构建 Android：
 
 ```shell
+flutter analyze
 flutter test
+flutter build apk --debug --target-platform android-arm64
 ```
 
 开发约定：[LLM 使用政策](LLM_POLICY.md)

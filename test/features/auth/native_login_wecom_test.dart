@@ -1,12 +1,12 @@
 import 'dart:async';
 
-import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:material_ui/material_ui.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:shuyo/core/wecom_constants.dart';
 import 'package:shuyo/data/services/academic_native_auth_service.dart';
-import 'package:shuyo/data/services/wecom_auth_service.dart';
 import 'package:shuyo/data/services/student_identity_service.dart';
+import 'package:shuyo/data/services/wecom_auth_service.dart';
 import 'package:shuyo/features/auth/native_login_page.dart';
 
 /// 企微扫码登录 WebVPN 的产物：握手已在扫码页内完成，回调地址是落地页。

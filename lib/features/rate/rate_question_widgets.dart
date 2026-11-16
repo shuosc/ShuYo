@@ -1,8 +1,9 @@
-import 'package:flutter/material.dart';
+import 'package:material_ui/material_ui.dart';
 
 import '../../data/models/course_review.dart';
 import '../../shared/shuyo_text_styles.dart';
 import '../../shared/theme/shuyo_theme.dart';
+import 'rate_widgets.dart';
 
 /// Large five-star picker for the overall question.
 class RateOverallPicker extends StatelessWidget {
@@ -73,13 +74,20 @@ class RateOptionGrid extends StatelessWidget {
   final List<String> selected;
   final ValueChanged<List<String>> onChanged;
 
-  void _toggle(String key) {
+  void _toggle(BuildContext context, String key) {
+    if (selected.contains(key)) {
+      onChanged(selected.where((item) => item != key).toList());
+      return;
+    }
     if (question.multiple) {
-      onChanged(selected.contains(key)
-          ? selected.where((item) => item != key).toList()
-          : [...selected, key]);
+      final limit = question.maxSelections;
+      if (limit != null && selected.toSet().length >= limit) {
+        showRateSnack(context, '最多选择$limit项');
+        return;
+      }
+      onChanged([...selected, key]);
     } else {
-      onChanged(selected.contains(key) ? const [] : [key]);
+      onChanged([key]);
     }
   }
 
@@ -99,8 +107,7 @@ class RateOptionGrid extends StatelessWidget {
               child: _OptionCell(
                 label: option.label,
                 selected: selected.contains(option.key),
-                multiple: question.multiple,
-                onTap: () => _toggle(option.key),
+                onTap: () => _toggle(context, option.key),
               ),
             ),
         ],
@@ -113,13 +120,11 @@ class _OptionCell extends StatelessWidget {
   const _OptionCell({
     required this.label,
     required this.selected,
-    required this.multiple,
     required this.onTap,
   });
 
   final String label;
   final bool selected;
-  final bool multiple;
   final VoidCallback onTap;
 
   @override
@@ -158,15 +163,9 @@ class _OptionCell extends StatelessWidget {
                 top: 6,
                 right: 6,
                 child: Icon(
-                  multiple
-                      ? (selected
-                          ? Icons.check_box_rounded
-                          : Icons.check_box_outline_blank_rounded)
-                      : Icons.check_circle_rounded,
+                  Icons.check_circle_rounded,
                   size: 16,
-                  color: selected
-                      ? colors.accent
-                      : (multiple ? colors.borderStrong : Colors.transparent),
+                  color: selected ? colors.accent : Colors.transparent,
                 ),
               ),
             ],
