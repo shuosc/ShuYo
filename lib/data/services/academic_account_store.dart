@@ -10,6 +10,8 @@ class AcademicAccountStore {
   }) : _preferencesLoader = preferencesLoader ?? SharedPreferences.getInstance;
 
   static const studentIdKey = 'academic.account.student_id';
+  static int _sessionEpoch = 0;
+  static int get sessionEpoch => _sessionEpoch;
   static const lastStudentIdKey = 'academic.account.last_student_id';
   static const loginHistoryKey = 'academic.account.login_history';
   static const sessionExpiredKey = 'academic.account.session_expired.current';
@@ -29,6 +31,7 @@ class AcademicAccountStore {
     if (normalized.isEmpty) return;
     final preferences = await _preferencesLoader();
     if (preferences.getString(studentIdKey)?.trim() != normalized) {
+      _sessionEpoch++;
       final secure = SecureAppStore(preferencesLoader: _preferencesLoader);
       await secure.delete(SecureAppStore.campusCardSessionKey);
       if (await loadDataStudentId() != normalized) {
@@ -101,6 +104,7 @@ class AcademicAccountStore {
       (await _preferencesLoader()).getBool(legacySessionExpiredKey) == true;
 
   Future<void> clear({bool sessionExpired = false}) async {
+    _sessionEpoch++;
     final preferences = await _preferencesLoader();
     await rememberExistingAccounts();
     final studentId = await loadStudentId();

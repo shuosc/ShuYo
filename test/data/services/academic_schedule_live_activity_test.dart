@@ -399,8 +399,7 @@ void main() {
     expect(settings.leadMinutes, 30);
   });
 
-  test('an old disallowed response cannot clear a newer live opt-in',
-      () async {
+  test('an old disallowed response cannot clear a newer live opt-in', () async {
     await enableBoth([_session()]);
     final synchronizing = Completer<void>();
     final releaseSync = Completer<void>();

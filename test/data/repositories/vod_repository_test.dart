@@ -1,0 +1,734 @@
+import 'dart:async';
+
+import 'package:flutter_test/flutter_test.dart';
+import 'package:shuyo/data/models/course_recording.dart';
+import 'package:shuyo/data/repositories/vod_repository.dart';
+import 'package:shuyo/data/services/vod_api_client.dart';
+
+const _course = VodCourse(
+  teachingClassId: 42,
+  termId: 7,
+  name: '程序设计',
+  code: 'CS101',
+  teacherNames: ['教师甲'],
+);
+const _lesson = VodLesson(
+  id: 123,
+  teachingClassId: 42,
+  name: '程序设计',
+  isPlayable: true,
+);
+
+class _FakeClient extends VodApiClient {
+  _FakeClient({this.coursesFuture}) : super(headersLoader: (_) async => {});
+
+  Future<List<VodCourse>>? coursesFuture;
+  Future<List<VodLesson>>? liveFuture;
+  Future<List<VodLesson>>? lessonsFuture;
+  Future<VodPlayback>? playbackFuture;
+  void Function(List<VodCourse>)? publishCourses;
+  void Function(List<VodLesson>)? publishLive;
+  int courseRequests = 0;
+  int lessonRequests = 0;
+  int liveRequests = 0;
+  int playbackRequests = 0;
+  int livePlaybackRequests = 0;
+  VodLiveProtocol? lastLiveProtocol;
+  List<VodLesson> liveLessons = [];
+
+  @override
+  Future<List<VodLesson>> fetchLiveLessons({
+    required int termId,
+    int? teachingClassId,
+    void Function(List<VodLesson>)? onProgress,
+  }) async {
+    liveRequests++;
+    publishLive = onProgress;
+    final lessons = await (liveFuture ?? Future.value(liveLessons));
+    return lessons
+        .where((lesson) =>
+            teachingClassId == null ||
+            lesson.teachingClassId == teachingClassId)
+        .toList();
+  }
+
+  @override
+  Future<List<VodCourse>> fetchCourses({
+    required int termId,
+    void Function(List<VodCourse>)? onProgress,
+  }) async {
+    courseRequests++;
+    publishCourses = onProgress;
+    final pending = coursesFuture;
+    return pending == null ? [_course] : await pending;
+  }
+
+  @override
+  Future<List<VodLesson>> fetchLessons(VodCourse course) async {
+    lessonRequests++;
+    return await (lessonsFuture ?? Future.value([_lesson]));
+  }
+
+  @override
+  Future<VodPlayback> fetchPlayback({
+    required VodCourse course,
+    required VodLesson lesson,
+  }) async {
+    playbackRequests++;
+    final pending = playbackFuture;
+    if (pending != null) return await pending;
+    return VodPlayback(
+      lessonId: lesson.id,
+      teachingClassId: course.teachingClassId,
+      title: course.name,
+      views: [
+        VodView(
+          viewNumber: 7,
+          url: Uri.https(
+              'media.example', '/clip.mp4', {'grant': '$playbackRequests'}),
+        ),
+      ],
+    );
+  }
+
+  @override
+  Future<VodPlayback> fetchLivePlayback({
+    required VodCourse course,
+    required VodLesson lesson,
+    VodLiveProtocol protocol = VodLiveProtocol.hls,
+  }) async {
+    livePlaybackRequests++;
+    lastLiveProtocol = protocol;
+    return VodPlayback(
+      lessonId: lesson.id,
+      teachingClassId: course.teachingClassId,
+      title: course.name,
+      isLive: true,
+      views: [
+        VodView(
+          viewNumber: 1,
+          url: Uri.https('media.example', '/live', {'protocol': protocol.name}),
+        ),
+      ],
+    );
+  }
+}
+
+class _TermsClient extends _FakeClient {
+  _TermsClient(this.terms);
+
+  final List<VodTerm> terms;
+  Future<List<VodTerm>>? pendingTerms;
+  int termRequests = 0;
+
+  @override
+  Future<List<VodTerm>> fetchTerms() {
+    termRequests++;
+    return pendingTerms ?? Future.value(terms);
+  }
+}
+
+class _OfflineRepository extends VodRepository {
+  _OfflineRepository({super.apiClient});
+
+  @override
+  Future<bool> hasCachedRecordings() async => true;
+}
+
+void main() {
+  test('a forced term reload waits for the in-flight request and fetches again',
+      () async {
+    const firstTerm = VodTerm(id: 7, name: '当前学期', isCurrent: true);
+    const nextTerm = VodTerm(id: 8, name: '新学期', isCurrent: true);
+    final client = _TermsClient(const [nextTerm]);
+    final gate = Completer<List<VodTerm>>();
+    client.pendingTerms = gate.future;
+    final repository = VodRepository(apiClient: client);
+    addTearDown(repository.dispose);
+
+    final initial = repository.loadTerms();
+    final forced = repository.loadTerms(forceRefresh: true);
+    await Future<void>.delayed(Duration.zero);
+    expect(client.termRequests, 1);
+
+    client.pendingTerms = null;
+    gate.complete(const [firstTerm]);
+    expect(await initial, const [firstTerm]);
+    expect(await forced, const [nextTerm]);
+    expect(client.termRequests, 2);
+  });
+
+  test('refresh keeps the live course pinned until the new live list arrives',
+      () async {
+    final client = _FakeClient();
+    final repository = VodRepository(apiClient: client);
+    addTearDown(repository.dispose);
+    final liveLesson = VodLesson(
+      id: 900,
+      teachingClassId: 42,
+      name: '程序设计',
+      isPlayable: true,
+      isLive: true,
+      beginTime: DateTime(2026, 11, 9, 8),
+      liveEndTime: DateTime.now().add(const Duration(hours: 1)),
+      catalogCourse: _course,
+    );
+    client.liveLessons = [liveLesson];
+    expect((await repository.loadCatalog(termId: 7)).single.isLive, isTrue);
+
+    final nextLive = Completer<List<VodLesson>>();
+    client.liveFuture = nextLive.future;
+    final snapshots = <List<VodCourse>>[];
+    final refresh = repository.loadCatalog(
+        termId: 7, forceRefresh: true, onProgress: snapshots.add);
+    await Future<void>.delayed(Duration.zero);
+    // Recordings returned first; the previous live entry keeps the course on
+    // air and at the top instead of disappearing mid-refresh.
+    expect(snapshots.last.single.isLive, isTrue);
+
+    nextLive.complete([]);
+    expect((await refresh).single.isLive, isFalse);
+  });
+
+  test('a failed live refresh keeps the last known live course', () async {
+    final client = _FakeClient();
+    final repository = _OfflineRepository(apiClient: client);
+    addTearDown(repository.dispose);
+    client.liveLessons = [
+      VodLesson(
+        id: 900,
+        teachingClassId: 42,
+        name: '程序设计',
+        isPlayable: true,
+        isLive: true,
+        beginTime: DateTime(2026, 11, 9, 8),
+        liveEndTime: DateTime.now().add(const Duration(hours: 1)),
+        catalogCourse: _course,
+      ),
+    ];
+    expect((await repository.loadCatalog(termId: 7)).single.isLive, isTrue);
+
+    client.liveFuture = Future.error(const VodNetworkException());
+    final refreshed =
+        await repository.loadCatalog(termId: 7, forceRefresh: true);
+    expect(refreshed.single.isLive, isTrue);
+  });
+
+  for (final liveFirst in [false, true]) {
+    test(
+        'lesson sources start concurrently when ${liveFirst ? 'live' : 'recordings'} finish first',
+        () async {
+      final client = _FakeClient();
+      final repository = VodRepository(apiClient: client);
+      addTearDown(repository.dispose);
+      await repository.loadCatalog(termId: 7);
+      final live = Completer<List<VodLesson>>();
+      final recordings = Completer<List<VodLesson>>();
+      client
+        ..liveFuture = live.future
+        ..lessonsFuture = recordings.future;
+      final result = repository.loadCourseLessons(_course);
+      await Future<void>.delayed(Duration.zero);
+      expect(client.liveRequests, 2);
+      expect(client.lessonRequests, 1);
+      if (liveFirst) {
+        live.complete([]);
+      } else {
+        recordings.complete([_lesson]);
+      }
+      await Future<void>.delayed(Duration.zero);
+      expect(client.liveRequests, 2);
+      expect(client.lessonRequests, 1);
+      if (liveFirst) {
+        recordings.complete([_lesson]);
+      } else {
+        live.complete([]);
+      }
+      expect(await result, [_lesson]);
+    });
+  }
+
+  for (final hasLive in [false, true]) {
+    test(
+        'recording permission fallback requires ${hasLive ? 'available' : 'nonempty'} live lessons',
+        () async {
+      final client = _FakeClient();
+      final repository = VodRepository(apiClient: client);
+      addTearDown(repository.dispose);
+      await repository.loadCatalog(termId: 7);
+      final recordings = Completer<List<VodLesson>>();
+      const liveLesson = VodLesson(
+        id: 900,
+        teachingClassId: 42,
+        name: '直播课程',
+        isPlayable: true,
+        isLive: true,
+        catalogCourse: _course,
+      );
+      client
+        ..liveLessons = hasLive ? [liveLesson] : []
+        ..lessonsFuture = recordings.future;
+      final result = repository.loadCourseLessons(_course);
+      final checked = expectLater(
+        result,
+        hasLive
+            ? completion([liveLesson])
+            : throwsA(isA<VodPermissionException>()),
+      );
+      await Future<void>.delayed(Duration.zero);
+      expect(client.lessonRequests, 1);
+      recordings.completeError(const VodPermissionException());
+      await checked;
+    });
+  }
+
+  test('recorded courses publish and can open while live loading is pending',
+      () async {
+    final courses = Completer<List<VodCourse>>();
+    final live = Completer<List<VodLesson>>();
+    final client = _FakeClient(coursesFuture: courses.future)
+      ..liveFuture = live.future;
+    final repository = VodRepository(apiClient: client);
+    addTearDown(repository.dispose);
+    final snapshots = <List<VodCourse>>[];
+    final result = repository.loadCatalog(termId: 7, onProgress: snapshots.add);
+    client.publishCourses!([_course]);
+    expect(snapshots.last, [_course]);
+    expect(() => snapshots.last.add(_course), throwsUnsupportedError);
+    expect(await repository.loadLessons(_course), [_lesson]);
+    expect(client.courseRequests, 1);
+    courses.complete([_course]);
+    await Future<void>.delayed(Duration.zero);
+    expect(snapshots.last, [_course]);
+    live.complete([]);
+    expect(await result, [_course]);
+  });
+
+  test('live-first progress merges later recordings without losing live state',
+      () async {
+    final courses = Completer<List<VodCourse>>();
+    final live = Completer<List<VodLesson>>();
+    final client = _FakeClient(coursesFuture: courses.future)
+      ..liveFuture = live.future;
+    final repository = VodRepository(apiClient: client);
+    addTearDown(repository.dispose);
+    const liveLesson = VodLesson(
+      id: 123,
+      teachingClassId: 42,
+      name: '程序设计',
+      isPlayable: true,
+      isLive: true,
+      catalogCourse: VodCourse(teachingClassId: 42, termId: 7, name: '直播信息'),
+    );
+    final snapshots = <List<VodCourse>>[];
+    final result = repository.loadCatalog(termId: 7, onProgress: snapshots.add);
+    live.complete([liveLesson]);
+    await Future<void>.delayed(Duration.zero);
+    expect(snapshots.last.single.name, '直播信息');
+    expect(snapshots.last.single.isLive, isTrue);
+    client.publishCourses!([
+      const VodCourse(teachingClassId: 99, termId: 7, name: '仅录播课程'),
+      _course,
+    ]);
+    expect(snapshots.last.map((course) => course.teachingClassId), [42, 99]);
+    expect(snapshots.last.first.name, _course.name);
+    expect(snapshots.last.first.code, _course.code);
+    expect(snapshots.last.first.liveLesson, liveLesson);
+    courses.complete([_course]);
+    expect((await result).single.liveLesson, liveLesson);
+  });
+
+  test('late live results update existing courses and move them to the top',
+      () async {
+    final live = Completer<List<VodLesson>>();
+    final client = _FakeClient(
+        coursesFuture: Future.value([
+      const VodCourse(teachingClassId: 99, termId: 7, name: '仅录播课程'),
+      _course,
+    ]))
+      ..liveFuture = live.future;
+    final repository = VodRepository(apiClient: client);
+    addTearDown(repository.dispose);
+    final snapshots = <List<VodCourse>>[];
+    final result = repository.loadCatalog(termId: 7, onProgress: snapshots.add);
+    await Future<void>.delayed(Duration.zero);
+    expect(snapshots.last.map((course) => course.teachingClassId), [99, 42]);
+    const liveLesson = VodLesson(
+      id: 123,
+      teachingClassId: 42,
+      name: '程序设计',
+      isPlayable: true,
+      isLive: true,
+      catalogCourse: _course,
+    );
+    live.complete([liveLesson]);
+    final courses = await result;
+    expect(courses.map((course) => course.teachingClassId), [42, 99]);
+    expect(courses.first.liveLesson, liveLesson);
+    expect(courses.first.code, _course.code);
+    expect(snapshots.last.map((course) => course.teachingClassId), [42, 99]);
+  });
+
+  test('joined catalog readers receive the current and subsequent progress',
+      () async {
+    final courses = Completer<List<VodCourse>>();
+    final live = Completer<List<VodLesson>>();
+    final client = _FakeClient(coursesFuture: courses.future)
+      ..liveFuture = live.future;
+    final repository = VodRepository(apiClient: client);
+    addTearDown(repository.dispose);
+    final firstProgress = <List<VodCourse>>[];
+    final secondProgress = <List<VodCourse>>[];
+    final first =
+        repository.loadCatalog(termId: 7, onProgress: firstProgress.add);
+    client.publishCourses!([_course]);
+    final second =
+        repository.loadCatalog(termId: 7, onProgress: secondProgress.add);
+    expect(secondProgress.single, [_course]);
+    expect(client.courseRequests, 1);
+    courses.complete([_course]);
+    live.complete([]);
+    expect(await first, [_course]);
+    expect(await second, [_course]);
+    expect(secondProgress.length, firstProgress.length);
+    final cached = <List<VodCourse>>[];
+    expect(await repository.loadCatalog(termId: 7, onProgress: cached.add),
+        [_course]);
+    expect(cached.single, [_course]);
+    expect(client.courseRequests, 1);
+  });
+
+  test('a failed source keeps authorized successful partial courses usable',
+      () async {
+    final live = Completer<List<VodLesson>>();
+    final client = _FakeClient()..liveFuture = live.future;
+    final repository = VodRepository(apiClient: client);
+    addTearDown(repository.dispose);
+    final snapshots = <List<VodCourse>>[];
+    final result = repository.loadCatalog(termId: 7, onProgress: snapshots.add);
+    final rejected = expectLater(result, throwsA(isA<VodNetworkException>()));
+    await Future<void>.delayed(Duration.zero);
+    expect(snapshots.last, [_course]);
+    live.completeError(const VodNetworkException());
+    await rejected;
+    expect(await repository.loadLessons(_course), [_lesson]);
+    expect(client.courseRequests, 1);
+  });
+
+  test('clear rejects stale partial callbacks and discards their permissions',
+      () async {
+    final courses = Completer<List<VodCourse>>();
+    final live = Completer<List<VodLesson>>();
+    final client = _FakeClient(coursesFuture: courses.future)
+      ..liveFuture = live.future;
+    final repository = VodRepository(
+      apiClient: client,
+      clientFactory: () => _FakeClient(coursesFuture: Future.value([])),
+    );
+    addTearDown(repository.dispose);
+    final snapshots = <List<VodCourse>>[];
+    final result = repository.loadCatalog(termId: 7, onProgress: snapshots.add);
+    final rejected =
+        expectLater(result, throwsA(isA<VodSessionExpiredException>()));
+    client.publishCourses!([_course]);
+    final published = snapshots.length;
+    repository.clear();
+    expect(() => client.publishCourses!([_course]),
+        throwsA(isA<VodSessionExpiredException>()));
+    courses.complete([_course]);
+    live.complete([]);
+    await rejected;
+    expect(snapshots.length, published);
+    await expectLater(repository.loadLessons(_course),
+        throwsA(isA<VodPermissionException>()));
+  });
+
+  test(
+      'unified catalog keeps live-only classes and combines live and recorded episodes',
+      () async {
+    final client = _FakeClient()
+      ..liveLessons = [
+        VodLesson(
+            id: 123,
+            teachingClassId: 42,
+            name: '程序设计',
+            isPlayable: true,
+            isLive: true,
+            beginTime: DateTime(2026, 10, 28),
+            catalogCourse: _course),
+        const VodLesson(
+            id: 900,
+            teachingClassId: 99,
+            name: '仅直播课程',
+            isPlayable: true,
+            isLive: true,
+            catalogCourse:
+                VodCourse(teachingClassId: 99, termId: 7, name: '仅直播课程')),
+      ];
+    final repository = VodRepository(apiClient: client);
+    addTearDown(repository.dispose);
+    final courses = await repository.loadCatalog(termId: 7);
+    expect(
+        courses.map((course) => course.teachingClassId), containsAll([42, 99]));
+    expect(courses.every((course) => course.isLive), isTrue);
+    expect(courses.firstWhere((course) => course.teachingClassId == 42).code,
+        'CS101');
+    final lessons = await repository.loadCourseLessons(_course);
+    expect(lessons, hasLength(1));
+    expect(lessons.single.id, 123);
+    expect(lessons.single.isLive, isTrue);
+  });
+
+  test('concurrent catalog reads share one request', () async {
+    final response = Completer<List<VodCourse>>();
+    final client = _FakeClient(coursesFuture: response.future);
+    final repository = VodRepository(apiClient: client);
+    addTearDown(repository.dispose);
+    final first = repository.loadCourses(termId: 7);
+    final second = repository.loadCourses(termId: 7);
+    await Future<void>.delayed(Duration.zero);
+    expect(client.courseRequests, 1);
+    response.complete([_course]);
+    expect(await first, [_course]);
+    expect(await second, [_course]);
+    await repository.loadCourses(termId: 7);
+    expect(client.courseRequests, 1);
+  });
+
+  test(
+      'clear rejects stale results before they can populate a new account cache',
+      () async {
+    final response = Completer<List<VodCourse>>();
+    final oldClient = _FakeClient(coursesFuture: response.future);
+    final nextClient = _FakeClient(coursesFuture: Future.value([]));
+    final repository = VodRepository(
+      apiClient: oldClient,
+      clientFactory: () => nextClient,
+    );
+    addTearDown(repository.dispose);
+    final oldRequest = repository.loadCourses(termId: 7);
+    final rejected =
+        expectLater(oldRequest, throwsA(isA<VodSessionExpiredException>()));
+    repository.clear();
+    response.complete([_course]);
+    await rejected;
+    expect(await repository.loadCourses(termId: 7), isEmpty);
+    expect(nextClient.courseRequests, 1);
+  });
+
+  test('search matches course, code and teacher inside the authorized list',
+      () {
+    final repository = VodRepository(apiClient: _FakeClient());
+    addTearDown(repository.dispose);
+    expect(repository.filterCourses([_course], keyword: 'CS101'), [_course]);
+    expect(repository.filterCourses([_course], keyword: '教师甲'), [_course]);
+    expect(repository.filterCourses([_course], teacher: '教师甲'), [_course]);
+    expect(repository.filterCourses([_course], teacher: '教师乙'), isEmpty);
+    expect(repository.filterCourses([_course], keyword: '不存在'), isEmpty);
+  });
+
+  test('an arbitrary class outside the normal catalog cannot load lessons',
+      () async {
+    final client = _FakeClient();
+    final repository = VodRepository(apiClient: client);
+    addTearDown(repository.dispose);
+    await expectLater(
+      repository.loadLessons(const VodCourse(
+        teachingClassId: 999,
+        termId: 7,
+        name: '课表外课程',
+      )),
+      throwsA(isA<VodPermissionException>()),
+    );
+    expect(client.lessonRequests, 0);
+  });
+
+  test('playback uses the selected lesson without catalog permission preflight',
+      () async {
+    final client = _FakeClient(coursesFuture: Future.value([]))
+      ..lessonsFuture = Future.value([]);
+    final repository = VodRepository(apiClient: client);
+    addTearDown(repository.dispose);
+    final playback = await repository.preparePlayback(
+      course: _course,
+      lesson: const VodLesson(
+        id: 999,
+        teachingClassId: 42,
+        name: '所选课次',
+        isPlayable: true,
+      ),
+    );
+    expect(playback.lessonId, 999);
+    expect(client.playbackRequests, 1);
+    expect(client.courseRequests, 0);
+    expect(client.lessonRequests, 0);
+    expect(client.liveRequests, 0);
+  });
+
+  test(
+      'live playback uses its selected ID and protocol without a catalog reload',
+      () async {
+    final client = _FakeClient(coursesFuture: Future.value([]));
+    final repository = VodRepository(apiClient: client);
+    addTearDown(repository.dispose);
+    const lesson = VodLesson(
+      id: 999,
+      teachingClassId: 42,
+      name: '所选直播',
+      isPlayable: true,
+      isLive: true,
+    );
+    final playback = await repository.prepareLivePlaybackWithProtocol(
+      course: _course,
+      lesson: lesson,
+      protocol: VodLiveProtocol.flv,
+    );
+    expect(playback.lessonId, 999);
+    expect(playback.isLive, isTrue);
+    expect(client.livePlaybackRequests, 1);
+    expect(client.lastLiveProtocol, VodLiveProtocol.flv);
+    expect(client.courseRequests, 0);
+    expect(client.lessonRequests, 0);
+    expect(client.liveRequests, 0);
+  });
+
+  test('invalid course and lesson identities never reach the playback endpoint',
+      () async {
+    final client = _FakeClient();
+    final repository = VodRepository(apiClient: client);
+    addTearDown(repository.dispose);
+    for (final lesson in [
+      const VodLesson(
+          id: 0, teachingClassId: 42, name: '无效课次', isPlayable: true),
+      const VodLesson(
+          id: 123, teachingClassId: 999, name: '其他教学班', isPlayable: true),
+    ]) {
+      await expectLater(
+          repository.preparePlayback(course: _course, lesson: lesson),
+          throwsA(isA<VodInvalidResponseException>()));
+    }
+    await expectLater(
+      repository.preparePlayback(
+        course: const VodCourse(teachingClassId: 42, termId: 0, name: '无效学期'),
+        lesson: _lesson,
+      ),
+      throwsA(isA<VodInvalidResponseException>()),
+    );
+    expect(client.playbackRequests, 0);
+    expect(client.courseRequests, 0);
+  });
+
+  test('recording status does not prevent requesting playback details',
+      () async {
+    final client = _FakeClient();
+    final repository = VodRepository(apiClient: client);
+    addTearDown(repository.dispose);
+    final playback = await repository.preparePlayback(
+      course: _course,
+      lesson: const VodLesson(
+        id: 123,
+        teachingClassId: 42,
+        name: '回放生成中',
+        isPlayable: false,
+        isGenerating: true,
+      ),
+    );
+    expect(playback.lessonId, 123);
+    expect(client.playbackRequests, 1);
+  });
+
+  test('a real playback rejection is not replaced by a local permission result',
+      () async {
+    final response = Completer<VodPlayback>();
+    final client = _FakeClient()..playbackFuture = response.future;
+    final repository = VodRepository(apiClient: client);
+    addTearDown(repository.dispose);
+    final pending =
+        repository.preparePlayback(course: _course, lesson: _lesson);
+    final rejected =
+        expectLater(pending, throwsA(isA<VodPermissionException>()));
+    response.completeError(const VodPermissionException());
+    await rejected;
+    expect(client.playbackRequests, 1);
+    expect(client.courseRequests, 0);
+    expect(client.lessonRequests, 0);
+  });
+
+  test('clearing the session rejects pending direct playback results',
+      () async {
+    final response = Completer<VodPlayback>();
+    final client = _FakeClient()..playbackFuture = response.future;
+    final repository = VodRepository(apiClient: client);
+    addTearDown(repository.dispose);
+    final pending =
+        repository.preparePlayback(course: _course, lesson: _lesson);
+    final rejected =
+        expectLater(pending, throwsA(isA<VodSessionExpiredException>()));
+    repository.clear();
+    response.complete(VodPlayback(
+      lessonId: _lesson.id,
+      teachingClassId: _course.teachingClassId,
+      title: _course.name,
+      views: [VodView(viewNumber: 1, url: Uri.https('media.example', '/clip'))],
+    ));
+    await rejected;
+    expect(client.playbackRequests, 1);
+  });
+
+  test('late old playback cannot remove a new same-lesson request after clear',
+      () async {
+    final oldResponse = Completer<VodPlayback>();
+    final newResponse = Completer<VodPlayback>();
+    final oldClient = _FakeClient()..playbackFuture = oldResponse.future;
+    final newClient = _FakeClient()..playbackFuture = newResponse.future;
+    final repository = VodRepository(
+      apiClient: oldClient,
+      clientFactory: () => newClient,
+    );
+    addTearDown(repository.dispose);
+    final oldPending =
+        repository.preparePlayback(course: _course, lesson: _lesson);
+    final rejected =
+        expectLater(oldPending, throwsA(isA<VodSessionExpiredException>()));
+    repository.clear();
+    final newPending =
+        repository.preparePlayback(course: _course, lesson: _lesson);
+    oldResponse.complete(VodPlayback(
+      lessonId: _lesson.id,
+      teachingClassId: _course.teachingClassId,
+      title: _course.name,
+      views: [VodView(viewNumber: 1, url: Uri.https('media.example', '/old'))],
+    ));
+    await rejected;
+    final joinedPending =
+        repository.preparePlayback(course: _course, lesson: _lesson);
+    expect(newClient.playbackRequests, 1);
+    final playback = VodPlayback(
+      lessonId: _lesson.id,
+      teachingClassId: _course.teachingClassId,
+      title: _course.name,
+      views: [VodView(viewNumber: 1, url: Uri.https('media.example', '/new'))],
+    );
+    newResponse.complete(playback);
+    expect(await newPending, same(playback));
+    expect(await joinedPending, same(playback));
+    expect(oldClient.playbackRequests, 1);
+    expect(newClient.playbackRequests, 1);
+  });
+
+  test(
+      'subsequent playback requests obtain fresh signed URLs without catalog gates',
+      () async {
+    final client = _FakeClient();
+    final repository = VodRepository(apiClient: client);
+    addTearDown(repository.dispose);
+    final first =
+        await repository.preparePlayback(course: _course, lesson: _lesson);
+    final second =
+        await repository.preparePlayback(course: _course, lesson: _lesson);
+    expect(first.views.single.url, isNot(second.views.single.url));
+    expect(client.playbackRequests, 2);
+    expect(client.courseRequests, 0);
+    expect(client.lessonRequests, 0);
+  });
+}

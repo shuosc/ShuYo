@@ -37,7 +37,21 @@ final _schedule = AcademicSchedule(
   fetchedAt: DateTime(2026, 9, 1),
 );
 
+class _TrackingScheduleApi extends AcademicScheduleApiClient {
+  final requestedTerms = <String>[];
+
+  @override
+  Future<AcademicSchedule> fetchScheduleForTerm(AcademicTermQuery query) async {
+    requestedTerms.add(query.key);
+    return _schedule;
+  }
+}
+
 class _TrackingSchedule extends AcademicScheduleRepository {
+  _TrackingSchedule() : this._(_TrackingScheduleApi());
+  _TrackingSchedule._(this.api) : super(apiClient: api);
+
+  final _TrackingScheduleApi api;
   int requests = 0;
   bool expired = false;
   bool unavailable = false;
@@ -100,7 +114,8 @@ class _LocalUnifiedAccount extends UnifiedAccountService {
   int academicAuthorizations = 0;
 
   @override
-  Future<WebVpnRecoveryOutcome> recoverWebVpn() async =>
+  Future<WebVpnRecoveryOutcome> recoverWebVpn(
+          {bool forceRefresh = false}) async =>
       WebVpnRecoveryOutcome.unavailable;
 
   @override
@@ -277,7 +292,7 @@ void main() {
   for (final tab in ['学业', '日程']) {
     for (final authenticate in [false, true]) {
       testWidgets(
-          '$tab expired refresh returns without retry, authenticate=$authenticate',
+          '$tab expired refresh restores account state, authenticate=$authenticate',
           (tester) async {
         final controller = StartupOnboardingController();
         final schedule = _TrackingSchedule()..expired = true;
@@ -314,13 +329,26 @@ void main() {
         expect(controller.academicSessionExpired, isTrue);
         expect(await account.loadStudentId(), isNull);
         expect(await account.isSessionExpired(), isTrue);
-        if (authenticate) await account.saveStudentId('DEMO0001');
+        if (authenticate) {
+          await account.saveStudentId('DEMO0001');
+          schedule.expired = false;
+        }
         Navigator.of(tester.element(find.byType(NativeLoginPage))).pop(
           authenticate ? NativeLoginResult.authenticated : null,
         );
         await tester.pumpAndSettle();
         expect(find.byType(NativeLoginPage), findsNothing);
+        if (tab == '日程' && authenticate) {
+          // The recovered action retries its original term. This fixture is
+          // empty, so retain the local copy when that result is confirmed.
+          expect(find.text('教务返回空课表'), findsOneWidget);
+          await tester.tap(find.text('保留本地版本'));
+          await tester.pumpAndSettle();
+        }
         expect(schedule.requests, tab == '日程' ? 1 : 0);
+        expect(schedule.api.requestedTerms,
+            tab == '日程' && authenticate ? ['2026:3'] : isEmpty);
+        expect(find.text('课表刷新失败'), findsNothing);
         expect(progress.requests, tab == '学业' ? 1 : 0);
         expect(ranking.requests, tab == '学业' ? 1 : 0);
         expect(controller.academicLoggedIn, authenticate);

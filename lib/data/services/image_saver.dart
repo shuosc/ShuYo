@@ -11,9 +11,12 @@ class ImageSaver {
 
   static const _channel = MethodChannel('work.shuyo.app/image_saver');
 
-  static Future<void> saveNetworkImage(String url) async {
+  static Future<void> saveNetworkImage(
+    String url, {
+    Map<String, String>? headers,
+  }) async {
     final uri = Uri.parse(url);
-    final response = await _download(uri);
+    final response = await _download(uri, headers: headers);
     final mimeType = response.mimeType ?? _mimeTypeFromPath(uri.path);
     final filename = _filenameFor(uri, mimeType);
     await _channel.invokeMethod<void>('saveImage', {
@@ -23,11 +26,14 @@ class ImageSaver {
     });
   }
 
-  static Future<_DownloadedImage> _download(Uri uri) async {
+  static Future<_DownloadedImage> _download(
+    Uri uri, {
+    Map<String, String>? headers,
+  }) async {
     final client = HttpClient();
     try {
       client.connectionTimeout = HttpTimeout.connect;
-      return await _downloadWithClient(client, uri).timeout(
+      return await _downloadWithClient(client, uri, headers: headers).timeout(
         HttpTimeout.transfer,
         onTimeout: () {
           client.close(force: true);
@@ -41,9 +47,11 @@ class ImageSaver {
 
   static Future<_DownloadedImage> _downloadWithClient(
     HttpClient client,
-    Uri uri,
-  ) async {
+    Uri uri, {
+    Map<String, String>? headers,
+  }) async {
     final request = await client.getUrl(uri).timeout(HttpTimeout.connect);
+    headers?.forEach(request.headers.set);
     final response = await request.close().timeout(HttpTimeout.normal);
     if (response.statusCode < 200 || response.statusCode >= 300) {
       throw Exception('图片下载失败 (${response.statusCode})');

@@ -1,0 +1,1036 @@
+import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
+
+import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
+import 'package:shuyo/core/vod_url_resolver.dart';
+import 'package:shuyo/data/models/course_recording.dart';
+import 'package:shuyo/data/services/vod_api_client.dart';
+import 'package:shuyo/data/services/vod_auth_service.dart';
+
+class _SessionAuth extends VodAuthService {
+  _SessionAuth({this.onEnsure});
+
+  final Future<void> Function(bool forceRefresh)? onEnsure;
+  final ensureCalls = <bool>[];
+  int clears = 0;
+  String token = 'test-original-token';
+
+  @override
+  Future<void> ensureSession({
+    required bool useWebVpn,
+    bool forceRefresh = false,
+  }) async {
+    ensureCalls.add(forceRefresh);
+    await onEnsure?.call(forceRefresh);
+    if (forceRefresh) token = 'test-renewed-token';
+  }
+
+  @override
+  Future<Map<String, String>> headersFor(Uri uri, {bool? useWebVpn}) async =>
+      {'jwt-token': token};
+
+  @override
+  Future<void> clearSession({bool? useWebVpn}) async {
+    clears++;
+    throw StateError('business requests must not clear campus authentication');
+  }
+}
+
+const _course = VodCourse(
+  teachingClassId: 42,
+  termId: 7,
+  name: '课程甲',
+);
+const _lesson = VodLesson(
+  id: 123,
+  teachingClassId: 42,
+  name: '课程甲',
+  isPlayable: true,
+);
+
+http.Response _response(Object? data) => http.Response(
+      jsonEncode({'status': 200, 'ok': true, 'dataOk': true, 'data': data}),
+      200,
+      headers: {'content-type': 'application/json; charset=utf-8'},
+    );
+
+Map<String, Object?> _detail({
+  int courseId = 123,
+  int teachingClassId = 42,
+  int viewCourseId = 123,
+  int permission = 1,
+}) =>
+    {
+      'id': courseId,
+      'teclId': teachingClassId,
+      'lvcrVodStatus': permission,
+      'courName': '课程甲',
+      'lastPlayTime': 89,
+      'voiceChannel': 7,
+      'courseVodViewList': [
+        {
+          'courId': viewCourseId,
+          'viewNum': 7,
+          'url': 'https://media.example/clip.mp4?auth_key=opaque%2Bsignature',
+        },
+      ],
+    };
+
+VodApiClient _client(
+  Future<http.Response> Function(http.Request) handler, {
+  int pageSize = 2,
+  VodHeadersLoader? mediaHeadersLoader,
+}) =>
+    VodApiClient(
+      httpClient: MockClient(handler),
+      headersLoader: (_) async => {'jwt-token': 'test-business-token'},
+      mediaHeadersLoader: mediaHeadersLoader ?? (_) async => {},
+      uriResolver: (path, parameters) => Uri.https(
+        'vod.example',
+        path,
+        parameters,
+      ),
+      mediaUrlResolver: Uri.parse,
+      pageSize: pageSize,
+    );
+
+void main() {
+  for (final live in [false, true]) {
+    test(
+        '${live ? 'live' : 'course'} page progress avoids per-row catalog copies',
+        () async {
+      final secondPage = Completer<http.Response>();
+      final secondRequested = Completer<void>();
+      final client = _client((request) async {
+        final page = int.parse(request.url.queryParameters['page.pageIndex']!);
+        if (page == 2) {
+          secondRequested.complete();
+          return secondPage.future;
+        }
+        return _response({
+          'pageIndex': 1,
+          'pageCount': 2,
+          'rowCount': 52,
+          'records': [
+            for (var id = 1; id <= 50; id++)
+              {
+                'teclId': live ? 42 : id,
+                'acteId': 7,
+                'subjName': '课程$id',
+                if (live) ...{'id': id, 'liveType': 0},
+              },
+          ],
+        });
+      }, pageSize: 50);
+      addTearDown(client.dispose);
+      final snapshots = <List<Object>>[];
+      final result = live
+          ? client.fetchLiveLessons(termId: 7, onProgress: snapshots.add)
+          : client.fetchCourses(termId: 7, onProgress: snapshots.add);
+      await secondRequested.future;
+      // The first item is still immediate; the remainder of a received page
+      // does not trigger another 49 copies and repository/UI notifications.
+      expect(snapshots.map((value) => value.length), [1, 50]);
+      secondPage.complete(_response({
+        'pageIndex': 2,
+        'pageCount': 2,
+        'rowCount': 52,
+        'records': [
+          for (var id = 51; id <= 52; id++)
+            {
+              'teclId': live ? 42 : id,
+              'acteId': 7,
+              'subjName': '课程$id',
+              if (live) ...{'id': id, 'liveType': 0},
+            },
+        ],
+      }));
+      expect(await result, hasLength(52));
+      expect(snapshots.map((value) => value.length), [1, 50, 52]);
+      expect(snapshots.first, hasLength(1));
+      expect(() => snapshots.last.add(snapshots.last.first),
+          throwsUnsupportedError);
+    });
+  }
+
+  test('course progress publishes each parsed course before later pages finish',
+      () async {
+    final secondPage = Completer<http.Response>();
+    final secondRequested = Completer<void>();
+    final client = _client((request) async {
+      final page = int.parse(request.url.queryParameters['page.pageIndex']!);
+      if (page == 2) {
+        secondRequested.complete();
+        return secondPage.future;
+      }
+      return _response({
+        'pageIndex': 1,
+        'pageCount': 2,
+        'rowCount': 3,
+        'records': [
+          for (final id in [42, 43])
+            {'teclId': id, 'acteId': 7, 'subjName': '课程$id'},
+        ],
+      });
+    });
+    addTearDown(client.dispose);
+    final snapshots = <List<VodCourse>>[];
+    final result = client.fetchCourses(termId: 7, onProgress: snapshots.add);
+    await secondRequested.future;
+    expect(snapshots.map((snapshot) => snapshot.length), [1, 2]);
+    expect(snapshots.first.single.teachingClassId, 42);
+    expect(() => snapshots.last.add(_course), throwsUnsupportedError);
+    secondPage.complete(_response({
+      'pageIndex': 2,
+      'pageCount': 2,
+      'rowCount': 3,
+      'records': [
+        {'teclId': 44, 'acteId': 7, 'subjName': '课程44'},
+      ],
+    }));
+    expect(
+        (await result).map((course) => course.teachingClassId), [42, 43, 44]);
+    expect(snapshots.map((snapshot) => snapshot.length), [1, 2, 3]);
+  });
+
+  test('live progress publishes available lessons before later pages finish',
+      () async {
+    final secondPage = Completer<http.Response>();
+    final secondRequested = Completer<void>();
+    final client = _client((request) async {
+      expect(request.url.path, '/v1/vod_live/t-1');
+      final page = int.parse(request.url.queryParameters['page.pageIndex']!);
+      if (page == 2) {
+        secondRequested.complete();
+        return secondPage.future;
+      }
+      return _response({
+        'pageIndex': 1,
+        'pageCount': 2,
+        'rowCount': 3,
+        'records': [
+          for (final id in [123, 124])
+            {
+              'id': id,
+              'teclId': 42,
+              'acteId': 7,
+              'subjName': '课程$id',
+              'liveType': 0,
+            },
+        ],
+      });
+    });
+    addTearDown(client.dispose);
+    final snapshots = <List<VodLesson>>[];
+    final result =
+        client.fetchLiveLessons(termId: 7, onProgress: snapshots.add);
+    await secondRequested.future;
+    expect(snapshots.map((snapshot) => snapshot.length), [1, 2]);
+    expect(() => snapshots.last.add(_lesson), throwsUnsupportedError);
+    secondPage.complete(_response({
+      'pageIndex': 2,
+      'pageCount': 2,
+      'rowCount': 3,
+      'records': [
+        {
+          'id': 125,
+          'teclId': 42,
+          'acteId': 7,
+          'subjName': '未开播',
+          'liveType': 1,
+        },
+      ],
+    }));
+    expect((await result).map((lesson) => lesson.id), [123, 124]);
+    expect(snapshots.map((snapshot) => snapshot.length), [1, 2]);
+  });
+
+  test('partial course progress never accepts another term', () async {
+    final client = _client((_) async => _response({
+          'pageCount': 1,
+          'rowCount': 2,
+          'records': [
+            {'teclId': 42, 'acteId': 7, 'subjName': '正确学期'},
+            {'teclId': 43, 'acteId': 6, 'subjName': '其他学期'},
+          ],
+        }));
+    addTearDown(client.dispose);
+    final snapshots = <List<VodCourse>>[];
+    await expectLater(client.fetchCourses(termId: 7, onProgress: snapshots.add),
+        throwsA(isA<VodInvalidResponseException>()));
+    expect(snapshots, hasLength(1));
+    expect(snapshots.single.single.teachingClassId, 42);
+  });
+
+  test('term API accepts bare arrays and epoch timestamps', () async {
+    final client = _client((request) async => http.Response(
+        jsonEncode([
+          {
+            'id': 6,
+            'acyeCode': '2025-2026',
+            'acteTerm': 2,
+            'currentTerm': false,
+          },
+          {
+            'id': 7,
+            'acyeCode': '2026-2027',
+            'acteTerm': 1,
+            'currentTerm': true,
+            'acteBeginDate': 1789344000000,
+          },
+        ]),
+        200));
+    addTearDown(client.dispose);
+
+    final terms = await client.fetchTerms();
+    expect(terms.map((term) => term.id), [7, 6]);
+    expect(terms.first.name, '2026-2027学年第1学期');
+    expect(terms.first.academicYear, '2026-2027');
+    expect(terms.first.termNumber, 1);
+    expect(terms.first.academicYearLabel, '26-27学年');
+    expect(terms.first.seasonLabel, '秋季学期');
+    expect(terms.first.startDate?.millisecondsSinceEpoch, 1789344000000);
+  });
+
+  test('term catalog retains historical terms and its current-first ordering',
+      () async {
+    final client = _client((request) async => http.Response(
+        jsonEncode([
+          {
+            'id': 4,
+            'acyeCode': '2024-2025',
+            'acteTerm': 3,
+            'currentTerm': true,
+          },
+          {'id': 98, 'acyeCode': '2023-2024', 'acteTerm': 1},
+          {'id': 97, 'acyeCode': '2024-2025', 'acteTerm': 4},
+          {'id': 5, 'acyeCode': '2025-2026', 'acteTerm': 1},
+          {'id': 6, 'acyeCode': '2025-2026', 'acteTerm': 2},
+          {'id': 7, 'acyeCode': '2026-2027', 'acteTerm': 1},
+          {'id': 8, 'acyeCode': '2025-2026', 'acteTerm': 0},
+          {'id': 9, 'acteTerm': 1},
+          {'id': 10, 'acyeCode': 'unknown', 'acteTerm': 1},
+          {'id': 11, 'acyeCode': '2024-2025', 'acteTerm': -1},
+          {'id': 0, 'acyeCode': '2024-2025', 'acteTerm': 1},
+          {'id': -1, 'acyeCode': '2024-2025', 'acteTerm': 1},
+        ]),
+        200));
+    addTearDown(client.dispose);
+
+    final terms = await client.fetchTerms();
+    expect(terms.map((term) => term.id), [4, 98, 97, 7, 6, 5]);
+    expect(terms.first.name, '2024-2025学年第3学期');
+    expect(terms.first.isCurrent, isTrue);
+    expect(terms.singleWhere((term) => term.id == 97).termNumber, 4);
+  });
+
+  test('a historical-only term catalog remains selectable including term four',
+      () async {
+    final client = _client((request) async => http.Response(
+        jsonEncode([
+          {'id': 4, 'acyeCode': '2024-2025', 'acteTerm': 4},
+          {'id': 3, 'acyeCode': '2024-2025', 'acteTerm': 2},
+        ]),
+        200));
+    addTearDown(client.dispose);
+
+    final terms = await client.fetchTerms();
+    expect(terms.map((term) => term.id), [4, 3]);
+    expect(terms.map((term) => term.termNumber), [4, 2]);
+  });
+
+  test('historical courses use the selected server term ID on the ordinary API',
+      () async {
+    final requests = <Uri>[];
+    final client = _client((request) async {
+      requests.add(request.url);
+      expect(request.headers['jwt-token'], 'test-business-token');
+      if (request.url.path == '/v1/list/termYear') {
+        return http.Response(
+            jsonEncode([
+              {'id': 74, 'acyeCode': '2024-2025', 'acteTerm': 4},
+            ]),
+            200);
+      }
+      expect(request.url.path, '/v1/group_subject_vod_list/t-1');
+      final query = request.url.queryParameters;
+      expect(query['acteId'], '74');
+      expect(query.containsKey('isAdmin'), isFalse);
+      expect(query.containsKey('showAllVodCourse'), isFalse);
+      return _response({
+        'pageIndex': 1,
+        'pageCount': 1,
+        'rowCount': 1,
+        'records': [
+          {'teclId': 42, 'acteId': 74, 'subjName': '历史课程'},
+        ],
+      });
+    });
+    addTearDown(client.dispose);
+
+    final term = (await client.fetchTerms()).single;
+    final courses = await client.fetchCourses(termId: term.id);
+    expect(requests.map((uri) => uri.path),
+        ['/v1/list/termYear', '/v1/group_subject_vod_list/t-1']);
+    expect(term.termNumber, 4);
+    expect(courses.single.teachingClassId, 42);
+    expect(courses.single.termId, 74);
+    expect(courses.single.name, '历史课程');
+  });
+
+  test('ordinary class catalog follows all pages with no global flags',
+      () async {
+    final pages = <int>[];
+    final client = _client((request) async {
+      expect(request.url.path, '/v1/group_subject_vod_list/t-1');
+      final query = request.url.queryParameters;
+      expect(query['acteId'], '7');
+      expect(query.containsKey('isAdmin'), isFalse);
+      expect(query.containsKey('showAllVodCourse'), isFalse);
+      final page = int.parse(query['page.pageIndex']!);
+      pages.add(page);
+      return _response({
+        'pageIndex': page,
+        'pageCount': 2,
+        'rowCount': 3,
+        'records': [
+          for (final id in page == 1 ? [42, 43] : [44])
+            {
+              'id': 999,
+              'teclId': id,
+              'acteId': 7,
+              'subjName': '课程$id',
+              'teacNames': ['教师甲'],
+            },
+        ],
+      });
+    });
+    addTearDown(client.dispose);
+
+    final courses = await client.fetchCourses(termId: 7);
+    expect(pages, [1, 2]);
+    expect(courses.map((course) => course.teachingClassId), [42, 43, 44]);
+    expect(courses.first.teacherLabel, '教师甲');
+  });
+
+  test('missing pages fail instead of returning an incomplete catalog',
+      () async {
+    final client = _client((request) async => _response({
+          'pageIndex':
+              int.parse(request.url.queryParameters['page.pageIndex']!),
+          'pageCount': 2,
+          'rowCount': 3,
+          'records': [],
+        }));
+    addTearDown(client.dispose);
+    await expectLater(client.fetchCourses(termId: 7),
+        throwsA(isA<VodInvalidResponseException>()));
+  });
+
+  test('duplicate page rows cannot masquerade as a complete catalog', () async {
+    final client = _client((request) async {
+      final page = int.parse(request.url.queryParameters['page.pageIndex']!);
+      return _response({
+        'pageIndex': page,
+        'pageCount': 2,
+        'rowCount': 4,
+        'records': [
+          for (final id in page == 1 ? [42, 43] : [43, 44])
+            {'teclId': id, 'acteId': 7, 'subjName': '课程$id'},
+        ],
+      });
+    });
+    addTearDown(client.dispose);
+    await expectLater(client.fetchCourses(termId: 7),
+        throwsA(isA<VodInvalidResponseException>()));
+  });
+
+  test('a changed total between pages requires a consistent refresh', () async {
+    final client = _client((request) async {
+      final page = int.parse(request.url.queryParameters['page.pageIndex']!);
+      return _response({
+        'pageIndex': page,
+        'pageCount': 2,
+        'rowCount': page == 1 ? 4 : 3,
+        'records': [
+          for (final id in page == 1 ? [42, 43] : [44])
+            {'teclId': id, 'acteId': 7, 'subjName': '课程$id'},
+        ],
+      });
+    });
+    addTearDown(client.dispose);
+    await expectLater(client.fetchCourses(termId: 7),
+        throwsA(isA<VodInvalidResponseException>()));
+  });
+
+  test('lesson list keeps valid recordings regardless of status flags',
+      () async {
+    final client = _client((request) async {
+      expect(request.url.path, '/v1/subject_vod_list_new');
+      expect(request.url.queryParameters['teclIds'], '42');
+      expect(request.url.queryParameters['schoolOpenStatusFlag'], 'false');
+      return _response({
+        'rowCount': 8,
+        'pageCount': 1,
+        'records': [
+          for (var i = 0; i < 7; i++)
+            {
+              'id': i + 1,
+              'teclId': 42,
+              'subjName': '课程甲',
+              'courBeginTime': '2026-10-20 08:00:00',
+              'vodEnable': i == 1 ? 0 : 1,
+              'vodClickEnable': i == 2 ? 0 : 1,
+              'vodDeleteStatus': i == 3 ? 1 : 0,
+              'vodStatus': i == 4 ? 2 : (i == 5 ? 4 : (i == 6 ? 7 : 5)),
+            },
+          {
+            'id': 8,
+            'teclId': 42,
+            'subjName': '状态缺失',
+            'courBeginTime': '2026-10-20 08:00:00',
+          },
+        ],
+      });
+    });
+    addTearDown(client.dispose);
+    final lessons = await client.fetchLessons(_course);
+    expect(lessons.map((lesson) => lesson.id), [1, 2, 3, 4, 5, 6, 7, 8]);
+    expect(
+        lessons.where((lesson) => lesson.isPlayable).map((lesson) => lesson.id),
+        [1, 3]);
+    expect(lessons.where((lesson) => lesson.canPlay).map((lesson) => lesson.id),
+        [1, 2, 3, 4, 5, 6, 7, 8]);
+    expect(lessons.first.beginTime?.hour, 8);
+  });
+
+  test(
+      'lesson listing requests the ordinary endpoint without permission preflight',
+      () async {
+    final requests = <String>[];
+    final client = _client((request) async {
+      requests.add(request.url.path);
+      expect(request.url.path, '/v1/subject_vod_list_new');
+      expect(request.headers['jwt-token'], 'test-business-token');
+      return _response({'rowCount': 0, 'pageCount': 1, 'records': []});
+    });
+    addTearDown(client.dispose);
+    expect(await client.fetchLessons(_course), isEmpty);
+    expect(requests, ['/v1/subject_vod_list_new']);
+  });
+
+  test('playback directly accepts usable views despite a zero metadata ACL',
+      () async {
+    final requests = <http.Request>[];
+    final client = _client((request) async {
+      requests.add(request);
+      expect(request.url.path, '/v1/course_vod_urls_new');
+      expect(request.url.queryParameters, {'courseId': '123'});
+      expect(request.headers['jwt-token'], 'test-business-token');
+      return _response(_detail(permission: 0));
+    });
+    addTearDown(client.dispose);
+    final playback =
+        await client.fetchPlayback(course: _course, lesson: _lesson);
+    expect(playback.lessonId, 123);
+    expect(playback.views.single.url.host, 'media.example');
+    expect(requests.map((request) => request.url.path),
+        ['/v1/course_vod_urls_new']);
+  });
+
+  for (final refusal in ['http', 'status', 'code']) {
+    test('playback preserves a real $refusal 403 refusal', () async {
+      final requests = <String>[];
+      final client = _client((request) async {
+        requests.add(request.url.path);
+        expect(request.url.queryParameters, {'courseId': '123'});
+        return refusal == 'http'
+            ? http.Response('', 403)
+            : http.Response(jsonEncode({refusal: 403}), 200);
+      });
+      addTearDown(client.dispose);
+      await expectLater(
+        client.fetchPlayback(course: _course, lesson: _lesson),
+        throwsA(isA<VodPermissionException>()),
+      );
+      expect(requests, ['/v1/course_vod_urls_new']);
+    });
+  }
+
+  test('recording status does not prevent requesting a playback URL', () async {
+    final requests = <String>[];
+    final client = _client((request) async {
+      requests.add(request.url.path);
+      return _response(_detail());
+    });
+    addTearDown(client.dispose);
+    final playback = await client.fetchPlayback(
+      course: _course,
+      lesson: const VodLesson(
+        id: 123,
+        teachingClassId: 42,
+        name: '回放生成中',
+        isPlayable: false,
+        isGenerating: true,
+      ),
+    );
+    expect(playback.lessonId, 123);
+    expect(requests, ['/v1/course_vod_urls_new']);
+  });
+
+  test('missing playback URLs fail only after the detail request', () async {
+    final requests = <String>[];
+    final client = _client((request) async {
+      requests.add(request.url.path);
+      return _response({
+        ..._detail(permission: 0),
+        'courseVodViewList': <Object>[],
+      });
+    });
+    addTearDown(client.dispose);
+    await expectLater(
+      client.fetchPlayback(
+        course: _course,
+        lesson: const VodLesson(
+          id: 123,
+          teachingClassId: 42,
+          name: '回放生成中',
+          isPlayable: false,
+          isGenerating: true,
+        ),
+      ),
+      throwsA(isA<VodApiException>()),
+    );
+    expect(requests, ['/v1/course_vod_urls_new']);
+  });
+
+  test(
+      'playback preserves signature and requests target-specific media headers',
+      () async {
+    final mediaTargets = <Uri>[];
+    final client = _client((request) async {
+      expect(request.url.path, '/v1/course_vod_urls_new');
+      expect(request.url.queryParameters['courseId'], '123');
+      return _response(_detail());
+    }, mediaHeadersLoader: (target) async {
+      mediaTargets.add(target);
+      return {
+        'Cookie': 'webvpn-token=test-gateway',
+        'jwt-token': 'must-not-leak',
+        'Authorization': 'must-not-leak',
+      };
+    });
+    addTearDown(client.dispose);
+    final playback =
+        await client.fetchPlayback(course: _course, lesson: _lesson);
+    expect(playback.lastPosition, const Duration(seconds: 89));
+    expect(playback.views.single.label, '合成画面');
+    expect(playback.views.single.url.toString(),
+        'https://media.example/clip.mp4?auth_key=opaque%2Bsignature');
+    expect(mediaTargets, [playback.views.single.url]);
+    expect(playback.views.single.httpHeaders,
+        {'Cookie': 'webvpn-token=test-gateway'});
+  });
+
+  for (final mismatch in ['course', 'class', 'view']) {
+    test('playback refuses $mismatch mismatch despite a returned URL',
+        () async {
+      final client = _client((request) async {
+        expect(request.url.path, '/v1/course_vod_urls_new');
+        return _response(_detail(
+          courseId: mismatch == 'course' ? 456 : 123,
+          teachingClassId: mismatch == 'class' ? 43 : 42,
+          viewCourseId: mismatch == 'view' ? 456 : 123,
+        ));
+      });
+      addTearDown(client.dispose);
+      await expectLater(
+        client.fetchPlayback(course: _course, lesson: _lesson),
+        throwsA(isA<VodInvalidResponseException>()),
+      );
+    });
+  }
+
+  for (final response in [
+    http.Response('', 401),
+    http.Response(jsonEncode({'status': 10013}), 200),
+    http.Response('<html>newsso.shu.edu.cn/oauth2/login</html>', 200),
+    http.Response('', 302, headers: {'location': 'https://newsso.shu.edu.cn/'}),
+  ]) {
+    test(
+        'session failure is distinct from network failure ${response.statusCode}',
+        () async {
+      final client = _client((request) async {
+        expect(request.followRedirects, isFalse);
+        return response;
+      });
+      addTearDown(client.dispose);
+      await expectLater(
+          client.fetchTerms(), throwsA(isA<VodSessionExpiredException>()));
+    });
+  }
+
+  test('network error does not become a session-expired error', () async {
+    final client = _client((_) async => throw const SocketException('offline'));
+    addTearDown(client.dispose);
+    await expectLater(client.fetchTerms(), throwsA(isA<VodNetworkException>()));
+  });
+
+  for (final expiredResponse in [
+    http.Response('', 401),
+    http.Response(jsonEncode({'status': 10013}), 200),
+    http.Response('<html>newsso.shu.edu.cn/oauth2/login</html>', 200),
+  ]) {
+    test(
+        'business expiration silently renews once and retries the same request '
+        '${expiredResponse.statusCode}', () async {
+      final auth = _SessionAuth();
+      final requests = <http.Request>[];
+      final client = VodApiClient(
+        authService: auth,
+        httpClient: MockClient((request) async {
+          requests.add(request);
+          return requests.length == 1
+              ? expiredResponse
+              : http.Response('[]', 200);
+        }),
+      );
+      addTearDown(client.dispose);
+      addTearDown(auth.dispose);
+      expect(await client.fetchTerms(), isEmpty);
+      expect(auth.ensureCalls, [false, true]);
+      expect(auth.clears, 0);
+      expect(requests.length, 2);
+      expect(requests[1].url, requests[0].url);
+      expect(requests[0].headers['jwt-token'], 'test-original-token');
+      expect(requests[1].headers['jwt-token'], 'test-renewed-token');
+    });
+  }
+
+  test('a second business expiration stops instead of looping or expiring SSO',
+      () async {
+    final auth = _SessionAuth();
+    var requests = 0;
+    final client = VodApiClient(
+      authService: auth,
+      httpClient: MockClient((_) async {
+        requests++;
+        return http.Response('', 401);
+      }),
+    );
+    addTearDown(client.dispose);
+    addTearDown(auth.dispose);
+    await expectLater(
+        client.fetchTerms(),
+        throwsA(allOf(
+          isA<VodApiException>()
+              .having((error) => error.statusCode, 'statusCode', 401),
+          isNot(isA<VodSessionExpiredException>()),
+        )));
+    expect(requests, 2);
+    expect(auth.ensureCalls, [false, true]);
+    expect(auth.clears, 0);
+  });
+
+  final renewalFailures = <String, Object>{
+    'unavailable identity service': const VodAuthUnavailableException(),
+    'rejected authentication': const VodAuthException('录播会话交换失败'),
+    'network socket': const SocketException('offline'),
+    'authentication timeout': TimeoutException('unavailable'),
+  };
+  for (final failure in renewalFailures.entries) {
+    test('business 401 plus ${failure.key} remains a 401 refusal', () async {
+      final auth = _SessionAuth(onEnsure: (forceRefresh) async {
+        if (forceRefresh) throw failure.value;
+      });
+      var requests = 0;
+      final client = VodApiClient(
+        authService: auth,
+        httpClient: MockClient((_) async {
+          requests++;
+          return http.Response('', 401);
+        }),
+      );
+      addTearDown(client.dispose);
+      addTearDown(auth.dispose);
+
+      await expectLater(
+          client.fetchPlayback(course: _course, lesson: _lesson),
+          throwsA(allOf(
+            isA<VodApiException>()
+                .having((error) => error.statusCode, 'statusCode', 401),
+            isNot(isA<VodNetworkException>()),
+            isNot(isA<VodSessionExpiredException>()),
+          )));
+      expect(requests, 1);
+      expect(auth.ensureCalls, [false, true]);
+      expect(auth.clears, 0);
+    });
+  }
+
+  for (final result in ['permission', 'server', 'business', 'network']) {
+    test('$result failure does not renew or clear the campus account',
+        () async {
+      final auth = _SessionAuth();
+      var requests = 0;
+      final client = VodApiClient(
+        authService: auth,
+        httpClient: MockClient((_) async {
+          requests++;
+          return switch (result) {
+            'permission' => http.Response('', 403),
+            'server' => http.Response('', 500),
+            'business' => http.Response(jsonEncode({'status': 500}), 200),
+            _ => throw const SocketException('offline'),
+          };
+        }),
+      );
+      addTearDown(client.dispose);
+      addTearDown(auth.dispose);
+      await expectLater(
+          client.fetchTerms(),
+          throwsA(allOf(
+            isA<VodApiException>(),
+            isNot(isA<VodSessionExpiredException>()),
+          )));
+      expect(requests, 1);
+      expect(auth.ensureCalls, [false]);
+      expect(auth.clears, 0);
+    });
+  }
+
+  test('expired shared SSO during renewal preserves its explicit semantics',
+      () async {
+    final auth = _SessionAuth(onEnsure: (forceRefresh) async {
+      if (forceRefresh) {
+        throw const VodCampusAuthRequiredException(ssoExpired: true);
+      }
+    });
+    var requests = 0;
+    final client = VodApiClient(
+      authService: auth,
+      httpClient: MockClient((_) async {
+        requests++;
+        return http.Response('', 401);
+      }),
+    );
+    addTearDown(client.dispose);
+    addTearDown(auth.dispose);
+    await expectLater(
+        client.fetchTerms(),
+        throwsA(
+          isA<VodSessionExpiredException>()
+              .having((error) => error.ssoExpired, 'ssoExpired', isTrue),
+        ));
+    expect(requests, 1);
+    expect(auth.ensureCalls, [false, true]);
+  });
+
+  test('missing campus account is distinct from an expired shared SSO',
+      () async {
+    final auth = _SessionAuth(onEnsure: (_) async {
+      throw const VodCampusAuthRequiredException();
+    });
+    var requests = 0;
+    final client = VodApiClient(
+      authService: auth,
+      httpClient: MockClient((_) async {
+        requests++;
+        return http.Response('[]', 200);
+      }),
+    );
+    addTearDown(client.dispose);
+    addTearDown(auth.dispose);
+    await expectLater(
+        client.fetchTerms(),
+        throwsA(
+          isA<VodSessionExpiredException>()
+              .having((error) => error.ssoExpired, 'ssoExpired', isFalse),
+        ));
+    expect(requests, 0);
+    expect(auth.ensureCalls, [false]);
+  });
+
+  for (final duringRenewal in [false, true]) {
+    test(
+        'WebVPN recovery remains distinct ${duringRenewal ? 'during renewal' : 'before a request'}',
+        () async {
+      final auth = _SessionAuth(onEnsure: (forceRefresh) async {
+        if (!duringRenewal || forceRefresh) {
+          throw const VodWebVpnAuthRequiredException();
+        }
+      });
+      var requests = 0;
+      final client = VodApiClient(
+        useWebVpn: true,
+        authService: auth,
+        httpClient: MockClient((_) async {
+          requests++;
+          return http.Response('', 401);
+        }),
+      );
+      addTearDown(client.dispose);
+      addTearDown(auth.dispose);
+      await expectLater(
+          client.fetchTerms(),
+          throwsA(isA<VodWebVpnSessionExpiredException>()
+              .having(
+                  (error) => error.message, 'message', 'WebVPN 连接已失效，请恢复连接后重试')
+              .having((error) => error.ssoExpired, 'ssoExpired', isFalse)
+              .having((error) => error.statusCode, 'statusCode', isNull)));
+      expect(requests, duringRenewal ? 1 : 0);
+      expect(auth.ensureCalls, duringRenewal ? [false, true] : [false]);
+      expect(auth.clears, 0);
+    });
+  }
+
+  test('WebVPN gateway redirect preserves the business session', () async {
+    final auth = _SessionAuth();
+    var requests = 0;
+    final client = VodApiClient(
+      useWebVpn: true,
+      authService: auth,
+      httpClient: MockClient((request) async {
+        requests++;
+        expect(request.followRedirects, isFalse);
+        return http.Response('', 302,
+            headers: {'location': 'https://webvpn.shu.edu.cn:443/auth/login'});
+      }),
+    );
+    addTearDown(client.dispose);
+    addTearDown(auth.dispose);
+    await expectLater(
+        client.fetchTerms(), throwsA(isA<VodWebVpnSessionExpiredException>()));
+    expect(requests, 1);
+    expect(auth.ensureCalls, [false]);
+    expect(auth.clears, 0);
+  });
+
+  test('direct mode keeps the existing redirect renewal policy', () async {
+    final auth = _SessionAuth();
+    var requests = 0;
+    final client = VodApiClient(
+      useWebVpn: false,
+      authService: auth,
+      httpClient: MockClient((request) async {
+        requests++;
+        expect(request.followRedirects, isFalse);
+        return requests == 1
+            ? http.Response('', 302,
+                headers: {'location': 'https://webvpn.shu.edu.cn/auth/login'})
+            : http.Response('[]', 200);
+      }),
+    );
+    addTearDown(client.dispose);
+    addTearDown(auth.dispose);
+    expect(await client.fetchTerms(), isEmpty);
+    expect(requests, 2);
+    expect(auth.ensureCalls, [false, true]);
+    expect(auth.clears, 0);
+  });
+
+  for (final location in [
+    '/login',
+    'https://webvpn.shu.edu.cn.evil.example/auth/login',
+    'https://evil.example@webvpn.shu.edu.cn/auth/login',
+    'https://webvpn.shu.edu.cn:444/auth/login',
+    'http://webvpn.shu.edu.cn/auth/login',
+  ]) {
+    test('non-gateway redirect follows existing renewal policy: $location',
+        () async {
+      final auth = _SessionAuth();
+      final hosts = <String>[];
+      final client = VodApiClient(
+        useWebVpn: true,
+        authService: auth,
+        httpClient: MockClient((request) async {
+          hosts.add(request.url.host);
+          expect(request.followRedirects, isFalse);
+          return hosts.length == 1
+              ? http.Response('', 302, headers: {'location': location})
+              : http.Response('[]', 200);
+        }),
+      );
+      addTearDown(client.dispose);
+      addTearDown(auth.dispose);
+      expect(await client.fetchTerms(), isEmpty);
+      expect(auth.ensureCalls, [false, true]);
+      expect(auth.clears, 0);
+      expect(hosts, [VodUrlResolver.webVpnHost, VodUrlResolver.webVpnHost]);
+    });
+  }
+
+  test('ordinary auth exchange failure remains a safe API error', () async {
+    final auth = _SessionAuth(onEnsure: (_) async {
+      throw const VodAuthException('录播会话交换暂时不可用，请稍后重试');
+    });
+    var requests = 0;
+    final client = VodApiClient(
+      authService: auth,
+      httpClient: MockClient((_) async {
+        requests++;
+        return http.Response('[]', 200);
+      }),
+    );
+    addTearDown(client.dispose);
+    addTearDown(auth.dispose);
+    await expectLater(
+        client.fetchTerms(),
+        throwsA(allOf(
+          isA<VodApiException>()
+              .having((error) => error.message, 'message', '录播会话交换暂时不可用，请稍后重试')
+              .having((error) => error.statusCode, 'statusCode', 401),
+          isNot(isA<VodSessionExpiredException>()),
+          isNot(isA<VodNetworkException>()),
+        )));
+    expect(requests, 0);
+    expect(auth.ensureCalls, [false]);
+    expect(auth.clears, 0);
+  });
+
+  test('initial unavailable authentication permits network outage handling',
+      () async {
+    final auth = _SessionAuth(onEnsure: (_) async {
+      throw const VodAuthUnavailableException();
+    });
+    var requests = 0;
+    final client = VodApiClient(
+      authService: auth,
+      httpClient: MockClient((_) async {
+        requests++;
+        return http.Response('[]', 200);
+      }),
+    );
+    addTearDown(client.dispose);
+    addTearDown(auth.dispose);
+
+    await expectLater(
+        client.fetchPlayback(course: _course, lesson: _lesson),
+        throwsA(allOf(
+          isA<VodNetworkException>()
+              .having((error) => error.statusCode, 'statusCode', isNull),
+          isNot(isA<VodSessionExpiredException>()),
+        )));
+    expect(requests, 0);
+    expect(auth.ensureCalls, [false]);
+    expect(auth.clears, 0);
+  });
+
+  test('headersLoader mock bypasses the real authentication service', () async {
+    final auth = _SessionAuth(onEnsure: (_) async {
+      throw StateError('real authentication must not run');
+    });
+    final client = VodApiClient(
+      authService: auth,
+      headersLoader: (_) async => {},
+      httpClient: MockClient((_) async => http.Response('[]', 200)),
+    );
+    addTearDown(client.dispose);
+    addTearDown(auth.dispose);
+    expect(await client.fetchTerms(), isEmpty);
+    expect(auth.ensureCalls, isEmpty);
+  });
+}
