@@ -204,12 +204,13 @@ void main() {
         of: picker,
         matching: find.byIcon(Icons.location_city_outlined),
       ),
-      findsOneWidget,
+      findsNothing,
     );
-    expect(
-      find.descendant(of: picker, matching: find.byIcon(Icons.swap_horiz)),
-      findsOneWidget,
+    final swapFinder = find.descendant(
+      of: picker,
+      matching: find.byIcon(Icons.swap_horiz),
     );
+    expect(swapFinder, findsOneWidget);
     expect(
       find.descendant(
         of: picker,
@@ -239,8 +240,18 @@ void main() {
       greaterThanOrEqualTo(8),
     );
     final pickerRect = tester.getRect(picker);
+    final campusRect = tester.getRect(campusFinder);
+    final swapRect = tester.getRect(swapFinder);
     final datePickerRect = tester.getRect(find.byType(OutlinedButton).last);
-    expect(pickerRect.right, closeTo(datePickerRect.right, 0.5));
+    expect(swapRect.right, closeTo(datePickerRect.right, 0.5));
+    expect(
+      campusRect.left - pickerRect.left,
+      closeTo(pickerRect.right - swapRect.right, 0.5),
+    );
+    expect(
+      campusRect.top - pickerRect.top,
+      closeTo(pickerRect.bottom - campusRect.bottom, 0.5),
+    );
 
     await tester.tap(picker);
     await tester.pumpAndSettle();

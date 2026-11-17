@@ -761,10 +761,11 @@ class _SearchControls extends StatelessWidget {
         child: Column(
           children: [
             Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16),
+              padding: const EdgeInsets.only(left: 16, right: 8),
               child: LayoutBuilder(
                 builder: (context, constraints) {
-                  final maxButtonWidth = constraints.maxWidth * 0.65;
+                  // 右侧预留 8px 内边距给按钮点击热区，使其视觉内容与下方 16px 右边距对齐。
+                  final maxButtonWidth = (constraints.maxWidth - 8) * 0.65 + 8;
                   return Row(
                     crossAxisAlignment: CrossAxisAlignment.center,
                     children: [
@@ -913,7 +914,7 @@ class _SearchControls extends StatelessWidget {
   }
 }
 
-/// 顶栏校区与教学楼切换按钮：无边框、贴齐右侧边距，突出当前楼栋。
+/// 顶栏校区与教学楼切换按钮：无边框、点击区域与内容对称对齐，突出当前楼栋。
 class _BuildingPickerButton extends StatelessWidget {
   const _BuildingPickerButton({
     required this.campusLabel,
@@ -932,27 +933,23 @@ class _BuildingPickerButton extends StatelessWidget {
     final colors = context.shuyoColors;
     final primary = Theme.of(context).colorScheme.primary;
     final enabled = onPressed != null;
-    final fixedWidth = campusLabel.isEmpty ? 52.0 : 60.0;
+    final fixedWidth = campusLabel.isEmpty ? 40.0 : 48.0;
     final maxCampusWidth = math.max(0.0, maxWidth - fixedWidth) * 0.6;
     return TextButton(
       key: const ValueKey('classroom-building-picker'),
       onPressed: onPressed,
       style: TextButton.styleFrom(
         foregroundColor: colors.textPrimary,
-        alignment: Alignment.centerRight,
-        minimumSize: const Size(0, 40),
+        minimumSize: Size.zero,
         tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-        padding: const EdgeInsets.fromLTRB(6, 6, 0, 6),
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(10),
+        ),
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Icon(
-            Icons.location_city_outlined,
-            size: 18,
-            color: enabled ? colors.textSecondary : colors.textMuted,
-          ),
-          const SizedBox(width: 4),
           if (campusLabel.isNotEmpty) ...[
             ConstrainedBox(
               constraints: BoxConstraints(maxWidth: maxCampusWidth),
