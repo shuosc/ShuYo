@@ -194,6 +194,8 @@ void main() {
 
     expect(find.byType(DropdownButtonFormField<String>), findsNothing);
     expect(find.byType(DropdownButtonFormField<int>), findsNothing);
+    final picker = find.byKey(const ValueKey('classroom-building-picker'));
+    expect(tester.widget<ButtonStyleButton>(picker), isA<TextButton>());
     expect(find.text('9月1日'), findsOneWidget);
     expect(find.text('星期二'), findsOneWidget);
     expect(find.text('晴'), findsOneWidget);

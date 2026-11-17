@@ -827,14 +827,15 @@ class _SearchControls extends StatelessWidget {
                   ),
                   const SizedBox(width: 12),
                   Flexible(
-                    child: OutlinedButton(
+                    child: TextButton(
                       key: const ValueKey('classroom-building-picker'),
                       onPressed:
                           options.buildings.isEmpty ? null : onPickBuilding,
-                      style: OutlinedButton.styleFrom(
+                      style: TextButton.styleFrom(
+                        foregroundColor: colors.textPrimary,
                         padding: const EdgeInsets.symmetric(
-                          horizontal: 12,
-                          vertical: 10,
+                          horizontal: 10,
+                          vertical: 8,
                         ),
                       ),
                       child: Row(
