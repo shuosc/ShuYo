@@ -91,7 +91,9 @@ class ThereBookingClient {
   bool _submitting = false;
 
   BookingVenue? get venue => _venue;
-  bool get hasBusinessSession => _sessionId?.isNotEmpty == true;
+  // A parsed empty sessionId selects cookie authentication on newer pages.
+  // null means that no mobile entry has been initialized.
+  bool get hasBusinessSession => _sessionId != null;
 
   void dispose() => _http.close(force: true);
 
@@ -177,6 +179,12 @@ class ThereBookingClient {
       );
     }
     _requirePage(response);
+    if (RegExp(r'''["']isAnonymous["']\s*:\s*true''').hasMatch(response.body)) {
+      throw const ThereBookingException(
+        ThereFailureKind.loginRequired,
+        '图书馆预约需要登录',
+      );
+    }
     final match = RegExp(
           r'''\bsessionId\s*[=:]\s*("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')''',
         ).firstMatch(response.body) ??
@@ -198,19 +206,27 @@ class ThereBookingClient {
     } on Object {
       session = null;
     }
-    if (session == null || session.isEmpty || session.contains('\n')) {
+    if (session == null ||
+        session.contains('\n') ||
+        session.contains('\r') ||
+        (session.isNotEmpty && session.trim().isEmpty)) {
       throw const ThereBookingException(
         ThereFailureKind.uncertain,
         '图书馆预约页面会话无效，请稍后重试',
       );
     }
-    if (RegExp(r'''["']isAnonymous["']\s*:\s*true''').hasMatch(response.body)) {
-      throw const ThereBookingException(
-        ThereFailureKind.loginRequired,
-        '图书馆预约需要登录',
+    // Current pages leave sessionId empty and authenticate API requests with
+    // SPHYS_SESSION. Keep legacy header authentication when a token is present;
+    // profile() still verifies the authenticated account in either mode.
+    _sessionId = session;
+    if (kDebugMode) {
+      debugPrint(
+        '[THERE_BOOKING] mobile-session '
+        'venue=${venue.roomType} '
+        'transport=${useWebVpn ? 'webvpn' : 'direct'} '
+        'mode=${session.isEmpty ? 'cookie' : 'header'}',
       );
     }
-    _sessionId = session;
   }
 
   Future<void> refreshVenue(BookingVenue venue) async {
@@ -550,7 +566,7 @@ class ThereBookingClient {
       );
     }
     final headers = <String, String>{
-      'x-hys-session': _sessionId!,
+      if (_sessionId!.isNotEmpty) 'x-hys-session': _sessionId!,
       'x-room-type': venue.roomType,
       'x-hys-platform': 'UNDEFINE',
       'x-lang': 'zh',
@@ -587,6 +603,17 @@ class ThereBookingClient {
           string(json['noticeMessage']) ??
           '图书馆预约服务拒绝了本次操作';
       throw ThereBookingException(ThereFailureKind.business, message);
+    }
+    if (kDebugMode && path.startsWith('/api/v3/booking-status/areas/')) {
+      final rooms = object(json['data'])?['rooms'];
+      if (rooms is List) {
+        debugPrint(
+          '[THERE_BOOKING] seats '
+          'venue=${venue.roomType} '
+          'transport=${useWebVpn ? 'webvpn' : 'direct'} '
+          'query=${_queryShape(query)} count=${rooms.length}',
+        );
+      }
     }
     return json;
   }

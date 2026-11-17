@@ -25,6 +25,8 @@ void main() {
   var weChatRedirectHost = 'open.weixin.qq.com';
   var redirectToWebVpnPortal = false;
   String? bootstrapState = 'SERVER_STATE+/_=';
+  String? mobilePageOverride;
+  var rejectCookieSession = false;
 
   Uri callbackUri(String? state, {String code = 'ONCE', bool proxy = false}) =>
       Uri.parse(proxy
@@ -50,6 +52,8 @@ void main() {
     weChatRedirectHost = 'open.weixin.qq.com';
     redirectToWebVpnPortal = false;
     bootstrapState = 'SERVER_STATE+/_=';
+    mobilePageOverride = null;
+    rejectCookieSession = false;
     server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
     requests = server.listen((request) async {
       final path = request.uri.path;
@@ -59,6 +63,17 @@ void main() {
           '${request.headers.value('x-hys-session') ?? '-'}');
       requestCookies[path] = request.headers.value(HttpHeaders.cookieHeader);
       requestQueries[path] = request.uri.queryParameters;
+      if (path.startsWith('/api/v3/') &&
+          mobilePageOverride != null &&
+          (rejectCookieSession ||
+              requestCookies[path]
+                      ?.contains('SPHYS_SESSION=COOKIE_SESSION_SECRET') !=
+                  true)) {
+        request.response.statusCode = 401;
+        request.response.write(jsonEncode({'code': 401}));
+        await request.response.close();
+        return;
+      }
       Object response;
       if (path == '/login') {
         request.response.statusCode = 302;
@@ -115,11 +130,16 @@ void main() {
           return;
         }
         request.response.headers.contentType = ContentType.html;
-        response = path == '/mobile/libseat'
-            ? 'window.loginUser={"isAnonymous":false};'
-                'window.sessionId="SESSION_LIB";'
-            : 'window.loginUser={"isAnonymous":false,'
-                '"sessionId":"SESSION_24H"};';
+        if (mobilePageOverride != null) {
+          request.response.headers.add(HttpHeaders.setCookieHeader,
+              'SPHYS_SESSION=COOKIE_SESSION_SECRET; Path=/');
+        }
+        response = mobilePageOverride ??
+            (path == '/mobile/libseat'
+                ? 'window.loginUser={"isAnonymous":false};'
+                    'window.sessionId="SESSION_LIB";'
+                : 'window.loginUser={"isAnonymous":false,'
+                    '"sessionId":"SESSION_24H"};');
       } else if (path == '/api/v3/my/profile') {
         response = {
           'code': 0,
@@ -204,6 +224,128 @@ void main() {
     await client.profile();
     expect(seen, contains('GET /api/v3/my/profile LIB_SEAT SESSION_LIB'));
     expect(seen, contains('GET /api/v3/my/profile STATION SESSION_24H'));
+  });
+
+  for (final useWebVpn in [false, true]) {
+    test('empty sessionId uses cookies with useWebVpn=$useWebVpn', () async {
+      // Current mobile pages contain an authenticated loginUser but no token
+      // or isAnonymous field. The API validates the cookie-backed identity.
+      mobilePageOverride = 'var sessionId = "";'
+          'var loginUser = {"id":"USER_1","name":"测试用户"};';
+      final cookieClient = ThereBookingClient(
+        serviceUri: Uri.parse('http://127.0.0.1:${server.port}'),
+        useWebVpn: useWebVpn,
+        cookieLoader: (_) async => [],
+        cookieSetter: (_) async {},
+      );
+      addTearDown(cookieClient.dispose);
+
+      await cookieClient.selectVenue(BookingVenue.library);
+      expect(cookieClient.hasBusinessSession, isTrue);
+      expect((await cookieClient.profile())['isAnonymous'], isFalse);
+      final data = await cookieClient.area(
+          'AREA_1', '2026-11-17 20:00', '2026-11-17 21:00');
+      expect(ThereBookingClient.objects(data['rooms']), hasLength(1));
+      expect(seen, contains('GET /api/v3/my/profile LIB_SEAT -'));
+      expect(
+          seen, contains('GET /api/v3/booking-status/areas/AREA_1 LIB_SEAT -'));
+      expect(requestCookies['/api/v3/my/profile'],
+          contains('SPHYS_SESSION=COOKIE_SESSION_SECRET'));
+      expect(requestCookies['/api/v3/booking-status/areas/AREA_1'],
+          contains('SPHYS_SESSION=COOKIE_SESSION_SECRET'));
+      expect(seen.every((entry) => entry.startsWith('GET ')), isTrue);
+    });
+  }
+
+  test('cookie authentication still rejects an expired API session', () async {
+    mobilePageOverride = 'var sessionId = "";';
+    await client.selectVenue(BookingVenue.library);
+    rejectCookieSession = true;
+    await expectLater(
+      client.profile(),
+      throwsA(isA<ThereBookingException>().having(
+        (error) => error.kind,
+        'kind',
+        ThereFailureKind.loginRequired,
+      )),
+    );
+  });
+
+  test('anonymous empty-session pages request login before parsing the token',
+      () async {
+    mobilePageOverride =
+        'var sessionId = ""; var loginUser = {"isAnonymous":true};';
+    await expectLater(
+      client.selectVenue(BookingVenue.library),
+      throwsA(isA<ThereBookingException>().having(
+        (error) => error.kind,
+        'kind',
+        ThereFailureKind.loginRequired,
+      )),
+    );
+    expect(client.hasBusinessSession, isFalse);
+    expect(seen.any((entry) => entry.contains('/api/v3/')), isFalse);
+  });
+
+  for (final entry in {
+    'missing': '<html>not a booking entry</html>',
+    'malformed': r'var sessionId = "\invalid";',
+    'line feed': r'var sessionId = "\n";',
+    'carriage return': r'var sessionId = "\r";',
+    'whitespace': 'var sessionId = "   ";',
+  }.entries) {
+    test('${entry.key} sessionId is not accepted as cookie authentication',
+        () async {
+      mobilePageOverride = entry.value;
+      await expectLater(
+        client.selectVenue(BookingVenue.library),
+        throwsA(isA<ThereBookingException>().having(
+          (error) => error.kind,
+          'kind',
+          ThereFailureKind.uncertain,
+        )),
+      );
+      expect(client.hasBusinessSession, isFalse);
+    });
+  }
+
+  test('reset invalidates cookie mode and venue changes retain the room type',
+      () async {
+    mobilePageOverride = 'var sessionId = "";';
+    await client.selectVenue(BookingVenue.library);
+    await client.selectVenue(BookingVenue.library);
+    expect(
+        seen.where((entry) => entry.contains('/mobile/libseat')), hasLength(1));
+    await client.selectVenue(BookingVenue.studySpace);
+    await client.profile();
+    expect(seen, contains('GET /api/v3/my/profile STATION -'));
+    client.resetSession();
+    expect(client.hasBusinessSession, isFalse);
+    await expectLater(client.profile(), throwsA(isA<ThereBookingException>()));
+    await client.selectVenue(BookingVenue.library);
+    expect(client.hasBusinessSession, isTrue);
+  });
+
+  test('cookie and seat diagnostics disclose counts without session values',
+      () async {
+    final logs = <String>[];
+    final previous = debugPrint;
+    debugPrint = (message, {wrapWidth}) {
+      if (message != null) logs.add(message);
+    };
+    addTearDown(() => debugPrint = previous);
+    mobilePageOverride = 'var sessionId = "";';
+    await client.selectVenue(BookingVenue.library);
+    await client.area('AREA_1', '2026-11-17 20:00', '2026-11-17 21:00');
+    final log = logs.join('\n');
+    expect(log, contains('mode=cookie'));
+    expect(
+        log,
+        contains(
+            'seats venue=LIB_SEAT transport=direct query=interval count=1'));
+    for (final secret in ['COOKIE_SESSION_SECRET', 'AREA_1', 'ROOM_1']) {
+      expect(log, isNot(contains(secret)));
+    }
   });
 
   test('an active venue reuses its mobile session within the client', () async {
