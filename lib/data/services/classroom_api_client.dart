@@ -110,6 +110,55 @@ class ClassroomApiClient {
     return parseBuildingSchedule(json, building: building);
   }
 
+  Future<ClassroomSemesterInfo?> fetchCurrentSemester({
+    ClassroomAccessMode? accessMode,
+  }) async {
+    final json = await _postJson(
+      '/course/findCurSemester',
+      accessMode: accessMode ?? ClassroomUrlResolver.accessMode,
+    );
+    return parseCurrentSemester(json);
+  }
+
+  Future<ClassroomCourseSearchResult> searchCoursesByKeyword({
+    required String keyword,
+    int startPage = 0,
+    int pageSize = 50,
+    ClassroomAccessMode? accessMode,
+  }) async {
+    final json = await _postJson(
+      '/course/queryExtendESCourseByKeyword',
+      accessMode: accessMode ?? ClassroomUrlResolver.accessMode,
+      body: {
+        'keyword': keyword,
+        'pagesize': pageSize.toString(),
+        'startPage': startPage.toString(),
+      },
+    );
+    return parseCourseSearchResult(json);
+  }
+
+  static ClassroomSemesterInfo? parseCurrentSemester(JsonMap json) {
+    final data = _dataMap(json);
+    if (data.isEmpty) return null;
+    final info = ClassroomSemesterInfo.fromJson(data);
+    return info.week > 0 ? info : null;
+  }
+
+  static ClassroomCourseSearchResult parseCourseSearchResult(JsonMap json) {
+    final data = _dataMap(json);
+    final rawHits = data['rsData'] as List? ?? const [];
+    final hits = rawHits
+        .whereType<JsonMap>()
+        .map(ClassroomEsCourseHit.fromJson)
+        .where((hit) => hit.courseName.isNotEmpty)
+        .toList(growable: false);
+    return ClassroomCourseSearchResult(
+      totalHits: intValue(data['totalHits']),
+      hits: hits,
+    );
+  }
+
   static ClassroomSearchOptions parseSearchOptions(
     JsonMap formJson,
     JsonMap sectionJson,

@@ -14,12 +14,14 @@ void main() {
     _SearchRepository repository, {
     String campus = '宝山',
     ClassroomSearchOptions? options,
+    DateTime? initialDate,
   }) async {
     await tester.pumpWidget(MaterialApp(
       home: ClassroomSearchPage(
         repository: repository,
         options: options ?? _SearchRepository.options,
-        initialDate: DateTime(2026, 9, 1),
+        // 2026-09-01 为周二（weekday == 2），第 1 周。
+        initialDate: initialDate ?? DateTime(2026, 9, 1),
         initialCampus: campus,
       ),
     ));
@@ -35,6 +37,7 @@ void main() {
     expect(find.byType(TextField), findsOneWidget);
     expect(submit, findsOneWidget);
     expect(tester.widget<IconButton>(submit).onPressed, isNull);
+    expect(repository.searchCalls, isEmpty);
 
     await tester.enterText(find.byType(TextField), '高等数学');
     await tester.pump();
@@ -45,6 +48,7 @@ void main() {
     await tester.tap(submit);
     await tester.pumpAndSettle();
 
+    expect(repository.searchCalls.single.keyword, '高等数学');
     expect(
         find.byKey(const ValueKey('classroom-search-results')), findsOneWidget);
     expect(find.text('高等数学'), findsWidgets);
@@ -67,40 +71,142 @@ void main() {
     expect(find.text('1-2节'), findsOneWidget);
   });
 
-  testWidgets('matches course name, teacher and room number', (tester) async {
-    final repository = _SearchRepository();
+  testWidgets('filters ES results locally by selected date and buildings',
+      (tester) async {
+    final repository = _SearchRepository(
+      hitsByPage: {
+        0: const ClassroomCourseSearchResult(
+          totalHits: 4,
+          hits: [
+            ClassroomEsCourseHit(
+              courseName: '高等数学',
+              teacherName: '张老师',
+              roomName: 'A101',
+              dayInWeek: 2,
+              startSection: 1,
+              endSection: 2,
+              startWeek: 1,
+              endWeek: 16,
+            ),
+            // 周三课程，不应在周二显示。
+            ClassroomEsCourseHit(
+              courseName: '高等数学(周三)',
+              teacherName: '赵老师',
+              roomName: 'A102',
+              dayInWeek: 3,
+              startSection: 1,
+              endSection: 2,
+              startWeek: 1,
+              endWeek: 16,
+            ),
+            // 第 5-8 周课程，不应在第 1 周显示。
+            ClassroomEsCourseHit(
+              courseName: '高等数学(后半程)',
+              teacherName: '钱老师',
+              roomName: 'A103',
+              dayInWeek: 2,
+              startSection: 3,
+              endSection: 3,
+              startWeek: 5,
+              endWeek: 8,
+            ),
+            // 延长校区课程，默认仅选宝山时不显示。
+            ClassroomEsCourseHit(
+              courseName: '高等数学(延长)',
+              teacherName: '孙老师',
+              roomName: '行健201',
+              dayInWeek: 2,
+              startSection: 1,
+              endSection: 2,
+              startWeek: 1,
+              endWeek: 16,
+            ),
+          ],
+        ),
+      },
+    );
     await open(tester, repository);
 
-    // 关键词本身也会出现在输入框里，因此只在结果区里查文本。
-    Finder inResults(String text) => find.descendant(
-          of: find.byKey(const ValueKey('classroom-search-results')),
-          matching: find.text(text),
-        );
+    await tester.enterText(find.byType(TextField), '高等数学');
+    await tester.pump();
+    await tester.tap(find.byKey(const ValueKey('classroom-search-submit')));
+    await tester.pumpAndSettle();
 
-    Future<void> search(String keyword) async {
-      await tester.enterText(find.byType(TextField), keyword);
-      await tester.pump();
-      await tester.tap(find.byKey(const ValueKey('classroom-search-submit')));
-      await tester.pumpAndSettle();
-    }
+    expect(find.text('高等数学'), findsWidgets);
+    expect(find.text('高等数学(周三)'), findsNothing);
+    expect(find.text('高等数学(后半程)'), findsNothing);
+    expect(find.text('高等数学(延长)'), findsNothing);
 
-    await search('张老师');
-    expect(inResults('高等数学'), findsOneWidget);
-    expect(inResults('线性代数'), findsNothing);
+    // 勾选延长校区后立即出现延长的结果，无需重新请求。
+    final callsBefore = repository.searchCalls.length;
+    await tester.tap(find.byKey(const ValueKey('classroom-search-filter')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('classroom-campus-check-延长')));
+    await tester.pumpAndSettle();
+    await tester.tapAt(const Offset(20, 400));
+    await tester.pumpAndSettle();
 
-    await search('A103');
-    expect(inResults('线性代数'), findsOneWidget);
-    expect(inResults('高等数学'), findsNothing);
+    expect(repository.searchCalls.length, callsBefore);
+    expect(find.text('高等数学(延长)'), findsOneWidget);
+  });
 
-    await search('线性代数');
-    expect(inResults('线性代数'), findsOneWidget);
+  testWidgets('loads next page seamlessly when scrolling near bottom',
+      (tester) async {
+    final page0Hits = [
+      for (var i = 1; i <= 16; i++)
+        ClassroomEsCourseHit(
+          courseName: '课程$i',
+          teacherName: '教师$i',
+          roomName: 'A${100 + i}',
+          dayInWeek: 2,
+          startSection: 1,
+          endSection: 2,
+          startWeek: 1,
+          endWeek: 16,
+        ),
+    ];
+    final page1Hits = [
+      const ClassroomEsCourseHit(
+        courseName: '第二页课程',
+        teacherName: '李老师',
+        roomName: 'A201',
+        dayInWeek: 2,
+        startSection: 3,
+        endSection: 3,
+        startWeek: 1,
+        endWeek: 16,
+      ),
+    ];
+    final repository = _SearchRepository(
+      hitsByPage: {
+        0: ClassroomCourseSearchResult(totalHits: 17, hits: page0Hits),
+        16: ClassroomCourseSearchResult(totalHits: 17, hits: page1Hits),
+      },
+    );
+    await open(tester, repository);
+
+    await tester.enterText(find.byType(TextField), '课程');
+    await tester.pump();
+    await tester.tap(find.byKey(const ValueKey('classroom-search-submit')));
+    await tester.pumpAndSettle();
+
+    expect(repository.searchCalls.map((c) => c.startPage), [0]);
+    expect(find.text('第二页课程'), findsNothing);
+
+    await tester.drag(
+      find.byKey(const ValueKey('classroom-search-results')),
+      const Offset(0, -1500),
+    );
+    await tester.pumpAndSettle();
+
+    expect(repository.searchCalls.map((c) => c.startPage), [0, 16]);
+    expect(find.text('第二页课程'), findsOneWidget);
   });
 
   testWidgets('an empty keyword leaves the result area blank', (tester) async {
     final repository = _SearchRepository();
     await open(tester, repository);
 
-    // 搜索框下方不再有说明小字或统计行。
     expect(find.textContaining('输入课程名'), findsNothing);
     expect(find.textContaining('范围：'), findsNothing);
 
@@ -125,7 +231,6 @@ void main() {
     expect(
         find.byKey(const ValueKey('classroom-search-filter')), findsOneWidget);
 
-    // 时间筛选是校园卡同款的三项。
     await tester.tap(find.byKey(const ValueKey('classroom-search-date')));
     await tester.pumpAndSettle();
     expect(find.text('今天'), findsOneWidget);
@@ -134,8 +239,7 @@ void main() {
 
     await tester.tap(find.text('明天'));
     await tester.pumpAndSettle();
-    // 换日期会重新取当天的课表。
-    expect(repository.loadedBuildings, contains(303));
+    expect(find.byKey(const ValueKey('classroom-search-date')), findsOneWidget);
   });
 
   testWidgets('the filter groups three campuses like the announcement menu',
@@ -149,17 +253,14 @@ void main() {
     expect(find.text('宝山校区'), findsOneWidget);
     expect(find.text('延长校区'), findsOneWidget);
     expect(find.text('嘉定校区'), findsOneWidget);
-    // 东区并入宝山，所以不会单独出现。
     expect(find.text('宝山东区校区'), findsNothing);
 
-    // 每个校区一个三态勾选框（公告搜索的分组头同款）。
     for (final campus in const ['宝山', '延长', '嘉定']) {
       final header = tester.widget<Checkbox>(
           find.byKey(ValueKey('classroom-campus-check-$campus')));
       expect(header.tristate, isTrue);
     }
 
-    // 默认只展开当前校区（宝山），另外两个校区收起。
     expect(
         find.byKey(const ValueKey('classroom-building-303')), findsOneWidget);
     expect(find.byKey(const ValueKey('classroom-building-399')), findsNothing);
@@ -167,7 +268,6 @@ void main() {
     expect(find.byKey(const ValueKey('classroom-building-check-303')),
         findsOneWidget);
 
-    // 展开另一个校区后才出现它的楼。
     await tester.tap(find.byKey(const ValueKey('classroom-campus-延长')));
     await tester.pumpAndSettle();
     expect(
@@ -194,32 +294,10 @@ void main() {
         find.byKey(const ValueKey('classroom-building-303')), findsOneWidget);
   });
 
-  testWidgets('toggling a campus selects and clears all its buildings',
-      (tester) async {
-    final repository = _SearchRepository();
-    await open(tester, repository);
-
-    await tester.tap(find.byKey(const ValueKey('classroom-search-filter')));
-    await tester.pumpAndSettle();
-
-    // 分组头的勾选框单独管全组，点整行只会折叠。
-    await tester.tap(find.byKey(const ValueKey('classroom-campus-check-延长')));
-    await tester.pumpAndSettle();
-    // 关闭浮层时把勾选结果交回页面。
-    await tester.tapAt(const Offset(20, 400));
-    await tester.pumpAndSettle();
-
-    // 宝山 + 延长 都参与，嘉定没有。
-    expect(repository.loadedBuildings, containsAll(<int>[303, 399]));
-    expect(repository.loadedBuildings, isNot(contains(607)));
-  });
-
   testWidgets('clearing every campus asks the user to pick one',
       (tester) async {
     final repository = _SearchRepository();
     await open(tester, repository);
-    // 打开页面时已经按默认校区取过一次课表。
-    final loadsBefore = repository.loadedBuildings.length;
 
     await tester.tap(find.byKey(const ValueKey('classroom-search-filter')));
     await tester.pumpAndSettle();
@@ -229,8 +307,6 @@ void main() {
     await tester.tapAt(const Offset(20, 400));
     await tester.pumpAndSettle();
 
-    // 一栋都没选时不再发请求，而是提示去筛选里勾选。
-    expect(repository.loadedBuildings, hasLength(loadsBefore));
     expect(find.text('没有选择教学楼'), findsOneWidget);
   });
 
@@ -242,7 +318,6 @@ void main() {
     await tester.tap(find.byKey(const ValueKey('classroom-search-filter')));
     await tester.pumpAndSettle();
 
-    // A楼 与 AJ楼 并排：同一行、上下位置一致。
     final a =
         tester.getCenter(find.byKey(const ValueKey('classroom-building-303')));
     final aj =
@@ -254,7 +329,6 @@ void main() {
         .widget<Checkbox>(find.byKey(ValueKey('classroom-building-check-$id')))
         .value;
 
-    // 各自一个勾选框，互相不影响。
     expect(checked(303), isTrue);
     expect(checked(325), isTrue);
     await tester
@@ -263,22 +337,46 @@ void main() {
     expect(checked(303), isFalse);
     expect(checked(325), isTrue);
 
-    // 并排的楼名只占一行：半宽单元格不足时截断而不是折行。
     Text titleOf(int id) => tester.widget<Text>(find.descendant(
           of: find.byKey(ValueKey('classroom-building-$id')),
           matching: find.byType(Text),
         ));
     expect(titleOf(303).maxLines, 1);
     expect(titleOf(325).maxLines, 1);
-    // 独占一行的楼仍然允许两行。
     expect(titleOf(220).maxLines, 2);
   });
 }
 
-const _firstCourseTitle = '高等数学';
-
 class _SearchRepository extends ClassroomRepository {
-  _SearchRepository();
+  _SearchRepository({Map<int, ClassroomCourseSearchResult>? hitsByPage})
+      : _hitsByPage = hitsByPage ??
+            const {
+              0: ClassroomCourseSearchResult(
+                totalHits: 2,
+                hits: [
+                  ClassroomEsCourseHit(
+                    courseName: '高等数学',
+                    teacherName: '张老师',
+                    roomName: 'A101',
+                    dayInWeek: 2,
+                    startSection: 1,
+                    endSection: 2,
+                    startWeek: 1,
+                    endWeek: 16,
+                  ),
+                  ClassroomEsCourseHit(
+                    courseName: '线性代数',
+                    teacherName: '王老师',
+                    roomName: 'A103',
+                    dayInWeek: 2,
+                    startSection: 3,
+                    endSection: 3,
+                    startWeek: 1,
+                    endWeek: 16,
+                  ),
+                ],
+              ),
+            };
 
   static const options = ClassroomSearchOptions(
     buildings: [
@@ -294,7 +392,8 @@ class _SearchRepository extends ClassroomRepository {
     ],
   );
 
-  final loadedBuildings = <int>[];
+  final Map<int, ClassroomCourseSearchResult> _hitsByPage;
+  final searchCalls = <({String keyword, int startPage, int pageSize})>[];
 
   @override
   ClassroomSearchOptions? get optionsSnapshot => options;
@@ -307,69 +406,26 @@ class _SearchRepository extends ClassroomRepository {
       options;
 
   @override
-  Future<ClassroomBuildingSchedule> loadBuildingDay({
-    required ClassroomBuilding building,
-    required DateTime date,
+  Future<ClassroomSemesterInfo?> loadCurrentSemester({
     bool forceRefresh = false,
     ClassroomAccessMode? accessMode,
+  }) async =>
+      ClassroomSemesterInfo(week: 1, realDate: DateTime(2026, 9, 1));
+
+  @override
+  Future<ClassroomCourseSearchResult> searchCourses({
+    required String keyword,
+    int startPage = 0,
+    int pageSize = 50,
+    ClassroomAccessMode? accessMode,
   }) async {
-    loadedBuildings.add(building.id);
-    if (building.id != 303) {
-      return ClassroomBuildingSchedule(building: building, floors: const []);
-    }
-    return ClassroomBuildingSchedule(
-      building: building,
-      floors: [
-        ClassroomFloor(
-          id: 1,
-          name: '一层',
-          rooms: [
-            ClassroomRoom(
-              id: 11,
-              name: 'A101',
-              floorName: '一层',
-              fullName: 'A楼A101',
-              courses: const [
-                ClassroomCourse(
-                  courseName: _firstCourseTitle,
-                  teacherName: '张老师',
-                  startSection: 1,
-                  endSection: 2,
-                ),
-              ],
-            ),
-            ClassroomRoom(
-              id: 12,
-              name: 'A102',
-              floorName: '一层',
-              fullName: 'A楼A102',
-              courses: const [
-                ClassroomCourse(
-                  courseName: _firstCourseTitle,
-                  teacherName: '李老师',
-                  startSection: 3,
-                  endSection: 3,
-                ),
-              ],
-            ),
-            ClassroomRoom(
-              id: 13,
-              name: 'A103',
-              floorName: '一层',
-              fullName: 'A楼A103',
-              courses: const [
-                ClassroomCourse(
-                  courseName: '线性代数',
-                  teacherName: '王老师',
-                  startSection: 1,
-                  endSection: 2,
-                ),
-              ],
-            ),
-          ],
-        ),
-      ],
-    );
+    searchCalls.add((
+      keyword: keyword,
+      startPage: startPage,
+      pageSize: pageSize,
+    ));
+    return _hitsByPage[startPage] ??
+        const ClassroomCourseSearchResult(totalHits: 0, hits: []);
   }
 }
 

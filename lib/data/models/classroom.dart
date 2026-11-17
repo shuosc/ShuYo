@@ -351,6 +351,195 @@ class CourseLocationMatch {
   final ClassroomCourse course;
 }
 
+class ClassroomSemesterInfo {
+  const ClassroomSemesterInfo({
+    required this.week,
+    this.realDate,
+  });
+
+  final int week;
+  final DateTime? realDate;
+
+  factory ClassroomSemesterInfo.fromJson(JsonMap json) {
+    final rawDate = stringValue(json['realDate']);
+    DateTime? parsedDate;
+    if (rawDate.isNotEmpty) {
+      final parsed = DateTime.tryParse(rawDate);
+      if (parsed != null) {
+        final shanghai = parsed.toUtc().add(const Duration(hours: 8));
+        parsedDate = DateTime(shanghai.year, shanghai.month, shanghai.day);
+      }
+    }
+    return ClassroomSemesterInfo(
+      week: intValue(json['week']),
+      realDate: parsedDate,
+    );
+  }
+
+  /// 计算指定日期所属的教学周；若无基准日期或周次无效则返回 null。
+  int? weekForDate(DateTime date, {DateTime? now}) {
+    if (week <= 0) return null;
+    final anchor = realDate ??
+        () {
+          final current = now ?? DateTime.now();
+          return DateTime(current.year, current.month, current.day);
+        }();
+    final target = DateTime(date.year, date.month, date.day);
+    final anchorMonday = anchor.subtract(Duration(days: anchor.weekday - 1));
+    final targetMonday = target.subtract(Duration(days: target.weekday - 1));
+    final deltaWeeks = targetMonday.difference(anchorMonday).inDays ~/ 7;
+    return week + deltaWeeks;
+  }
+}
+
+class ClassroomEsCourseHit {
+  const ClassroomEsCourseHit({
+    required this.courseName,
+    required this.teacherName,
+    required this.roomName,
+    required this.dayInWeek,
+    required this.startSection,
+    required this.endSection,
+    required this.startWeek,
+    required this.endWeek,
+    this.source = '',
+  });
+
+  final String courseName;
+  final String teacherName;
+  final String roomName;
+  final int dayInWeek;
+  final int startSection;
+  final int endSection;
+  final int startWeek;
+  final int endWeek;
+  final String source;
+
+  String get sectionText => startSection == endSection
+      ? '$startSection节'
+      : '$startSection-$endSection节';
+
+  bool matchesDate(DateTime date, {int? targetWeek}) {
+    if (dayInWeek > 0 && dayInWeek != date.weekday) {
+      return false;
+    }
+    if (targetWeek != null && startWeek > 0 && endWeek > 0) {
+      return targetWeek >= startWeek && targetWeek <= endWeek;
+    }
+    return true;
+  }
+
+  /// 按 ES 返回的 `roomName` 推断所属教学楼。
+  ClassroomBuilding? matchBuilding(List<ClassroomBuilding> buildings) {
+    final normalized = roomName.trim();
+    if (normalized.isEmpty) return null;
+    final upper = normalized.toUpperCase();
+    final prefix = normalized.contains('/')
+        ? normalized.split('/').first.trim()
+        : normalized;
+
+    ClassroomBuilding? findById(int id) {
+      for (final building in buildings) {
+        if (building.id == id) return building;
+      }
+      return null;
+    }
+
+    ClassroomBuilding? findByNames(List<String> keywords) {
+      for (final keyword in keywords) {
+        for (final building in buildings) {
+          if (building.name.contains(keyword) ||
+              building.fullName.contains(keyword)) {
+            return building;
+          }
+        }
+      }
+      return null;
+    }
+
+    // 东区大楼与命名归一化后的楼宇优先按关键词匹配。
+    if (prefix.contains('信息大楼') || prefix.contains('计算机')) {
+      return findById(478) ?? findByNames(const ['计算机/通信楼', '信息大楼']);
+    }
+    if (prefix.contains('材料') || prefix.contains('17号楼')) {
+      return findById(477) ?? findByNames(const ['材料楼', '材料大楼']);
+    }
+    if (prefix.contains('商管') || prefix.contains('经管')) {
+      return findById(476) ?? findByNames(const ['经管楼', '商管大楼']);
+    }
+
+    // 宝山主楼与阶梯楼：双字母前缀必须在单字母之前匹配。
+    const codePrefixes = <(String prefix, int id, List<String> names)>[
+      ('AJ', 325, ['AJ楼']),
+      ('BJ', 328, ['BJ楼']),
+      ('CJ', 262, ['CJ楼']),
+      ('DJ', 208, ['DJ楼']),
+      ('EJ', 220, ['EJ楼']),
+      ('FJ', 221, ['FJ楼']),
+      ('GA', 930, ['GA楼']),
+      ('GJ', 222, ['GJ楼']),
+      ('A', 303, ['A楼']),
+      ('B', 122, ['B楼']),
+      ('C', 528, ['C楼']),
+      ('D', 164, ['D楼']),
+      ('J', 700, ['J楼']),
+    ];
+    for (final entry in codePrefixes) {
+      if (upper.startsWith(entry.$1)) {
+        return findById(entry.$2) ?? findByNames(entry.$3);
+      }
+    }
+
+    // 延长 / 嘉定等校区按楼名或常见简称匹配。
+    for (final building in buildings) {
+      if (prefix.contains(building.name) ||
+          normalized.contains(building.name)) {
+        return building;
+      }
+    }
+    const shortAliases = <(String alias, int id)>[
+      ('行健', 399),
+      ('四教', 422),
+      ('仪表', 449),
+      ('一教', 607),
+      ('二教', 575),
+      ('文达', 759),
+    ];
+    for (final alias in shortAliases) {
+      if (normalized.contains(alias.$1)) {
+        return findById(alias.$2);
+      }
+    }
+    return null;
+  }
+
+  factory ClassroomEsCourseHit.fromJson(JsonMap json) {
+    final start = intValue(json['startSection']);
+    final end = intValue(json['endSection']);
+    return ClassroomEsCourseHit(
+      courseName: stringValue(json['courseName']),
+      teacherName: stringValue(json['teacherName']),
+      roomName: stringValue(json['roomName']),
+      dayInWeek: intValue(json['dayinweek'] ?? json['dayInWeek']),
+      startSection: start,
+      endSection: end >= start ? end : start,
+      startWeek: intValue(json['startWeek']),
+      endWeek: intValue(json['endWeek']),
+      source: stringValue(json['sjly']),
+    );
+  }
+}
+
+class ClassroomCourseSearchResult {
+  const ClassroomCourseSearchResult({
+    required this.totalHits,
+    required this.hits,
+  });
+
+  final int totalHits;
+  final List<ClassroomEsCourseHit> hits;
+}
+
 String _campusName(int campusId, String fullName, String cachedName) {
   final knownName = switch (campusId) {
     // 东区（475）在宝山校区内，展示时并入宝山。

@@ -62,6 +62,7 @@ class ClassroomRepository {
   final Duration scheduleCacheDuration;
 
   ClassroomSearchOptions? _memoryOptions;
+  ClassroomSemesterInfo? _semesterInfo;
   final _scheduleCache = <String, _CachedClassroomSchedule>{};
 
   /// The options already held in memory from an earlier [loadOptions].
@@ -225,6 +226,35 @@ class ClassroomRepository {
     ]);
     return results;
   }
+
+  Future<ClassroomSemesterInfo?> loadCurrentSemester({
+    bool forceRefresh = false,
+    ClassroomAccessMode? accessMode,
+  }) async {
+    if (!forceRefresh && _semesterInfo != null) {
+      return _semesterInfo;
+    }
+    final info = await _client.fetchCurrentSemester(
+      accessMode: accessMode ?? ClassroomUrlResolver.accessMode,
+    );
+    if (info != null) {
+      _semesterInfo = info;
+    }
+    return info;
+  }
+
+  Future<ClassroomCourseSearchResult> searchCourses({
+    required String keyword,
+    int startPage = 0,
+    int pageSize = 50,
+    ClassroomAccessMode? accessMode,
+  }) =>
+      _client.searchCoursesByKeyword(
+        keyword: keyword,
+        startPage: startPage,
+        pageSize: pageSize,
+        accessMode: accessMode ?? ClassroomUrlResolver.accessMode,
+      );
 
   /// The section range a course starting at [section] belongs to.
   ClassroomSectionRange? rangeForSection(
