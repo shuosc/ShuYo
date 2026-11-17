@@ -1,6 +1,6 @@
 import 'dart:async';
 
-import 'package:flutter/material.dart';
+import 'package:material_ui/material_ui.dart';
 
 import '../../data/models/library_book_item.dart';
 import '../../data/services/library_api_client.dart';
@@ -8,7 +8,7 @@ import '../../data/services/library_auth_service.dart';
 import '../../shared/shuyo_text_styles.dart';
 import '../../shared/theme/shuyo_theme.dart';
 import '../../shared/widgets/empty_state.dart';
-import '../course_recordings/recording_list_presentation.dart';
+import '../../shared/widgets/list_presentation.dart';
 import 'library_book_list_tile.dart';
 import 'library_campus_menu.dart';
 import 'library_publish_time_menu.dart';
@@ -253,9 +253,8 @@ class _LibrarySearchPageState extends State<LibrarySearchPage> {
                   IconButton(
                     key: const ValueKey('library-search-submit'),
                     tooltip: '开始搜索',
-                    onPressed: !_queryState.value.hasKeyword
-                        ? null
-                        : _submitSearch,
+                    onPressed:
+                        !_queryState.value.hasKeyword ? null : _submitSearch,
                     icon: Icon(
                       Icons.search,
                       color: Theme.of(context).colorScheme.primary,
@@ -266,7 +265,7 @@ class _LibrarySearchPageState extends State<LibrarySearchPage> {
             ),
           ),
           Expanded(
-            child: RecordingListPresentation(
+            child: ListPresentation(
               changes: _searchController,
               shouldUpdateImmediately: () =>
                   _renderedRevision != _revision ||
@@ -338,9 +337,7 @@ class _LibrarySearchPageState extends State<LibrarySearchPage> {
                       .copyWith(fontWeight: FontWeight.w600),
                 ),
                 Text(
-                  _activeKeyword == null
-                      ? '仅检索图书'
-                      : '图书 · $_activeKeyword',
+                  _activeKeyword == null ? '仅检索图书' : '图书 · $_activeKeyword',
                   key: const ValueKey('library-search-keyword-label'),
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,

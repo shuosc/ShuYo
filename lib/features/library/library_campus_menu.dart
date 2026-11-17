@@ -1,6 +1,6 @@
 import 'dart:math' as math;
 
-import 'package:flutter/material.dart';
+import 'package:material_ui/material_ui.dart';
 
 import '../../data/models/library_book_item.dart';
 import '../../shared/theme/shuyo_theme.dart';
@@ -56,8 +56,7 @@ Future<Set<LibraryCampusFilter>?> showLibraryCampusMenu(
         FadeTransition(
       opacity: animation,
       child: SlideTransition(
-        position:
-            Tween(begin: const Offset(.18, 0), end: Offset.zero).animate(
+        position: Tween(begin: const Offset(.18, 0), end: Offset.zero).animate(
           CurvedAnimation(parent: animation, curve: Curves.easeOutCubic),
         ),
         child: child,

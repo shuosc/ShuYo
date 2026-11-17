@@ -1,4 +1,4 @@
-import 'package:flutter/material.dart';
+import 'package:material_ui/material_ui.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shuyo/data/models/library_book_item.dart';
 import 'package:shuyo/data/services/library_api_client.dart';
@@ -49,7 +49,8 @@ void main() {
 
     expect(apiClient.calls.last.campuses, isEmpty);
 
-    await tester.tap(find.byKey(const ValueKey('library-newbook-campus-filter')));
+    await tester
+        .tap(find.byKey(const ValueKey('library-newbook-campus-filter')));
     await tester.pumpAndSettle();
 
     expect(find.text('ALL'), findsNothing);
@@ -58,8 +59,10 @@ void main() {
     expect(find.text('延长校区'), findsOneWidget);
     expect(find.text('嘉定校区'), findsOneWidget);
 
-    await tester.tap(find.byKey(const ValueKey('library-campus-option:baoshan')));
-    await tester.tap(find.byKey(const ValueKey('library-campus-option:yanchang')));
+    await tester
+        .tap(find.byKey(const ValueKey('library-campus-option:baoshan')));
+    await tester
+        .tap(find.byKey(const ValueKey('library-campus-option:yanchang')));
     // 点击遮罩关闭菜单后自动应用当前勾选
     await tester.tapAt(const Offset(10, 10));
     await tester.pumpAndSettle();
