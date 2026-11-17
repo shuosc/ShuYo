@@ -26,21 +26,30 @@ void main() {
     await tester.pumpAndSettle();
   }
 
-  testWidgets('searches as the user types without a submit button',
+  testWidgets('searches via the text field and adjacent search button',
       (tester) async {
     final repository = _SearchRepository();
     await open(tester, repository);
 
-    // 没有“开始搜索”按钮，输入即触发。
-    expect(find.byTooltip('开始搜索'), findsNothing);
+    final submit = find.byKey(const ValueKey('classroom-search-submit'));
     expect(find.byType(TextField), findsOneWidget);
+    expect(submit, findsOneWidget);
+    expect(tester.widget<IconButton>(submit).onPressed, isNull);
 
     await tester.enterText(find.byType(TextField), '高等数学');
-    await tester.pump(const Duration(milliseconds: 320));
+    await tester.pump();
+    expect(tester.widget<IconButton>(submit).onPressed, isNotNull);
+    expect(
+        find.byKey(const ValueKey('classroom-search-results')), findsNothing);
+
+    await tester.tap(submit);
     await tester.pumpAndSettle();
 
+    expect(
+        find.byKey(const ValueKey('classroom-search-results')), findsOneWidget);
     expect(find.text('高等数学'), findsWidgets);
-    expect(find.text('找到 2 条 · 1 门课'), findsOneWidget);
+    expect(find.textContaining('门课'), findsNothing);
+    expect(find.textContaining('找到 '), findsNothing);
   });
 
   testWidgets('groups hits by building then by section with two sticky levels',
@@ -49,7 +58,8 @@ void main() {
     await open(tester, repository);
 
     await tester.enterText(find.byType(TextField), '高等数学');
-    await tester.pump(const Duration(milliseconds: 320));
+    await tester.pump();
+    await tester.tap(find.byKey(const ValueKey('classroom-search-submit')));
     await tester.pumpAndSettle();
 
     // 一级吸顶「宝山校区 A楼」，二级吸顶「1-2节」。
@@ -69,7 +79,8 @@ void main() {
 
     Future<void> search(String keyword) async {
       await tester.enterText(find.byType(TextField), keyword);
-      await tester.pump(const Duration(milliseconds: 320));
+      await tester.pump();
+      await tester.tap(find.byKey(const ValueKey('classroom-search-submit')));
       await tester.pumpAndSettle();
     }
 
@@ -89,18 +100,21 @@ void main() {
     final repository = _SearchRepository();
     await open(tester, repository);
 
-    // 搜索框下方不再有说明小字。
+    // 搜索框下方不再有说明小字或统计行。
     expect(find.textContaining('输入课程名'), findsNothing);
     expect(find.textContaining('范围：'), findsNothing);
 
     await tester.enterText(find.byType(TextField), '高等数学');
-    await tester.pump(const Duration(milliseconds: 320));
+    await tester.pump();
+    await tester.tap(find.byKey(const ValueKey('classroom-search-submit')));
     await tester.pumpAndSettle();
-    expect(find.text('找到 2 条 · 1 门课'), findsOneWidget);
+    expect(
+        find.byKey(const ValueKey('classroom-search-results')), findsOneWidget);
 
     await tester.tap(find.byKey(const ValueKey('classroom-search-clear')));
     await tester.pumpAndSettle();
-    expect(find.text('找到 2 条 · 1 门课'), findsNothing);
+    expect(
+        find.byKey(const ValueKey('classroom-search-results')), findsNothing);
   });
 
   testWidgets('the app bar owns the date and building filters', (tester) async {

@@ -12,7 +12,6 @@ import '../../shared/shuyo_text_styles.dart';
 import '../../shared/theme/shuyo_theme.dart';
 import '../../shared/widgets/course_color_label.dart';
 import '../../shared/widgets/empty_state.dart';
-import '../../shared/widgets/shuyo_search_field.dart';
 import 'classroom_filter_menu.dart';
 import 'classroom_grouped_sliver.dart';
 import 'classroom_presentation.dart';
@@ -42,7 +41,7 @@ class ClassroomSearchHit {
       terms.every((term) => _haystack.contains(term));
 }
 
-/// 独立搜索页：输入即搜索，不设搜索按钮。
+/// 独立搜索页：通过文本框与搜索按钮检索课程。
 ///
 /// 日期与教室筛选都在本页 AppBar 上，主页只负责进入这里。
 class ClassroomSearchPage extends StatefulWidget {
@@ -70,7 +69,7 @@ class ClassroomSearchPage extends StatefulWidget {
 
 class _ClassroomSearchPageState extends State<ClassroomSearchPage> {
   final _controller = TextEditingController();
-  Timer? _debounce;
+  final _focusNode = FocusNode();
   late DateTime _date;
   late Set<int> _selectedIds;
   final _hits = <ClassroomSearchHit>[];
@@ -101,7 +100,7 @@ class _ClassroomSearchPageState extends State<ClassroomSearchPage> {
 
   @override
   void dispose() {
-    _debounce?.cancel();
+    _focusNode.dispose();
     _controller.dispose();
     super.dispose();
   }
@@ -239,12 +238,9 @@ class _ClassroomSearchPageState extends State<ClassroomSearchPage> {
     }
   }
 
-  void _onChanged(String value) {
-    _debounce?.cancel();
-    _debounce = Timer(const Duration(milliseconds: 300), () {
-      if (!mounted) return;
-      _applyKeyword(value);
-    });
+  void _submitSearch([String? raw]) {
+    _focusNode.unfocus();
+    _applyKeyword(raw ?? _controller.text);
   }
 
   void _applyKeyword(String value) {
@@ -254,9 +250,10 @@ class _ClassroomSearchPageState extends State<ClassroomSearchPage> {
     });
   }
 
-  void _clearKeyword() {
-    _debounce?.cancel();
-    _controller.clear();
+  void _clearKeyword({bool clearField = true}) {
+    if (clearField) {
+      _controller.clear();
+    }
     _applyKeyword('');
   }
 
@@ -366,30 +363,58 @@ class _ClassroomSearchPageState extends State<ClassroomSearchPage> {
       body: Column(
         children: [
           Padding(
-            padding: const EdgeInsets.fromLTRB(16, 4, 16, 0),
+            padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
             child: ValueListenableBuilder<TextEditingValue>(
               valueListenable: _controller,
-              builder: (context, value, child) => ShuYoSearchField(
-                controller: _controller,
-                hintText: '搜索课程、教师或教室',
-                autofocus: true,
-                onChanged: _onChanged,
-                onSubmitted: (text) {
-                  _debounce?.cancel();
-                  _applyKeyword(text);
-                },
-                trailing: value.text.isEmpty
-                    ? null
-                    : IconButton(
-                        key: const ValueKey('classroom-search-clear'),
-                        tooltip: '清空关键词',
-                        onPressed: _clearKeyword,
-                        icon: const Icon(Icons.clear, size: 18),
+              builder: (context, value, child) {
+                final hasText = value.text.isNotEmpty;
+                final hasKeyword = value.text.trim().isNotEmpty;
+                return Row(
+                  children: [
+                    Expanded(
+                      child: TextField(
+                        key: const ValueKey('classroom-search-query'),
+                        controller: _controller,
+                        focusNode: _focusNode,
+                        autofocus: true,
+                        onTapOutside: (_) => _focusNode.unfocus(),
+                        textInputAction: TextInputAction.search,
+                        onSubmitted: _submitSearch,
+                        onChanged: (text) {
+                          if (text.trim().isEmpty && _keyword.isNotEmpty) {
+                            _clearKeyword(clearField: false);
+                          }
+                        },
+                        decoration: InputDecoration(
+                          labelText: '搜索课程、教师或教室',
+                          suffixIcon: !hasText
+                              ? null
+                              : IconButton(
+                                  key: const ValueKey('classroom-search-clear'),
+                                  tooltip: '清空关键词',
+                                  onPressed: _clearKeyword,
+                                  icon: const Icon(Icons.clear),
+                                ),
+                        ),
                       ),
-              ),
+                    ),
+                    const SizedBox(width: 6),
+                    IconButton(
+                      key: const ValueKey('classroom-search-submit'),
+                      tooltip: '开始搜索',
+                      onPressed: !hasKeyword ? null : () => _submitSearch(),
+                      icon: Icon(
+                        Icons.search,
+                        color: hasKeyword
+                            ? Theme.of(context).colorScheme.primary
+                            : null,
+                      ),
+                    ),
+                  ],
+                );
+              },
             ),
           ),
-          const SizedBox(height: 2),
           Expanded(child: _body()),
         ],
       ),
@@ -435,31 +460,7 @@ class _ClassroomSearchPageState extends State<ClassroomSearchPage> {
         message: '试试课程名、教师名或教室号，也可以在右上角换一批教学楼。',
       );
     }
-    final courseCount =
-        matches.map((hit) => hit.course.courseName).toSet().length;
-    return Column(
-      children: [
-        Padding(
-          padding: const EdgeInsets.fromLTRB(16, 2, 16, 6),
-          child: Row(
-            children: [
-              Expanded(
-                child: Text(
-                  '找到 ${matches.length} 条 · $courseCount 门课',
-                  style: ShuYoTextStyles.meta(color: colors.textTertiary),
-                ),
-              ),
-              if (_loading)
-                Text(
-                  '$_completed/$_total 栋',
-                  style: ShuYoTextStyles.meta(color: colors.textMuted),
-                ),
-            ],
-          ),
-        ),
-        Expanded(child: _results(matches)),
-      ],
-    );
+    return _results(matches);
   }
 
   Widget _results(List<ClassroomSearchHit> matches) {
