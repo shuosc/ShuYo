@@ -210,7 +210,7 @@ void main() {
     expect(
       find.descendant(
         of: find.byKey(const ValueKey('classroom-building-picker')),
-        matching: find.text('嘉定校区 D楼'),
+        matching: find.text('嘉定校区 ALL'),
       ),
       findsOneWidget,
     );
@@ -219,10 +219,12 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.byKey(const ValueKey('classroom-picker-campus-宝山')));
     await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('classroom-picker-building-1')));
+    await tester.pumpAndSettle();
     expect(
       find.descendant(
         of: find.byKey(const ValueKey('classroom-building-picker')),
-        matching: find.text('宝山校区 ALL'),
+        matching: find.text('宝山校区 A楼'),
       ),
       findsOneWidget,
     );
@@ -231,7 +233,7 @@ void main() {
     expect(
       find.descendant(
         of: find.byKey(const ValueKey('classroom-building-picker')),
-        matching: find.text('嘉定校区 D楼'),
+        matching: find.text('嘉定校区 ALL'),
       ),
       findsOneWidget,
     );
@@ -240,7 +242,7 @@ void main() {
     expect(
       find.descendant(
         of: find.byKey(const ValueKey('classroom-building-picker')),
-        matching: find.text('宝山校区 A楼'),
+        matching: find.text('宝山校区 ALL'),
       ),
       findsOneWidget,
     );

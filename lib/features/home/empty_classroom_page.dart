@@ -441,17 +441,16 @@ class _EmptyClassroomPageState extends State<EmptyClassroomPage> {
   ClassroomBuilding? _validBuilding(ClassroomSearchOptions options) {
     final campus = _selectedCampus;
     final current = _selectedBuilding;
-    if (current == null && _resultFuture != null) {
+    if (current == null) {
       return null;
     }
     final buildings = options.buildings
         .where((building) => campus == null || building.campusName == campus)
         .toList(growable: false);
-    if (current != null &&
-        buildings.any((building) => building.id == current.id)) {
+    if (buildings.any((building) => building.id == current.id)) {
       return current;
     }
-    return buildings.isEmpty ? null : buildings.first;
+    return null;
   }
 
   Future<void> _pickBuilding(ClassroomSearchOptions options) async {

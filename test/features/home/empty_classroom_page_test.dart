@@ -202,7 +202,7 @@ void main() {
     expect(
       find.descendant(
         of: find.byKey(const ValueKey('classroom-building-picker')),
-        matching: find.text('宝山校区 A楼'),
+        matching: find.text('宝山校区 ALL'),
       ),
       findsOneWidget,
     );
@@ -212,25 +212,51 @@ void main() {
     expect(find.byKey(const ValueKey('classroom-single-building-menu')),
         findsOneWidget);
     expect(find.byType(Checkbox), findsNothing);
+    // 默认仅展开当前校区（宝山），其他校区（嘉定）收起，第一项为「全部教学楼」。
+    expect(
+        find.byKey(const ValueKey('classroom-picker-all-宝山')), findsOneWidget);
+    expect(find.byKey(const ValueKey('classroom-picker-building-1')),
+        findsOneWidget);
+    expect(find.byKey(const ValueKey('classroom-picker-all-嘉定')), findsNothing);
+    expect(find.byKey(const ValueKey('classroom-picker-building-2')),
+        findsNothing);
 
-    await tester.tap(find.byKey(const ValueKey('classroom-picker-campus-宝山')));
+    await tester.tap(find.byKey(const ValueKey('classroom-picker-building-1')));
     await tester.pumpAndSettle();
     expect(
       find.descendant(
         of: find.byKey(const ValueKey('classroom-building-picker')),
-        matching: find.text('宝山校区 ALL'),
+        matching: find.text('宝山校区 A楼'),
       ),
       findsOneWidget,
     );
 
     await tester.tap(find.byKey(const ValueKey('classroom-building-picker')));
     await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('classroom-picker-campus-嘉定')));
+    await tester.pumpAndSettle();
+    expect(
+        find.byKey(const ValueKey('classroom-picker-all-嘉定')), findsOneWidget);
     await tester.tap(find.byKey(const ValueKey('classroom-picker-building-2')));
     await tester.pumpAndSettle();
     expect(
       find.descendant(
         of: find.byKey(const ValueKey('classroom-building-picker')),
         matching: find.text('嘉定校区 D楼'),
+      ),
+      findsOneWidget,
+    );
+
+    await tester.tap(find.byKey(const ValueKey('classroom-building-picker')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('classroom-picker-campus-宝山')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('classroom-picker-all-宝山')));
+    await tester.pumpAndSettle();
+    expect(
+      find.descendant(
+        of: find.byKey(const ValueKey('classroom-building-picker')),
+        matching: find.text('宝山校区 ALL'),
       ),
       findsOneWidget,
     );
