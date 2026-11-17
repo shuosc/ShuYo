@@ -206,44 +206,50 @@ void main() {
       await tester.pumpAndSettle();
     }
 
+    final picker = find.byKey(const ValueKey('classroom-building-picker'));
+
     await open('嘉定', 'first');
     expect(
-      find.descendant(
-        of: find.byKey(const ValueKey('classroom-building-picker')),
-        matching: find.text('嘉定校区 ALL'),
-      ),
+      find.descendant(of: picker, matching: find.text('嘉定校区')),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(of: picker, matching: find.text('ALL')),
       findsOneWidget,
     );
 
-    await tester.tap(find.byKey(const ValueKey('classroom-building-picker')));
+    await tester.tap(picker);
     await tester.pumpAndSettle();
     await tester.tap(find.byKey(const ValueKey('classroom-picker-campus-宝山')));
     await tester.pumpAndSettle();
     await tester.tap(find.byKey(const ValueKey('classroom-picker-building-1')));
     await tester.pumpAndSettle();
     expect(
-      find.descendant(
-        of: find.byKey(const ValueKey('classroom-building-picker')),
-        matching: find.text('宝山校区 A楼'),
-      ),
+      find.descendant(of: picker, matching: find.text('宝山校区')),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(of: picker, matching: find.text('A楼')),
       findsOneWidget,
     );
 
     await open('嘉定', 'reopen');
     expect(
-      find.descendant(
-        of: find.byKey(const ValueKey('classroom-building-picker')),
-        matching: find.text('嘉定校区 ALL'),
-      ),
+      find.descendant(of: picker, matching: find.text('嘉定校区')),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(of: picker, matching: find.text('ALL')),
       findsOneWidget,
     );
 
     await open('延长', 'second');
     expect(
-      find.descendant(
-        of: find.byKey(const ValueKey('classroom-building-picker')),
-        matching: find.text('宝山校区 ALL'),
-      ),
+      find.descendant(of: picker, matching: find.text('宝山校区')),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(of: picker, matching: find.text('ALL')),
       findsOneWidget,
     );
   });

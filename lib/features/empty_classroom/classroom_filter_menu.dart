@@ -541,13 +541,31 @@ class _SingleBuildingMenuState extends State<_SingleBuildingMenu> {
   }
 
   Widget _allBuildingsTile(String campus) {
+    final colors = context.shuyoColors;
+    final primary = Theme.of(context).colorScheme.primary;
     final selected =
         widget.selectedCampus == campus && widget.selectedBuilding == null;
     return ListTile(
       key: ValueKey('classroom-picker-all-$campus'),
       selected: selected,
       contentPadding: const EdgeInsets.only(left: 16, right: 12),
-      title: const Text('全部教学楼'),
+      title: Row(
+        children: [
+          Icon(
+            Icons.grid_view_outlined,
+            size: 18,
+            color: selected ? primary : colors.textSecondary,
+          ),
+          const SizedBox(width: 8),
+          const Flexible(
+            child: Text(
+              '全部教学楼',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+        ],
+      ),
       trailing: selected ? const Icon(Icons.check, size: 18) : null,
       onTap: () => Navigator.of(context).pop(
         (campus: campus, building: null),

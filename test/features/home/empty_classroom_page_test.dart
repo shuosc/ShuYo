@@ -201,20 +201,62 @@ void main() {
     expect(find.text('晴'), findsOneWidget);
     expect(
       find.descendant(
-        of: find.byKey(const ValueKey('classroom-building-picker')),
-        matching: find.text('宝山校区 ALL'),
+        of: picker,
+        matching: find.byIcon(Icons.location_city_outlined),
       ),
       findsOneWidget,
     );
+    expect(
+      find.descendant(of: picker, matching: find.byIcon(Icons.swap_horiz)),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(
+        of: picker,
+        matching: find.byIcon(Icons.keyboard_arrow_down),
+      ),
+      findsNothing,
+    );
+    final campusFinder = find.descendant(
+      of: picker,
+      matching: find.text('宝山校区'),
+    );
+    final buildingFinder = find.descendant(
+      of: picker,
+      matching: find.text('ALL'),
+    );
+    expect(campusFinder, findsOneWidget);
+    expect(buildingFinder, findsOneWidget);
+    final campusText = tester.widget<Text>(campusFinder);
+    final buildingText = tester.widget<Text>(buildingFinder);
+    expect(campusText.style?.fontSize, greaterThanOrEqualTo(16));
+    expect(buildingText.style?.fontSize, greaterThanOrEqualTo(16));
+    final theme = Theme.of(tester.element(picker));
+    expect(buildingText.style?.color, theme.colorScheme.primary);
+    expect(
+      tester.getTopLeft(buildingFinder).dx -
+          tester.getTopRight(campusFinder).dx,
+      greaterThanOrEqualTo(8),
+    );
+    final pickerRect = tester.getRect(picker);
+    final datePickerRect = tester.getRect(find.byType(OutlinedButton).last);
+    expect(pickerRect.right, closeTo(datePickerRect.right, 0.5));
 
-    await tester.tap(find.byKey(const ValueKey('classroom-building-picker')));
+    await tester.tap(picker);
     await tester.pumpAndSettle();
     expect(find.byKey(const ValueKey('classroom-single-building-menu')),
         findsOneWidget);
     expect(find.byType(Checkbox), findsNothing);
-    // 默认仅展开当前校区（宝山），其他校区（嘉定）收起，第一项为「全部教学楼」。
+    // 默认仅展开当前校区（宝山），其他校区（嘉定）收起，第一项为「全部教学楼」且带前置标识。
+    final baoshanAll = find.byKey(const ValueKey('classroom-picker-all-宝山'));
+    expect(baoshanAll, findsOneWidget);
     expect(
-        find.byKey(const ValueKey('classroom-picker-all-宝山')), findsOneWidget);
+      find.descendant(
+        of: baoshanAll,
+        matching: find.byIcon(Icons.grid_view_outlined),
+      ),
+      findsOneWidget,
+    );
     expect(find.byKey(const ValueKey('classroom-picker-building-1')),
         findsOneWidget);
     expect(find.byKey(const ValueKey('classroom-picker-all-嘉定')), findsNothing);
@@ -224,14 +266,15 @@ void main() {
     await tester.tap(find.byKey(const ValueKey('classroom-picker-building-1')));
     await tester.pumpAndSettle();
     expect(
-      find.descendant(
-        of: find.byKey(const ValueKey('classroom-building-picker')),
-        matching: find.text('宝山校区 A楼'),
-      ),
+      find.descendant(of: picker, matching: find.text('宝山校区')),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(of: picker, matching: find.text('A楼')),
       findsOneWidget,
     );
 
-    await tester.tap(find.byKey(const ValueKey('classroom-building-picker')));
+    await tester.tap(picker);
     await tester.pumpAndSettle();
     await tester.tap(find.byKey(const ValueKey('classroom-picker-campus-嘉定')));
     await tester.pumpAndSettle();
@@ -240,26 +283,56 @@ void main() {
     await tester.tap(find.byKey(const ValueKey('classroom-picker-building-2')));
     await tester.pumpAndSettle();
     expect(
-      find.descendant(
-        of: find.byKey(const ValueKey('classroom-building-picker')),
-        matching: find.text('嘉定校区 D楼'),
-      ),
+      find.descendant(of: picker, matching: find.text('嘉定校区')),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(of: picker, matching: find.text('D楼')),
       findsOneWidget,
     );
 
-    await tester.tap(find.byKey(const ValueKey('classroom-building-picker')));
+    await tester.tap(picker);
     await tester.pumpAndSettle();
     await tester.tap(find.byKey(const ValueKey('classroom-picker-campus-宝山')));
     await tester.pumpAndSettle();
     await tester.tap(find.byKey(const ValueKey('classroom-picker-all-宝山')));
     await tester.pumpAndSettle();
     expect(
-      find.descendant(
-        of: find.byKey(const ValueKey('classroom-building-picker')),
-        matching: find.text('宝山校区 ALL'),
-      ),
+      find.descendant(of: picker, matching: find.text('宝山校区')),
       findsOneWidget,
     );
+    expect(
+      find.descendant(of: picker, matching: find.text('ALL')),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets(
+      'header row handles narrow screens and large text without overflow',
+      (tester) async {
+    tester.view.physicalSize = const Size(320, 640);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final repository = _MultiBuildingSnapshotRepository(
+      weatherResult: const ClassroomWeather(weather: '多云转小雨 18~25℃'),
+    );
+    await tester.pumpWidget(MaterialApp(
+      builder: (context, child) => MediaQuery(
+        data: MediaQuery.of(context)
+            .copyWith(textScaler: const TextScaler.linear(2)),
+        child: child!,
+      ),
+      home: EmptyClassroomPage(
+        repository: repository,
+        initialDate: DateTime(2026, 9, 1),
+      ),
+    ));
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const ValueKey('classroom-building-picker')),
+        findsOneWidget);
+    expect(tester.takeException(), isNull);
   });
 
   testWidgets('omits weather cleanly when classroom weather is unavailable',

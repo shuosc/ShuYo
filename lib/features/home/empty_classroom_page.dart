@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:material_ui/material_ui.dart';
 
@@ -744,18 +745,13 @@ class _SearchControls extends StatelessWidget {
   final VoidCallback onNextRange;
   final ValueChanged<DateTime> onDateChanged;
 
-  String _buildingPickerLabel() {
-    final campus = selectedCampus ?? '';
-    final campusPrefix = campus.isEmpty ? '' : '$campus校区';
-    final buildingName = selectedBuilding?.name ?? 'ALL';
-    if (campusPrefix.isEmpty) return buildingName;
-    return '$campusPrefix $buildingName';
-  }
-
   @override
   Widget build(BuildContext context) {
     final colors = context.shuyoColors;
     final weatherInfo = weather?.weather.trim() ?? '';
+    final campus = selectedCampus ?? '';
+    final campusLabel = campus.isEmpty ? '' : '$campus校区';
+    final buildingLabel = selectedBuilding?.name ?? 'ALL';
     return DecoratedBox(
       decoration: BoxDecoration(
         border: Border(bottom: BorderSide(color: colors.border)),
@@ -766,94 +762,94 @@ class _SearchControls extends StatelessWidget {
           children: [
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 16),
-              child: Row(
-                crossAxisAlignment: CrossAxisAlignment.center,
-                children: [
-                  Expanded(
-                    child: Row(
-                      children: [
-                        Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Text(
-                              '${selectedDate.month}月${selectedDate.day}日',
-                              style: ShuYoTextStyles.title(
-                                color: colors.textPrimary,
-                                size: 15.5,
-                                weight: FontWeight.w600,
-                              ),
-                            ),
-                            const SizedBox(height: 1),
-                            Text(
-                              _weekdayLabel(selectedDate),
-                              style: ShuYoTextStyles.meta(
-                                color: colors.textTertiary,
-                                size: 12.5,
-                              ),
-                            ),
-                          ],
-                        ),
-                        if (weatherInfo.isNotEmpty) ...[
-                          const SizedBox(width: 12),
-                          Flexible(
-                            child: Row(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                Icon(
-                                  _weatherIcon(weatherInfo),
-                                  size: 16,
-                                  color: colors.textSecondary,
+              child: LayoutBuilder(
+                builder: (context, constraints) {
+                  final maxButtonWidth = constraints.maxWidth * 0.65;
+                  return Row(
+                    crossAxisAlignment: CrossAxisAlignment.center,
+                    children: [
+                      Expanded(
+                        child: LayoutBuilder(
+                          builder: (context, leftConstraints) => Row(
+                            children: [
+                              ConstrainedBox(
+                                constraints: BoxConstraints(
+                                  maxWidth: weatherInfo.isEmpty
+                                      ? leftConstraints.maxWidth
+                                      : leftConstraints.maxWidth * 0.6,
                                 ),
-                                const SizedBox(width: 4),
-                                Flexible(
-                                  child: Text(
-                                    weatherInfo,
-                                    maxLines: 1,
-                                    overflow: TextOverflow.ellipsis,
-                                    style: ShuYoTextStyles.meta(
-                                      color: colors.textSecondary,
-                                      size: 13,
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Text(
+                                      '${selectedDate.month}月${selectedDate.day}日',
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: ShuYoTextStyles.title(
+                                        color: colors.textPrimary,
+                                        size: 15.5,
+                                        weight: FontWeight.w600,
+                                      ),
                                     ),
+                                    const SizedBox(height: 1),
+                                    Text(
+                                      _weekdayLabel(selectedDate),
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: ShuYoTextStyles.meta(
+                                        color: colors.textTertiary,
+                                        size: 12.5,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                              if (weatherInfo.isNotEmpty) ...[
+                                const SizedBox(width: 12),
+                                Flexible(
+                                  child: Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      Icon(
+                                        _weatherIcon(weatherInfo),
+                                        size: 16,
+                                        color: colors.textSecondary,
+                                      ),
+                                      const SizedBox(width: 4),
+                                      Flexible(
+                                        child: Text(
+                                          weatherInfo,
+                                          maxLines: 1,
+                                          overflow: TextOverflow.ellipsis,
+                                          style: ShuYoTextStyles.meta(
+                                            color: colors.textSecondary,
+                                            size: 13,
+                                          ),
+                                        ),
+                                      ),
+                                    ],
                                   ),
                                 ),
                               ],
-                            ),
+                            ],
                           ),
-                        ],
-                      ],
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  Flexible(
-                    child: TextButton(
-                      key: const ValueKey('classroom-building-picker'),
-                      onPressed:
-                          options.buildings.isEmpty ? null : onPickBuilding,
-                      style: TextButton.styleFrom(
-                        foregroundColor: colors.textPrimary,
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 10,
-                          vertical: 8,
                         ),
                       ),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Flexible(
-                            child: Text(
-                              _buildingPickerLabel(),
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                            ),
-                          ),
-                          const SizedBox(width: 4),
-                          const Icon(Icons.keyboard_arrow_down, size: 18),
-                        ],
+                      const SizedBox(width: 8),
+                      ConstrainedBox(
+                        constraints: BoxConstraints(maxWidth: maxButtonWidth),
+                        child: _BuildingPickerButton(
+                          campusLabel: campusLabel,
+                          buildingLabel: buildingLabel,
+                          maxWidth: maxButtonWidth,
+                          onPressed:
+                              options.buildings.isEmpty ? null : onPickBuilding,
+                        ),
                       ),
-                    ),
-                  ),
-                ],
+                    ],
+                  );
+                },
               ),
             ),
             const SizedBox(height: 10),
@@ -912,6 +908,86 @@ class _SearchControls extends StatelessWidget {
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+/// 顶栏校区与教学楼切换按钮：无边框、贴齐右侧边距，突出当前楼栋。
+class _BuildingPickerButton extends StatelessWidget {
+  const _BuildingPickerButton({
+    required this.campusLabel,
+    required this.buildingLabel,
+    required this.maxWidth,
+    required this.onPressed,
+  });
+
+  final String campusLabel;
+  final String buildingLabel;
+  final double maxWidth;
+  final VoidCallback? onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = context.shuyoColors;
+    final primary = Theme.of(context).colorScheme.primary;
+    final enabled = onPressed != null;
+    final fixedWidth = campusLabel.isEmpty ? 52.0 : 60.0;
+    final maxCampusWidth = math.max(0.0, maxWidth - fixedWidth) * 0.6;
+    return TextButton(
+      key: const ValueKey('classroom-building-picker'),
+      onPressed: onPressed,
+      style: TextButton.styleFrom(
+        foregroundColor: colors.textPrimary,
+        alignment: Alignment.centerRight,
+        minimumSize: const Size(0, 40),
+        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+        padding: const EdgeInsets.fromLTRB(6, 6, 0, 6),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(
+            Icons.location_city_outlined,
+            size: 18,
+            color: enabled ? colors.textSecondary : colors.textMuted,
+          ),
+          const SizedBox(width: 4),
+          if (campusLabel.isNotEmpty) ...[
+            ConstrainedBox(
+              constraints: BoxConstraints(maxWidth: maxCampusWidth),
+              child: Text(
+                campusLabel,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: ShuYoTextStyles.title(
+                  color: enabled ? colors.textPrimary : colors.textMuted,
+                  size: 16,
+                  weight: FontWeight.w500,
+                ),
+              ),
+            ),
+            const SizedBox(width: 8),
+          ],
+          Flexible(
+            child: Text(
+              buildingLabel,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: ShuYoTextStyles.title(
+                color: enabled ? primary : colors.textMuted,
+                size: 16,
+                weight: FontWeight.w600,
+              ),
+            ),
+          ),
+          const SizedBox(width: 6),
+          Icon(
+            Icons.swap_horiz,
+            size: 18,
+            color: enabled ? colors.textSecondary : colors.textMuted,
+          ),
+        ],
       ),
     );
   }
