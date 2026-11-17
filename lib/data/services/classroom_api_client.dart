@@ -138,6 +138,62 @@ class ClassroomApiClient {
     return parseCourseSearchResult(json);
   }
 
+  /// 获取教室平台首页天气；服务端不可用或未返回有效数据时返回 null。
+  Future<ClassroomWeather?> fetchWeather({
+    ClassroomAccessMode? accessMode,
+  }) async {
+    final mode = accessMode ?? ClassroomUrlResolver.accessMode;
+    final useWebVpn = mode == ClassroomAccessMode.webVpn;
+    final homeUri = ClassroomUrlResolver.uri('/', accessMode: mode);
+    final weatherUri = ClassroomUrlResolver.uri(
+      '/sysConfig/getSysWeatherByDate',
+      accessMode: mode,
+    );
+    try {
+      final headers = await _headers(homeUri, useWebVpn: useWebVpn);
+      final homeResponse = await HttpTimeout.request(
+        _httpClient.get(homeUri, headers: {
+          'user-agent': ClientUserAgent.mobileBrowser,
+          if (headers['cookie'] != null) 'cookie': headers['cookie']!,
+        }),
+        message: '天气请求超时',
+      );
+      final setCookie = homeResponse.headers['set-cookie'];
+      if (setCookie != null) {
+        final match = RegExp(r'JSESSIONID=([^;,\s]+)').firstMatch(setCookie);
+        if (match != null) {
+          final jsession = 'JSESSIONID=${match.group(1)}';
+          final existing = headers['cookie'];
+          headers['cookie'] = existing == null || existing.isEmpty
+              ? jsession
+              : '$existing; $jsession';
+        }
+      }
+      headers['referer'] = homeUri.toString();
+      final response = await HttpTimeout.request(
+        _httpClient.post(weatherUri, headers: headers),
+        message: '天气请求超时',
+      );
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        return null;
+      }
+      final decoded = _decodeJson(response.bodyBytes);
+      if (intValue(decoded['code']) != 200) {
+        return null;
+      }
+      return parseWeather(decoded);
+    } on Object {
+      return null;
+    }
+  }
+
+  static ClassroomWeather? parseWeather(JsonMap json) {
+    final data = _dataMap(json);
+    if (data.isEmpty) return null;
+    final info = ClassroomWeather.fromJson(data);
+    return info.weather.isEmpty ? null : info;
+  }
+
   static ClassroomSemesterInfo? parseCurrentSemester(JsonMap json) {
     final data = _dataMap(json);
     if (data.isEmpty) return null;

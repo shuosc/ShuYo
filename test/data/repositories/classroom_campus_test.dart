@@ -208,45 +208,41 @@ void main() {
 
     await open('嘉定', 'first');
     expect(
-      tester
-          .widget<DropdownButtonFormField<String>>(
-            find.byType(DropdownButtonFormField<String>).first,
-          )
-          .initialValue,
-      '嘉定',
+      find.descendant(
+        of: find.byKey(const ValueKey('classroom-building-picker')),
+        matching: find.text('嘉定校区 D楼'),
+      ),
+      findsOneWidget,
     );
 
-    await tester.tap(find.byType(DropdownButtonFormField<String>).first);
+    await tester.tap(find.byKey(const ValueKey('classroom-building-picker')));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('宝山').last);
+    await tester.tap(find.byKey(const ValueKey('classroom-picker-campus-宝山')));
     await tester.pumpAndSettle();
     expect(
-      tester
-          .widget<DropdownButtonFormField<String>>(
-            find.byType(DropdownButtonFormField<String>).first,
-          )
-          .initialValue,
-      '宝山',
+      find.descendant(
+        of: find.byKey(const ValueKey('classroom-building-picker')),
+        matching: find.text('宝山校区 ALL'),
+      ),
+      findsOneWidget,
     );
 
     await open('嘉定', 'reopen');
     expect(
-      tester
-          .widget<DropdownButtonFormField<String>>(
-            find.byType(DropdownButtonFormField<String>).first,
-          )
-          .initialValue,
-      '嘉定',
+      find.descendant(
+        of: find.byKey(const ValueKey('classroom-building-picker')),
+        matching: find.text('嘉定校区 D楼'),
+      ),
+      findsOneWidget,
     );
 
     await open('延长', 'second');
     expect(
-      tester
-          .widget<DropdownButtonFormField<String>>(
-            find.byType(DropdownButtonFormField<String>).first,
-          )
-          .initialValue,
-      '宝山',
+      find.descendant(
+        of: find.byKey(const ValueKey('classroom-building-picker')),
+        matching: find.text('宝山校区 A楼'),
+      ),
+      findsOneWidget,
     );
   });
 }

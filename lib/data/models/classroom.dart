@@ -540,6 +540,27 @@ class ClassroomCourseSearchResult {
   final List<ClassroomEsCourseHit> hits;
 }
 
+class ClassroomWeather {
+  const ClassroomWeather({
+    required this.weather,
+    this.city = '',
+    this.lowTemp = '',
+    this.highTemp = '',
+  });
+
+  final String weather;
+  final String city;
+  final String lowTemp;
+  final String highTemp;
+
+  factory ClassroomWeather.fromJson(JsonMap json) => ClassroomWeather(
+        weather: stringValue(json['weather']),
+        city: stringValue(json['city']),
+        lowTemp: stringValue(json['temp1']),
+        highTemp: stringValue(json['temp2']),
+      );
+}
+
 String _campusName(int campusId, String fullName, String cachedName) {
   final knownName = switch (campusId) {
     // 东区（475）在宝山校区内，展示时并入宝山。

@@ -149,7 +149,8 @@ void main() {
       home: EmptyClassroomPage(repository: repository),
     ));
 
-    expect(find.byType(DropdownButtonFormField<String>), findsOneWidget);
+    expect(find.byKey(const ValueKey('classroom-building-picker')),
+        findsOneWidget);
     expect(repository.searches, 1);
 
     await tester.pumpAndSettle();
@@ -165,14 +166,91 @@ void main() {
       home: EmptyClassroomPage(repository: repository),
     ));
 
-    expect(find.byType(DropdownButtonFormField<String>), findsNothing);
+    expect(
+        find.byKey(const ValueKey('classroom-building-picker')), findsNothing);
     expect(find.byType(CircularProgressIndicator), findsOneWidget);
 
     load.complete(_SnapshotRepository.options);
     await tester.pumpAndSettle();
 
-    expect(find.byType(DropdownButtonFormField<String>), findsOneWidget);
+    expect(find.byKey(const ValueKey('classroom-building-picker')),
+        findsOneWidget);
     expect(repository.searches, 1);
+  });
+
+  testWidgets(
+      'header row renders date, weekday, weather and single-select building popup',
+      (tester) async {
+    final repository = _MultiBuildingSnapshotRepository(
+      weatherResult: const ClassroomWeather(weather: '晴'),
+    );
+    await tester.pumpWidget(MaterialApp(
+      home: EmptyClassroomPage(
+        repository: repository,
+        initialDate: DateTime(2026, 9, 1),
+      ),
+    ));
+    await tester.pumpAndSettle();
+
+    expect(find.byType(DropdownButtonFormField<String>), findsNothing);
+    expect(find.byType(DropdownButtonFormField<int>), findsNothing);
+    expect(find.text('9月1日'), findsOneWidget);
+    expect(find.text('星期二'), findsOneWidget);
+    expect(find.text('晴'), findsOneWidget);
+    expect(
+      find.descendant(
+        of: find.byKey(const ValueKey('classroom-building-picker')),
+        matching: find.text('宝山校区 A楼'),
+      ),
+      findsOneWidget,
+    );
+
+    await tester.tap(find.byKey(const ValueKey('classroom-building-picker')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('classroom-single-building-menu')),
+        findsOneWidget);
+    expect(find.byType(Checkbox), findsNothing);
+
+    await tester.tap(find.byKey(const ValueKey('classroom-picker-campus-宝山')));
+    await tester.pumpAndSettle();
+    expect(
+      find.descendant(
+        of: find.byKey(const ValueKey('classroom-building-picker')),
+        matching: find.text('宝山校区 ALL'),
+      ),
+      findsOneWidget,
+    );
+
+    await tester.tap(find.byKey(const ValueKey('classroom-building-picker')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('classroom-picker-building-2')));
+    await tester.pumpAndSettle();
+    expect(
+      find.descendant(
+        of: find.byKey(const ValueKey('classroom-building-picker')),
+        matching: find.text('嘉定校区 D楼'),
+      ),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('omits weather cleanly when classroom weather is unavailable',
+      (tester) async {
+    final repository = _SnapshotRepository(
+      snapshot: _SnapshotRepository.options,
+      weatherResult: null,
+    );
+    await tester.pumpWidget(MaterialApp(
+      home: EmptyClassroomPage(
+        repository: repository,
+        initialDate: DateTime(2026, 9, 1),
+      ),
+    ));
+    await tester.pumpAndSettle();
+
+    expect(find.text('9月1日'), findsOneWidget);
+    expect(find.text('星期二'), findsOneWidget);
+    expect(find.byIcon(Icons.wb_sunny_outlined), findsNothing);
   });
 
   testWidgets('the toolbar refresh button is replaced by a search entry',
@@ -253,6 +331,7 @@ class _SnapshotRepository extends ClassroomRepository {
   _SnapshotRepository({
     ClassroomSearchOptions? snapshot,
     this.pendingLoad,
+    this.weatherResult,
   }) : _snapshot = snapshot;
 
   static const options = ClassroomSearchOptions(
@@ -266,6 +345,7 @@ class _SnapshotRepository extends ClassroomRepository {
 
   final ClassroomSearchOptions? _snapshot;
   final Future<ClassroomSearchOptions>? pendingLoad;
+  final ClassroomWeather? weatherResult;
   int searches = 0;
 
   /// 非空时下一次 `search` 会挂起，用于观察进度条。
@@ -273,6 +353,13 @@ class _SnapshotRepository extends ClassroomRepository {
 
   @override
   ClassroomSearchOptions? get optionsSnapshot => _snapshot;
+
+  @override
+  Future<ClassroomWeather?> loadWeather({
+    bool forceRefresh = false,
+    ClassroomAccessMode? accessMode,
+  }) async =>
+      weatherResult;
 
   @override
   Future<ClassroomSearchOptions> loadOptions({
@@ -300,4 +387,23 @@ class _SnapshotRepository extends ClassroomRepository {
       floors: const [],
     );
   }
+}
+
+class _MultiBuildingSnapshotRepository extends _SnapshotRepository {
+  _MultiBuildingSnapshotRepository({super.weatherResult})
+      : super(snapshot: _multiOptions);
+
+  static const _multiOptions = ClassroomSearchOptions(
+    buildings: [
+      ClassroomBuilding(id: 1, name: 'A楼', campusId: 3, campusName: '宝山'),
+      ClassroomBuilding(id: 325, name: 'AJ楼', campusId: 3, campusName: '宝山'),
+      ClassroomBuilding(id: 2, name: 'D楼', campusId: 574, campusName: '嘉定'),
+    ],
+    sections: [
+      ClassroomSection(index: 1, startTime: '08:00', endTime: '08:45'),
+    ],
+  );
+
+  @override
+  ClassroomSearchOptions? get optionsSnapshot => _multiOptions;
 }

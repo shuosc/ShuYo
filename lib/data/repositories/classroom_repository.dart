@@ -63,6 +63,7 @@ class ClassroomRepository {
 
   ClassroomSearchOptions? _memoryOptions;
   ClassroomSemesterInfo? _semesterInfo;
+  ClassroomWeather? _weather;
   final _scheduleCache = <String, _CachedClassroomSchedule>{};
 
   /// The options already held in memory from an earlier [loadOptions].
@@ -255,6 +256,26 @@ class ClassroomRepository {
         pageSize: pageSize,
         accessMode: accessMode ?? ClassroomUrlResolver.accessMode,
       );
+
+  Future<ClassroomWeather?> loadWeather({
+    bool forceRefresh = false,
+    ClassroomAccessMode? accessMode,
+  }) async {
+    if (!forceRefresh && _weather != null) {
+      return _weather;
+    }
+    try {
+      final weather = await _client.fetchWeather(
+        accessMode: accessMode ?? ClassroomUrlResolver.accessMode,
+      );
+      if (weather != null) {
+        _weather = weather;
+      }
+      return weather;
+    } on Object {
+      return null;
+    }
+  }
 
   /// The section range a course starting at [section] belongs to.
   ClassroomSectionRange? rangeForSection(

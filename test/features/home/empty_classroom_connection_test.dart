@@ -69,7 +69,8 @@ void main() {
     expect(find.textContaining('开启WebVPN'), findsNothing);
     expect(find.text('尝试直连'), findsOneWidget);
     expect(find.text('重试WebVPN'), findsOneWidget);
-    expect(find.byType(DropdownButtonFormField<String>), findsOneWidget);
+    expect(find.byKey(const ValueKey('classroom-building-picker')),
+        findsOneWidget);
     await tester.ensureVisible(_button('尝试直连'));
     expect(tester.getRect(_button('尝试直连')).right,
         lessThan(tester.getRect(_button('重试WebVPN')).left));

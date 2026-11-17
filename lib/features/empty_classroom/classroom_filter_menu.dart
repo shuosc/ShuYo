@@ -418,3 +418,224 @@ class _CampusHeaderDelegate extends SliverPersistentHeaderDelegate {
       expanded != oldDelegate.expanded ||
       value != oldDelegate.value;
 }
+
+typedef ClassroomBuildingSelection = ({
+  String campus,
+  ClassroomBuilding? building,
+});
+
+/// 首页单选校区/教学楼弹窗：复用搜索页筛选浮层的视觉与分组样式，去掉勾选框。
+///
+/// 点选校区标题即为该校区的「全部教学楼」；点选具体教学楼则直接选中并关闭弹窗。
+Future<ClassroomBuildingSelection?> showClassroomSingleBuildingMenu(
+  BuildContext context, {
+  required List<ClassroomBuilding> buildings,
+  String? selectedCampus,
+  ClassroomBuilding? selectedBuilding,
+}) {
+  return _showTopRightMenu<ClassroomBuildingSelection>(
+    context,
+    barrierLabel: '关闭校区与教学楼选择',
+    builder: (_) => _SingleBuildingMenu(
+      buildings: buildings,
+      selectedCampus: selectedCampus,
+      selectedBuilding: selectedBuilding,
+    ),
+  );
+}
+
+class _SingleBuildingMenu extends StatefulWidget {
+  const _SingleBuildingMenu({
+    required this.buildings,
+    required this.selectedCampus,
+    required this.selectedBuilding,
+  });
+
+  final List<ClassroomBuilding> buildings;
+  final String? selectedCampus;
+  final ClassroomBuilding? selectedBuilding;
+
+  @override
+  State<_SingleBuildingMenu> createState() => _SingleBuildingMenuState();
+}
+
+class _SingleBuildingMenuState extends State<_SingleBuildingMenu> {
+  final Set<String> _collapsedCampuses = <String>{};
+  final _scrollController = ScrollController();
+
+  @override
+  void dispose() {
+    _scrollController.dispose();
+    super.dispose();
+  }
+
+  void _toggleExpanded(String campus) {
+    setState(() {
+      if (!_collapsedCampuses.add(campus)) {
+        _collapsedCampuses.remove(campus);
+      }
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = context.shuyoColors;
+    final groups = groupBuildingsByCampus(widget.buildings);
+    return Material(
+      key: const ValueKey('classroom-single-building-menu'),
+      elevation: 12,
+      color: colors.surface,
+      borderRadius: BorderRadius.circular(16),
+      clipBehavior: Clip.antiAlias,
+      child: ConstrainedBox(
+        constraints: BoxConstraints(
+          maxHeight: MediaQuery.sizeOf(context).height * .72,
+        ),
+        child: Scrollbar(
+          controller: _scrollController,
+          thumbVisibility: true,
+          child: CustomScrollView(
+            key: const ValueKey('classroom-single-building-menu-scroll'),
+            controller: _scrollController,
+            shrinkWrap: true,
+            slivers: [
+              const SliverToBoxAdapter(child: SizedBox(height: 8)),
+              for (final group in groups)
+                SliverMainAxisGroup(
+                  slivers: [
+                    SliverPersistentHeader(
+                      pinned: true,
+                      delegate: _SingleCampusHeaderDelegate(
+                        campus: group.campus,
+                        expanded: !_collapsedCampuses.contains(group.campus),
+                        selected: widget.selectedCampus == group.campus &&
+                            widget.selectedBuilding == null,
+                        onSelectCampus: () => Navigator.of(context).pop(
+                          (campus: group.campus, building: null),
+                        ),
+                        onToggleExpanded: () => _toggleExpanded(group.campus),
+                      ),
+                    ),
+                    if (!_collapsedCampuses.contains(group.campus))
+                      SliverList.list(children: [
+                        for (final row
+                            in classroomBuildingRows(group.buildings))
+                          _buildingRow(group.campus, row),
+                      ]),
+                  ],
+                ),
+              const SliverToBoxAdapter(child: SizedBox(height: 8)),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildingRow(String campus, List<ClassroomBuilding> row) {
+    return Row(
+      children: [
+        for (final building in row)
+          Expanded(
+            child: _buildingTile(
+              campus,
+              building,
+              singleLine: row.length > 1,
+            ),
+          ),
+      ],
+    );
+  }
+
+  Widget _buildingTile(
+    String campus,
+    ClassroomBuilding building, {
+    bool singleLine = false,
+  }) {
+    final selected = widget.selectedBuilding?.id == building.id;
+    return ListTile(
+      key: ValueKey('classroom-picker-building-${building.id}'),
+      selected: selected,
+      contentPadding: const EdgeInsets.only(left: 16, right: 12),
+      title: Text(
+        building.name,
+        maxLines: singleLine ? 1 : 2,
+        overflow: TextOverflow.ellipsis,
+      ),
+      trailing: selected ? const Icon(Icons.check, size: 18) : null,
+      onTap: () => Navigator.of(context).pop(
+        (campus: campus, building: building),
+      ),
+    );
+  }
+}
+
+class _SingleCampusHeaderDelegate extends SliverPersistentHeaderDelegate {
+  const _SingleCampusHeaderDelegate({
+    required this.campus,
+    required this.expanded,
+    required this.selected,
+    required this.onSelectCampus,
+    required this.onToggleExpanded,
+  });
+
+  final String campus;
+  final bool expanded;
+  final bool selected;
+  final VoidCallback onSelectCampus;
+  final VoidCallback onToggleExpanded;
+
+  @override
+  double get minExtent => _campusHeaderExtent;
+
+  @override
+  double get maxExtent => _campusHeaderExtent;
+
+  @override
+  Widget build(
+      BuildContext context, double shrinkOffset, bool overlapsContent) {
+    final colors = context.shuyoColors;
+    final primary = Theme.of(context).colorScheme.primary;
+    return Material(
+      key: ValueKey('classroom-picker-sticky-campus-$campus'),
+      color: Theme.of(context).colorScheme.surface,
+      child: ListTile(
+        key: ValueKey('classroom-picker-campus-$campus'),
+        selected: selected,
+        contentPadding: const EdgeInsets.only(left: 16, right: 4),
+        title: Row(
+          children: [
+            Text(
+              '$campus校区',
+              style: const TextStyle(fontWeight: FontWeight.w600),
+            ),
+            const SizedBox(width: 6),
+            Flexible(
+              child: Text(
+                '全部教学楼',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: ShuYoTextStyles.meta(
+                  color: selected ? primary : colors.textTertiary,
+                ),
+              ),
+            ),
+          ],
+        ),
+        trailing: IconButton(
+          key: ValueKey('classroom-picker-toggle-$campus'),
+          tooltip: expanded ? '收起' : '展开',
+          onPressed: onToggleExpanded,
+          icon: Icon(expanded ? Icons.expand_less : Icons.expand_more),
+        ),
+        onTap: onSelectCampus,
+      ),
+    );
+  }
+
+  @override
+  bool shouldRebuild(_SingleCampusHeaderDelegate oldDelegate) =>
+      campus != oldDelegate.campus ||
+      expanded != oldDelegate.expanded ||
+      selected != oldDelegate.selected;
+}

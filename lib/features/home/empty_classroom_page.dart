@@ -12,6 +12,7 @@ import '../../shared/navigation/shuyo_route.dart';
 import '../../shared/shuyo_text_styles.dart';
 import '../../shared/theme/shuyo_theme.dart';
 import '../../shared/widgets/empty_state.dart';
+import '../empty_classroom/classroom_filter_menu.dart';
 import '../empty_classroom/classroom_search_page.dart';
 
 class EmptyClassroomPage extends StatefulWidget {
@@ -43,6 +44,7 @@ class _EmptyClassroomPageState extends State<EmptyClassroomPage> {
   ClassroomSearchOptions? _options;
   ClassroomBuilding? _selectedBuilding;
   ClassroomSectionRange? _selectedRange;
+  ClassroomWeather? _weather;
   String? _selectedCampus;
   late DateTime _selectedDate = widget.initialDate ?? DateTime.now();
   bool _loadingOptions = false;
@@ -61,6 +63,7 @@ class _EmptyClassroomPageState extends State<EmptyClassroomPage> {
   @override
   void initState() {
     super.initState();
+    unawaited(_loadWeather());
     final snapshot = widget.repository.optionsSnapshot;
     if (snapshot == null || snapshot.buildings.isEmpty) {
       _loadFuture = _loadOptions();
@@ -71,6 +74,12 @@ class _EmptyClassroomPageState extends State<EmptyClassroomPage> {
     // return that same instance.
     _applyOptionsSnapshot(snapshot);
     _loadFuture = Future<void>.value();
+  }
+
+  Future<void> _loadWeather() async {
+    final weather = await widget.repository.loadWeather();
+    if (!mounted || weather == null) return;
+    setState(() => _weather = weather);
   }
 
   /// Restores the options and their matching selections and starts the query
@@ -160,9 +169,9 @@ class _EmptyClassroomPageState extends State<EmptyClassroomPage> {
               selectedBuilding: _selectedBuilding,
               selectedRange: _selectedRange,
               selectedDate: _selectedDate,
+              weather: _weather,
               ranges: widget.repository.defaultRanges(options.sections),
-              onCampusChanged: _setCampus,
-              onBuildingChanged: _setBuilding,
+              onPickBuilding: () => unawaited(_pickBuilding(options)),
               onRangeChanged: _setRange,
               onPreviousRange: () => _stepRange(-1),
               onNextRange: () => _stepRange(1),
@@ -445,25 +454,22 @@ class _EmptyClassroomPageState extends State<EmptyClassroomPage> {
     return buildings.isEmpty ? null : buildings.first;
   }
 
-  void _setCampus(String? value) {
-    final options = _options;
-    if (options == null || value == null) {
+  Future<void> _pickBuilding(ClassroomSearchOptions options) async {
+    final picked = await showClassroomSingleBuildingMenu(
+      context,
+      buildings: options.buildings,
+      selectedCampus: _selectedCampus,
+      selectedBuilding: _selectedBuilding,
+    );
+    if (picked == null || !mounted) return;
+    if (picked.campus == _selectedCampus &&
+        picked.building?.id == _selectedBuilding?.id) {
       return;
     }
-    final buildings = options.buildings
-        .where((building) => building.campusName == value)
-        .toList(growable: false);
-    final keepAllBuildings = _selectedBuilding == null;
     setState(() {
-      _selectedCampus = value;
-      _selectedBuilding =
-          keepAllBuildings || buildings.isEmpty ? null : buildings.first;
+      _selectedCampus = picked.campus;
+      _selectedBuilding = picked.building;
     });
-    _search();
-  }
-
-  void _setBuilding(ClassroomBuilding? value) {
-    setState(() => _selectedBuilding = value);
     _search();
   }
 
@@ -717,9 +723,9 @@ class _SearchControls extends StatelessWidget {
     required this.selectedBuilding,
     required this.selectedRange,
     required this.selectedDate,
+    required this.weather,
     required this.ranges,
-    required this.onCampusChanged,
-    required this.onBuildingChanged,
+    required this.onPickBuilding,
     required this.onRangeChanged,
     required this.onPreviousRange,
     required this.onNextRange,
@@ -731,21 +737,26 @@ class _SearchControls extends StatelessWidget {
   final ClassroomBuilding? selectedBuilding;
   final ClassroomSectionRange? selectedRange;
   final DateTime selectedDate;
+  final ClassroomWeather? weather;
   final List<ClassroomSectionRange> ranges;
-  final ValueChanged<String?> onCampusChanged;
-  final ValueChanged<ClassroomBuilding?> onBuildingChanged;
+  final VoidCallback onPickBuilding;
   final ValueChanged<ClassroomSectionRange> onRangeChanged;
   final VoidCallback onPreviousRange;
   final VoidCallback onNextRange;
   final ValueChanged<DateTime> onDateChanged;
 
+  String _buildingPickerLabel() {
+    final campus = selectedCampus ?? '';
+    final campusPrefix = campus.isEmpty ? '' : '$campus校区';
+    final buildingName = selectedBuilding?.name ?? 'ALL';
+    if (campusPrefix.isEmpty) return buildingName;
+    return '$campusPrefix $buildingName';
+  }
+
   @override
   Widget build(BuildContext context) {
     final colors = context.shuyoColors;
-    final campusBuildings = options.buildings
-        .where((building) =>
-            selectedCampus == null || building.campusName == selectedCampus)
-        .toList(growable: false);
+    final weatherInfo = weather?.weather.trim() ?? '';
     return DecoratedBox(
       decoration: BoxDecoration(
         border: Border(bottom: BorderSide(color: colors.border)),
@@ -757,51 +768,88 @@ class _SearchControls extends StatelessWidget {
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 16),
               child: Row(
+                crossAxisAlignment: CrossAxisAlignment.center,
                 children: [
                   Expanded(
-                    child: DropdownButtonFormField<String>(
-                      key: ValueKey('campus-$selectedCampus'),
-                      initialValue: selectedCampus,
-                      decoration: const InputDecoration(
-                        labelText: '校区',
-                        border: OutlineInputBorder(),
-                        isDense: true,
-                      ),
-                      items: [
-                        for (final campus in options.campusNames)
-                          DropdownMenuItem(
-                            value: campus,
-                            child: Text(campus),
+                    child: Row(
+                      children: [
+                        Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Text(
+                              '${selectedDate.month}月${selectedDate.day}日',
+                              style: ShuYoTextStyles.title(
+                                color: colors.textPrimary,
+                                size: 15.5,
+                                weight: FontWeight.w600,
+                              ),
+                            ),
+                            const SizedBox(height: 1),
+                            Text(
+                              _weekdayLabel(selectedDate),
+                              style: ShuYoTextStyles.meta(
+                                color: colors.textTertiary,
+                                size: 12.5,
+                              ),
+                            ),
+                          ],
+                        ),
+                        if (weatherInfo.isNotEmpty) ...[
+                          const SizedBox(width: 12),
+                          Flexible(
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Icon(
+                                  _weatherIcon(weatherInfo),
+                                  size: 16,
+                                  color: colors.textSecondary,
+                                ),
+                                const SizedBox(width: 4),
+                                Flexible(
+                                  child: Text(
+                                    weatherInfo,
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: ShuYoTextStyles.meta(
+                                      color: colors.textSecondary,
+                                      size: 13,
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ),
                           ),
+                        ],
                       ],
-                      onChanged: onCampusChanged,
                     ),
                   ),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: DropdownButtonFormField<int>(
-                      key: ValueKey(
-                        'building-$selectedCampus-${selectedBuilding?.id ?? 0}',
-                      ),
-                      initialValue: selectedBuilding?.id ?? 0,
-                      decoration: const InputDecoration(
-                        labelText: '教学楼',
-                        border: OutlineInputBorder(),
-                        isDense: true,
-                      ),
-                      items: [
-                        const DropdownMenuItem(
-                          value: 0,
-                          child: Text('全部教学楼'),
+                  const SizedBox(width: 12),
+                  Flexible(
+                    child: OutlinedButton(
+                      key: const ValueKey('classroom-building-picker'),
+                      onPressed:
+                          options.buildings.isEmpty ? null : onPickBuilding,
+                      style: OutlinedButton.styleFrom(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 12,
+                          vertical: 10,
                         ),
-                        for (final building in campusBuildings)
-                          DropdownMenuItem(
-                            value: building.id,
-                            child: Text(building.name),
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Flexible(
+                            child: Text(
+                              _buildingPickerLabel(),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
                           ),
-                      ],
-                      onChanged: (id) => onBuildingChanged(
-                        id == 0 ? null : _buildingById(campusBuildings, id),
+                          const SizedBox(width: 4),
+                          const Icon(Icons.keyboard_arrow_down, size: 18),
+                        ],
                       ),
                     ),
                   ),
@@ -1387,14 +1435,26 @@ bool _isSameDay(DateTime a, DateTime b) {
   return a.year == b.year && a.month == b.month && a.day == b.day;
 }
 
-ClassroomBuilding? _buildingById(
-  List<ClassroomBuilding> buildings,
-  int? id,
-) {
-  for (final building in buildings) {
-    if (building.id == id) {
-      return building;
-    }
+String _weekdayLabel(DateTime date) {
+  const names = <String>[
+    '星期一',
+    '星期二',
+    '星期三',
+    '星期四',
+    '星期五',
+    '星期六',
+    '星期日',
+  ];
+  return names[date.weekday - 1];
+}
+
+IconData _weatherIcon(String weather) {
+  if (weather.contains('雪')) return Icons.ac_unit_outlined;
+  if (weather.contains('雷')) return Icons.thunderstorm_outlined;
+  if (weather.contains('雨')) return Icons.grain_outlined;
+  if (weather.contains('雾') || weather.contains('霾')) return Icons.blur_on;
+  if (weather.contains('阴') || weather.contains('云')) {
+    return Icons.cloud_outlined;
   }
-  return null;
+  return Icons.wb_sunny_outlined;
 }
