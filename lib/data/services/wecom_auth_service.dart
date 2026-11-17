@@ -341,9 +341,12 @@ class WeComAuthService {
 
   /// 阶段二：用已建立的 SSO 会话向 [target] 换取业务系统授权码回调地址。
   ///
-  /// 先按目标系统的策略准备 `state`，再请求 `/oauth/authorize`，
-  /// 返回其 302 的 Location。
-  Future<Uri> authorizeTarget(WeComOAuthTarget target) async {
+  /// 业务系统提供的 [state] 原样传递并校验；未提供时按目标策略准备。
+  /// 请求 `/oauth/authorize` 并返回其 302 的 Location。
+  Future<Uri> authorizeTarget(
+    WeComOAuthTarget target, {
+    String? state,
+  }) async {
     if (target.kind == WeComOAuthTargetKind.webVpn) {
       throw const WeComAuthException(
         'webVpnRequiresFinish',
@@ -351,8 +354,8 @@ class WeComAuthService {
       );
     }
     _debug('authorizeTarget begin client=${target.clientName}');
-    final state = await _prepareState(target);
-    _debug('authorizeTarget stateLength=${state.length}');
+    final expectedState = state ?? await _prepareState(target);
+    _debug('authorizeTarget stateLength=${expectedState.length}');
     final uri = Uri.parse(WeComConstants.ssoBase).replace(
       path: WeComConstants.authorizePath,
       queryParameters: {
@@ -360,7 +363,7 @@ class WeComAuthService {
         'client_id': target.clientId,
         'redirect_uri': target.redirectUri,
         if (target.scope.isNotEmpty) 'scope': target.scope,
-        if (state.isNotEmpty) 'state': state,
+        if (expectedState.isNotEmpty) 'state': expectedState,
       },
     );
     final response = await _get(uri, host: _RequestHost.sso);
@@ -383,7 +386,9 @@ class WeComAuthService {
     final callbackUri = uri.resolve(location);
     _validateRedirect(callbackUri, target.redirectUri);
     final returnedState = callbackUri.queryParameters['state'];
-    if (returnedState != null && returnedState != state) {
+    if ((state != null || returnedState != null) &&
+        (returnedState != expectedState ||
+            callbackUri.queryParametersAll['state']?.length != 1)) {
       throw const WeComAuthException(
         'authorizationStateMismatch',
         '统一认证授权状态校验失败',

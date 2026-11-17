@@ -155,6 +155,100 @@ void main() {
     });
   });
 
+  group('OAuth authorization state', () {
+    const serverState = 'SERVER_STATE+/_=';
+    late HttpServer server;
+    late WeComAuthService service;
+    Uri? requestedUri;
+    var echoState = true;
+    var duplicateState = false;
+    String? responseState;
+
+    setUp(() async {
+      requestedUri = null;
+      echoState = true;
+      duplicateState = false;
+      responseState = null;
+      server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      server.listen((request) async {
+        requestedUri = request.uri;
+        final state =
+            echoState ? request.uri.queryParameters['state'] : responseState;
+        final callback = Uri.parse(request.uri.queryParameters['redirect_uri']!)
+            .replace(queryParameters: {
+          'code': 'TEST_CODE',
+          if (state != null) 'state': state,
+        });
+        request.response.statusCode = 302;
+        request.response.headers.set(
+          HttpHeaders.locationHeader,
+          duplicateState
+              ? '$callback&state=${Uri.encodeQueryComponent(state!)}'
+              : callback.toString(),
+        );
+        await request.response.close();
+      });
+      service = WeComAuthService(
+        httpClient:
+            _LoopbackHttpClient(Uri.parse('http://127.0.0.1:${server.port}')),
+      );
+    });
+
+    tearDown(() async {
+      service.dispose();
+      await server.close(force: true);
+    });
+
+    test('forwards and validates the exact booking bootstrap state', () async {
+      final callback = await service.authorizeTarget(
+        WeComOAuthTarget.there,
+        state: serverState,
+      );
+      expect(requestedUri?.path, '/oauth/authorize');
+      expect(requestedUri?.queryParameters['state'], serverState);
+      expect(requestedUri?.queryParameters['client_id'],
+          WeComOAuthTarget.there.clientId);
+      expect(callback.queryParameters['state'], serverState);
+    });
+
+    for (final entry in <String, String?>{
+      'missing': null,
+      'mismatched': 'OTHER_STATE',
+    }.entries) {
+      test('rejects a ${entry.key} callback state', () async {
+        echoState = false;
+        responseState = entry.value;
+        await expectLater(
+          service.authorizeTarget(WeComOAuthTarget.there, state: serverState),
+          throwsA(isA<WeComAuthException>().having(
+            (error) => error.code,
+            'code',
+            'authorizationStateMismatch',
+          )),
+        );
+      });
+    }
+
+    test('rejects duplicate callback state parameters', () async {
+      duplicateState = true;
+      await expectLater(
+        service.authorizeTarget(WeComOAuthTarget.there, state: serverState),
+        throwsA(isA<WeComAuthException>().having(
+          (error) => error.code,
+          'code',
+          'authorizationStateMismatch',
+        )),
+      );
+    });
+
+    test('keeps the academic target local state generation', () async {
+      final callback = await service.authorizeTarget(WeComOAuthTarget.academic);
+      final state = requestedUri?.queryParameters['state'];
+      expect(state, matches(RegExp(r'^[0-9a-f]{32}$')));
+      expect(callback.queryParameters['state'], state);
+    });
+  });
+
   group('WeComOAuthTarget', () {
     test('academic target encodes the jwxt client', () {
       final decoded = jsonDecode(
@@ -210,6 +304,27 @@ class _PendingHttpClient implements HttpClient {
 
   @override
   void close({bool force = false}) {}
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+/// Routes the real authorization request to a local HTTP server in tests.
+class _LoopbackHttpClient implements HttpClient {
+  _LoopbackHttpClient(this.baseUri);
+
+  final Uri baseUri;
+  final HttpClient _client = HttpClient();
+
+  @override
+  set connectionTimeout(Duration? value) => _client.connectionTimeout = value;
+
+  @override
+  Future<HttpClientRequest> getUrl(Uri url) =>
+      _client.getUrl(baseUri.replace(path: url.path, query: url.query));
+
+  @override
+  void close({bool force = false}) => _client.close(force: force);
 
   @override
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);

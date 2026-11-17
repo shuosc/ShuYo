@@ -83,6 +83,7 @@ class ThereBookingClient {
   AcademicSessionCookieStore _cookies = AcademicSessionCookieStore();
   bool _browserCookiesLoaded = false;
   String? _portalWebVpnToken;
+  String? _oauthState;
   bool _oauthCompleted = false;
   BookingVenue? _venue;
   String? _sessionId;
@@ -98,6 +99,7 @@ class ThereBookingClient {
     _cookies = AcademicSessionCookieStore();
     _browserCookiesLoaded = false;
     _portalWebVpnToken = null;
+    _oauthState = null;
     _oauthCompleted = false;
     _sessionId = null;
     _venue = null;
@@ -376,15 +378,22 @@ class ThereBookingClient {
         'PUT', '/api/v3/bookings/${Uri.encodeComponent(bookingId)}/finish');
   }
 
-  /// Begins the service-specific exchange without changing the SSO cookie.
-  Future<void> prepareOAuth() async {
+  /// Returns the server's state paired with the initialized booking cookie.
+  Future<String> prepareOAuth() async {
+    _oauthState = null;
     final response = await _request('GET', '/login', query: {'from': 'web'});
-    if (response.status < 300 || response.status >= 400) {
+    final states = response.location?.queryParametersAll['state'];
+    if (response.status < 300 ||
+        response.status >= 400 ||
+        states == null ||
+        states.length != 1 ||
+        states.single.isEmpty) {
       throw const ThereBookingException(
         ThereFailureKind.uncertain,
         '图书馆预约暂时无法启动登录，请稍后重试',
       );
     }
+    return _oauthState = states.single;
   }
 
   Future<void> completeOAuth(
@@ -398,6 +407,16 @@ class ThereBookingClient {
       throw const ThereBookingException(
         ThereFailureKind.uncertain,
         '图书馆预约授权回调无效',
+      );
+    }
+    final states = callback.queryParametersAll['state'];
+    if (_oauthState == null ||
+        states == null ||
+        states.length != 1 ||
+        states.single != _oauthState) {
+      throw const ThereBookingException(
+        ThereFailureKind.uncertain,
+        '图书馆预约授权状态校验失败，请重新登录',
       );
     }
     await _loadBrowserCookies();
@@ -447,6 +466,7 @@ class ThereBookingClient {
         '图书馆预约登录跳转次数过多，请稍后重试',
       );
     }
+    _oauthState = null;
     _oauthCompleted = true;
     await selectVenue(BookingVenue.library);
   }

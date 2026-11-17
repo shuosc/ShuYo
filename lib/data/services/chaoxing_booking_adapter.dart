@@ -591,7 +591,7 @@ class ChaoxingBookingAdapter extends ThereBookingClient {
       });
 
   @override
-  Future<void> prepareOAuth() async {
+  Future<String> prepareOAuth() async {
     throw const ThereBookingException(
         ThereFailureKind.loginRequired, '请先登录校园账户，再返回图书馆预约');
   }

@@ -1436,8 +1436,9 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
         await client.profile();
       } on ThereBookingException catch (error) {
         if (error.kind != ThereFailureKind.loginRequired) rethrow;
-        await client.prepareOAuth();
-        final callback = await _unifiedAccountService.authorizeThere();
+        final state = await client.prepareOAuth();
+        final callback =
+            await _unifiedAccountService.authorizeThere(state: state);
         if (callback == null) {
           await _unifiedAccountService.setTherePendingRecovery(true);
           return;

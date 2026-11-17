@@ -172,13 +172,13 @@ class UnifiedAccountService {
     }
   }
 
-  Future<Uri?> authorizeThere() async {
+  Future<Uri?> authorizeThere({required String state}) async {
     final cookies = await _ssoSessionStore.sessionCookies();
     if (cookies.isEmpty) return null;
     final auth = _weComAuthServiceFactory();
     try {
       auth.adoptSessionCookies(cookies);
-      return await auth.authorizeTarget(WeComOAuthTarget.there);
+      return await auth.authorizeTarget(WeComOAuthTarget.there, state: state);
     } on WeComAuthException catch (error) {
       if (error.code == 'sessionNotReused') return null;
       rethrow;

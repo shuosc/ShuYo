@@ -13,6 +13,7 @@ void main() {
   late ThereBookingClient client;
   final seen = <String>[];
   final requestCookies = <String, String?>{};
+  final requestQueries = <String, Map<String, String>>{};
   final mobileModes = <String>[];
   final detailAbilities = <String, List<String>>{};
   Map<String, dynamic>? createdBody;
@@ -23,10 +24,21 @@ void main() {
   var weChatRedirectForAll = false;
   var weChatRedirectHost = 'open.weixin.qq.com';
   var redirectToWebVpnPortal = false;
+  String? bootstrapState = 'SERVER_STATE+/_=';
+
+  Uri callbackUri(String? state, {String code = 'ONCE', bool proxy = false}) =>
+      Uri.parse(proxy
+              ? 'https://there.shu.edu.cn/login-oauth2'
+              : 'http://127.0.0.1:${server.port}/login-oauth2')
+          .replace(queryParameters: {
+        'code': code,
+        if (state != null) 'state': state,
+      });
 
   setUp(() async {
     seen.clear();
     requestCookies.clear();
+    requestQueries.clear();
     mobileModes.clear();
     detailAbilities.clear();
     createdBody = null;
@@ -37,6 +49,7 @@ void main() {
     weChatRedirectForAll = false;
     weChatRedirectHost = 'open.weixin.qq.com';
     redirectToWebVpnPortal = false;
+    bootstrapState = 'SERVER_STATE+/_=';
     server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
     requests = server.listen((request) async {
       final path = request.uri.path;
@@ -45,15 +58,29 @@ void main() {
           '${request.headers.value('x-room-type') ?? '-'} '
           '${request.headers.value('x-hys-session') ?? '-'}');
       requestCookies[path] = request.headers.value(HttpHeaders.cookieHeader);
+      requestQueries[path] = request.uri.queryParameters;
       Object response;
       if (path == '/login') {
         request.response.statusCode = 302;
-        request.response.headers
-            .set(HttpHeaders.locationHeader, '/oauth2/login/context');
+        request.response.headers.set(
+          HttpHeaders.locationHeader,
+          Uri.parse('https://oauth.shu.edu.cn/oauth/authorize')
+              .replace(queryParameters: {
+            if (bootstrapState != null) 'state': bootstrapState!,
+          }).toString(),
+        );
         request.response.headers
             .add(HttpHeaders.setCookieHeader, 'SPHYS_SESSION=prewarm; Path=/');
         response = '';
       } else if (path == '/login-oauth2') {
+        if (request.uri.queryParameters['state'] != bootstrapState ||
+            request.uri.queryParametersAll['state']?.length != 1 ||
+            requestCookies[path]?.contains('SPHYS_SESSION=prewarm') != true) {
+          request.response.statusCode = 400;
+          request.response.write('登录校验失败，请重新发起授权');
+          await request.response.close();
+          return;
+        }
         request.response.statusCode = 302;
         request.response.headers
             .set(HttpHeaders.locationHeader, '/web?authJump=token');
@@ -306,9 +333,10 @@ void main() {
   });
 
   test('there bootstrap cookie is carried through OAuth callback', () async {
-    await client.prepareOAuth();
-    await client.completeOAuth(
-        Uri.parse('http://127.0.0.1:${server.port}/login-oauth2?code=ONCE'));
+    final state = await client.prepareOAuth();
+    expect(state, bootstrapState);
+    await client.completeOAuth(callbackUri(state));
+    expect(requestQueries['/login-oauth2']?['state'], state);
     expect(requestCookies['/login-oauth2'], contains('SPHYS_SESSION=prewarm'));
     expect(requestCookies['/web'], contains('SPHYS_SESSION=authenticated'));
     expect(
@@ -316,6 +344,89 @@ void main() {
       isEmpty,
     );
     expect(await client.profile(), containsPair('id', 'USER_1'));
+  });
+
+  for (final entry in <String, String?>{'missing': null, 'empty': ''}.entries) {
+    test('OAuth bootstrap rejects a ${entry.key} state and forgets old state',
+        () async {
+      final previousState = await client.prepareOAuth();
+      bootstrapState = entry.value;
+      await expectLater(
+        client.prepareOAuth(),
+        throwsA(isA<ThereBookingException>()),
+      );
+      await expectLater(
+        client.completeOAuth(callbackUri(previousState)),
+        throwsA(isA<ThereBookingException>()),
+      );
+      expect(requestQueries.containsKey('/login-oauth2'), isFalse);
+    });
+  }
+
+  for (final entry in <String, String?>{
+    'missing': null,
+    'mismatched': 'OTHER_STATE',
+  }.entries) {
+    test('OAuth callback rejects a ${entry.key} state before requesting there',
+        () async {
+      await client.prepareOAuth();
+      await expectLater(
+        client.completeOAuth(callbackUri(entry.value)),
+        throwsA(isA<ThereBookingException>().having(
+          (error) => error.message,
+          'message',
+          contains('授权状态校验失败'),
+        )),
+      );
+      expect(requestQueries.containsKey('/login-oauth2'), isFalse);
+    });
+  }
+
+  test('OAuth callback rejects duplicate state parameters', () async {
+    final state = await client.prepareOAuth();
+    final callback = Uri.parse(
+        '${callbackUri(state)}&state=${Uri.encodeQueryComponent(state)}');
+    await expectLater(
+      client.completeOAuth(callback),
+      throwsA(isA<ThereBookingException>()),
+    );
+    expect(requestQueries.containsKey('/login-oauth2'), isFalse);
+  });
+
+  test('a new OAuth bootstrap replaces the previous expected state', () async {
+    final previousState = await client.prepareOAuth();
+    bootstrapState = 'NEXT_SERVER_STATE';
+    final state = await client.prepareOAuth();
+    await expectLater(
+      client.completeOAuth(callbackUri(previousState)),
+      throwsA(isA<ThereBookingException>()),
+    );
+    expect(requestQueries.containsKey('/login-oauth2'), isFalse);
+    await client.completeOAuth(callbackUri(state));
+    expect(requestQueries['/login-oauth2']?['state'], state);
+  });
+
+  test('resetting the session invalidates pending OAuth state', () async {
+    final state = await client.prepareOAuth();
+    client.resetSession();
+    await expectLater(
+      client.completeOAuth(callbackUri(state)),
+      throwsA(isA<ThereBookingException>()),
+    );
+    expect(requestQueries.containsKey('/login-oauth2'), isFalse);
+  });
+
+  test('a completed OAuth state cannot be reused', () async {
+    final state = await client.prepareOAuth();
+    await client.completeOAuth(callbackUri(state));
+    final callbacks =
+        seen.where((entry) => entry.startsWith('GET /login-oauth2')).length;
+    await expectLater(
+      client.completeOAuth(callbackUri(state)),
+      throwsA(isA<ThereBookingException>()),
+    );
+    expect(seen.where((entry) => entry.startsWith('GET /login-oauth2')).length,
+        callbacks);
   });
 
   test('HTTP there landing is upgraded to HTTPS without changing its token',
@@ -364,9 +475,10 @@ void main() {
     expect(requestCookies['/mobile/libseat'],
         contains('webvpn-token=GATEWAY_TOKEN'));
     expect(requestCookies['/mobile/libseat'], isNot(contains('SPHYS_SESSION')));
-    await proxyClient.prepareOAuth();
-    await proxyClient.completeOAuth(
-        Uri.parse('https://there.shu.edu.cn/login-oauth2?code=ONCE'));
+    final state = await proxyClient.prepareOAuth();
+    await proxyClient.completeOAuth(callbackUri(state, proxy: true));
+    expect(requestQueries['/login-oauth2']?['state'], state);
+    expect(requestCookies['/login-oauth2'], contains('SPHYS_SESSION=prewarm'));
     expect(await proxyClient.profile(), containsPair('id', 'USER_1'));
   });
 
@@ -409,7 +521,7 @@ void main() {
     );
   });
 
-  test('there callback diagnostics redact the code and landing token',
+  test('there callback diagnostics redact the code, state and landing token',
       () async {
     final logs = <String>[];
     final previous = debugPrint;
@@ -417,12 +529,13 @@ void main() {
       if (message != null) logs.add(message);
     };
     addTearDown(() => debugPrint = previous);
-    await client.prepareOAuth();
-    await client.completeOAuth(Uri.parse(
-        'http://127.0.0.1:${server.port}/login-oauth2?code=SECRET_CODE'));
+    bootstrapState = 'SECRET_STATE';
+    final state = await client.prepareOAuth();
+    await client.completeOAuth(callbackUri(state, code: 'SECRET_CODE'));
     final log = logs.join('\n');
     expect(log, contains('path=/login-oauth2 status=302'));
     expect(log, isNot(contains('SECRET_CODE')));
+    expect(log, isNot(contains('SECRET_STATE')));
     expect(log, isNot(contains('authJump=token')));
   });
 
@@ -518,10 +631,9 @@ void main() {
       throwsA(isA<ThereBookingException>().having(
           (error) => error.kind, 'kind', ThereFailureKind.loginRequired)),
     );
-    await client.prepareOAuth();
+    final state = await client.prepareOAuth();
     await expectLater(
-      client.completeOAuth(
-          Uri.parse('http://127.0.0.1:${server.port}/login-oauth2?code=ONCE')),
+      client.completeOAuth(callbackUri(state)),
       throwsA(isA<ThereBookingException>()
           .having((error) => error.kind, 'kind', ThereFailureKind.uncertain)
           .having((error) => error.message, 'message', contains('微信授权'))),

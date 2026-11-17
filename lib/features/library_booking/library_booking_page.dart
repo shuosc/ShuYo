@@ -3016,17 +3016,18 @@ class _LibraryBookingPageState extends State<LibraryBookingPage> {
       return _authenticateNow(
           venue: activeVenue, client: activeClient, interactive: false);
     }
+    String state;
     try {
-      await activeClient.prepareOAuth();
+      state = await activeClient.prepareOAuth();
     } on ThereBookingException catch (error) {
       if (error.kind != ThereFailureKind.webVpnLoginRequired ||
           !await _restoreWebVpn(interactive)) {
         rethrow;
       }
       activeClient.resetSession();
-      await activeClient.prepareOAuth();
+      state = await activeClient.prepareOAuth();
     }
-    final callback = await widget.accountService.authorizeThere();
+    final callback = await widget.accountService.authorizeThere(state: state);
     if (callback != null) {
       await activeClient.completeOAuth(callback);
       return true;

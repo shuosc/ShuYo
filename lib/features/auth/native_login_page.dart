@@ -744,14 +744,6 @@ class _NativeLoginPageState extends State<NativeLoginPage> {
       _weComBusy = true;
     });
     try {
-      if (widget.destination == NativeLoginDestination.there) {
-        final client = ThereBookingClient();
-        try {
-          await client.prepareOAuth();
-        } finally {
-          client.dispose();
-        }
-      }
       final session = await (widget.startWeComSession?.call() ??
           _weComAuthService.startQrSession());
       if (!mounted) return;
@@ -949,19 +941,16 @@ class _NativeLoginPageState extends State<NativeLoginPage> {
       await _authService.publishSessionCookies();
       final client = ThereBookingClient();
       try {
-        final target = callbackUri.host == client.baseUri.host &&
-                callbackUri.path == '/login-oauth2' &&
-                callbackUri.queryParameters['code']?.isNotEmpty == true
-            ? callbackUri
-            : await UnifiedAccountService().authorizeThere();
+        // Start a fresh booking exchange after publishing SSO cookies so its
+        // state and bootstrap cookie belong to the same attempt.
+        final state = await client.prepareOAuth();
+        final target =
+            await UnifiedAccountService().authorizeThere(state: state);
         if (target == null) {
           _showError('统一认证未能授权图书馆预约，请重新登录');
           return;
         }
-        await client.completeOAuth(
-          target,
-          cookies: _authService.sessionCookies,
-        );
+        await client.completeOAuth(target);
         final profile = await client.profile();
         final expected = await AcademicAccountStore().loadStudentId();
         if (expected != null &&

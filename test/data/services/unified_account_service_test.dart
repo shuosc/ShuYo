@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:shuyo/core/wecom_constants.dart';
 import 'package:shuyo/data/services/academic_auth_service.dart';
 import 'package:shuyo/data/services/shu_sso_session_store.dart';
 import 'package:shuyo/data/services/unified_account_service.dart';
@@ -44,8 +45,44 @@ class _RejectedWebVpn extends WeComAuthService {
       throw const WeComAuthException('webVpnFinishFailed', 'WebVPN 拒绝兑换');
 }
 
+class _ThereAuthorization extends WeComAuthService {
+  WeComOAuthTarget? authorizedTarget;
+  String? authorizedState;
+
+  @override
+  Future<Uri> authorizeTarget(WeComOAuthTarget target, {String? state}) async {
+    authorizedTarget = target;
+    authorizedState = state;
+    return Uri.parse(target.redirectUri).replace(queryParameters: {
+      'code': 'TEST_CODE',
+      if (state != null) 'state': state,
+    });
+  }
+}
+
 void main() {
   setUp(() => SharedPreferences.setMockInitialValues({}));
+
+  test('booking authorization forwards the server-provided state', () async {
+    final auth = _ThereAuthorization();
+    final account = UnifiedAccountService(
+      ssoSessionStore: _SessionStore(true),
+      weComAuthServiceFactory: () => auth,
+    );
+    const state = 'SERVER_STATE+/_=';
+    final callback = await account.authorizeThere(state: state);
+    expect(auth.authorizedTarget, WeComOAuthTarget.there);
+    expect(auth.authorizedState, state);
+    expect(callback?.queryParameters['state'], state);
+  });
+
+  test('booking authorization without SSO still requests login', () async {
+    final account = UnifiedAccountService(
+      ssoSessionStore: _SessionStore(false),
+      weComAuthServiceFactory: () => throw StateError('SSO is unavailable'),
+    );
+    expect(await account.authorizeThere(state: 'SERVER_STATE'), isNull);
+  });
 
   test('a valid business session needs no SSO authorization', () async {
     final sso = _SessionStore(false);
