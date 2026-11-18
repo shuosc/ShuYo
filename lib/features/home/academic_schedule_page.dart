@@ -6,6 +6,7 @@ import 'dart:math';
 import 'package:flutter/foundation.dart';
 import 'package:material_ui/material_ui.dart';
 
+import '../../core/confirmation_window.dart';
 import '../../data/models/academic_schedule.dart';
 import '../../data/models/academic_schedule_collection.dart';
 import '../../data/repositories/academic_schedule_repository.dart';
@@ -32,6 +33,7 @@ const _scheduleCourseRadius = 5.0;
 const _nonCurrentWeekCourseFill = Color(0xFFBDBDBD);
 const _nonCurrentWeekCourseText = Color(0xFFFFFFFF);
 const _nonCurrentWeekCourseMetaText = Color(0xD9FFFFFF);
+const _randomizeConfirmWindow = Duration(minutes: 5);
 
 class AcademicSchedulePage extends StatefulWidget {
   const AcademicSchedulePage({
@@ -85,6 +87,10 @@ class _AcademicSchedulePageState extends State<AcademicSchedulePage> {
       const AcademicScheduleDisplaySettings(
           colorful: true, showTeacher: true, showCredit: false);
   Map<String, int> _courseColorValues = const {};
+
+  /// When the user last confirmed a color reassignment, used to keep the
+  /// dialog away while colors are re-rolled.
+  DateTime? _colorsConfirmedAt;
   late bool _usingInitialState;
   String? _initialLoadError;
   String? _viewedTermKey;
@@ -621,30 +627,72 @@ class _AcademicSchedulePageState extends State<AcademicSchedulePage> {
     if (confirmed == true && mounted) await _refreshSchedule();
   }
 
+  /// Confirms before overwriting the colors of the term on screen.
+  Future<bool> _confirmRandomizeColors(List<String> keys) async {
+    final overwritesManual = keys.any(_courseColorValues.containsKey);
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: const Text('确认随机颜色'),
+          content: Text(
+            '点击确定后将为当前课表所有课程随机分配颜色。'
+            '${overwritesManual ? '已手动设置的颜色会被覆盖。' : ''}'
+            '${_displaySettings.colorful ? '' : '将同时打开多彩显示。'}',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(false),
+              child: const Text('取消'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.of(context).pop(true),
+              child: const Text('确定'),
+            ),
+          ],
+        );
+      },
+    );
+    return confirmed ?? false;
+  }
+
   Future<void> _randomizeColors() async {
     final schedule = _schedule;
     if (schedule == null || schedule.sessions.isEmpty) {
       _showSnack('暂无课程');
       return;
     }
-    final palette = context.shuyoColors.schedulePalette;
-    final random = Random();
     final keys = schedule.sessions
         .map(_courseColorSeed)
         .where((key) => key.isNotEmpty)
         .toSet()
         .toList()
       ..sort();
-    final next = <String, int>{};
+    final now = DateTime.now();
+    if (!isConfirmationFresh(
+          confirmedAt: _colorsConfirmedAt,
+          now: now,
+          window: _randomizeConfirmWindow,
+        ) &&
+        !await _confirmRandomizeColors(keys)) {
+      return;
+    }
+    if (!mounted) {
+      return;
+    }
+    final palette = context.shuyoColors.schedulePalette;
+    final random = Random();
+    // Colors assigned to courses outside the current term are kept as they are.
+    final next = <String, int>{..._courseColorValues};
     for (final key in keys) {
-      final current =
-          _courseColorValues[key] ?? _courseColor(context, key).toARGB32();
+      final current = next[key] ?? _courseColor(context, key).toARGB32();
       final choices =
           palette.where((color) => color.toARGB32() != current).toList();
       final available = choices.isNotEmpty ? choices : palette;
       next[key] = available[random.nextInt(available.length)].toARGB32();
     }
     await _displaySettingsService.saveCourseColors(next);
+    _colorsConfirmedAt = now;
     AcademicScheduleDisplaySettings settings = _displaySettings;
     if (!settings.colorful) {
       settings = await _displaySettingsService.saveSettings(
