@@ -666,9 +666,15 @@ class _NativeLoginPageState extends State<NativeLoginPage> {
       return;
     }
     // 演示模式完全离线，在发起网络请求之前处理。
-    if (widget.destination == NativeLoginDestination.academic &&
-        DemoSession.matchesCredentials(_studentId.text, _password.text)) {
-      _closeWith(NativeLoginResult.demo);
+    if (DemoSession.isDemoUsername(_studentId.text)) {
+      if (widget.destination != NativeLoginDestination.academic) {
+        _showError('请从上大校园账户登录页进入演示模式');
+      } else if (DemoSession.matchesCredentials(
+          _studentId.text, _password.text)) {
+        _closeWith(NativeLoginResult.demo);
+      } else {
+        _showError('演示账号密码不正确');
+      }
       return;
     }
     if (!mounted) return;

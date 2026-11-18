@@ -804,17 +804,7 @@ class _StartupOnboardingState extends State<StartupOnboarding>
           _feature(Icons.map_outlined, '校园服务', '探索更多校园生活功能'),
           _feature(Icons.notifications_none, '重要提醒', '不错过课程和校园公告'),
         ],
-        pageFooter: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            if (widget.onDemoLogin != null && !_accountManagerMode)
-              TextButton(
-                onPressed: _enteringDemo ? null : _enterDemoMode,
-                child: const Text('体验演示模式'),
-              ),
-            _terms(context),
-          ],
-        ),
+        pageFooter: _terms(context),
       );
 
   Widget _notifications(BuildContext context) => _content(

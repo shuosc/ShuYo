@@ -4,6 +4,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:material_ui/material_ui.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:shuyo/core/wecom_constants.dart';
+import 'package:shuyo/data/demo/demo_session.dart';
 import 'package:shuyo/data/services/academic_native_auth_service.dart';
 import 'package:shuyo/data/services/student_identity_service.dart';
 import 'package:shuyo/data/services/wecom_auth_service.dart';
@@ -51,6 +52,36 @@ void main() {
     );
     await tester.pumpAndSettle();
     expect(find.text('使用企业微信登录'), findsOneWidget);
+  });
+
+  testWidgets('campus login handles the reserved demo account locally',
+      (tester) async {
+    NativeLoginResult? result;
+    await tester.pumpWidget(MaterialApp(
+      home: Builder(builder: (context) {
+        return TextButton(
+          onPressed: () async {
+            result = await Navigator.of(context).push<NativeLoginResult>(
+              MaterialPageRoute(builder: (_) => const NativeLoginPage()),
+            );
+          },
+          child: const Text('上大校园账户'),
+        );
+      }),
+    ));
+    await tester.tap(find.text('上大校园账户'));
+    await tester.pumpAndSettle();
+    final fields = find.byType(TextFormField);
+    final submit = find.widgetWithText(FilledButton, '继续');
+    await tester.enterText(fields.first, DemoSession.username);
+    await tester.enterText(fields.last, 'wrong');
+    await tester.tap(submit);
+    await tester.pumpAndSettle();
+    expect(find.text('演示账号密码不正确'), findsOneWidget);
+    await tester.enterText(fields.last, DemoSession.password);
+    await tester.tap(submit);
+    await tester.pumpAndSettle();
+    expect(result, NativeLoginResult.demo);
   });
 
   testWidgets('WebVPN login shows the WeCom login entry button',

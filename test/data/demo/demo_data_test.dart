@@ -42,7 +42,10 @@ void main() {
   });
 
   test('demo session credentials are exact', () {
-    expect(DemoSession.matchesCredentials('admin2512', 'abc123456'), isTrue);
-    expect(DemoSession.matchesCredentials('admin2512', 'wrong'), isFalse);
+    expect(DemoSession.matchesCredentials('shuyo.demo', 'CampusPreview26'),
+        isTrue);
+    expect(DemoSession.matchesCredentials('ShuYo.Demo ', 'wrong'), isFalse);
+    expect(DemoSession.isDemoUsername('ShuYo.Demo '), isTrue);
+    expect(DemoSession.isDemoUsername('admin2512'), isFalse);
   });
 }
