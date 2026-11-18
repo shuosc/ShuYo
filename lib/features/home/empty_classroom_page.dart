@@ -17,6 +17,7 @@ class EmptyClassroomPage extends StatefulWidget {
     super.key,
     required this.repository,
     this.initialDate,
+    this.fixedDate = false,
     this.initialCampus = ClassroomCampus.defaultName,
     this.onWebVpnExpired,
     this.onWebVpnRecoveryRequired,
@@ -25,6 +26,7 @@ class EmptyClassroomPage extends StatefulWidget {
 
   final ClassroomRepository repository;
   final DateTime? initialDate;
+  final bool fixedDate;
   final String initialCampus;
   final Future<void> Function()? onWebVpnExpired;
   final Future<WebVpnRecoveryOutcome> Function(bool interactive)?
@@ -148,6 +150,7 @@ class _EmptyClassroomPageState extends State<EmptyClassroomPage> {
               selectedBuilding: _selectedBuilding,
               selectedRange: _selectedRange,
               selectedDate: _selectedDate,
+              fixedDate: widget.fixedDate,
               ranges: widget.repository.defaultRanges(options.sections),
               onCampusChanged: _setCampus,
               onBuildingChanged: _setBuilding,
@@ -736,6 +739,7 @@ class _SearchControls extends StatelessWidget {
     required this.selectedBuilding,
     required this.selectedRange,
     required this.selectedDate,
+    required this.fixedDate,
     required this.ranges,
     required this.onCampusChanged,
     required this.onBuildingChanged,
@@ -751,6 +755,7 @@ class _SearchControls extends StatelessWidget {
   final ClassroomBuilding? selectedBuilding;
   final ClassroomSectionRange? selectedRange;
   final DateTime selectedDate;
+  final bool fixedDate;
   final List<ClassroomSectionRange> ranges;
   final ValueChanged<String?> onCampusChanged;
   final ValueChanged<ClassroomBuilding?> onBuildingChanged;
@@ -830,51 +835,56 @@ class _SearchControls extends StatelessWidget {
               ),
             ),
             const SizedBox(height: 10),
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16),
-              child: Row(
-                children: [
-                  _DateButton(
-                    label: '今天',
-                    selected: _isSameDay(selectedDate, DateTime.now()),
-                    onTap: () => onDateChanged(DateTime.now()),
-                  ),
-                  const SizedBox(width: 8),
-                  _DateButton(
-                    label: '明天',
-                    selected: _isSameDay(
-                      selectedDate,
-                      DateTime.now().add(const Duration(days: 1)),
+            if (fixedDate)
+              Text(
+                  '演示日期 · ${selectedDate.year} 年 ${selectedDate.month} 月 ${selectedDate.day} 日')
+            else
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 16),
+                child: Row(
+                  children: [
+                    _DateButton(
+                      label: '今天',
+                      selected: _isSameDay(selectedDate, DateTime.now()),
+                      onTap: () => onDateChanged(DateTime.now()),
                     ),
-                    onTap: () => onDateChanged(
-                      DateTime.now().add(const Duration(days: 1)),
+                    const SizedBox(width: 8),
+                    _DateButton(
+                      label: '明天',
+                      selected: _isSameDay(
+                        selectedDate,
+                        DateTime.now().add(const Duration(days: 1)),
+                      ),
+                      onTap: () => onDateChanged(
+                        DateTime.now().add(const Duration(days: 1)),
+                      ),
                     ),
-                  ),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: OutlinedButton.icon(
-                      onPressed: () async {
-                        final picked = await showDatePicker(
-                          context: context,
-                          initialDate: selectedDate,
-                          firstDate: DateTime.now().subtract(
-                            const Duration(days: 30),
-                          ),
-                          lastDate: DateTime.now().add(
-                            const Duration(days: 180),
-                          ),
-                        );
-                        if (picked != null) {
-                          onDateChanged(picked);
-                        }
-                      },
-                      icon: const Icon(Icons.calendar_month_outlined, size: 18),
-                      label: Text(_dateLabel(selectedDate)),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: OutlinedButton.icon(
+                        onPressed: () async {
+                          final picked = await showDatePicker(
+                            context: context,
+                            initialDate: selectedDate,
+                            firstDate: DateTime.now().subtract(
+                              const Duration(days: 30),
+                            ),
+                            lastDate: DateTime.now().add(
+                              const Duration(days: 180),
+                            ),
+                          );
+                          if (picked != null) {
+                            onDateChanged(picked);
+                          }
+                        },
+                        icon:
+                            const Icon(Icons.calendar_month_outlined, size: 18),
+                        label: Text(_dateLabel(selectedDate)),
+                      ),
                     ),
-                  ),
-                ],
+                  ],
+                ),
               ),
-            ),
             const SizedBox(height: 10),
             _SectionRangeSelector(
               ranges: ranges,

@@ -26,6 +26,7 @@ class HomeDashboardPage extends StatelessWidget {
     this.onOpenCampusMap,
     required this.onOpenOtp,
     required this.todayCourseContent,
+    this.coursePreviewDate,
     required this.announcementContent,
     this.layout,
     this.isDemo = false,
@@ -47,6 +48,7 @@ class HomeDashboardPage extends StatelessWidget {
   final VoidCallback? onOpenCampusMap;
   final VoidCallback onOpenOtp;
   final String todayCourseContent;
+  final DateTime? coursePreviewDate;
   final String announcementContent;
   final HomeLayout? layout;
   final bool isDemo;
@@ -109,7 +111,7 @@ class HomeDashboardPage extends StatelessWidget {
                 border: Border.all(color: context.shuyoColors.border),
               ),
               child: Text(
-                '演示模式 · 本地静态数据，操作不会上传',
+                '演示模式 · 校园服务使用本地示例数据',
                 style: TextStyle(
                   color: context.shuyoColors.textSecondary,
                   fontSize: 13,
@@ -149,11 +151,14 @@ class HomeDashboardPage extends StatelessWidget {
 
   Widget _moduleRow(HomeModule module) {
     final key = ValueKey('home-module:${module.id}');
+    final previewDate = coursePreviewDate;
     return switch (module) {
       HomeModule.todayCourse => _HomeRow(
           key: key,
           icon: Icons.event,
-          title: module.title,
+          title: previewDate == null
+              ? module.title
+              : '${previewDate.month}月${previewDate.day}日课程',
           content: todayCourseContent,
           onTap: onOpenAcademicSystem,
         ),

@@ -12,7 +12,10 @@ import '../core/app_tab.dart';
 import '../core/client_app_info.dart';
 import '../core/client_update_policy.dart';
 import '../core/otp_url_resolver.dart';
+import '../data/demo/demo_campus_card_repository.dart';
+import '../data/demo/demo_course_review_repository.dart';
 import '../data/demo/demo_data_bundle.dart';
+import '../data/demo/demo_library_booking.dart';
 import '../data/demo/demo_repositories.dart';
 import '../data/models/client_backend.dart';
 import '../data/models/academic_schedule.dart';
@@ -175,6 +178,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
   bool _checkingClientBackendPrompts = false;
   bool _refreshingWebVpnStatus = false;
   bool _openingLibraryBooking = false;
+  late final _demoLibraryBookingSession = DemoLibraryBookingSession();
   ThereBookingClient? _directBookingClient;
   ThereBookingClient? _webVpnBookingClient;
   ChaoxingBookingClient? _chaoxingBookingClient;
@@ -183,6 +187,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
   CampusCardService? _campusCardServiceInstance;
   CampusCardService get _campusCardService => _campusCardServiceInstance ??=
       CampusCardService(accountService: _unifiedAccountService);
+  static const _demoCampusCardRepository = DemoCampusCardRepository();
   final _campusCardBalanceStore = CampusCardBalanceStore();
   final _campusCardCache = CampusCardCache();
   CampusCardInfo? _campusCardInfo;
@@ -230,12 +235,20 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
       ClientBackendRepository(studentIdentityService: _studentIdentityService);
   CourseReviewRepository? _courseReviewRepositoryInstance;
   CourseReviewRepository get _courseReviewRepository =>
-      _courseReviewRepositoryInstance ??= CourseReviewRepository(
-        studentIdentityService: _studentIdentityService,
-        scheduleRepository: _scheduleRepository,
-        scheduleLoader: _loadReviewSchedule,
-        isDemo: widget.isDemo,
-      );
+      _courseReviewRepositoryInstance ??= widget.isDemo
+          ? DemoCourseReviewRepository(
+              schedule: widget.demoData?.schedule,
+              scheduleRepository: _scheduleRepository,
+              scheduleLoader:
+                  widget.demoData == null && widget.scheduleRepository == null
+                      ? () async => null
+                      : _loadReviewSchedule,
+            )
+          : CourseReviewRepository(
+              studentIdentityService: _studentIdentityService,
+              scheduleRepository: _scheduleRepository,
+              scheduleLoader: _loadReviewSchedule,
+            );
 
   // An applied empty view is authoritative; only an unseen view falls back.
   Future<AcademicSchedule?> _loadReviewSchedule() async => _hasViewedSchedule
@@ -276,6 +289,9 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
     _progressTabInitialized = _tab == AppTab.progress;
     _scheduleTabInitialized = _tab == AppTab.schedule;
     _rateTabInitialized = _tab == AppTab.rate;
+    if (widget.isDemo) {
+      _campusCardBalance = DemoCampusCardRepository.card.balance;
+    }
     final demo = widget.demoData;
     _scheduleRepository = widget.scheduleRepository ??
         (widget.isDemo && demo != null
@@ -320,7 +336,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
     _syncOnboardingAccountStatus();
     unawaited(_refreshScheduleSummaryQuietly());
     unawaited(_loadAnnouncementSummaryFromCache());
-    if (Platform.isAndroid || Platform.isIOS) {
+    if (!widget.isDemo && (Platform.isAndroid || Platform.isIOS)) {
       _widgetClickSubscription = HomeWidget.widgetClicked.listen((uri) {
         if (uri?.scheme == 'shuyo' && uri?.host == 'schedule') {
           _openScheduleFromWidget();
@@ -440,12 +456,14 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
                             repository: _progressRepository,
                             rankingRepository: _rankingRepository,
                             onLoginRequired: _handleInvalidAcademicSession,
+                            isDemo: widget.isDemo,
                           )
                         : const SizedBox.expand(),
                     _scheduleTabInitialized
                         ? AcademicSchedulePage(
                             key: ValueKey(_scheduleDataRevision),
                             repository: _scheduleRepository,
+                            isDemo: widget.isDemo,
                             notificationService: _scheduleNotificationService,
                             widgetService: _scheduleWidgetService,
                             onLoginRequired: _handleInvalidAcademicSession,
@@ -548,7 +566,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
       onRefreshCampusCard: () => unawaited(_refreshCampusCardFromHome()),
       isCampusCardRefreshing: _refreshingCampusCardFromHome,
       campusCardContent: [
-        if (_academicSessionExpired)
+        if (_academicSessionExpired && !widget.isDemo)
           '登录已失效'
         else if (_campusCardBalance != null)
           '当前余额：¥${_campusCardBalance!.toStringAsFixed(2)}'
@@ -559,6 +577,9 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
       onOpenCampusMap: () => unawaited(_openCampusMap()),
       onOpenOtp: () => unawaited(_openOtp()),
       todayCourseContent: _scheduleSummaryText,
+      coursePreviewDate: widget.isDemo && widget.demoData != null
+          ? DemoDataBundle.previewTime
+          : null,
       announcementContent: _announcementSummaryText,
       isDemo: widget.isDemo,
     );
@@ -898,7 +919,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
     _loadingScheduleSummary = true;
     try {
       final summary = await _scheduleRepository.homeSummary();
-      unawaited(_scheduleWidgetService.syncFromCache());
+      if (!widget.isDemo) unawaited(_scheduleWidgetService.syncFromCache());
       if (mounted) setState(() => _scheduleSummaryText = summary.text);
     } on Object {
       if (mounted) setState(() => _scheduleSummaryText = '点击同步教务课表');
@@ -1059,7 +1080,8 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
         builder: (_) => EmptyClassroomPage(
           repository: _classroomRepository,
           initialCampus: _preferredCampus,
-          initialDate: widget.isDemo ? DateTime(2026, 9, 1) : null,
+          initialDate: widget.isDemo ? DemoDataBundle.previewTime : null,
+          fixedDate: widget.isDemo,
           onWebVpnRecoveryRequired: widget.isDemo
               ? null
               : (interactive) => _recoverWebVpnOutcomeForFeature(
@@ -1170,9 +1192,8 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
     bool allowLogin = true,
   }) async {
     if (widget.isDemo) {
-      if (interactive) {
-        setState(() => _campusCardRefreshError = '演示模式暂不支持校园卡查询');
-      }
+      final card = await _demoCampusCardRepository.fetchCardInfo();
+      if (mounted) setState(() => _campusCardBalance = card.balance);
       return;
     }
     if (!_hasAcademicSession || _academicStudentId == null) {
@@ -1331,7 +1352,14 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
 
   Future<void> _openCampusCard() async {
     if (widget.isDemo) {
-      _showSnack('演示模式暂不支持校园卡查询');
+      await Navigator.of(context).push<void>(
+        shuyoRoute(
+          builder: (_) => CampusCardPage.demo(
+            dataSource: _demoCampusCardRepository,
+            initialCard: DemoCampusCardRepository.card,
+          ),
+        ),
+      );
       return;
     }
     if (!_hasAcademicSession || _academicStudentId == null) {
@@ -1381,30 +1409,32 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
 
   Future<void> _openLibraryBooking() async {
     if (_openingLibraryBooking) return;
-    if (widget.isDemo) {
-      _showSnack('演示模式暂不支持图书馆预约');
-      return;
-    }
     _openingLibraryBooking = true;
     try {
       final useWebVpn = _webVpnEnabled;
       await Navigator.of(context).push<void>(
         shuyoRoute(
-          builder: (_) => LibraryBookingPage(
-            accountService: _unifiedAccountService,
-            initialCampus: _preferredCampus,
-            // The page owns one There client per venue for concurrent loads.
-            chaoxingClient: _chaoxingBookingClient ??= ChaoxingBookingClient(),
-            useWebVpn: useWebVpn,
-            onWebVpnSessionRequired: () =>
-                _changeWebVpnFromAccountManager(true),
-            onWebVpnRecoveryRequired: (interactive) =>
-                _recoverWebVpnForFeature(interactive: interactive),
-            onCampusSessionExpired: (interactive) =>
-                _handleCampusSsoExpired(interactive: interactive),
-            onCampusLoginRequired: () => _loginCampusAccount(),
-            onChaoxingLoginRequired: _loginForChaoxingBooking,
-          ),
+          builder: (_) => widget.isDemo
+              ? LibraryBookingPage.demo(
+                  session: _demoLibraryBookingSession,
+                  initialCampus: _preferredCampus,
+                )
+              : LibraryBookingPage(
+                  accountService: _unifiedAccountService,
+                  initialCampus: _preferredCampus,
+                  // The page owns one There client per venue for concurrent loads.
+                  chaoxingClient: _chaoxingBookingClient ??=
+                      ChaoxingBookingClient(),
+                  useWebVpn: useWebVpn,
+                  onWebVpnSessionRequired: () =>
+                      _changeWebVpnFromAccountManager(true),
+                  onWebVpnRecoveryRequired: (interactive) =>
+                      _recoverWebVpnForFeature(interactive: interactive),
+                  onCampusSessionExpired: (interactive) =>
+                      _handleCampusSsoExpired(interactive: interactive),
+                  onCampusLoginRequired: () => _loginCampusAccount(),
+                  onChaoxingLoginRequired: _loginForChaoxingBooking,
+                ),
         ),
       );
     } finally {
@@ -1498,7 +1528,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
   }
 
   Future<void> _changeStartupTab(AppTab tab) async {
-    await _clientSettingsService.saveStartupTab(tab);
+    await _clientSettingsService.saveStartupTab(tab, isDemo: widget.isDemo);
     if (mounted) setState(() => _preferredStartupTab = tab);
   }
 

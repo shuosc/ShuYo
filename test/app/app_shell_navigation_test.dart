@@ -3,6 +3,7 @@ import 'package:material_ui/material_ui.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:shuyo/app/app_shell.dart';
 import 'package:shuyo/core/app_tab.dart';
+import 'package:shuyo/data/demo/demo_data_bundle.dart';
 import 'package:shuyo/data/services/academic_profile_preferences.dart';
 import 'package:shuyo/data/services/client_settings_service.dart';
 import 'package:shuyo/features/home/academic_progress_page.dart';
@@ -15,8 +16,9 @@ void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   setUp(() => SharedPreferences.setMockInitialValues({}));
 
-  testWidgets('home campus card refresh shows its feedback inline',
+  testWidgets('demo campus card refreshes and opens offline history',
       (tester) async {
+    final demo = await tester.runAsync(DemoDataBundle.load);
     final controller = StartupOnboardingController();
     addTearDown(controller.dispose);
     await tester.pumpWidget(MaterialApp(
@@ -27,18 +29,44 @@ void main() {
         onThemeChanged: (_) async {},
         onFollowSystemThemeChanged: (_) async {},
         academicLoginSignal: 0,
-        initialHasAcademicSession: true,
-        initialAcademicStudentId: '25120000',
+        initialHasAcademicSession: false,
+        initialAcademicStudentId: null,
         onboardingController: controller,
         isDemo: true,
+        demoData: demo!,
       ),
     ));
     await tester.pumpAndSettle();
     await tester.ensureVisible(find.byTooltip('刷新校园卡余额'));
     await tester.tap(find.byTooltip('刷新校园卡余额'));
     await tester.pumpAndSettle();
-    expect(find.text('演示模式暂不支持校园卡查询'), findsOneWidget);
+    expect(find.text('当前余额：¥87.60'), findsOneWidget);
     expect(find.byType(SnackBar), findsNothing);
+    await tester.tap(find.text('校园卡'));
+    await tester.pumpAndSettle();
+    expect(find.text('¥ 87.60'), findsOneWidget);
+    expect(
+        find.byKey(const ValueKey('campus-card-chart-plot')), findsOneWidget);
+    expect(find.byKey(const ValueKey('campus-card-recharge')), findsNothing);
+
+    final historyButton = find.byKey(const ValueKey('campus-card-history'));
+    await tester.scrollUntilVisible(
+      historyButton,
+      160,
+      scrollable: find.descendant(
+        of: find.byKey(const ValueKey('campus-card-scroll-view')),
+        matching: find.byType(Scrollable),
+      ),
+    );
+    await tester.tap(historyButton);
+    await tester.pumpAndSettle();
+    expect(find.text('历史消费'), findsOneWidget);
+    await tester
+        .tap(find.byKey(const ValueKey('campus-card-history-tab-credit')));
+    await tester.pumpAndSettle();
+    expect(find.text('校园卡充值'), findsOneWidget);
+    expect(find.text('+ ¥35.00'), findsOneWidget);
+    expect(find.text('宝山校区第一食堂'), findsNothing);
   });
 
   testWidgets('library booking opens with the latest account campus preference',
@@ -90,6 +118,7 @@ void main() {
 
   testWidgets('opens the schedule from the home row and third tab',
       (tester) async {
+    final demo = (await tester.runAsync(DemoDataBundle.load))!;
     final controller = StartupOnboardingController();
     addTearDown(controller.dispose);
     await tester.pumpWidget(MaterialApp(
@@ -101,10 +130,11 @@ void main() {
         onFollowSystemThemeChanged: (_) async {},
         academicLoginSignal: 0,
         initialHasAcademicSession: true,
-        initialAcademicStudentId: '25120000',
-        initialNickname: '小明',
+        initialAcademicStudentId: demo.schedule.term.studentId,
+        initialNickname: demo.schedule.term.studentName,
         onboardingController: controller,
         isDemo: true,
+        demoData: demo,
       ),
     ));
     await tester.pumpAndSettle();
@@ -113,8 +143,9 @@ void main() {
     );
     expect(navigation.items.map((item) => item.label).toList(),
         ['首页', '课评', '学业', '日程']);
-    expect(find.text('你好，小明！'), findsOneWidget);
-    await tester.tap(find.text('今日课程'));
+    expect(find.text('你好，演示同学！'), findsOneWidget);
+    expect(find.textContaining('08:00 · 面向对象程序设计'), findsOneWidget);
+    await tester.tap(find.text('9月1日课程'));
     await tester.pumpAndSettle();
     expect(
         tester
@@ -122,10 +153,26 @@ void main() {
             .currentIndex,
         AppTab.schedule.index);
     expect(find.byType(AcademicSchedulePage), findsOneWidget);
+    expect(find.text(demo.schedule.term.displayName), findsOneWidget);
     expect(find.byTooltip('课表信息说明'), findsOneWidget);
+    expect(find.byTooltip('分享与导入'), findsNothing);
     expect(find.byTooltip('更多'), findsOneWidget);
     expect(find.byTooltip('Back'), findsNothing);
     expect(find.byTooltip('通知'), findsNothing);
+
+    await tester.tap(find.byTooltip('设置开学日期'));
+    await tester.pumpAndSettle();
+    expect(find.text('选择开学日期'), findsOneWidget);
+    await tester.tap(find.text('确定'));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byTooltip('更多'));
+    await tester.pumpAndSettle();
+    expect(find.text('通知设置'), findsNothing);
+    await tester.tap(find.text('恢复演示课表'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('确定'));
+    await tester.pumpAndSettle();
 
     for (final label in ['学业', '首页', '日程']) {
       await tester.tap(find.text(label).last);
@@ -137,6 +184,8 @@ void main() {
           ['首页', '课评', '学业', '日程'].indexOf(label));
       if (label == '学业') {
         expect(find.byType(AcademicProgressPage), findsOneWidget);
+        expect(find.text('平均绩点'), findsOneWidget);
+        expect(find.text('学院排名'), findsOneWidget);
         expect(find.byTooltip('更多'), findsOneWidget);
       }
     }
@@ -240,7 +289,9 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.text('学业'));
     await tester.pumpAndSettle();
-    expect(await ClientSettingsService().loadStartupTab(), AppTab.progress);
+    expect(await ClientSettingsService().loadStartupTab(isDemo: true),
+        AppTab.progress);
+    expect(await ClientSettingsService().loadStartupTab(), AppTab.home);
 
     await tester.pageBack();
     await tester.pumpAndSettle();

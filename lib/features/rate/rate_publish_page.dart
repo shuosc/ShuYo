@@ -165,7 +165,10 @@ class _RatePublishPageState extends State<RatePublishPage> {
               style: ShuYoTextStyles.meta(color: colors.textSecondary)),
         ],
         const SizedBox(height: 12),
-        Text('评价匿名展示，其他同学只能看到汇总统计。',
+        Text(
+            widget.repository.isDemo
+                ? '演示评价仅保留在本次演示中。'
+                : '评价匿名展示，其他同学只能看到汇总统计。',
             style: ShuYoTextStyles.meta(color: colors.textTertiary)),
       ],
     );
@@ -281,7 +284,13 @@ class _RatePublishPageState extends State<RatePublishPage> {
         draft,
       );
       if (!mounted) return;
-      showRateSnack(context, widget.existing == null ? '评价已发布' : '评价已更新');
+      showRateSnack(
+          context,
+          widget.repository.isDemo
+              ? '演示评价已保存'
+              : widget.existing == null
+                  ? '评价已发布'
+                  : '评价已更新');
       Navigator.of(context).pop(true);
     } on Object catch (error) {
       if (mounted) showRateWriteError(context, widget.repository, error);
@@ -419,7 +428,7 @@ class _RateEditReviewPageState extends State<RateEditReviewPage> {
         draft,
       );
       if (!mounted) return;
-      showRateSnack(context, '评价已更新');
+      showRateSnack(context, widget.repository.isDemo ? '演示评价已保存' : '评价已更新');
       Navigator.of(context).pop(true);
     } on Object catch (error) {
       if (mounted) showRateWriteError(context, widget.repository, error);

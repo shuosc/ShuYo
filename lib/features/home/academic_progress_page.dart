@@ -17,11 +17,13 @@ class AcademicProgressPage extends StatefulWidget {
     required this.repository,
     required this.onLoginRequired,
     this.rankingRepository,
+    this.isDemo = false,
   });
 
   final AcademicProgressRepository repository;
   final AcademicRankingRepository? rankingRepository;
   final Future<void> Function() onLoginRequired;
+  final bool isDemo;
 
   @override
   State<AcademicProgressPage> createState() => _AcademicProgressPageState();
@@ -48,7 +50,8 @@ class _AcademicProgressPageState extends State<AcademicProgressPage> {
   bool _rankingLoading = false;
   String? _rankingError;
   String? _loadError;
-  final _displaySettingsService = AcademicProgressDisplaySettingsService();
+  late final _displaySettingsService =
+      AcademicProgressDisplaySettingsService(isDemo: widget.isDemo);
   late final AcademicRankingRepository _rankingRepository =
       widget.rankingRepository ?? AcademicRankingRepository();
 

@@ -83,6 +83,24 @@ class AcademicScheduleRepository {
   bool get supportsTermDiscovery => true;
   ValueListenable<int> get collectionChanges => _collection.changes;
 
+  Future<List<AcademicScheduleRecord>> loadSavedSchedules() async {
+    final legacy = await loadCachedSchedule();
+    final owner = await _dataOwner() ?? legacy?.term.studentId;
+    return owner == null
+        ? <AcademicScheduleRecord>[]
+        : await _collection.list(owner);
+  }
+
+  Future<String?> loadPrimaryTermKey() async {
+    final owner = await _dataOwner();
+    return owner == null ? null : _collection.primaryKey(owner);
+  }
+
+  Future<AcademicScheduleRecord?> loadTermRecord(String key) async {
+    final owner = await _dataOwner();
+    return owner == null ? null : _collection.load(owner, key);
+  }
+
   Future<AcademicSchedule?> loadCachedSchedule() async {
     final prefs = await _preferencesLoader();
     final studentId = await AcademicAccountStore(

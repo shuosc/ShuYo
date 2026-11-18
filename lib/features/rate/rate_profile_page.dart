@@ -112,7 +112,8 @@ class _RateProfilePageState extends State<RateProfilePage> {
               child: ListTile(
                 leading: const Icon(Icons.flag_outlined),
                 title: const Text('课评反馈'),
-                subtitle: Text('课程或教师信息有误、找不到课程、功能建议',
+                subtitle: Text(
+                    _repo.isDemo ? '演示模式暂不支持课评反馈' : '课程或教师信息有误、找不到课程、功能建议',
                     style: ShuYoTextStyles.meta(color: colors.textTertiary)),
                 trailing: const Icon(Icons.chevron_right),
               ),

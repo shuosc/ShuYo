@@ -3,14 +3,16 @@ import 'package:shared_preferences/shared_preferences.dart';
 class DemoSession {
   const DemoSession._();
 
-  static const username = 'admin2512';
-  static const password = 'abc123456';
-  static const displayUsername = 'admin';
+  // Public review credentials select bundled data; they grant no server access.
+  static const username = 'shuyo.demo';
+  static const password = 'CampusPreview26';
   static const _enabledKey = 'demo.session.enabled.v1';
 
-  static bool matchesCredentials(String inputUsername, String inputPassword) {
-    return inputUsername.trim() == username && inputPassword == password;
-  }
+  static bool isDemoUsername(String input) =>
+      input.trim().toLowerCase() == username;
+
+  static bool matchesCredentials(String inputUsername, String inputPassword) =>
+      isDemoUsername(inputUsername) && inputPassword == password;
 
   static Future<bool> isEnabled() async {
     final preferences = await SharedPreferences.getInstance();

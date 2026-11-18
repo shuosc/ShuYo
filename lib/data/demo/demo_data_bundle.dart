@@ -28,6 +28,8 @@ class DemoDataBundle {
   final ClassroomSearchOptions classroomOptions;
   final ClassroomBuildingSchedule classroomSchedule;
 
+  static final previewTime = DateTime(2026, 9, 1, 7, 55);
+
   static Future<DemoDataBundle> load({AssetBundle? bundle}) async {
     final assets = bundle ?? rootBundle;
     final schedule = AcademicScheduleParser.parse(
@@ -82,7 +84,11 @@ class DemoDataBundle {
       schedule: schedule,
       announcements: announcementItems,
       announcementDetails: details,
-      classroomOptions: classroomOptions,
+      classroomOptions: ClassroomSearchOptions(
+        buildings: [building],
+        sections: classroomOptions.sections,
+        currentSection: classroomOptions.currentSection,
+      ),
       classroomSchedule: classroomSchedule,
     );
   }

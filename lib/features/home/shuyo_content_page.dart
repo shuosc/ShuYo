@@ -77,17 +77,29 @@ class _ContentList extends StatefulWidget {
 
 class _ContentListState extends State<_ContentList>
     with AutomaticKeepAliveClientMixin {
-  late Future<ShuyoContentLoad> _future = widget.isDemo
-      ? Future.value(const ShuyoContentLoad([]))
-      : widget.repository.load(widget.kind);
+  late Future<ShuyoContentLoad> _future = _load();
+
+  Future<ShuyoContentLoad> _load() async {
+    if (!widget.isDemo) return widget.repository.load(widget.kind);
+    final tips = widget.kind == ShuyoContentKind.tips;
+    return ShuyoContentLoad([
+      ShuyoContentItem(
+        id: widget.kind.name,
+        title: tips ? '如何查找空教室' : '演示学期开学安排',
+        content: tips
+            ? '在首页打开「空教室」，选择节次即可查看 GA 楼的空闲教室。点开教室可查看当天安排。'
+            : '本演示课表的第一周从 8 月 31 日开始。打开「课表」可以查看每周课程、上课地点和任课教师。',
+        createdAt: DateTime(2026, 9, 1),
+        updatedAt: null,
+      ),
+    ]);
+  }
 
   @override
   bool get wantKeepAlive => true;
 
   Future<void> _refresh() async {
-    final future = widget.isDemo
-        ? Future.value(const ShuyoContentLoad([]))
-        : widget.repository.load(widget.kind);
+    final future = _load();
     setState(() => _future = future);
     try {
       await future;
