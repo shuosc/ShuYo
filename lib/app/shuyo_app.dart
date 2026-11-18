@@ -8,7 +8,6 @@ import '../core/app_tab.dart';
 import '../core/classroom_url_resolver.dart';
 import '../core/otp_url_resolver.dart';
 import '../data/demo/demo_data_bundle.dart';
-import '../data/demo/demo_repositories.dart';
 import '../data/demo/demo_session.dart';
 import '../data/models/classroom.dart';
 import '../data/repositories/academic_schedule_repository.dart';
@@ -48,12 +47,14 @@ class _ShuYoAppState extends State<ShuYoApp> with WidgetsBindingObserver {
   final _studentIdentityService = StudentIdentityService();
   final _dataMigrationService = AppDataMigrationService();
   final _onboardingController = StartupOnboardingController();
+  final _demoOnboardingController = StartupOnboardingController();
   late Future<_StartupData> _startupFuture;
   String _manualThemeId = ShuYoThemes.defaultId;
   CustomBackground? _customBackground;
   bool _followSystemTheme = false;
   bool _demoMode = false;
   DemoDataBundle? _demoData;
+  AppTab _demoStartupTab = AppTab.home;
   int _academicLoginSignal = 0;
   late final Future<bool> _initialScheduleWidgetLaunch;
   bool _initialWidgetLaunchConsumed = false;
@@ -80,6 +81,7 @@ class _ShuYoAppState extends State<ShuYoApp> with WidgetsBindingObserver {
     WidgetsBinding.instance.removeObserver(this);
     _studentIdentityService.dispose();
     _onboardingController.dispose();
+    _demoOnboardingController.dispose();
     super.dispose();
   }
 
@@ -121,12 +123,17 @@ class _ShuYoAppState extends State<ShuYoApp> with WidgetsBindingObserver {
           if (snapshot.hasError) {
             return _StartupError(error: snapshot.error.toString());
           }
-          if (!snapshot.hasData) {
+          if (snapshot.connectionState != ConnectionState.done ||
+              !snapshot.hasData) {
             return ShuYoLaunchSurface(theme: theme);
           }
           final data = snapshot.data!;
           final demo = _demoMode && _demoData != null;
+          final demoTerm = demo ? _demoData!.schedule.term : null;
+          final controller =
+              demo ? _demoOnboardingController : _onboardingController;
           return StartupOnboarding(
+            key: ValueKey(demo),
             initiallyCompleted: demo || data.onboardingCompleted,
             initialAcademicLoggedIn: demo || data.hasAcademicSession,
             initialAcademicSessionExpired: !demo && data.academicSessionExpired,
@@ -134,7 +141,7 @@ class _ShuYoAppState extends State<ShuYoApp> with WidgetsBindingObserver {
               setState(() => _academicLoginSignal++);
             },
             onDemoLogin: _activateDemoMode,
-            controller: _onboardingController,
+            controller: controller,
             studentIdentityService: demo ? null : _studentIdentityService,
             child: AppShell(
               key: ValueKey('app-shell-${demo ? 'demo' : 'normal'}'),
@@ -152,20 +159,23 @@ class _ShuYoAppState extends State<ShuYoApp> with WidgetsBindingObserver {
               initialHasAcademicSession: demo || data.hasAcademicSession,
               initialAcademicSessionExpired:
                   !demo && data.academicSessionExpired,
-              initialAcademicStudentId: demo
-                  ? data.initialScheduleState?.schedule?.term.studentId
-                  : data.academicStudentId,
-              initialNickname: demo ? null : data.nickname,
-              initialPreferredCampus: data.preferredCampus,
-              initialStartupTab: data.startupTab,
-              initialOpenSchedule: data.openScheduleFromWidget &&
-                  (demo || data.onboardingCompleted),
-              initialScheduleState: data.initialScheduleState,
-              initialScheduleDisplayState: data.initialScheduleDisplayState,
-              initialScheduleLoadError: data.initialScheduleLoadError,
+              initialAcademicStudentId:
+                  demoTerm?.studentId ?? data.academicStudentId,
+              initialNickname: demoTerm?.studentName ?? data.nickname,
+              initialPreferredCampus:
+                  demo ? ClassroomCampus.defaultName : data.preferredCampus,
+              initialStartupTab: demo ? _demoStartupTab : data.startupTab,
+              initialOpenSchedule: !demo &&
+                  data.openScheduleFromWidget &&
+                  data.onboardingCompleted,
+              initialScheduleState: demo ? null : data.initialScheduleState,
+              initialScheduleDisplayState:
+                  demo ? null : data.initialScheduleDisplayState,
+              initialScheduleLoadError:
+                  demo ? null : data.initialScheduleLoadError,
               isDemo: demo,
               demoData: _demoData,
-              onboardingController: _onboardingController,
+              onboardingController: controller,
               studentIdentityService: demo ? null : _studentIdentityService,
               onExitDemo: demo ? _exitDemoMode : null,
             ),
@@ -187,20 +197,18 @@ class _ShuYoAppState extends State<ShuYoApp> with WidgetsBindingObserver {
   }
 
   Future<_StartupData> _loadStartup() async {
-    final openScheduleFromWidget = await _takeInitialScheduleWidgetLaunch();
     if (await DemoSession.isEnabled()) {
-      return _loadDemoStartup(
-        openScheduleFromWidget: openScheduleFromWidget,
-      );
+      _initialWidgetLaunchConsumed = true;
+      return _loadDemoStartup();
     }
     // This must run before any repository/auth service reads local state.  The
     // migration intentionally resets this major release to a fresh install.
     await _dataMigrationService.migrateIfNeeded();
     if (await DemoSession.isEnabled()) {
-      return _loadDemoStartup(
-        openScheduleFromWidget: openScheduleFromWidget,
-      );
+      _initialWidgetLaunchConsumed = true;
+      return _loadDemoStartup();
     }
+    final openScheduleFromWidget = await _takeInitialScheduleWidgetLaunch();
     await ClientAppInfo.load();
     final networkSettings = await _settingsService.loadNetworkSettings();
     final startupTab = await _settingsService.loadStartupTab();
@@ -252,28 +260,18 @@ class _ShuYoAppState extends State<ShuYoApp> with WidgetsBindingObserver {
     }
   }
 
-  Future<_StartupData> _loadDemoStartup({
-    bool openScheduleFromWidget = false,
-  }) async {
+  Future<_StartupData> _loadDemoStartup() async {
     final demoData = await DemoDataBundle.load();
+    _demoStartupTab = await _settingsService.loadStartupTab(isDemo: true);
     _demoMode = true;
     _demoData = demoData;
-    final initialScheduleLoad = openScheduleFromWidget
-        ? await _loadInitialScheduleState(
-            DemoAcademicScheduleRepository(demoData.schedule),
-          )
-        : const _InitialScheduleLoad();
-    return _StartupData(
+    return const _StartupData(
       webVpnEnabled: false,
       hasAcademicSession: true,
-      academicStudentId: initialScheduleLoad.state?.schedule?.term.studentId,
-      startupTab: await _settingsService.loadStartupTab(),
+      academicStudentId: null,
       onboardingCompleted: true,
       demoMode: true,
-      openScheduleFromWidget: openScheduleFromWidget,
-      initialScheduleState: initialScheduleLoad.state,
-      initialScheduleDisplayState: initialScheduleLoad.displayState,
-      initialScheduleLoadError: initialScheduleLoad.error,
+      openScheduleFromWidget: false,
     );
   }
 
@@ -311,16 +309,18 @@ class _ShuYoAppState extends State<ShuYoApp> with WidgetsBindingObserver {
 
   Future<void> _activateDemoMode() async {
     final demoData = await DemoDataBundle.load();
+    final startupTab = await _settingsService.loadStartupTab(isDemo: true);
+    await DemoSession.enable();
     if (!mounted) return;
     setState(() {
       _demoMode = true;
       _demoData = demoData;
+      _demoStartupTab = startupTab;
     });
   }
 
   Future<void> _exitDemoMode() async {
     await DemoSession.disable();
-    await _settingsService.saveStartupOnboardingCompleted(false);
     if (!mounted) return;
     setState(() {
       _demoMode = false;

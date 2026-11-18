@@ -4,6 +4,7 @@ import 'dart:math';
 import 'package:cupertino_ui/cupertino_ui.dart' show CupertinoPicker;
 import 'package:material_ui/material_ui.dart';
 
+import '../../data/demo/demo_library_booking.dart';
 import '../../data/models/classroom.dart';
 import '../../data/services/academic_account_store.dart';
 import '../../data/services/chaoxing_booking_adapter.dart';
@@ -142,7 +143,7 @@ enum _BookingCampus {
 class LibraryBookingPage extends StatefulWidget {
   const LibraryBookingPage({
     super.key,
-    required this.accountService,
+    required UnifiedAccountService accountService,
     this.thereClientFactory,
     this.chaoxingClient,
     this.useWebVpn = false,
@@ -153,9 +154,27 @@ class LibraryBookingPage extends StatefulWidget {
     this.onWebVpnRecoveryRequired,
     this.initialCampus = ClassroomCampus.defaultName,
     this.schoolClock,
-  });
+  })  : _accountService = accountService,
+        _demoSession = null;
 
-  final UnifiedAccountService accountService;
+  LibraryBookingPage.demo({
+    super.key,
+    required DemoLibraryBookingSession session,
+    this.initialCampus = ClassroomCampus.defaultName,
+  })  : _demoSession = session,
+        _accountService = null,
+        thereClientFactory = null,
+        chaoxingClient = null,
+        useWebVpn = false,
+        onWebVpnSessionRequired = null,
+        onChaoxingLoginRequired = null,
+        onCampusLoginRequired = null,
+        onCampusSessionExpired = null,
+        onWebVpnRecoveryRequired = null,
+        schoolClock = session.schoolClock;
+
+  final UnifiedAccountService? _accountService;
+  final DemoLibraryBookingSession? _demoSession;
   final ThereBookingClient Function(BookingVenue)? thereClientFactory;
   final ChaoxingBookingClient? chaoxingClient;
   final bool useWebVpn;
@@ -177,6 +196,8 @@ class _LibraryBookingPageState extends State<LibraryBookingPage> {
   static const double _timeDigitFontSize = 22;
   static const _snapshotLifetime = Duration(seconds: 60);
 
+  bool get _isDemo => widget._demoSession != null;
+
   final Map<BookingVenue, ThereBookingClient> _thereClients = {};
   final Map<BookingVenue, ChaoxingBookingAdapter> _chaoxingAdapters = {};
   final Map<BookingVenue, Future<void>> _pendingVenueSelections = {};
@@ -186,7 +207,7 @@ class _LibraryBookingPageState extends State<LibraryBookingPage> {
   DateTime? _sharedChaoxingRoomLoadAt;
   String? _sharedChaoxingRoomDay;
   BookingVenue _activeClientVenue = BookingVenue.library;
-  ThereBookingClient get _client => _clientForVenue(_activeClientVenue);
+  LibraryBookingVenueData get _client => _clientForVenue(_activeClientVenue);
 
   Future<List<Map<String, dynamic>>> _loadSharedChaoxingRooms() {
     final now = DateTime.now();
@@ -222,7 +243,10 @@ class _LibraryBookingPageState extends State<LibraryBookingPage> {
     return load;
   }
 
-  ThereBookingClient _clientForVenue(BookingVenue venue) => venue.isChaoxing
+  LibraryBookingVenueData _clientForVenue(BookingVenue venue) =>
+      widget._demoSession?.forVenue(venue) ?? _liveClientForVenue(venue);
+
+  ThereBookingClient _liveClientForVenue(BookingVenue venue) => venue.isChaoxing
       ? _chaoxingAdapters.putIfAbsent(
           venue,
           () => ChaoxingBookingAdapter(
@@ -240,7 +264,8 @@ class _LibraryBookingPageState extends State<LibraryBookingPage> {
         );
 
   Future<void> _ensureVenueSelected(
-      BookingVenue venue, ThereBookingClient client) async {
+      BookingVenue venue, LibraryBookingVenueData client) async {
+    if (client is! ThereBookingClient) return;
     final pending = _pendingVenueSelections[venue];
     if (pending != null) return pending;
     final selection = client.selectVenue(venue);
@@ -258,6 +283,7 @@ class _LibraryBookingPageState extends State<LibraryBookingPage> {
       {bool refresh = false}) async {
     final client = _clientForVenue(venue);
     _activeClientVenue = venue;
+    if (client is! ThereBookingClient) return;
     if (refresh) {
       final pending = _pendingVenueSelections[venue];
       if (pending != null) {
@@ -405,7 +431,7 @@ class _LibraryBookingPageState extends State<LibraryBookingPage> {
   }
 
   Future<void> _refreshHomeData({bool force = false}) async {
-    if (!_homeCacheLoaded) unawaited(_loadHomeCache());
+    if (!_isDemo && !_homeCacheLoaded) unawaited(_loadHomeCache());
     await Future.wait([
       _loadBookings(showFailures: force, force: force),
       _loadHomeCampusAreas(force: force),
@@ -511,6 +537,7 @@ class _LibraryBookingPageState extends State<LibraryBookingPage> {
 
   void _enqueueBookingCacheWrite(
       Future<void> Function(String studentId) write) {
+    if (_isDemo) return;
     final pending = _bookingCacheWriteQueue.then((_) async {
       final studentId =
           _cacheStudentId ?? await AcademicAccountStore().loadStudentId();
@@ -614,7 +641,7 @@ class _LibraryBookingPageState extends State<LibraryBookingPage> {
                       onPressed: _busy ? null : _goBack,
                       icon: const Icon(Icons.arrow_back),
                     ),
-              title: Text(_pageTitle),
+              title: Text(_isDemo ? '$_pageTitle · 演示' : _pageTitle),
             ),
             body: _loading
                 ? _loadingBody()
@@ -771,6 +798,11 @@ class _LibraryBookingPageState extends State<LibraryBookingPage> {
           if (!_busy) await _refreshHomeData(force: true);
         },
         child: _pageList([
+          if (_isDemo)
+            const Padding(
+              padding: EdgeInsets.only(bottom: 8),
+              child: Text('你可以试用座位预约。演示记录仅在本次演示期间保留。'),
+            ),
           _homeRecentSection(),
           const SizedBox(height: 18),
           Row(children: [
@@ -884,7 +916,7 @@ class _LibraryBookingPageState extends State<LibraryBookingPage> {
               Padding(
                 padding: const EdgeInsets.only(bottom: 16),
                 child: Text(
-                    _bookingsLoading || !_homeCacheLoaded
+                    _bookingsLoading || (!_isDemo && !_homeCacheLoaded)
                         ? '加载中'
                         : _bookingsIncomplete
                             ? '预约列表暂时无法完整加载，请检查是否连接校园网'
@@ -2541,7 +2573,7 @@ class _LibraryBookingPageState extends State<LibraryBookingPage> {
       _step = _BookingStep.bookings;
       _bookingFilter = '全部';
     });
-    unawaited(_reloadHistoryCache());
+    if (!_isDemo) unawaited(_reloadHistoryCache());
     unawaited(_refreshBookingsOnOpen());
   }
 
@@ -2576,18 +2608,18 @@ class _LibraryBookingPageState extends State<LibraryBookingPage> {
         _areas = _areasForVenue(areas, _venue);
         _loading = false;
       });
-      if (!_venue.isChaoxing) {
+      if (!_isDemo && !_venue.isChaoxing) {
         try {
-          await widget.accountService.setTherePendingRecovery(false);
+          await widget._accountService!.setTherePendingRecovery(false);
         } on Object {
           // The business data is usable even if the local marker fails.
         }
       }
     } on Object catch (error) {
       if (!mounted || generation != _generation) return;
-      if (!_venue.isChaoxing) {
+      if (!_isDemo && !_venue.isChaoxing) {
         try {
-          await widget.accountService.setTherePendingRecovery(true);
+          await widget._accountService!.setTherePendingRecovery(true);
         } on Object {
           // Keep the service error visible.
         }
@@ -2716,7 +2748,7 @@ class _LibraryBookingPageState extends State<LibraryBookingPage> {
   }
 
   Future<_PrefetchedBookingDay> _prefetchBookingDay(String day, String id,
-      BookingVenue venue, ThereBookingClient client) async {
+      BookingVenue venue, LibraryBookingVenueData client) async {
     final data = await _read(() => client.area(id, day, day),
         venue: venue, client: client);
     final rules = ThereBookingClient.object(data['bookingTimes']) ?? const {};
@@ -2996,7 +3028,7 @@ class _LibraryBookingPageState extends State<LibraryBookingPage> {
     bool interactive = true,
   }) async {
     final activeVenue = venue ?? _activeClientVenue;
-    final activeClient = client ?? _client;
+    final activeClient = client ?? _liveClientForVenue(_activeClientVenue);
     if (activeVenue.isChaoxing) {
       try {
         activeClient.resetSession();
@@ -3027,7 +3059,7 @@ class _LibraryBookingPageState extends State<LibraryBookingPage> {
       activeClient.resetSession();
       state = await activeClient.prepareOAuth();
     }
-    final callback = await widget.accountService.authorizeThere(state: state);
+    final callback = await widget._accountService!.authorizeThere(state: state);
     if (callback != null) {
       await activeClient.completeOAuth(callback);
       return true;
@@ -3096,11 +3128,13 @@ class _LibraryBookingPageState extends State<LibraryBookingPage> {
     Future<T> Function() operation, {
     Future<void> Function(T)? validateAfterRecovery,
     BookingVenue? venue,
-    ThereBookingClient? client,
+    LibraryBookingVenueData? client,
     bool interactiveAuth = true,
   }) async {
+    if (_isDemo) return operation();
     final activeVenue = venue ?? _activeClientVenue;
-    final activeClient = client ?? _client;
+    final activeClient = client as ThereBookingClient? ??
+        _liveClientForVenue(_activeClientVenue);
     final revision = _authenticationRevision;
     try {
       return await operation();
@@ -3160,11 +3194,12 @@ class _LibraryBookingPageState extends State<LibraryBookingPage> {
   }
 
   Future<void> _checkAccount(Map<String, dynamic> profile,
-      {ThereBookingClient? client}) async {
+      {LibraryBookingVenueData? client}) async {
+    if (_isDemo) return;
     final expected = await AcademicAccountStore().loadStudentId();
     if (expected != null &&
         !ThereBookingClient.matchesAccount(profile, expected)) {
-      await (client ?? _client).clearSession();
+      await ((client ?? _client) as ThereBookingClient).clearSession();
       throw const ThereBookingException(
         ThereFailureKind.business,
         '图书馆预约登录的是另一个校园账户，请退出校园账户后重新登录',
@@ -3186,7 +3221,7 @@ class _LibraryBookingPageState extends State<LibraryBookingPage> {
     final confirmed = await showDialog<bool>(
           context: context,
           builder: (context) => AlertDialog(
-            title: const Text('确认预约'),
+            title: Text(_isDemo ? '确认演示预约' : '确认预约'),
             content: Text('$_selectedAreaPath\n'
                 '${ThereBookingClient.string(room?['name']) ?? '座位'}\n'
                 '$_day  $_start—$_end'),
@@ -3582,6 +3617,7 @@ class _LibraryBookingPageState extends State<LibraryBookingPage> {
   }
 
   Future<void> _finishBooking(String id, {required BookingVenue venue}) async {
+    if (_isDemo) return;
     final confirmed = await showDialog<bool>(
           context: context,
           builder: (context) => AlertDialog(
@@ -3605,7 +3641,7 @@ class _LibraryBookingPageState extends State<LibraryBookingPage> {
     if (!mounted) return;
     setState(() => _busy = true);
     var finished = false;
-    final client = _clientForVenue(venue);
+    final client = _liveClientForVenue(venue);
     try {
       await _read(() => _selectBookingVenue(venue, refresh: true),
           venue: venue, client: client);
@@ -3637,13 +3673,13 @@ class _LibraryBookingPageState extends State<LibraryBookingPage> {
   }
 
   Future<void> _signBooking(String id, {required BookingVenue venue}) async {
-    if (!venue.isChaoxing) return;
+    if (_isDemo || !venue.isChaoxing) return;
     await _bookingLoads[venue];
     if (!mounted || _busy) return;
     setState(() => _busy = true);
     var signed = false;
     var uncertain = false;
-    final client = _clientForVenue(venue) as ChaoxingBookingAdapter;
+    final client = _liveClientForVenue(venue) as ChaoxingBookingAdapter;
     try {
       await _read(() => _selectBookingVenue(venue, refresh: true),
           venue: venue, client: client);
@@ -3676,11 +3712,12 @@ class _LibraryBookingPageState extends State<LibraryBookingPage> {
   }
 
   Future<void> _recoverAfterWrite({bool webVpn = false}) async {
+    if (_isDemo) return;
     try {
       final recovered =
           webVpn ? await _restoreWebVpn(true) : await _authenticate();
       if (!recovered || !mounted) return;
-      if (webVpn) _client.resetSession();
+      if (webVpn) _liveClientForVenue(_activeClientVenue).resetSession();
       if (_step == _BookingStep.bookings) {
         await _loadBookings(force: true);
       } else {

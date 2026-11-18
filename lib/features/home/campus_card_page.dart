@@ -27,11 +27,25 @@ class CampusCardPage extends StatefulWidget {
     this.onCardUpdated,
     this.onAuthRequired,
     this.cache,
-  });
+  }) : isDemo = false;
 
+  CampusCardPage.demo({
+    super.key,
+    required CampusCardDataSource dataSource,
+    this.initialCard,
+  })  : isDemo = true,
+        serviceFactory = (() => dataSource),
+        cache = null,
+        initialQueriedAt = null,
+        fetchCardInfo = null,
+        onCardUpdated = null,
+        onAuthRequired = null,
+        onLogin = null;
+
+  final bool isDemo;
   final CampusCardCache? cache;
-  final Future<bool> Function() onLogin;
-  final CampusCardService Function()? serviceFactory;
+  final Future<bool> Function()? onLogin;
+  final CampusCardDataSource Function()? serviceFactory;
   final Future<CampusCardInfo> Function()? fetchCardInfo;
   final CampusCardInfo? initialCard;
   final DateTime? initialQueriedAt;
@@ -44,7 +58,7 @@ class CampusCardPage extends StatefulWidget {
 
 class _CampusCardPageState extends State<CampusCardPage> {
   CampusCardService? _ownedService;
-  CampusCardService get _service =>
+  CampusCardDataSource get _service =>
       widget.serviceFactory?.call() ?? (_ownedService ??= CampusCardService());
   static const _recentBillLimit = CampusCardRecentSnapshot.limit;
   bool _historyOpen = false;
@@ -465,7 +479,8 @@ class _CampusCardPageState extends State<CampusCardPage> {
   }
 
   Future<bool> _login({bool refreshAfterLogin = true}) async {
-    if (_loggingIn) return false;
+    final onLogin = widget.onLogin;
+    if (_loggingIn || onLogin == null) return false;
     if (refreshAfterLogin) {
       ++_refreshRevision;
       _supersedeRefresh();
@@ -491,7 +506,7 @@ class _CampusCardPageState extends State<CampusCardPage> {
       // Finish any expiry bookkeeping before the host starts a fresh login.
       await Future.wait(_authNotifications.values.toList());
       if (!mounted) return false;
-      loggedIn = await widget.onLogin();
+      loggedIn = await onLogin();
       if (loggedIn && mounted) {
         final studentId = await AcademicAccountStore().loadStudentId();
         if (!mounted) return false;
@@ -611,7 +626,8 @@ class _CampusCardPageState extends State<CampusCardPage> {
       context: context,
       builder: (context) => AlertDialog(
         title: const Text('校园卡信息说明'),
-        content: const Text('数据由学校信息门户提供，可能存在同步延迟。'),
+        content:
+            Text(widget.isDemo ? '余额和消费记录均为演示数据。' : '数据由学校信息门户提供，可能存在同步延迟。'),
         actions: [
           TextButton(
             onPressed: () => Navigator.of(context).pop(),
@@ -800,24 +816,26 @@ class _CampusCardPageState extends State<CampusCardPage> {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Expanded(child: _balanceContent()),
-          const SizedBox(width: 16),
-          Padding(
-            padding: const EdgeInsets.only(top: 1),
-            child: FilledButton.icon(
-              key: const ValueKey('campus-card-recharge'),
-              onPressed: _openingRecharge ? null : _openRecharge,
-              style: FilledButton.styleFrom(
-                backgroundColor: colors.accent,
-                foregroundColor: colors.onAccent,
-                minimumSize: const Size(0, 40),
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
-                textStyle: ShuYoTextStyles.label(),
+          if (!widget.isDemo) ...[
+            const SizedBox(width: 16),
+            Padding(
+              padding: const EdgeInsets.only(top: 1),
+              child: FilledButton.icon(
+                key: const ValueKey('campus-card-recharge'),
+                onPressed: _openingRecharge ? null : _openRecharge,
+                style: FilledButton.styleFrom(
+                  backgroundColor: colors.accent,
+                  foregroundColor: colors.onAccent,
+                  minimumSize: const Size(0, 40),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
+                  textStyle: ShuYoTextStyles.label(),
+                ),
+                icon: const Icon(Icons.open_in_new, size: 16),
+                label: const Text('充值'),
               ),
-              icon: const Icon(Icons.open_in_new, size: 16),
-              label: const Text('充值'),
             ),
-          ),
+          ],
         ],
       ),
     );

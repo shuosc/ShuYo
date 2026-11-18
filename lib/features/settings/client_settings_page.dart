@@ -178,7 +178,7 @@ class ClientSettingsPage extends StatelessWidget {
           context: context,
           builder: (context) => AlertDialog(
             title: const Text('退出演示模式？'),
-            content: const Text('退出后将返回正常登录流程，并清除本地演示数据。'),
+            content: const Text('将结束本次演示，返回 ShuYo。'),
             actions: [
               TextButton(
                 onPressed: () => Navigator.of(context).pop(false),

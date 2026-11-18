@@ -24,17 +24,25 @@ class CourseReviewRepository {
     Future<AcademicSchedule?> Function()? scheduleLoader,
     required this.studentIdentityService,
     required this.scheduleRepository,
-    this.isDemo = false,
-  })  : _api = apiClient ?? CourseReviewApiClient(),
+  })  : isDemo = false,
+        _api = apiClient ?? CourseReviewApiClient(),
         _preferencesLoader = preferencesLoader ?? SharedPreferences.getInstance,
         _scheduleLoader =
             scheduleLoader ?? scheduleRepository.loadCachedSchedule;
 
+  /// Shares timetable processing with the demonstration repository, without
+  /// constructing live network, identity, or preference dependencies.
+  CourseReviewRepository.offline({
+    required this.scheduleRepository,
+    required Future<AcademicSchedule?> Function() scheduleLoader,
+  })  : isDemo = true,
+        _scheduleLoader = scheduleLoader;
+
   static const _scheduleCollapsedKey = 'rate.home.schedule.collapsed';
 
-  final CourseReviewApiClient _api;
-  final Future<SharedPreferences> Function() _preferencesLoader;
-  final StudentIdentityService studentIdentityService;
+  late final CourseReviewApiClient _api;
+  late final Future<SharedPreferences> Function() _preferencesLoader;
+  late final StudentIdentityService studentIdentityService;
   final AcademicScheduleRepository scheduleRepository;
   final Future<AcademicSchedule?> Function() _scheduleLoader;
   final bool isDemo;

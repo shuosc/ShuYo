@@ -97,24 +97,6 @@ extension AcademicScheduleCollection on AcademicScheduleRepository {
     }
   }
 
-  Future<List<AcademicScheduleRecord>> loadSavedSchedules() async {
-    final legacy = await loadCachedSchedule();
-    final owner = await _dataOwner() ?? legacy?.term.studentId;
-    return owner == null
-        ? <AcademicScheduleRecord>[]
-        : await _collection.list(owner);
-  }
-
-  Future<String?> loadPrimaryTermKey() async {
-    final owner = await _dataOwner();
-    return owner == null ? null : _collection.primaryKey(owner);
-  }
-
-  Future<AcademicScheduleRecord?> loadTermRecord(String key) async {
-    final owner = await _dataOwner();
-    return owner == null ? null : _collection.load(owner, key);
-  }
-
   Future<ScheduleWeekState> loadTermWeekState(String key,
       {DateTime? now}) async {
     if (key == await loadPrimaryTermKey()) return loadWeekState(now: now);

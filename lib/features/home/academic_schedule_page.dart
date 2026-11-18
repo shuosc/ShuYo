@@ -47,6 +47,7 @@ class AcademicSchedulePage extends StatefulWidget {
     this.initialLoadError,
     this.onPrimaryScheduleChanged,
     this.onViewedScheduleChanged,
+    this.isDemo = false,
   });
 
   final AcademicScheduleRepository repository;
@@ -59,6 +60,7 @@ class AcademicSchedulePage extends StatefulWidget {
   final AcademicScheduleDisplayState? initialDisplayState;
   final String? initialLoadError;
   final Future<void> Function()? onPrimaryScheduleChanged;
+  final bool isDemo;
 
   /// Reports the applied view, including local edits, after it is displayed.
   final ValueChanged<AcademicSchedule?>? onViewedScheduleChanged;
@@ -76,7 +78,9 @@ class _AcademicSchedulePageState extends State<AcademicSchedulePage> {
   bool _refreshing = false;
   bool _followsCurrentWeek = true;
   Timer? _weekTimer;
-  final _displaySettingsService = AcademicScheduleDisplaySettingsService();
+  late final _displaySettingsService = AcademicScheduleDisplaySettingsService(
+    scope: widget.isDemo ? 'demo' : null,
+  );
   AcademicScheduleDisplaySettings _displaySettings =
       const AcademicScheduleDisplaySettings(
           colorful: true, showTeacher: true, showCredit: false);
@@ -102,9 +106,7 @@ class _AcademicSchedulePageState extends State<AcademicSchedulePage> {
     _initialLoadError = widget.initialLoadError;
     if (initialState != null) {
       _applyCachedState(initialState.schedule, initialState.weekState);
-      unawaited(
-        widget.widgetService.syncFromCache(),
-      );
+      _syncWidget();
     }
     final initialDisplayState = widget.initialDisplayState;
     if (initialDisplayState != null) {
@@ -113,10 +115,12 @@ class _AcademicSchedulePageState extends State<AcademicSchedulePage> {
     _loadFuture = _usingInitialState ? Future<void>.value() : _loadCached();
     widget.repository.discoveryState.addListener(_discoveryChanged);
     if (_usingInitialState) unawaited(_loadInitialCollectionMetadata());
-    _weekTimer = Timer.periodic(
-      const Duration(minutes: 1),
-      (_) => _refreshDisplayedWeekIfNeeded(),
-    );
+    if (!widget.isDemo) {
+      _weekTimer = Timer.periodic(
+        const Duration(minutes: 1),
+        (_) => _refreshDisplayedWeekIfNeeded(),
+      );
+    }
   }
 
   @override
@@ -168,11 +172,12 @@ class _AcademicSchedulePageState extends State<AcademicSchedulePage> {
           ],
         ),
         actions: [
-          IconButton(
-            tooltip: '分享与导入',
-            onPressed: _openShareHub,
-            icon: const Icon(Icons.people_outlined),
-          ),
+          if (!widget.isDemo)
+            IconButton(
+              tooltip: '分享与导入',
+              onPressed: _openShareHub,
+              icon: const Icon(Icons.people_outlined),
+            ),
           IconButton(
             tooltip: '设置开学日期',
             onPressed: _schedule == null ? null : _setFirstWeekStartDate,
@@ -343,7 +348,7 @@ class _AcademicSchedulePageState extends State<AcademicSchedulePage> {
       _applyCachedState(schedule, weekState);
       _applyDisplayState(displayState);
     });
-    unawaited(widget.widgetService.syncFromCache());
+    _syncWidget();
   }
 
   Future<void> _loadInitialCollectionMetadata() async {
@@ -401,8 +406,10 @@ class _AcademicSchedulePageState extends State<AcademicSchedulePage> {
   }
 
   Future<void> _primaryChanged() async {
-    unawaited(widget.widgetService.syncFromCache());
-    await widget.notificationService.syncScheduleReminders();
+    _syncWidget();
+    if (!widget.isDemo) {
+      await widget.notificationService.syncScheduleReminders();
+    }
     await widget.onPrimaryScheduleChanged?.call();
   }
 
@@ -420,10 +427,20 @@ class _AcademicSchedulePageState extends State<AcademicSchedulePage> {
     await _loadCached();
   }
 
+  void _syncWidget() {
+    if (!widget.isDemo) unawaited(widget.widgetService.syncFromCache());
+  }
+
   Future<int> _syncReminders({bool requestPermission = false}) async {
-    if (!_viewingPrimary) return 0;
+    if (widget.isDemo || !_viewingPrimary) return 0;
     return widget.notificationService
         .syncScheduleReminders(requestPermission: requestPermission);
+  }
+
+  void _scheduleEdited() {
+    _syncWidget();
+    unawaited(_syncReminders());
+    if (widget.isDemo) unawaited(widget.onPrimaryScheduleChanged?.call());
   }
 
   void _applyDisplayState(AcademicScheduleDisplayState state) {
@@ -504,10 +521,8 @@ class _AcademicSchedulePageState extends State<AcademicSchedulePage> {
             _followsCurrentWeek = true;
           });
         }
-        unawaited(
-          widget.widgetService.syncFromCache(),
-        );
-        final reminderCount = targetIsPrimary
+        _syncWidget();
+        final reminderCount = !widget.isDemo && targetIsPrimary
             ? await widget.notificationService.syncScheduleReminders(
                 requestPermission: true,
               )
@@ -517,7 +532,11 @@ class _AcademicSchedulePageState extends State<AcademicSchedulePage> {
         }
         await _loadCached();
         if (targetIsPrimary) await widget.onPrimaryScheduleChanged?.call();
-        _showScheduleReminderSnack('课表已同步', reminderCount);
+        if (widget.isDemo) {
+          _showSnack('已恢复演示课表');
+        } else {
+          _showScheduleReminderSnack('课表已同步', reminderCount);
+        }
       } on AcademicNoScheduleException {
         if (!mounted) return;
         final key = targetKey;
@@ -583,8 +602,10 @@ class _AcademicSchedulePageState extends State<AcademicSchedulePage> {
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
-        title: const Text('确认更新'),
-        content: const Text('点击确定后将更新正在查看的这一学期，不会保留本地编辑。'),
+        title: Text(widget.isDemo ? '恢复演示课表' : '确认更新'),
+        content: Text(
+          widget.isDemo ? '恢复演示课程与开学日期。' : '点击确定后将更新正在查看的这一学期，不会保留本地编辑。',
+        ),
         actions: [
           TextButton(
             onPressed: () => Navigator.of(context).pop(false),
@@ -679,10 +700,12 @@ class _AcademicSchedulePageState extends State<AcademicSchedulePage> {
     final weekState = _viewedTermKey == null
         ? await widget.repository.loadWeekState()
         : await widget.repository.loadTermWeekState(_viewedTermKey!);
-    await TermCalendarStore().save(
-      '${schedule.term.yearCode}:${schedule.term.termCode}',
-      weekState.firstWeekStart,
-    );
+    if (!widget.isDemo) {
+      await TermCalendarStore().save(
+        '${schedule.term.yearCode}:${schedule.term.termCode}',
+        weekState.firstWeekStart,
+      );
+    }
     if (!mounted) {
       return;
     }
@@ -696,9 +719,7 @@ class _AcademicSchedulePageState extends State<AcademicSchedulePage> {
       _followsCurrentWeek = true;
       _selectedManualSlot = null;
     });
-    unawaited(
-      widget.widgetService.syncFromCache(),
-    );
+    _syncWidget();
     await _syncReminders(
       requestPermission: true,
     );
@@ -776,10 +797,7 @@ class _AcademicSchedulePageState extends State<AcademicSchedulePage> {
             });
       }
     }
-    unawaited(
-      widget.widgetService.syncFromCache(),
-    );
-    unawaited(_syncReminders());
+    _scheduleEdited();
   }
 
   Future<void> _handleDayHeaderTap(int weekday) async {
@@ -1040,10 +1058,7 @@ class _AcademicSchedulePageState extends State<AcademicSchedulePage> {
       _setViewedSchedule(next);
       _selectedManualSlot = null;
     });
-    unawaited(
-      widget.widgetService.syncFromCache(),
-    );
-    unawaited(_syncReminders());
+    _scheduleEdited();
   }
 
   Future<void> _handleCourseTap(CourseSession session) async {
@@ -1151,10 +1166,7 @@ class _AcademicSchedulePageState extends State<AcademicSchedulePage> {
         nextColorValue,
       );
     }
-    unawaited(
-      widget.widgetService.syncFromCache(),
-    );
-    unawaited(_syncReminders());
+    _scheduleEdited();
   }
 
   Future<void> _deleteCourse(
@@ -1212,10 +1224,7 @@ class _AcademicSchedulePageState extends State<AcademicSchedulePage> {
       _setViewedSchedule(next);
       _selectedManualSlot = null;
     });
-    unawaited(
-      widget.widgetService.syncFromCache(),
-    );
-    unawaited(_syncReminders());
+    _scheduleEdited();
   }
 
   Future<_CourseDeleteScope?> _openDeleteScopeMenu(
@@ -1430,7 +1439,7 @@ class _AcademicSchedulePageState extends State<AcademicSchedulePage> {
                             child: CircularProgressIndicator(strokeWidth: 3),
                           )
                         : const Icon(Icons.refresh),
-                    title: const Text('更新课表'),
+                    title: Text(widget.isDemo ? '恢复演示课表' : '更新课表'),
                     enabled: !_refreshing,
                     onTap: () => Navigator.of(context)
                         .pop(_ScheduleMenuAction.updateSchedule),
@@ -1449,12 +1458,13 @@ class _AcademicSchedulePageState extends State<AcademicSchedulePage> {
                     onTap: () => Navigator.of(context)
                         .pop(_ScheduleMenuAction.randomColors),
                   ),
-                  ListTile(
-                    leading: const Icon(Icons.notifications_none),
-                    title: const Text('通知设置'),
-                    onTap: () =>
-                        Navigator.of(context).pop(_ScheduleMenuAction.settings),
-                  ),
+                  if (!widget.isDemo)
+                    ListTile(
+                      leading: const Icon(Icons.notifications_none),
+                      title: const Text('通知设置'),
+                      onTap: () => Navigator.of(context)
+                          .pop(_ScheduleMenuAction.settings),
+                    ),
                   ListTile(
                     leading: const Icon(Icons.palette_outlined),
                     title: const Text('显示设置'),
@@ -1568,7 +1578,9 @@ class _AcademicSchedulePageState extends State<AcademicSchedulePage> {
       builder: (context) => AlertDialog(
         title: const Text('课表信息说明'),
         content: Text(
-          '应用每次获取的课表信息为当时教务系统中数据，并非实时更新\n\n因此当发生课程变更、教室变更等情况，需手动进行刷新\n\n$syncText',
+          widget.isDemo
+              ? '课表使用随应用提供的演示课程。课程和开学日期的编辑仅保留在本次运行中。'
+              : '应用每次获取的课表信息为当时教务系统中数据，并非实时更新\n\n因此当发生课程变更、教室变更等情况，需手动进行刷新\n\n$syncText',
         ),
         actions: [
           TextButton(
@@ -1713,9 +1725,7 @@ class _AcademicSchedulePageState extends State<AcademicSchedulePage> {
       _displayedWeek = displayedWeek;
       _selectedManualSlot = null;
     });
-    unawaited(
-      widget.widgetService.syncFromCache(),
-    );
+    _syncWidget();
   }
 
   @override

@@ -668,7 +668,7 @@ class _NativeLoginPageState extends State<NativeLoginPage> {
     // 演示模式完全离线，在发起网络请求之前处理。
     if (widget.destination == NativeLoginDestination.academic &&
         DemoSession.matchesCredentials(_studentId.text, _password.text)) {
-      await _submitDemoLogin();
+      _closeWith(NativeLoginResult.demo);
       return;
     }
     if (!mounted) return;
@@ -713,25 +713,6 @@ class _NativeLoginPageState extends State<NativeLoginPage> {
     } finally {
       if (mounted) setState(() => _busy = false);
     }
-  }
-
-  /// 进入本地演示模式并返回结果。
-  ///
-  /// 全程离线，在任何网络请求之前处理。
-  Future<void> _submitDemoLogin() async {
-    setState(() => _busy = true);
-    try {
-      // The in-memory route must still work if persistence is unavailable
-      // (for example, in a restricted review environment). The app state is
-      // switched by the caller; persistence only keeps Demo active after a
-      // restart.
-      await DemoSession.enable();
-    } on Object {
-      // Continue into the local demo even when preferences cannot be written.
-    } finally {
-      if (mounted) setState(() => _busy = false);
-    }
-    _closeWith(NativeLoginResult.demo);
   }
 
   Future<void> _startWeComLogin() async {

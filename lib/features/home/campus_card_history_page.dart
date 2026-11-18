@@ -21,7 +21,7 @@ class CampusCardHistoryPage extends StatefulWidget {
   });
 
   final Future<bool> Function() onLogin;
-  final CampusCardService Function()? serviceFactory;
+  final CampusCardDataSource Function()? serviceFactory;
   final Future<void> Function(CampusCardAuthRequiredException)? onAuthRequired;
   final CampusCardInfo? initialCard;
   final DateTime? initialQueriedAt;
@@ -34,7 +34,7 @@ class CampusCardHistoryPage extends StatefulWidget {
 class _CampusCardHistoryPageState extends State<CampusCardHistoryPage>
     with SingleTickerProviderStateMixin {
   CampusCardService? _ownedService;
-  CampusCardService get _service =>
+  CampusCardDataSource get _service =>
       widget.serviceFactory?.call() ?? (_ownedService ??= CampusCardService());
   final _scrollController = ScrollController();
   late final TabController _tabController;

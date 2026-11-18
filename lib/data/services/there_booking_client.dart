@@ -50,7 +50,24 @@ class ThereBookingException implements Exception {
   String toString() => message;
 }
 
-class ThereBookingClient {
+abstract interface class LibraryBookingVenueData {
+  Future<Map<String, dynamic>> profile();
+  Future<List<Map<String, dynamic>>> recent();
+  Future<Map<String, dynamic>> overview(String day);
+  Future<List<Map<String, dynamic>>> areas(String day);
+  Future<Map<String, dynamic>> area(String areaId, String begin, String end);
+  Future<Map<String, dynamic>> detail(String bookingId);
+  Future<String> create({
+    required String areaId,
+    required String roomId,
+    required String day,
+    required String start,
+    required String end,
+  });
+  Future<void> cancel(String bookingId);
+}
+
+class ThereBookingClient implements LibraryBookingVenueData {
   ThereBookingClient({
     HttpClient? httpClient,
     SessionCookieJar? cookieJar,
@@ -234,6 +251,7 @@ class ThereBookingClient {
     await selectVenue(venue);
   }
 
+  @override
   Future<Map<String, dynamic>> profile() async {
     final data = object((await _api('GET', '/api/v3/my/profile'))['data']);
     if (data == null ||
@@ -248,18 +266,22 @@ class ThereBookingClient {
     return data;
   }
 
+  @override
   Future<List<Map<String, dynamic>>> recent() async =>
       objects((await _api('GET', '/api/v3/my/bookings/recent'))['data']);
 
+  @override
   Future<Map<String, dynamic>> overview(String day) async =>
       object((await _api('GET', '/api/v3/booking-status/overview',
           query: {'day': day}))['data']) ??
       const {};
 
+  @override
   Future<List<Map<String, dynamic>>> areas(String day) async =>
       objects((await _api('GET', '/api/v3/booking-status/areas',
           query: {'begin': day, 'end': day}))['data']);
 
+  @override
   Future<Map<String, dynamic>> area(
           String areaId, String begin, String end) async =>
       object((await _api(
@@ -269,6 +291,7 @@ class ThereBookingClient {
       ))['data']) ??
       const {};
 
+  @override
   Future<Map<String, dynamic>> detail(String bookingId) async {
     final data = object((await _api(
       'GET',
@@ -285,6 +308,7 @@ class ThereBookingClient {
   }
 
   /// Refreshes the selected interval immediately before creating a booking.
+  @override
   Future<String> create({
     required String areaId,
     required String roomId,
@@ -370,6 +394,7 @@ class ThereBookingClient {
     }
   }
 
+  @override
   Future<void> cancel(String bookingId) async {
     final current = await detail(bookingId);
     if (!strings(current['abilities']).contains('cancel')) {

@@ -33,8 +33,19 @@ class _CampusCardTokenExpiredException extends CampusCardAuthRequiredException {
   final String token;
 }
 
+abstract interface class CampusCardDataSource {
+  Future<CampusCardInfo> fetchCardInfo();
+
+  Future<List<CampusCardBill>> fetchBills({
+    required DateTime startDate,
+    required DateTime endDate,
+    void Function(List<CampusCardBill>)? onProgress,
+    bool Function()? shouldCancel,
+  });
+}
+
 /// 只访问门户的身份与校园卡查询接口，不承载支付或充值会话。
-class CampusCardService {
+class CampusCardService implements CampusCardDataSource {
   CampusCardService({
     HttpClient? httpClient,
     UnifiedAccountService? accountService,
@@ -60,6 +71,7 @@ class CampusCardService {
   Future<void> clearSession() =>
       _store.delete(SecureAppStore.campusCardSessionKey);
 
+  @override
   Future<CampusCardInfo> fetchCardInfo() => _withSession((session) async =>
       session.initialCard ?? await _readCard(session.token, session.studentId));
 
@@ -67,6 +79,7 @@ class CampusCardService {
   /// reset when a new session operation starts. Cancellation is checked at
   /// request boundaries; partial progress is never a successful final result.
   /// Empty ranges are queried but do not publish unchanged snapshots.
+  @override
   Future<List<CampusCardBill>> fetchBills({
     required DateTime startDate,
     required DateTime endDate,

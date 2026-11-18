@@ -232,6 +232,7 @@ class _StartupOnboardingState extends State<StartupOnboarding>
   bool _webVpnExpanded = false;
   bool _changingWebVpn = false;
   bool _choosingIdentity = false;
+  bool _enteringDemo = false;
   late bool _academicLoggedIn = widget.initialAcademicLoggedIn;
   late bool _academicSessionExpired = widget.initialAcademicSessionExpired;
   late bool _webVpnEnabled = widget.controller.webVpnEnabled;
@@ -489,13 +490,18 @@ class _StartupOnboardingState extends State<StartupOnboarding>
   }
 
   Future<void> _enterDemoMode() async {
-    if (!mounted) return;
-    setState(() {
-      _academicLoggedIn = true;
-    });
-    await widget.onDemoLogin?.call();
-    if (!mounted) return;
-    await _complete();
+    if (!mounted || _enteringDemo) return;
+    setState(() => _enteringDemo = true);
+    try {
+      await widget.onDemoLogin?.call();
+      if (_accountManagerMode && mounted) {
+        widget.controller.markAccountManagerClosed();
+      }
+    } on Object {
+      if (mounted) _showPanelNotice('无法打开演示，请重试');
+    } finally {
+      if (mounted) setState(() => _enteringDemo = false);
+    }
   }
 
   Future<bool> _confirmLogout({
@@ -798,7 +804,17 @@ class _StartupOnboardingState extends State<StartupOnboarding>
           _feature(Icons.map_outlined, '校园服务', '探索更多校园生活功能'),
           _feature(Icons.notifications_none, '重要提醒', '不错过课程和校园公告'),
         ],
-        pageFooter: _terms(context),
+        pageFooter: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (widget.onDemoLogin != null && !_accountManagerMode)
+              TextButton(
+                onPressed: _enteringDemo ? null : _enterDemoMode,
+                child: const Text('体验演示模式'),
+              ),
+            _terms(context),
+          ],
+        ),
       );
 
   Widget _notifications(BuildContext context) => _content(

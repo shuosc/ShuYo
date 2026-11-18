@@ -1,5 +1,6 @@
 import '../../core/classroom_url_resolver.dart';
 import '../models/academic_schedule.dart';
+import '../models/academic_schedule_collection.dart';
 import '../models/academic_progress.dart';
 import '../models/academic_ranking.dart';
 import '../models/announcement.dart';
@@ -12,23 +13,82 @@ import '../repositories/academic_ranking_repository.dart';
 import '../repositories/announcement_repository.dart';
 import '../repositories/classroom_repository.dart';
 import '../repositories/otp_token_repository.dart';
+import 'demo_data_bundle.dart';
 
 class DemoAcademicScheduleRepository extends AcademicScheduleRepository {
-  DemoAcademicScheduleRepository(this.schedule);
+  DemoAcademicScheduleRepository(this._snapshot) : _schedule = _snapshot;
 
-  final AcademicSchedule schedule;
+  final AcademicSchedule _snapshot;
+  AcademicSchedule _schedule;
+  static final _sampleFirstWeekStart =
+      AcademicScheduleRepository.startOfWeek(DemoDataBundle.previewTime);
+  DateTime _firstWeekStart = _sampleFirstWeekStart;
+
+  AcademicScheduleRecord get _record => AcademicScheduleRecord(
+        studentId: _schedule.term.studentId,
+        yearCode: _schedule.term.yearCode,
+        termCode: _schedule.term.termCode,
+        academicYearName: _schedule.term.academicYearName,
+        termName: _schedule.term.termName,
+        availability: ScheduleAvailability.available,
+        schedule: _schedule,
+        remoteSchedule: _snapshot,
+        firstWeekStart: _firstWeekStart,
+      );
 
   @override
   bool get supportsTermDiscovery => false;
 
   @override
-  Future<AcademicSchedule?> loadCachedSchedule() async => schedule;
+  Future<List<AcademicScheduleRecord>> loadSavedSchedules() async => [_record];
 
   @override
-  Future<AcademicSchedule> refreshSchedule() async => schedule;
+  Future<String> loadPrimaryTermKey() async => _record.key;
 
   @override
-  Future<void> saveCachedSchedule(AcademicSchedule schedule) async {}
+  Future<AcademicScheduleRecord?> loadTermRecord(String key) async {
+    final record = _record;
+    return record.key == key ? record : null;
+  }
+
+  @override
+  Future<ScheduleWeekState> loadWeekState({DateTime? now}) async =>
+      ScheduleWeekState(currentWeek: 1, anchorMonday: _firstWeekStart);
+
+  @override
+  Future<void> setFirstWeekStart(DateTime date) async {
+    _firstWeekStart = AcademicScheduleRepository.startOfWeek(date);
+  }
+
+  @override
+  int activeWeekFromState(
+    AcademicSchedule schedule,
+    ScheduleWeekState state, {
+    DateTime? now,
+  }) =>
+      super.activeWeekFromState(
+        schedule,
+        state,
+        now: now ?? DemoDataBundle.previewTime,
+      );
+
+  @override
+  Future<ScheduleHomeSummary> homeSummary({DateTime? now}) =>
+      super.homeSummary(now: now ?? DemoDataBundle.previewTime);
+
+  @override
+  Future<AcademicSchedule> loadCachedSchedule() async => _schedule;
+
+  @override
+  Future<AcademicSchedule> refreshSchedule() async {
+    _firstWeekStart = _sampleFirstWeekStart;
+    return _schedule = _snapshot;
+  }
+
+  @override
+  Future<void> saveCachedSchedule(AcademicSchedule schedule) async {
+    _schedule = schedule;
+  }
 }
 
 class DemoAcademicProgressRepository extends AcademicProgressRepository {

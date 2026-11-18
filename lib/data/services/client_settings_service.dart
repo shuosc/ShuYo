@@ -58,6 +58,7 @@ class ClientSettingsService {
   static const followSystemThemeKey = 'client.theme.follow_system';
   static const customBackgroundKey = 'client.theme.custom_background';
   static const startupTabKey = 'client.startup.tab';
+  static const demoStartupTabKey = 'demo.startup.tab';
   static const defaultAnnouncementSourceKey = 'announcements.defaultSource';
   static const homeLayoutKey = 'client.home.layout.v1';
   static const demoHomeLayoutKey = 'demo.home.layout.v1';
@@ -309,14 +310,19 @@ class ClientSettingsService {
     }
   }
 
-  Future<AppTab> loadStartupTab() async {
+  Future<AppTab> loadStartupTab({bool isDemo = false}) async {
     final prefs = await _preferencesLoader();
-    return AppTab.fromStorageId(prefs.getString(startupTabKey));
+    return AppTab.fromStorageId(
+      prefs.getString(isDemo ? demoStartupTabKey : startupTabKey),
+    );
   }
 
-  Future<void> saveStartupTab(AppTab tab) async {
+  Future<void> saveStartupTab(AppTab tab, {bool isDemo = false}) async {
     final prefs = await _preferencesLoader();
-    await prefs.setString(startupTabKey, tab.storageId);
+    await prefs.setString(
+      isDemo ? demoStartupTabKey : startupTabKey,
+      tab.storageId,
+    );
   }
 
   Future<bool> loadStartupOnboardingCompleted() async {

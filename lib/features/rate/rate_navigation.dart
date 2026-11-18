@@ -56,8 +56,13 @@ Future<void> openRateProfile(
     _push(context, RateProfilePage(repository: repo));
 
 Future<void> openRateFeedbackList(
-        BuildContext context, CourseReviewRepository repo) =>
-    _push(context, RateFeedbackListPage(repository: repo));
+    BuildContext context, CourseReviewRepository repo) async {
+  if (repo.isDemo) {
+    showRateSnack(context, '演示模式暂不支持课评反馈');
+    return;
+  }
+  await _push<void>(context, RateFeedbackListPage(repository: repo));
+}
 
 /// Opens the course review feedback form linked to a unit or a course.
 Future<void> openRateFeedbackComposer(
@@ -81,7 +86,7 @@ Future<bool> openRatePublish(
   RateUnit unit, {
   RateMyReview? existing,
 }) async {
-  if (!await ensureRateIdentity(context, repo)) return false;
+  if (!repo.isDemo && !await ensureRateIdentity(context, repo)) return false;
   if (!context.mounted) return false;
   final saved = await _push<bool>(
     context,
@@ -95,7 +100,7 @@ Future<bool> openRatePublish(
 Future<bool> ensureRateIdentity(
     BuildContext context, CourseReviewRepository repo) async {
   if (repo.isDemo) {
-    showRateSnack(context, '演示模式暂不支持发布评价');
+    showRateSnack(context, '演示模式暂不支持课评反馈');
     return false;
   }
   final identity = repo.studentIdentityService;
