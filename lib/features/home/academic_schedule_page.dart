@@ -615,7 +615,7 @@ class _AcademicSchedulePageState extends State<AcademicSchedulePage> {
         return AlertDialog(
           title: const Text('确认随机颜色'),
           content: Text(
-            '点击确定后将为当前学期所有课程随机分配配色。'
+            '点击确定后将为当前课表所有课程随机分配颜色。'
             '${overwritesManual ? '已手动设置的颜色会被覆盖。' : ''}'
             '${_displaySettings.colorful ? '' : '将同时打开多彩显示。'}',
           ),
@@ -659,8 +659,6 @@ class _AcademicSchedulePageState extends State<AcademicSchedulePage> {
     if (!mounted) {
       return;
     }
-    final previousColors = Map<String, int>.of(_courseColorValues);
-    final previousSettings = _displaySettings;
     final palette = context.shuyoColors.schedulePalette;
     final random = Random();
     // Colors assigned to courses outside the current term are kept as they are.
@@ -685,30 +683,7 @@ class _AcademicSchedulePageState extends State<AcademicSchedulePage> {
       _courseColorValues = next;
       _displaySettings = settings;
     });
-    _showSnack(
-      '已随机分配颜色',
-      action: SnackBarAction(
-        label: '撤销',
-        onPressed: () => unawaited(
-          _restoreColors(previousColors, previousSettings),
-        ),
-      ),
-    );
-  }
-
-  /// Puts back the colors and display settings captured before a
-  /// reassignment, used by the snack bar action.
-  Future<void> _restoreColors(
-    Map<String, int> colors,
-    AcademicScheduleDisplaySettings settings,
-  ) async {
-    await _displaySettingsService.saveCourseColors(colors);
-    final restored = await _displaySettingsService.saveSettings(settings);
-    if (!mounted) return;
-    setState(() {
-      _courseColorValues = colors;
-      _displaySettings = restored;
-    });
+    _showSnack('已随机分配颜色');
   }
 
   Future<bool> _recoverSession() async {
@@ -1712,21 +1687,12 @@ class _AcademicSchedulePageState extends State<AcademicSchedulePage> {
     return messages.isEmpty ? '通知设置已保存' : messages.join('；');
   }
 
-  void _showSnack(String message, {SnackBarAction? action}) {
+  void _showSnack(String message) {
     if (!mounted) {
       return;
     }
     ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(message),
-        action: action,
-        // SnackBar defaults `persist` to true whenever an action is present,
-        // which makes it ignore `duration` and stay until tapped.
-        persist: false,
-        duration: action == null
-            ? const Duration(seconds: 4)
-            : const Duration(seconds: 2),
-      ),
+      SnackBar(content: Text(message)),
     );
   }
 

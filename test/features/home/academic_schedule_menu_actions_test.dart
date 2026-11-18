@@ -49,7 +49,7 @@ void main() {
     await tester.tap(find.text('随机颜色'));
     await tester.pumpAndSettle();
     expect(find.text('确认随机颜色'), findsOneWidget);
-    expect(find.textContaining('点击确定后将为当前学期所有课程随机分配配色。'), findsOneWidget);
+    expect(find.textContaining('点击确定后将为当前课表所有课程随机分配颜色。'), findsOneWidget);
     expect(find.textContaining('同时打开多彩显示。'), findsOneWidget);
     await tester.tap(find.text('确定'));
     await tester.pumpAndSettle();
@@ -248,7 +248,7 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('the snack bar undo restores colors and the color mode',
+  testWidgets('randomizing replaces saved colors and shows success',
       (tester) async {
     SharedPreferences.setMockInitialValues({});
     final repository = _ScheduleRepository();
@@ -268,12 +268,8 @@ void main() {
     expect((await service.loadState()).settings.colorful, isTrue);
     expect((await service.loadCourseColors())['MATH101'], isNot(manual));
 
-    expect(find.text('撤销'), findsOneWidget);
-    await tester.tap(find.text('撤销'));
-    await tester.pumpAndSettle();
-
-    expect((await service.loadCourseColors())['MATH101'], manual);
-    expect((await service.loadState()).settings.colorful, isFalse);
+    expect(find.text('已随机分配颜色'), findsOneWidget);
+    expect(tester.widget<SnackBar>(find.byType(SnackBar)).action, isNull);
     expect(tester.takeException(), isNull);
   });
 
