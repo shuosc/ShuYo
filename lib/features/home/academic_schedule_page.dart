@@ -88,9 +88,7 @@ class _AcademicSchedulePageState extends State<AcademicSchedulePage> {
           colorful: true, showTeacher: true, showCredit: false);
   Map<String, int> _courseColorValues = const {};
 
-  /// When the user last confirmed a color reassignment, used to keep the
-  /// dialog away while colors are re-rolled.
-  DateTime? _colorsConfirmedAt;
+  final _colorsConfirmedAtByTerm = <(String, String), DateTime>{};
   late bool _usingInitialState;
   String? _initialLoadError;
   String? _viewedTermKey;
@@ -102,6 +100,14 @@ class _AcademicSchedulePageState extends State<AcademicSchedulePage> {
 
   bool get _viewingPrimary =>
       _viewedTermKey == null || _viewedTermKey == _primaryTermKey;
+
+  (String, String) _termIdentity(AcademicTerm term) =>
+      (term.studentId, academicTermKey(term.yearCode, term.termCode));
+
+  bool _isViewingTerm(AcademicTerm term) {
+    final viewed = _schedule?.term;
+    return viewed != null && _termIdentity(viewed) == _termIdentity(term);
+  }
 
   @override
   void initState() {
@@ -310,10 +316,7 @@ class _AcademicSchedulePageState extends State<AcademicSchedulePage> {
   }
 
   Future<void> _loadCached() async {
-    final cachedStateFuture = widget.repository.loadCachedState();
-    final displayStateFuture = _displaySettingsService.loadState();
-    final cachedState = await cachedStateFuture;
-    final displayState = await displayStateFuture;
+    final cachedState = await widget.repository.loadCachedState();
     final records = await widget.repository.loadSavedSchedules();
     final primary = await widget.repository.loadPrimaryTermKey();
     AcademicScheduleRecord? viewed;
@@ -346,6 +349,8 @@ class _AcademicSchedulePageState extends State<AcademicSchedulePage> {
         : key == null || key == primary
             ? cachedState.weekState
             : await widget.repository.loadTermWeekState(key);
+    final displayState =
+        await _displaySettingsService.loadState(term: schedule?.term);
     if (!mounted) return;
     setState(() {
       _viewedTermKey = key;
@@ -363,8 +368,12 @@ class _AcademicSchedulePageState extends State<AcademicSchedulePage> {
     final key = academicTermKey(schedule.term.yearCode, schedule.term.termCode);
     final primary = await widget.repository.loadPrimaryTermKey();
     final record = await widget.repository.loadTermRecord(key);
-    if (!mounted) return;
+    final displayState = widget.initialDisplayState == null
+        ? await _displaySettingsService.loadState(term: schedule.term)
+        : null;
+    if (!mounted || !_isViewingTerm(schedule.term)) return;
     setState(() {
+      if (displayState != null) _applyDisplayState(displayState);
       _viewedTermKey = key;
       _primaryTermKey = primary ?? key;
       _calendarConfigured = record == null || record.firstWeekStart != null;
@@ -511,6 +520,10 @@ class _AcademicSchedulePageState extends State<AcademicSchedulePage> {
         final weekState = targetIsPrimary
             ? await widget.repository.loadWeekState()
             : await widget.repository.loadTermWeekState(targetKey);
+        final displayState =
+            _viewedTermKey == targetKey && !_isViewingTerm(schedule.term)
+                ? await _displaySettingsService.loadState(term: schedule.term)
+                : null;
         if (!mounted) {
           return;
         }
@@ -519,6 +532,7 @@ class _AcademicSchedulePageState extends State<AcademicSchedulePage> {
         if (_viewedTermKey == targetKey) {
           setState(() {
             _setViewedSchedule(schedule);
+            if (displayState != null) _applyDisplayState(displayState);
             _weekState = weekState;
             _displayedWeek = _displayableWeek(
               widget.repository.activeWeekFromState(schedule, weekState),
@@ -668,21 +682,22 @@ class _AcademicSchedulePageState extends State<AcademicSchedulePage> {
         .toSet()
         .toList()
       ..sort();
-    final now = DateTime.now();
-    if (!isConfirmationFresh(
-          confirmedAt: _colorsConfirmedAt,
-          now: now,
-          window: _randomizeConfirmWindow,
-        ) &&
-        !await _confirmRandomizeColors(keys)) {
+    final term = schedule.term;
+    final identity = _termIdentity(term);
+    final alreadyConfirmed = isConfirmationFresh(
+      confirmedAt: _colorsConfirmedAtByTerm[identity],
+      now: DateTime.now(),
+      window: _randomizeConfirmWindow,
+    );
+    if (!alreadyConfirmed && !await _confirmRandomizeColors(keys)) {
       return;
     }
-    if (!mounted) {
+    if (!mounted || !_isViewingTerm(term)) {
       return;
     }
+    if (!alreadyConfirmed) _colorsConfirmedAtByTerm[identity] = DateTime.now();
     final palette = context.shuyoColors.schedulePalette;
     final random = Random();
-    // Colors assigned to courses outside the current term are kept as they are.
     final next = <String, int>{..._courseColorValues};
     for (final key in keys) {
       final current = next[key] ?? _courseColor(context, key).toARGB32();
@@ -691,8 +706,7 @@ class _AcademicSchedulePageState extends State<AcademicSchedulePage> {
       final available = choices.isNotEmpty ? choices : palette;
       next[key] = available[random.nextInt(available.length)].toARGB32();
     }
-    await _displaySettingsService.saveCourseColors(next);
-    _colorsConfirmedAt = now;
+    await _displaySettingsService.saveCourseColors(term, next);
     AcademicScheduleDisplaySettings settings = _displaySettings;
     if (!settings.colorful) {
       settings = await _displaySettingsService.saveSettings(
@@ -700,11 +714,12 @@ class _AcademicSchedulePageState extends State<AcademicSchedulePage> {
       );
     }
     if (!mounted) return;
+    final viewingTerm = _isViewingTerm(term);
     setState(() {
-      _courseColorValues = next;
+      if (viewingTerm) _courseColorValues = next;
       _displaySettings = settings;
     });
-    _showSnack('已随机分配颜色');
+    if (viewingTerm) _showSnack('已随机分配颜色');
   }
 
   Future<bool> _recoverSession() async {
@@ -824,28 +839,13 @@ class _AcademicSchedulePageState extends State<AcademicSchedulePage> {
     final next = schedule.copyWith(
       sessions: [...schedule.sessions, ...sessions],
     );
-    await widget.repository.saveWorkingSchedule(next);
-    if (!mounted) {
-      return;
-    }
-    setState(() {
-      _setViewedSchedule(next);
-      _selectedManualSlot = null;
-    });
-    if (result.colorValue != null) {
-      final colorKey = _courseColorSeed(sessions.first);
-      await _displaySettingsService.saveCourseColor(
-        colorKey,
-        result.colorValue!,
-      );
-      if (mounted) {
-        setState(() => _courseColorValues = {
-              ..._courseColorValues,
-              colorKey: result.colorValue!,
-            });
-      }
-    }
-    _scheduleEdited();
+    final color = result.colorValue;
+    await _persistSessions(
+      next,
+      color: color == null
+          ? null
+          : (key: _courseColorSeed(sessions.first), value: color),
+    );
   }
 
   Future<void> _handleDayHeaderTap(int weekday) async {
@@ -1097,15 +1097,28 @@ class _AcademicSchedulePageState extends State<AcademicSchedulePage> {
         '已从${_weekdayName(sourceWeekday)}复制 ${sourceSessions.length} 门课');
   }
 
-  Future<void> _persistSessions(AcademicSchedule next) async {
+  Future<void> _persistSessions(
+    AcademicSchedule next, {
+    ({String key, int value})? color,
+  }) async {
     await widget.repository.saveWorkingSchedule(next);
-    if (!mounted) {
-      return;
+    if (color != null) {
+      await _displaySettingsService.saveCourseColor(
+        next.term,
+        color.key,
+        color.value,
+      );
     }
-    setState(() {
-      _setViewedSchedule(next);
-      _selectedManualSlot = null;
-    });
+    if (!mounted) return;
+    if (_isViewingTerm(next.term)) {
+      setState(() {
+        _setViewedSchedule(next);
+        _selectedManualSlot = null;
+        if (color != null) {
+          _courseColorValues = {..._courseColorValues, color.key: color.value};
+        }
+      });
+    }
     _scheduleEdited();
   }
 
@@ -1194,27 +1207,12 @@ class _AcademicSchedulePageState extends State<AcademicSchedulePage> {
     // color when renaming instead of generating another color from the new name.
     final nextColorValue = result.colorValue ??
         (nextColorKey != colorKey ? previousColorValue : null);
-    await widget.repository.saveWorkingSchedule(next);
-    if (!mounted) {
-      return;
-    }
-    setState(() {
-      _setViewedSchedule(next);
-      _selectedManualSlot = null;
-      if (nextColorValue != null) {
-        _courseColorValues = {
-          ..._courseColorValues,
-          nextColorKey: nextColorValue,
-        };
-      }
-    });
-    if (nextColorValue != null) {
-      await _displaySettingsService.saveCourseColor(
-        nextColorKey,
-        nextColorValue,
-      );
-    }
-    _scheduleEdited();
+    await _persistSessions(
+      next,
+      color: nextColorValue == null
+          ? null
+          : (key: nextColorKey, value: nextColorValue),
+    );
   }
 
   Future<void> _deleteCourse(
@@ -1263,16 +1261,7 @@ class _AcademicSchedulePageState extends State<AcademicSchedulePage> {
     if (!changed) {
       return;
     }
-    final next = schedule.copyWith(sessions: nextSessions);
-    await widget.repository.saveWorkingSchedule(next);
-    if (!mounted) {
-      return;
-    }
-    setState(() {
-      _setViewedSchedule(next);
-      _selectedManualSlot = null;
-    });
-    _scheduleEdited();
+    await _persistSessions(schedule.copyWith(sessions: nextSessions));
   }
 
   Future<_CourseDeleteScope?> _openDeleteScopeMenu(

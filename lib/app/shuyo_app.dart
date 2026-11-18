@@ -279,12 +279,12 @@ class _ShuYoAppState extends State<ShuYoApp> with WidgetsBindingObserver {
     AcademicScheduleRepository repository,
   ) async {
     try {
-      final scheduleStateFuture = repository.loadCachedState();
-      final displayStateFuture =
-          AcademicScheduleDisplaySettingsService().loadState();
+      final state = await repository.loadCachedState();
+      final displayState = await AcademicScheduleDisplaySettingsService()
+          .loadState(term: state.schedule?.term);
       return _InitialScheduleLoad(
-        state: await scheduleStateFuture,
-        displayState: await displayStateFuture,
+        state: state,
+        displayState: displayState,
       );
     } on Object catch (error) {
       return _InitialScheduleLoad(error: error.toString());

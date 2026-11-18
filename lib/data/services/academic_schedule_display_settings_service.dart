@@ -2,6 +2,9 @@ import 'dart:convert';
 
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../models/academic_schedule.dart';
+import '../models/academic_schedule_collection.dart';
+
 class AcademicScheduleDisplaySettings {
   const AcademicScheduleDisplaySettings({
     required this.colorful,
@@ -64,11 +67,16 @@ class AcademicScheduleDisplaySettingsService {
 
   final Future<SharedPreferences> Function() _preferencesLoader;
 
-  Future<AcademicScheduleDisplayState> loadState() async {
+  String _termCourseColorsKey(AcademicTerm term) => _key(
+        '$_courseColorsKey.term.${Uri.encodeComponent(term.studentId)}.'
+        '${academicTermKey(term.yearCode, term.termCode)}',
+      );
+
+  Future<AcademicScheduleDisplayState> loadState({AcademicTerm? term}) async {
     final prefs = await _preferencesLoader();
     return AcademicScheduleDisplayState(
       settings: _settingsFromPreferences(prefs),
-      courseColorValues: _courseColorsFromPreferences(prefs),
+      courseColorValues: _courseColorsFromPreferences(prefs, term),
     );
   }
 
@@ -105,13 +113,19 @@ class AcademicScheduleDisplaySettingsService {
     return settings;
   }
 
-  Future<Map<String, int>> loadCourseColors() async {
+  Future<Map<String, int>> loadCourseColors(AcademicTerm term) async {
     final prefs = await _preferencesLoader();
-    return _courseColorsFromPreferences(prefs);
+    return _courseColorsFromPreferences(prefs, term);
   }
 
-  Map<String, int> _courseColorsFromPreferences(SharedPreferences prefs) {
-    final raw = prefs.getString(_key(_courseColorsKey));
+  Map<String, int> _courseColorsFromPreferences(
+    SharedPreferences prefs,
+    AcademicTerm? term,
+  ) {
+    // Legacy colors are a read-only starting point for untouched terms.
+    final raw =
+        (term == null ? null : prefs.getString(_termCourseColorsKey(term))) ??
+            prefs.getString(_key(_courseColorsKey));
     if (raw == null || raw.isEmpty) {
       return <String, int>{};
     }
@@ -130,15 +144,22 @@ class AcademicScheduleDisplaySettingsService {
     }
   }
 
-  Future<void> saveCourseColor(String key, int colorValue) async {
-    final colors = await loadCourseColors();
-    colors[key] = colorValue;
+  Future<void> saveCourseColor(
+    AcademicTerm term,
+    String key,
+    int colorValue,
+  ) async {
     final prefs = await _preferencesLoader();
-    await prefs.setString(_key(_courseColorsKey), jsonEncode(colors));
+    final colors = _courseColorsFromPreferences(prefs, term)
+      ..[key] = colorValue;
+    await prefs.setString(_termCourseColorsKey(term), jsonEncode(colors));
   }
 
-  Future<void> saveCourseColors(Map<String, int> colors) async {
+  Future<void> saveCourseColors(
+    AcademicTerm term,
+    Map<String, int> colors,
+  ) async {
     final prefs = await _preferencesLoader();
-    await prefs.setString(_key(_courseColorsKey), jsonEncode(colors));
+    await prefs.setString(_termCourseColorsKey(term), jsonEncode(colors));
   }
 }
