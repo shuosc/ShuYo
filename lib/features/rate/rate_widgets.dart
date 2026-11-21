@@ -17,12 +17,14 @@ class RateCard extends StatelessWidget {
     this.onTap,
     this.padding = const EdgeInsets.all(14),
     this.width,
+    this.color,
   });
 
   final Widget child;
   final VoidCallback? onTap;
   final EdgeInsetsGeometry padding;
   final double? width;
+  final Color? color;
 
   @override
   Widget build(BuildContext context) {
@@ -30,7 +32,7 @@ class RateCard extends StatelessWidget {
     return SizedBox(
       width: width,
       child: Material(
-        color: colors.surface,
+        color: color ?? colors.surface,
         shape: RoundedRectangleBorder(
           borderRadius: BorderRadius.circular(12),
           side: BorderSide(color: colors.border),

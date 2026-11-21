@@ -10,6 +10,8 @@ import 'package:shuyo/data/services/student_identity_service.dart';
 import 'package:shuyo/features/rate/rate_home_page.dart';
 import 'package:shuyo/features/rate/rate_list_pages.dart';
 import 'package:shuyo/features/rate/rate_widgets.dart';
+import 'package:shuyo/shared/theme/custom_background.dart';
+import 'package:shuyo/shared/theme/shuyo_theme.dart';
 
 RateUnit _unit(String id, String name, double? average, int count) =>
     RateUnit.fromJson({
@@ -165,6 +167,80 @@ double _scheduleArrowTurns(WidgetTester tester) => tester
 
 void main() {
   setUp(() => SharedPreferences.setMockInitialValues({}));
+
+  testWidgets('only homepage course cards follow photo module opacity',
+      (tester) async {
+    const settings = CustomBackground(
+      imagePath: 'assets/images/icon.png',
+      opacity: 50,
+      background: Colors.white,
+      surface: Color(0xFFF1F3F5),
+      text: Colors.black,
+      accent: Colors.blue,
+    );
+    final builtInTheme = ShuYoThemes.byId(ShuYoThemes.defaultId);
+    final repo = _FakeCourseReviewRepository(
+      matches: [_scheduleMatch(_scheduleUnit)],
+    );
+    addTearDown(repo.dispose);
+    tester.view.physicalSize = const Size(420, 1080);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    Future<void> pumpTheme(CustomBackground? background) async {
+      await tester.pumpWidget(MaterialApp(
+        theme: (background?.theme ?? builtInTheme).themeData(),
+        builder: (_, child) =>
+            CustomBackgroundScope(settings: background, child: child!),
+        home: Scaffold(body: RateHomePage(repository: repo, active: false)),
+      ));
+      await tester.pumpAndSettle();
+    }
+
+    Material cardFill(Finder card) => tester.widget<Material>(
+          find.descendant(of: card, matching: find.byType(Material)),
+        );
+
+    void expectCourseFills(Color fill, ShuYoColors colors) {
+      for (final course in [
+        _scheduleUnit.course.name,
+        _recent.course.name,
+        for (final ranking in _rankings)
+          '1  ${ranking.items.single.course.name}',
+      ]) {
+        final title = find.text(course);
+        final material = cardFill(
+          find.ancestor(of: title, matching: find.byType(RateCard)),
+        );
+        expect(material.color, fill, reason: course);
+        expect((material.shape as RoundedRectangleBorder).side.color,
+            colors.border);
+        expect(tester.widget<Text>(title).style?.color, colors.textPrimary);
+      }
+    }
+
+    for (final opacity in [20, 60, 100]) {
+      await pumpTheme(settings.copyWith(moduleOpacity: opacity));
+      expectCourseFills(settings.surface.withValues(alpha: opacity / 100),
+          settings.theme.colors);
+    }
+
+    for (final background in [
+      settings.copyWith(opacity: 0),
+      settings.copyWith(imagePath: ''),
+      null,
+    ]) {
+      await pumpTheme(background);
+      final colors = (background?.theme ?? builtInTheme).colors;
+      expectCourseFills(colors.surface, colors);
+    }
+
+    await pumpTheme(settings);
+    await tester.tap(find.text('查看全部').first);
+    await tester.pumpAndSettle();
+    expect(cardFill(find.byType(RateListCard)).color, settings.surface);
+  });
 
   testWidgets(
       'homepage rankings match recent cards and show stars without counts',

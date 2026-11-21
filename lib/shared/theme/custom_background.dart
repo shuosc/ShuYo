@@ -25,7 +25,7 @@ class CustomBackground {
   bool get hasVisiblePhoto => hasPhoto && opacity > 0;
   // 0 hides the photo; 100 shows the photo without a color veil.
   final int opacity;
-  // Applies to home module fills while a background photo is visible.
+  // Applies to module fills while a background photo is visible.
   final int moduleOpacity;
   final Color background;
   final Color surface;
@@ -207,6 +207,14 @@ class CustomBackgroundScope extends InheritedWidget {
   static CustomBackground? maybeOf(BuildContext context) => context
       .dependOnInheritedWidgetOfExactType<CustomBackgroundScope>()
       ?.settings;
+
+  /// Returns the module fill override only when a background photo is visible.
+  static Color? photoModuleSurfaceOf(BuildContext context) {
+    final settings = maybeOf(context);
+    return settings != null && settings.hasVisiblePhoto
+        ? settings.moduleSurface
+        : null;
+  }
 
   @override
   bool updateShouldNotify(CustomBackgroundScope oldWidget) =>

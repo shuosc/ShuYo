@@ -6,6 +6,7 @@ import 'package:material_ui/material_ui.dart';
 import '../../data/models/course_review.dart';
 import '../../data/repositories/course_review_repository.dart';
 import '../../shared/shuyo_text_styles.dart';
+import '../../shared/theme/custom_background.dart';
 import '../../shared/theme/shuyo_theme.dart';
 import 'rate_navigation.dart';
 import 'rate_widgets.dart';
@@ -400,6 +401,7 @@ class _ScheduleCourseCard extends StatelessWidget {
     final hasScore =
         result.status == RateLookupStatus.unit && unit!.average != null;
     return RateCard(
+      color: CustomBackgroundScope.photoModuleSurfaceOf(context),
       onTap: onTap,
       padding: const EdgeInsets.all(12),
       child: Column(
@@ -675,6 +677,7 @@ class _HomeUnitCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final colors = context.shuyoColors;
     return RateCard(
+      color: CustomBackgroundScope.photoModuleSurfaceOf(context),
       width: width,
       onTap: onTap,
       padding: const EdgeInsets.all(12),
