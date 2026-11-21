@@ -82,7 +82,7 @@ void main() {
   testWidgets(
       'a late network error keeps the route used before a setting change',
       (tester) async {
-    final pending = Completer<ClassroomAvailabilityResult>();
+    final pending = Completer<ClassroomBuildingSchedule>();
     final repository = _RoutingRepository()
       ..onSearch = (_, __) => pending.future;
     await tester.pumpWidget(
@@ -266,19 +266,13 @@ void main() {
     await tester.tap(_button('重试'));
     await tester.pumpAndSettle();
     expect(repository.searchModes.last, ClassroomAccessMode.direct);
-    expect(
-        repository.queries.every((q) =>
-            q.building.id == query.building.id &&
-            q.date == query.date &&
-            q.startSection == query.startSection &&
-            q.endSection == query.endSection),
-        isTrue);
+    expect(repository.queries, everyElement(query));
     expect(ClassroomUrlResolver.usesWebVpn, isFalse);
   });
 
   testWidgets('WebVPN retry shows progress and blocks duplicate route requests',
       (tester) async {
-    final pending = Completer<ClassroomAvailabilityResult>();
+    final pending = Completer<ClassroomBuildingSchedule>();
     final repository = _RoutingRepository();
     repository.onSearch = (query, _) => repository.searchModes.length == 1
         ? Future.error(TimeoutException('gateway timeout'))
@@ -387,26 +381,22 @@ void main() {
   });
 }
 
-ClassroomAvailabilityResult _emptyResult(ClassroomAvailabilityQuery query) =>
-    ClassroomAvailabilityResult(
-      building: query.building,
-      date: query.date,
-      startSection: query.startSection,
-      endSection: query.endSection,
-      floors: const [],
-    );
+typedef _ScheduleQuery = ({ClassroomBuilding building, DateTime date});
+
+ClassroomBuildingSchedule _emptyResult(_ScheduleQuery query) =>
+    ClassroomBuildingSchedule(building: query.building, floors: const []);
 
 class _RoutingRepository extends ClassroomRepository {
   _RoutingRepository({this.hasSnapshot = true});
   final bool hasSnapshot;
   Future<ClassroomSearchOptions> Function(ClassroomAccessMode)? onLoad;
-  Future<ClassroomAvailabilityResult> Function(
-      ClassroomAvailabilityQuery, ClassroomAccessMode)? onSearch;
+  Future<ClassroomBuildingSchedule> Function(
+      _ScheduleQuery, ClassroomAccessMode)? onSearch;
   final loadModes = <ClassroomAccessMode>[];
   final searchModes = <ClassroomAccessMode>[];
   final loadRefreshes = <bool>[];
   final searchRefreshes = <bool>[];
-  final queries = <ClassroomAvailabilityQuery>[];
+  final queries = <_ScheduleQuery>[];
 
   @override
   ClassroomSearchOptions? get optionsSnapshot => hasSnapshot ? _options : null;
@@ -421,14 +411,16 @@ class _RoutingRepository extends ClassroomRepository {
   }
 
   @override
-  Future<ClassroomAvailabilityResult> search(
-    ClassroomAvailabilityQuery query, {
+  Future<ClassroomBuildingSchedule> loadSchedule({
+    required ClassroomBuilding building,
+    required DateTime date,
     bool forceRefresh = false,
     ClassroomAccessMode? accessMode,
   }) async {
     final mode = accessMode ?? ClassroomUrlResolver.accessMode;
     searchModes.add(mode);
     searchRefreshes.add(forceRefresh);
+    final query = (building: building, date: date);
     queries.add(query);
     return onSearch == null
         ? _emptyResult(query)

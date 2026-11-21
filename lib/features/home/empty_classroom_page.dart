@@ -192,6 +192,7 @@ class _EmptyClassroomPageState extends State<EmptyClassroomPage> {
             onRefresh: _search,
             child: _ClassroomResultList(
               result: snapshot.data!,
+              range: _selectedRange!,
               keyword: _keyword,
             ),
           );
@@ -459,7 +460,6 @@ class _EmptyClassroomPageState extends State<EmptyClassroomPage> {
 
   void _setRange(ClassroomSectionRange range) {
     setState(() => _selectedRange = range);
-    _search();
   }
 
   void _stepRange(int delta) {
@@ -492,10 +492,6 @@ class _EmptyClassroomPageState extends State<EmptyClassroomPage> {
     bool forceRefresh = false,
     ClassroomAccessMode? accessMode,
   }) async {
-    final range = _selectedRange;
-    if (range == null) {
-      return;
-    }
     final buildings = _selectedBuilding == null
         ? _campusBuildings()
         : <ClassroomBuilding>[_selectedBuilding!];
@@ -504,7 +500,6 @@ class _EmptyClassroomPageState extends State<EmptyClassroomPage> {
     }
     final future = _searchBuildings(
       buildings: buildings,
-      range: range,
       date: _selectedDate,
       forceRefresh: forceRefresh,
       accessMode: accessMode ?? ClassroomUrlResolver.accessMode,
@@ -528,21 +523,16 @@ class _EmptyClassroomPageState extends State<EmptyClassroomPage> {
 
   Future<_ClassroomQueryResult> _searchBuildings({
     required List<ClassroomBuilding> buildings,
-    required ClassroomSectionRange range,
     required DateTime date,
     required bool forceRefresh,
     required ClassroomAccessMode accessMode,
   }) async {
-    final results = <ClassroomAvailabilityResult>[];
+    final results = <ClassroomBuildingSchedule>[];
     for (final building in buildings) {
       final result = await _withWebVpnRecovery(
-        () => widget.repository.search(
-          ClassroomAvailabilityQuery(
-            building: building,
-            date: date,
-            startSection: range.start,
-            endSection: range.end,
-          ),
+        () => widget.repository.loadSchedule(
+          building: building,
+          date: date,
           forceRefresh: forceRefresh,
           accessMode: accessMode,
         ),
@@ -552,8 +542,6 @@ class _EmptyClassroomPageState extends State<EmptyClassroomPage> {
     }
     return _ClassroomQueryResult(
       date: date,
-      startSection: range.start,
-      endSection: range.end,
       results: results,
     );
   }
@@ -657,21 +645,11 @@ class _ClassroomFailureActions extends StatelessWidget {
 class _ClassroomQueryResult {
   const _ClassroomQueryResult({
     required this.date,
-    required this.startSection,
-    required this.endSection,
     required this.results,
   });
 
   final DateTime date;
-  final int startSection;
-  final int endSection;
-  final List<ClassroomAvailabilityResult> results;
-
-  int get totalRooms =>
-      results.fold(0, (sum, result) => sum + result.totalRooms);
-
-  int get availableCount =>
-      results.fold(0, (sum, result) => sum + result.availableCount);
+  final List<ClassroomBuildingSchedule> results;
 
   String get scopeLabel {
     if (results.length == 1) {
@@ -1239,10 +1217,12 @@ class _DateButton extends StatelessWidget {
 class _ClassroomResultList extends StatelessWidget {
   const _ClassroomResultList({
     required this.result,
+    required this.range,
     required this.keyword,
   });
 
   final _ClassroomQueryResult result;
+  final ClassroomSectionRange range;
   final String keyword;
 
   @override
@@ -1250,14 +1230,22 @@ class _ClassroomResultList extends StatelessWidget {
     final normalizedKeyword = keyword.trim();
     final matches = result.courseMatches(normalizedKeyword);
     final colors = context.shuyoColors;
+    final sections = range.sections;
+    final availability = [
+      for (final schedule in result.results)
+        ClassroomBuildingAvailability(schedule, sections),
+    ];
+    final availableCount =
+        availability.fold(0, (sum, building) => sum + building.availableCount);
+    final totalRooms =
+        availability.fold(0, (sum, building) => sum + building.totalRooms);
 
     return ListView(
       physics: const AlwaysScrollableScrollPhysics(),
       padding: const EdgeInsets.fromLTRB(16, 12, 16, 26),
       children: [
         Text(
-          '${result.scopeLabel} · ${_dateLabel(result.date)} · '
-          '${result.startSection}-${result.endSection}节',
+          '${result.scopeLabel} · ${_dateLabel(result.date)} · ${range.label}',
           style: ShuYoTextStyles.title(
             color: colors.textPrimary,
             size: 16.5,
@@ -1274,11 +1262,11 @@ class _ClassroomResultList extends StatelessWidget {
           _CourseMatches(matches: matches),
         ] else ...[
           Text(
-            '可用 ${result.availableCount} / ${result.totalRooms} 间',
+            '可用 $availableCount / $totalRooms 间',
             style: TextStyle(color: colors.textTertiary),
           ),
           const SizedBox(height: 18),
-          if (result.availableCount == 0)
+          if (availableCount == 0)
             const Padding(
               padding: EdgeInsets.only(top: 48),
               child: EmptyState(
@@ -1288,9 +1276,10 @@ class _ClassroomResultList extends StatelessWidget {
               ),
             )
           else
-            for (final item in result.results)
+            for (final item in availability)
               _BuildingAvailableRooms(
                 result: item,
+                range: range,
                 showBuildingName: result.results.length > 1,
               ),
         ],
@@ -1302,10 +1291,12 @@ class _ClassroomResultList extends StatelessWidget {
 class _BuildingAvailableRooms extends StatelessWidget {
   const _BuildingAvailableRooms({
     required this.result,
+    required this.range,
     required this.showBuildingName,
   });
 
-  final ClassroomAvailabilityResult result;
+  final ClassroomBuildingAvailability result;
+  final ClassroomSectionRange range;
   final bool showBuildingName;
 
   @override
@@ -1336,8 +1327,7 @@ class _BuildingAvailableRooms extends StatelessWidget {
           for (final floor in availableFloors)
             _FloorAvailableRooms(
               floor: floor,
-              startSection: result.startSection,
-              endSection: result.endSection,
+              range: range,
             ),
         ],
       ),
@@ -1403,13 +1393,11 @@ class _CourseMatches extends StatelessWidget {
 class _FloorAvailableRooms extends StatelessWidget {
   const _FloorAvailableRooms({
     required this.floor,
-    required this.startSection,
-    required this.endSection,
+    required this.range,
   });
 
   final ClassroomFloorAvailability floor;
-  final int startSection;
-  final int endSection;
+  final ClassroomSectionRange range;
 
   @override
   Widget build(BuildContext context) {
@@ -1435,8 +1423,7 @@ class _FloorAvailableRooms extends StatelessWidget {
               for (final room in floor.availableRooms)
                 _RoomChip(
                   room: room,
-                  startSection: startSection,
-                  endSection: endSection,
+                  range: range,
                 ),
             ],
           ),
@@ -1449,13 +1436,11 @@ class _FloorAvailableRooms extends StatelessWidget {
 class _RoomChip extends StatelessWidget {
   const _RoomChip({
     required this.room,
-    required this.startSection,
-    required this.endSection,
+    required this.range,
   });
 
   final ClassroomRoom room;
-  final int startSection;
-  final int endSection;
+  final ClassroomSectionRange range;
 
   @override
   Widget build(BuildContext context) {
@@ -1467,7 +1452,7 @@ class _RoomChip extends StatelessWidget {
   }
 
   void _showRoomSheet(BuildContext context) {
-    final selectedCourses = room.coursesFor(startSection, endSection);
+    final selectedCourses = room.coursesFor(range.sections);
     final courses = [...room.courses]
       ..sort((a, b) => a.startSection.compareTo(b.startSection));
     showModalBottomSheet<void>(
@@ -1514,8 +1499,8 @@ class _RoomChip extends StatelessWidget {
                 const SizedBox(height: 14),
                 Text(
                   selectedCourses.isEmpty
-                      ? '$startSection-$endSection节空闲'
-                      : '$startSection-$endSection节已有安排',
+                      ? '${range.label}空闲'
+                      : '${range.label}已有安排',
                   style: TextStyle(
                     color: colors.accent,
                     fontSize: 13,

@@ -142,16 +142,11 @@ class _CampusRepository extends ClassroomRepository {
       options;
 
   @override
-  Future<ClassroomAvailabilityResult> search(
-    ClassroomAvailabilityQuery query, {
+  Future<ClassroomBuildingSchedule> loadSchedule({
+    required ClassroomBuilding building,
+    required DateTime date,
     bool forceRefresh = false,
     ClassroomAccessMode? accessMode,
   }) async =>
-      ClassroomAvailabilityResult(
-        building: query.building,
-        date: query.date,
-        startSection: query.startSection,
-        endSection: query.endSection,
-        floors: const [],
-      );
+      ClassroomBuildingSchedule(building: building, floors: const []);
 }

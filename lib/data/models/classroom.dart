@@ -142,11 +142,12 @@ class ClassroomCourse {
   final int endSection;
   final String source;
 
-  String get sectionText => '$startSection-$endSection节';
+  String get sectionText => startSection == endSection
+      ? '$startSection节'
+      : '$startSection–$endSection节';
 
-  bool overlaps(int start, int end) {
-    return startSection <= end && endSection >= start;
-  }
+  bool overlapsSections(Set<int> sections) => sections
+      .any((section) => section >= startSection && section <= endSection);
 
   factory ClassroomCourse.fromJson(JsonMap json) {
     return ClassroomCourse(
@@ -174,16 +175,13 @@ class ClassroomRoom {
   final String fullName;
   final List<ClassroomCourse> courses;
 
-  bool isFreeFor(int startSection, int endSection) {
-    return courses
-        .every((course) => !course.overlaps(startSection, endSection));
-  }
+  bool isFreeFor(Set<int> sections) =>
+      sections.isNotEmpty &&
+      !courses.any((course) => course.overlapsSections(sections));
 
-  List<ClassroomCourse> coursesFor(int startSection, int endSection) {
-    return courses
-        .where((course) => course.overlaps(startSection, endSection))
-        .toList(growable: false);
-  }
+  List<ClassroomCourse> coursesFor(Set<int> sections) => courses
+      .where((course) => course.overlapsSections(sections))
+      .toList(growable: false);
 
   factory ClassroomRoom.fromJson(JsonMap json, {required String floorName}) {
     return ClassroomRoom(
@@ -243,70 +241,34 @@ class ClassroomBuildingSchedule {
   }
 }
 
-class ClassroomAvailabilityResult {
-  const ClassroomAvailabilityResult({
-    required this.building,
-    required this.date,
-    required this.startSection,
-    required this.endSection,
-    required this.floors,
-  });
+class ClassroomBuildingAvailability {
+  ClassroomBuildingAvailability(
+      ClassroomBuildingSchedule schedule, Set<int> sections)
+      : building = schedule.building,
+        floors = [
+          for (final floor in schedule.floors)
+            ClassroomFloorAvailability(floor, sections),
+        ];
 
   final ClassroomBuilding building;
-  final DateTime date;
-  final int startSection;
-  final int endSection;
   final List<ClassroomFloorAvailability> floors;
 
   int get totalRooms => floors.fold(0, (sum, floor) => sum + floor.totalRooms);
 
   int get availableCount =>
       floors.fold(0, (sum, floor) => sum + floor.availableRooms.length);
-
-  List<CourseLocationMatch> courseMatches(String keyword) {
-    final normalized = keyword.trim().toLowerCase();
-    if (normalized.isEmpty) {
-      return const <CourseLocationMatch>[];
-    }
-    final matches = <CourseLocationMatch>[];
-    for (final floor in floors) {
-      for (final room in floor.rooms) {
-        for (final course in room.courses) {
-          final haystack =
-              '${course.courseName} ${course.teacherName} ${room.name}'
-                  .toLowerCase();
-          if (haystack.contains(normalized)) {
-            matches.add(CourseLocationMatch(room: room, course: course));
-          }
-        }
-      }
-    }
-    return matches;
-  }
 }
 
 class ClassroomFloorAvailability {
-  const ClassroomFloorAvailability({
-    required this.floor,
-    required this.rooms,
-    required this.availableRooms,
-  });
+  ClassroomFloorAvailability(this.floor, Set<int> sections)
+      : availableRooms = floor.rooms
+            .where((room) => room.isFreeFor(sections))
+            .toList(growable: false);
 
   final ClassroomFloor floor;
-  final List<ClassroomRoom> rooms;
   final List<ClassroomRoom> availableRooms;
 
-  int get totalRooms => rooms.length;
-}
-
-class CourseLocationMatch {
-  const CourseLocationMatch({
-    required this.room,
-    required this.course,
-  });
-
-  final ClassroomRoom room;
-  final ClassroomCourse course;
+  int get totalRooms => floor.rooms.length;
 }
 
 String _campusName(int campusId, String fullName, String cachedName) {
