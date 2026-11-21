@@ -57,7 +57,7 @@ class _EmptyClassroomPageState extends State<EmptyClassroomPage> {
   bool _loadingOptions = false;
   bool _refreshingOptions = false;
   _ClassroomView _view = _ClassroomView.available;
-  _ArrangementScope _arrangementScope = _ArrangementScope.selection;
+  _ArrangementScope _arrangementScope = _ArrangementScope.fullDay;
   bool _onlyArranged = false;
   final _courseSearch = TextEditingController();
   bool _initialSelectionApplied = false;
@@ -97,7 +97,7 @@ class _EmptyClassroomPageState extends State<EmptyClassroomPage> {
     final repository = widget.repository;
     _options = options;
     _selectedCampus = _validCampus(options);
-    _selectedBuilding = _validBuilding(options);
+    _selectedBuilding = _validBuilding();
     if (!_initialSelectionApplied) {
       _selectedDate = widget.initialDate ?? repository.defaultDateFor(options);
       _initialSelectionApplied = true;
@@ -463,35 +463,34 @@ class _EmptyClassroomPageState extends State<EmptyClassroomPage> {
     return names.isEmpty ? null : names.first;
   }
 
-  ClassroomBuilding? _validBuilding(ClassroomSearchOptions options) {
-    final campus = _selectedCampus;
-    final current = _selectedBuilding;
-    if (current == null && _buildingLoads.isNotEmpty) {
+  ClassroomBuilding? _validBuilding() {
+    if (_selectedBuilding == null && _buildingLoads.isNotEmpty) {
       return null;
     }
-    final buildings = options.buildings
-        .where((building) => campus == null || building.campusName == campus)
-        .toList(growable: false);
-    if (current != null &&
-        buildings.any((building) => building.id == current.id)) {
-      return current;
+    final buildings = _campusBuildings();
+    return _buildingById(buildings, _selectedBuilding?.id) ??
+        _defaultBuilding(buildings);
+  }
+
+  ClassroomBuilding? _defaultBuilding(List<ClassroomBuilding> buildings) {
+    for (final building in buildings) {
+      if (building.campusName == ClassroomCampus.defaultName &&
+          building.name == 'A楼') {
+        return building;
+      }
     }
-    return buildings.isEmpty ? null : buildings.first;
+    return buildings.firstOrNull;
   }
 
   void _setCampus(String? value) {
-    final options = _options;
-    if (options == null || value == null || value == _selectedCampus) {
+    if (_options == null || value == null || value == _selectedCampus) {
       return;
     }
-    final buildings = options.buildings
-        .where((building) => building.campusName == value)
-        .toList(growable: false);
-    final keepAllBuildings = _selectedBuilding == null;
     setState(() {
       _selectedCampus = value;
-      _selectedBuilding =
-          keepAllBuildings || buildings.isEmpty ? null : buildings.first;
+      if (_selectedBuilding != null) {
+        _selectedBuilding = _defaultBuilding(_campusBuildings());
+      }
     });
     _search();
   }

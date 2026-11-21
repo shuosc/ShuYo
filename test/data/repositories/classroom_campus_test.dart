@@ -53,6 +53,35 @@ void main() {
     expect(options.campusNames, ['宝山']);
   });
 
+  testWidgets('defaults to 宝山 A楼 and keeps building choices on refresh',
+      (tester) async {
+    final repository = _CampusRepository();
+    await tester.pumpWidget(MaterialApp(
+      home: EmptyClassroomPage(repository: repository),
+    ));
+    await tester.pumpAndSettle();
+
+    final campus = find.byType(DropdownButtonFormField<String>);
+    final building = find.byType(DropdownButtonFormField<int>);
+    int? selectedBuilding() =>
+        tester.widget<DropdownButtonFormField<int>>(building).initialValue;
+
+    expect(tester.widget<DropdownButtonFormField<String>>(campus).initialValue,
+        '宝山');
+    expect(selectedBuilding(), 303);
+    expect(repository.requestedBuildings, [303]);
+
+    for (final (name, id) in [('GA楼', 930), ('全部教学楼', 0)]) {
+      await tester.tap(building);
+      await tester.pumpAndSettle();
+      await tester.tap(find.text(name).last);
+      await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('刷新'));
+      await tester.pumpAndSettle();
+      expect(selectedBuilding(), id);
+    }
+  });
+
   testWidgets('preferred campus is applied on open with an available fallback',
       (tester) async {
     final repository = _CampusRepository();
@@ -77,6 +106,7 @@ void main() {
           .initialValue,
       '嘉定',
     );
+    expect(repository.requestedBuildings.last, 2);
 
     await tester.tap(find.byType(DropdownButtonFormField<String>).first);
     await tester.pumpAndSettle();
@@ -90,6 +120,7 @@ void main() {
           .initialValue,
       '宝山',
     );
+    expect(repository.requestedBuildings.last, 303);
 
     await open('嘉定', 'reopen');
     expect(
@@ -117,7 +148,13 @@ class _CampusRepository extends ClassroomRepository {
   static const options = ClassroomSearchOptions(
     buildings: [
       ClassroomBuilding(
-        id: 1,
+        id: 930,
+        name: 'GA楼',
+        campusId: 3,
+        campusName: '宝山',
+      ),
+      ClassroomBuilding(
+        id: 303,
         name: 'A楼',
         campusId: 3,
         campusName: '宝山',
@@ -133,6 +170,7 @@ class _CampusRepository extends ClassroomRepository {
       ClassroomSection(index: 1, startTime: '08:00', endTime: '08:45'),
     ],
   );
+  final requestedBuildings = <int>[];
 
   @override
   Future<ClassroomSearchOptions> loadOptions({
@@ -147,6 +185,8 @@ class _CampusRepository extends ClassroomRepository {
     required DateTime date,
     bool forceRefresh = false,
     ClassroomAccessMode? accessMode,
-  }) async =>
-      ClassroomBuildingSchedule(building: building, floors: const []);
+  }) async {
+    requestedBuildings.add(building.id);
+    return ClassroomBuildingSchedule(building: building, floors: const []);
+  }
 }

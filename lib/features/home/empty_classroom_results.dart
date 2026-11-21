@@ -3,8 +3,8 @@ part of 'empty_classroom_page.dart';
 enum _ClassroomView { available, arrangements }
 
 enum _ArrangementScope {
-  selection('所选节次'),
-  fullDay('全天');
+  fullDay('全天'),
+  selection('所选节次');
 
   const _ArrangementScope(this.label);
 

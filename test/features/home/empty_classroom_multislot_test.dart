@@ -237,6 +237,14 @@ void main() {
     await _tap(tester, _apply);
     await _tap(tester, find.text('教室安排'));
 
+    final fullDay = find.widgetWithText(ChoiceChip, '全天');
+    final selectedSections = find.widgetWithText(ChoiceChip, '所选节次');
+    expect(tester.widget<ChoiceChip>(fullDay).selected, isTrue);
+    expect(tester.getTopLeft(fullDay).dx,
+        lessThan(tester.getTopLeft(selectedSections).dx));
+    expect(find.text('线性代数'), findsOneWidget);
+
+    await _tap(tester, selectedSections);
     expect(find.text('周老师'), findsOneWidget);
     expect(find.text('程序设计'), findsOneWidget);
     expect(find.text('教学活动'), findsOneWidget);
@@ -247,11 +255,11 @@ void main() {
     await tester.enterText(find.byType(TextField), '林老师');
     await tester.pumpAndSettle();
     expect(find.text('没有匹配结果'), findsOneWidget);
-    await _tap(tester, find.widgetWithText(ChoiceChip, '全天'));
+    await _tap(tester, fullDay);
     expect(find.text('线性代数'), findsOneWidget);
 
     await _tap(tester, find.byTooltip('清除搜索'));
-    await _tap(tester, find.widgetWithText(ChoiceChip, '所选节次'));
+    await _tap(tester, selectedSections);
     await _tap(tester, find.widgetWithText(FilterChip, '仅看有安排'));
     expect(find.text('GA101'), findsNothing);
     expect(find.text('GA104'), findsNothing);
