@@ -271,11 +271,11 @@ class DemoAnnouncementRepository extends AnnouncementRepository {
 class DemoClassroomRepository extends ClassroomRepository {
   DemoClassroomRepository({
     required this.options,
-    required this.schedule,
+    required this.schedules,
   });
 
   final ClassroomSearchOptions options;
-  final ClassroomBuildingSchedule schedule;
+  final Map<int, ClassroomBuildingSchedule> schedules;
 
   @override
   ClassroomSearchOptions? get optionsSnapshot => options;
@@ -294,13 +294,9 @@ class DemoClassroomRepository extends ClassroomRepository {
     bool forceRefresh = false,
     ClassroomAccessMode? accessMode,
   }) async {
-    final supported = building.id == schedule.building.id &&
-        date.year == 2026 &&
-        date.month == 9 &&
-        date.day == 1;
-    return supported
-        ? schedule
-        : ClassroomBuildingSchedule(building: building, floors: const []);
+    final previewDate = date.year == 2026 && date.month == 9 && date.day == 1;
+    return (previewDate ? schedules[building.id] : null) ??
+        ClassroomBuildingSchedule(building: building, floors: const []);
   }
 }
 

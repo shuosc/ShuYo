@@ -318,7 +318,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
     _classroomRepository = widget.isDemo && demo != null
         ? DemoClassroomRepository(
             options: demo.classroomOptions,
-            schedule: demo.classroomSchedule,
+            schedules: demo.classroomSchedules,
           )
         : ClassroomRepository();
     _otpTokenRepository = widget.isDemo

@@ -19,14 +19,14 @@ class DemoDataBundle {
     required this.announcements,
     required this.announcementDetails,
     required this.classroomOptions,
-    required this.classroomSchedule,
+    required this.classroomSchedules,
   });
 
   final AcademicSchedule schedule;
   final List<AnnouncementListItem> announcements;
   final Map<String, AnnouncementDetail> announcementDetails;
   final ClassroomSearchOptions classroomOptions;
-  final ClassroomBuildingSchedule classroomSchedule;
+  final Map<int, ClassroomBuildingSchedule> classroomSchedules;
 
   static final previewTime = DateTime(2026, 9, 1, 7, 55);
 
@@ -71,25 +71,31 @@ class DemoDataBundle {
       classroomRaw[0],
       classroomRaw[1],
     );
-    final building = classroomOptions.buildings.firstWhere(
-      (item) => item.name == 'GA楼',
-      orElse: () => classroomOptions.buildings.first,
-    );
-    final classroomSchedule = ClassroomApiClient.parseBuildingSchedule(
-      await _json(assets, 'assets/demo/classroom/schedule-2026-09-01.json'),
-      building: building,
-    );
+    const schedulePaths = {
+      303: 'assets/demo/classroom/schedule-a-2026-09-01.json',
+      930: 'assets/demo/classroom/schedule-2026-09-01.json',
+    };
+    final classroomSchedules = {
+      for (final building in classroomOptions.buildings)
+        if (schedulePaths[building.id] case final path?)
+          building.id: ClassroomApiClient.parseBuildingSchedule(
+            await _json(assets, path),
+            building: building,
+          ),
+    };
 
     return DemoDataBundle(
       schedule: schedule,
       announcements: announcementItems,
       announcementDetails: details,
       classroomOptions: ClassroomSearchOptions(
-        buildings: [building],
+        buildings: [
+          for (final schedule in classroomSchedules.values) schedule.building,
+        ],
         sections: classroomOptions.sections,
         currentSection: classroomOptions.currentSection,
       ),
-      classroomSchedule: classroomSchedule,
+      classroomSchedules: classroomSchedules,
     );
   }
 
