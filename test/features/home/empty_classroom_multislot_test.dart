@@ -22,6 +22,13 @@ const _otherBuilding = ClassroomBuilding(
   campusName: '宝山',
 );
 
+const _otherCampusBuilding = ClassroomBuilding(
+  id: 3,
+  name: 'DJ楼',
+  campusId: 574,
+  campusName: '嘉定',
+);
+
 const _floor = ClassroomFloor(
   id: 1,
   name: '一层',
@@ -93,15 +100,57 @@ const _floor = ClassroomFloor(
   ],
 );
 
+const _otherSchedule = ClassroomBuildingSchedule(
+  building: _otherBuilding,
+  floors: [
+    ClassroomFloor(
+      id: 2,
+      name: '一层',
+      rooms: [
+        ClassroomRoom(
+          id: 201,
+          name: 'B101',
+          floorName: '一层',
+          fullName: '',
+          courses: [
+            ClassroomCourse(
+              courseName: '高等数学（上）',
+              teacherName: '吴老师',
+              startSection: 3,
+              endSection: 4,
+            ),
+            ClassroomCourse(
+              courseName: '高等数学（下）',
+              teacherName: '吴老师',
+              startSection: 5,
+              endSection: 6,
+            ),
+            ClassroomCourse(
+              courseName: '高等数学（习题）',
+              teacherName: '吴老师',
+              startSection: 7,
+              endSection: 8,
+            ),
+          ],
+        ),
+      ],
+    ),
+  ],
+);
+
 class _ScheduleRepository extends ClassroomRepository {
   _ScheduleRepository({this.otherSchedule});
 
   final Future<ClassroomBuildingSchedule>? otherSchedule;
-  int loads = 0;
+  final requestedBuildings = <int>[];
+  int get loads => requestedBuildings.length;
 
   @override
   ClassroomSearchOptions get optionsSnapshot => ClassroomSearchOptions(
-        buildings: [_building, if (otherSchedule != null) _otherBuilding],
+        buildings: [
+          _building,
+          if (otherSchedule != null) ...[_otherBuilding, _otherCampusBuilding],
+        ],
         sections: const [
           ClassroomSection(index: 3, startTime: '10:00', endTime: '10:45'),
           ClassroomSection(index: 4, startTime: '10:55', endTime: '11:40'),
@@ -119,10 +168,12 @@ class _ScheduleRepository extends ClassroomRepository {
     bool forceRefresh = false,
     ClassroomAccessMode? accessMode,
   }) async {
-    loads++;
+    requestedBuildings.add(building.id);
     if (building.id == _otherBuilding.id) return otherSchedule!;
-    return const ClassroomBuildingSchedule(
-        building: _building, floors: [_floor]);
+    return ClassroomBuildingSchedule(
+      building: building,
+      floors: building.id == _building.id ? const [_floor] : const [],
+    );
   }
 }
 
@@ -269,6 +320,87 @@ void main() {
     expect(find.text('线性代数'), findsOneWidget);
     expect(find.text('5–6节'), findsOneWidget);
     expect(repository.loads, 1);
+  });
+
+  testWidgets('keywords search the campus and honor the selected sections',
+      (tester) async {
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(410, 900);
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final other = Completer<ClassroomBuildingSchedule>();
+    final repository = _ScheduleRepository(otherSchedule: other.future);
+    await _open(tester, repository);
+    await _pickSections(tester);
+    await _tap(tester, _slot(7, 8));
+    await _tap(tester, _apply);
+    await _tap(tester, find.text('教室安排'));
+    final selectedSections = find.widgetWithText(ChoiceChip, '所选节次');
+    await _tap(tester, selectedSections);
+
+    final field = find.byType(TextField);
+    final building = find.byType(DropdownButtonFormField<int>);
+    DropdownButtonFormField<int> buildingField() => tester.widget(building);
+    await tester.enterText(field, '  ');
+    await tester.pumpAndSettle();
+    expect(buildingField().initialValue, _building.id);
+    expect(repository.requestedBuildings, [_building.id]);
+
+    await tester.enterText(field, '高');
+    await tester.pump();
+    expect(buildingField().initialValue, 0);
+    expect(buildingField().onChanged, isNull);
+    expect(find.text('全部教学楼'), findsOneWidget);
+    expect(repository.requestedBuildings,
+        [_building.id, _building.id, _otherBuilding.id]);
+
+    await tester.enterText(field, '  高等数学  ');
+    await tester.pump();
+    expect(repository.loads, 3);
+    other.complete(_otherSchedule);
+    await tester.pumpAndSettle();
+    expect(find.text('B101'), findsOneWidget);
+    expect(find.text('高等数学（上）'), findsOneWidget);
+    expect(find.text('高等数学（习题）'), findsOneWidget);
+    expect(find.text('高等数学（下）'), findsNothing);
+
+    await _tap(tester, find.widgetWithText(ChoiceChip, '全天'));
+    expect(find.text('高等数学（下）'), findsOneWidget);
+    expect(repository.loads, 3);
+    await _tap(tester, selectedSections);
+    await _tap(tester, find.text('找空教室'));
+    expect(buildingField().initialValue, _building.id);
+    expect(buildingField().onChanged, isNotNull);
+    expect(find.text('3–4、7–8节'), findsOneWidget);
+    expect(find.text('B101'), findsNothing);
+
+    await _tap(tester, find.text('教室安排'));
+    expect(find.text('高等数学（上）'), findsOneWidget);
+    expect(tester.widget<ChoiceChip>(selectedSections).selected, isTrue);
+    await _tap(tester, find.byTooltip('清除搜索'));
+    expect(buildingField().initialValue, _building.id);
+    expect(find.text('大学英语'), findsOneWidget);
+    expect(find.text('B101'), findsNothing);
+    expect(repository.requestedBuildings,
+        isNot(contains(_otherCampusBuilding.id)));
+  });
+
+  testWidgets('clearing the keyword ignores a pending campus result',
+      (tester) async {
+    final other = Completer<ClassroomBuildingSchedule>();
+    final repository = _ScheduleRepository(otherSchedule: other.future);
+    await _open(tester, repository);
+    await _tap(tester, find.text('教室安排'));
+    await tester.enterText(find.byType(TextField), '高等数学');
+    await tester.pump();
+    expect(find.byType(CircularProgressIndicator), findsOneWidget);
+
+    await _tap(tester, find.byTooltip('清除搜索'));
+    other.complete(_otherSchedule);
+    await tester.pumpAndSettle();
+    expect(find.text('GA楼'), findsOneWidget);
+    expect(find.text('线性代数'), findsOneWidget);
+    expect(find.text('B101'), findsNothing);
   });
 
   testWidgets('all buildings keep loaded rooms visible if another fails',

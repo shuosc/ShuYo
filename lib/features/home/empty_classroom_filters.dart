@@ -21,13 +21,14 @@ class _SearchControls extends StatelessWidget {
   final Set<int> selectedSections;
   final bool fixedDate;
   final ValueChanged<String?> onCampusChanged;
-  final ValueChanged<ClassroomBuilding?> onBuildingChanged;
+  final ValueChanged<ClassroomBuilding?>? onBuildingChanged;
   final VoidCallback onPickDate;
   final VoidCallback onPickSections;
 
   @override
   Widget build(BuildContext context) {
     final colors = context.shuyoColors;
+    final onBuildingChanged = this.onBuildingChanged;
     final buttonStyle = OutlinedButton.styleFrom(
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
       minimumSize: const Size(0, 42),
@@ -71,8 +72,9 @@ class _SearchControls extends StatelessWidget {
                     child: Text(building.name, overflow: TextOverflow.ellipsis),
                   ),
               ],
-              onChanged: (id) =>
-                  onBuildingChanged(_buildingById(buildings, id)),
+              onChanged: onBuildingChanged == null
+                  ? null
+                  : (id) => onBuildingChanged(_buildingById(buildings, id)),
             ),
           ),
           const SizedBox(height: 6),

@@ -60,9 +60,16 @@ class _EmptyClassroomPageState extends State<EmptyClassroomPage> {
   _ArrangementScope _arrangementScope = _ArrangementScope.fullDay;
   bool _onlyArranged = false;
   final _courseSearch = TextEditingController();
+  String _keyword = '';
   bool _initialSelectionApplied = false;
   ClassroomAccessMode? _retryingMode;
   Object? _retryingError;
+
+  bool get _searchingCampus =>
+      _view == _ClassroomView.arrangements && _keyword.isNotEmpty;
+
+  ClassroomBuilding? get _queryBuilding =>
+      _searchingCampus ? null : _selectedBuilding;
 
   @override
   void initState() {
@@ -174,28 +181,22 @@ class _EmptyClassroomPageState extends State<EmptyClassroomPage> {
           physics: const AlwaysScrollableScrollPhysics(),
           keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
           slivers: [
-            SliverToBoxAdapter(
-              child: ExcludeFocus(
-                excluding: _retryingMode != null,
-                child: AbsorbPointer(
-                  absorbing: _retryingMode != null,
-                  child: _SearchControls(
-                    options: options,
-                    selectedCampus: _selectedCampus,
-                    selectedBuilding: _selectedBuilding,
-                    selectedSections: _selectedSections,
-                    selectedDate: _selectedDate,
-                    fixedDate: widget.fixedDate,
-                    onCampusChanged: _setCampus,
-                    onBuildingChanged: _setBuilding,
-                    onPickSections: _pickSections,
-                    onPickDate: _pickDate,
-                  ),
-                ),
+            _filterSliver(
+              _SearchControls(
+                options: options,
+                selectedCampus: _selectedCampus,
+                selectedBuilding: _queryBuilding,
+                selectedSections: _selectedSections,
+                selectedDate: _selectedDate,
+                fixedDate: widget.fixedDate,
+                onCampusChanged: _setCampus,
+                onBuildingChanged: _searchingCampus ? null : _setBuilding,
+                onPickSections: _pickSections,
+                onPickDate: _pickDate,
               ),
             ),
-            SliverToBoxAdapter(
-              child: Padding(
+            _filterSliver(
+              Padding(
                 padding: const EdgeInsets.fromLTRB(16, 4, 16, 8),
                 child: _ClassroomSegments(
                   segments: const [
@@ -206,22 +207,21 @@ class _EmptyClassroomPageState extends State<EmptyClassroomPage> {
                         label: Text('教室安排')),
                   ],
                   selected: _view,
-                  onChanged: (value) {
-                    if (value == _view) return;
-                    FocusManager.instance.primaryFocus?.unfocus();
-                    setState(() => _view = value);
-                  },
+                  onChanged: _setView,
                 ),
               ),
             ),
             if (_view == _ClassroomView.arrangements)
-              SliverToBoxAdapter(
-                child: _ArrangementFilters(
+              _filterSliver(
+                _ArrangementFilters(
                   controller: _courseSearch,
                   scope: _arrangementScope,
                   onlyArranged: _onlyArranged,
-                  onSearch: (_) => setState(() {}),
-                  onClear: () => setState(_courseSearch.clear),
+                  onSearch: _setKeyword,
+                  onClear: () {
+                    _courseSearch.clear();
+                    _setKeyword('');
+                  },
                   onScope: (value) => setState(() => _arrangementScope = value),
                   onOnlyArranged: (value) =>
                       setState(() => _onlyArranged = value),
@@ -233,6 +233,13 @@ class _EmptyClassroomPageState extends State<EmptyClassroomPage> {
       ),
     );
   }
+
+  Widget _filterSliver(Widget child) => SliverToBoxAdapter(
+        child: ExcludeFocus(
+          excluding: _retryingMode != null,
+          child: AbsorbPointer(absorbing: _retryingMode != null, child: child),
+        ),
+      );
 
   Widget _results() {
     final errors = _buildingLoads.map((load) => load.error).nonNulls.toList();
@@ -257,7 +264,7 @@ class _EmptyClassroomPageState extends State<EmptyClassroomPage> {
       view: _view,
       sections: _selectedSections,
       scope: _arrangementScope,
-      keyword: _courseSearch.text.trim().toLowerCase(),
+      keyword: _keyword,
       onlyArranged: _onlyArranged,
     );
   }
@@ -501,6 +508,25 @@ class _EmptyClassroomPageState extends State<EmptyClassroomPage> {
     _search();
   }
 
+  void _setView(_ClassroomView value) {
+    if (value == _view) return;
+    FocusManager.instance.primaryFocus?.unfocus();
+    _updateArrangementQuery(() => _view = value);
+  }
+
+  void _setKeyword(String value) =>
+      _updateArrangementQuery(() => _keyword = value.trim().toLowerCase());
+
+  void _updateArrangementQuery(VoidCallback update) {
+    final previousBuildingId = _queryBuilding?.id;
+    setState(update);
+    // Edits within the same scope only filter the schedules already loading.
+    if (previousBuildingId != _queryBuilding?.id &&
+        _campusBuildings().length > 1) {
+      unawaited(_search());
+    }
+  }
+
   Future<void> _pickSections() async {
     final options = _options;
     if (options == null) return;
@@ -568,16 +594,21 @@ class _EmptyClassroomPageState extends State<EmptyClassroomPage> {
     bool forceRefresh = false,
     ClassroomAccessMode? accessMode,
   }) async {
-    final buildings = _selectedBuilding == null
-        ? _campusBuildings()
-        : <ClassroomBuilding>[_selectedBuilding!];
+    final building = _queryBuilding;
+    final buildings = building == null ? _campusBuildings() : [building];
     final loads = buildings.map(_BuildingLoad.new).toList(growable: false);
     final date = _selectedDate;
     final mode = accessMode ?? ClassroomUrlResolver.accessMode;
     setState(() => _buildingLoads = loads);
     bool isCurrent() => mounted && identical(loads, _buildingLoads);
 
-    for (final load in loads) {
+    // Check the selected building first without changing how results are
+    // grouped. Its schedule is usually already in the repository cache.
+    final queue = [...loads];
+    final selected =
+        queue.indexWhere((load) => load.building.id == _selectedBuilding?.id);
+    if (selected > 0) queue.insert(0, queue.removeAt(selected));
+    for (final load in queue) {
       if (!isCurrent()) return;
       try {
         final schedule = await _withWebVpnRecovery(
