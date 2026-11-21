@@ -13,6 +13,13 @@ void main() {
     expect(data.schedule.term.studentId, 'DEMO0001');
     expect(data.announcements, hasLength(4));
     expect(data.classroomSchedule.building.name, 'GA楼');
+    final rooms = data.classroomSchedule.rooms;
+    final example = rooms.singleWhere((room) => room.name == 'GA101');
+    expect(example.coursesFor({5, 6}).single.courseName, '线性代数');
+    expect(example.isFreeFor({3, 4, 7, 8}), isTrue);
+    expect(
+        rooms.expand((room) => room.courses).any((item) => item.source == '借'),
+        isTrue);
   });
 
   test('demonstrates the bundled term and keeps schedule edits offline',
