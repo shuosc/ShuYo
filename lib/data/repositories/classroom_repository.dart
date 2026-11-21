@@ -16,23 +16,11 @@ class ClassroomSectionRange {
   final int start;
   final int end;
 
-  String get label => start == end ? '$start节' : '$start-$end节';
+  String get label => start == end ? '$start节' : '$start–$end节';
 
   bool contains(int section) => section >= start && section <= end;
-}
 
-class ClassroomAvailabilityQuery {
-  const ClassroomAvailabilityQuery({
-    required this.building,
-    required this.date,
-    required this.startSection,
-    required this.endSection,
-  });
-
-  final ClassroomBuilding building;
-  final DateTime date;
-  final int startSection;
-  final int endSection;
+  Set<int> get sections => {for (var i = start; i <= end; i++) i};
 }
 
 class ClassroomRepository {
@@ -90,43 +78,14 @@ class ClassroomRepository {
     }
   }
 
-  Future<ClassroomAvailabilityResult> search(
-    ClassroomAvailabilityQuery query, {
-    bool forceRefresh = false,
-    ClassroomAccessMode? accessMode,
-  }) async {
-    final schedule = await _loadBuildingSchedule(
-      building: query.building,
-      date: query.date,
-      forceRefresh: forceRefresh,
-      accessMode: accessMode ?? ClassroomUrlResolver.accessMode,
-    );
-    final floors = schedule.floors.map((floor) {
-      final available = floor.rooms
-          .where((room) => room.isFreeFor(query.startSection, query.endSection))
-          .toList(growable: false);
-      return ClassroomFloorAvailability(
-        floor: floor,
-        rooms: floor.rooms,
-        availableRooms: available,
-      );
-    }).toList(growable: false);
-    return ClassroomAvailabilityResult(
-      building: query.building,
-      date: query.date,
-      startSection: query.startSection,
-      endSection: query.endSection,
-      floors: floors,
-    );
-  }
-
-  Future<ClassroomBuildingSchedule> _loadBuildingSchedule({
+  Future<ClassroomBuildingSchedule> loadSchedule({
     required ClassroomBuilding building,
     required DateTime date,
     bool forceRefresh = false,
-    required ClassroomAccessMode accessMode,
+    ClassroomAccessMode? accessMode,
   }) async {
-    final key = '${accessMode.name}:${building.id}:'
+    final mode = accessMode ?? ClassroomUrlResolver.accessMode;
+    final key = '${mode.name}:${building.id}:'
         '${date.year}-${date.month}-${date.day}';
     final cached = _scheduleCache[key];
     if (!forceRefresh &&
@@ -137,7 +96,7 @@ class ClassroomRepository {
     final schedule = await _client.fetchBuildingSchedule(
       building: building,
       date: date,
-      accessMode: accessMode,
+      accessMode: mode,
     );
     _scheduleCache[key] = _CachedClassroomSchedule(
       schedule: schedule,
@@ -147,14 +106,14 @@ class ClassroomRepository {
   }
 
   List<ClassroomSectionRange> defaultRanges(List<ClassroomSection> sections) {
-    final maxSection = sections.isEmpty
-        ? 12
-        : sections.map((section) => section.index).reduce(
-              (a, b) => a > b ? a : b,
-            );
+    final indexes = sections.isEmpty
+        ? {for (var i = 1; i <= 12; i++) i}
+        : sections.map((section) => section.index).toSet();
     final ranges = <ClassroomSectionRange>[];
-    for (var start = 1; start <= maxSection; start += 2) {
-      final end = start + 1 <= maxSection ? start + 1 : start;
+    for (final start in indexes.toList()..sort()) {
+      if (start.isEven && indexes.contains(start - 1)) continue;
+      final end =
+          start.isOdd && indexes.contains(start + 1) ? start + 1 : start;
       ranges.add(ClassroomSectionRange(start: start, end: end));
     }
     return ranges;
@@ -165,9 +124,6 @@ class ClassroomRepository {
     DateTime? now,
   }) {
     final ranges = defaultRanges(options.sections);
-    if (ranges.isEmpty) {
-      return const ClassroomSectionRange(start: 1, end: 2);
-    }
     final section = _sectionFromTime(options.sections, now ?? DateTime.now());
     if (section != null) {
       return ranges.firstWhere(

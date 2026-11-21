@@ -318,7 +318,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
     _classroomRepository = widget.isDemo && demo != null
         ? DemoClassroomRepository(
             options: demo.classroomOptions,
-            schedule: demo.classroomSchedule,
+            schedules: demo.classroomSchedules,
           )
         : ClassroomRepository();
     _otpTokenRepository = widget.isDemo
@@ -1078,7 +1078,6 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
       shuyoRoute(
         builder: (_) => EmptyClassroomPage(
           repository: _classroomRepository,
-          initialCampus: _preferredCampus,
           initialDate: widget.isDemo ? DemoDataBundle.previewTime : null,
           fixedDate: widget.isDemo,
           onWebVpnRecoveryRequired: widget.isDemo

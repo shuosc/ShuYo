@@ -1,0 +1,83 @@
+{
+  "code": 200,
+  "msg": "成功",
+  "data": {
+    "floorList": [
+      {
+        "id": 304,
+        "name": "一层",
+        "children": [
+          {
+            "id": 303101,
+            "name": "A101",
+            "roomCourseList": [
+              {
+                "courseName": "大学英语",
+                "teacherName": "周老师",
+                "startSection": 1,
+                "endSection": 2,
+                "sjly": "本"
+              },
+              {
+                "courseName": "线性代数",
+                "teacherName": "林老师",
+                "startSection": 7,
+                "endSection": 8,
+                "sjly": "本"
+              }
+            ]
+          },
+          {
+            "id": 303102,
+            "name": "A102",
+            "roomCourseList": [
+              {
+                "courseName": "高等数学",
+                "teacherName": "吴老师",
+                "startSection": 3,
+                "endSection": 4,
+                "sjly": "本"
+              }
+            ]
+          },
+          {
+            "id": 303103,
+            "name": "A103",
+            "roomCourseList": []
+          }
+        ]
+      },
+      {
+        "id": 305,
+        "name": "二层",
+        "children": [
+          {
+            "id": 303201,
+            "name": "A201",
+            "roomCourseList": [
+              {
+                "courseName": "程序设计",
+                "teacherName": "余老师",
+                "startSection": 5,
+                "endSection": 6,
+                "sjly": "本"
+              }
+            ]
+          },
+          {
+            "id": 303202,
+            "name": "A202",
+            "roomCourseList": [
+              {
+                "courseName": "教学活动",
+                "startSection": 3,
+                "endSection": 6,
+                "sjly": "借"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

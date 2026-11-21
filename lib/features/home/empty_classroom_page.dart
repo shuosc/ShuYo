@@ -10,7 +10,12 @@ import '../../data/services/classroom_api_client.dart';
 import '../../data/services/unified_account_service.dart';
 import '../../shared/shuyo_text_styles.dart';
 import '../../shared/theme/shuyo_theme.dart';
+import '../../shared/widgets/calendar_date_picker.dart';
+import '../../shared/widgets/date_picker_dialog.dart';
 import '../../shared/widgets/empty_state.dart';
+
+part 'empty_classroom_filters.dart';
+part 'empty_classroom_results.dart';
 
 class EmptyClassroomPage extends StatefulWidget {
   const EmptyClassroomPage({
@@ -43,18 +48,28 @@ class EmptyClassroomPage extends StatefulWidget {
 
 class _EmptyClassroomPageState extends State<EmptyClassroomPage> {
   late Future<void> _loadFuture;
-  Future<_ClassroomQueryResult>? _resultFuture;
+  List<_BuildingLoad> _buildingLoads = const [];
   ClassroomSearchOptions? _options;
   ClassroomBuilding? _selectedBuilding;
-  ClassroomSectionRange? _selectedRange;
+  Set<int> _selectedSections = const {};
   String? _selectedCampus;
   late DateTime _selectedDate = widget.initialDate ?? DateTime.now();
   bool _loadingOptions = false;
   bool _refreshingOptions = false;
+  _ClassroomView _view = _ClassroomView.available;
+  _ArrangementScope _arrangementScope = _ArrangementScope.fullDay;
+  bool _onlyArranged = false;
+  final _courseSearch = TextEditingController();
   String _keyword = '';
   bool _initialSelectionApplied = false;
   ClassroomAccessMode? _retryingMode;
   Object? _retryingError;
+
+  bool get _searchingCampus =>
+      _view == _ClassroomView.arrangements && _keyword.isNotEmpty;
+
+  ClassroomBuilding? get _queryBuilding =>
+      _searchingCampus ? null : _selectedBuilding;
 
   @override
   void initState() {
@@ -71,18 +86,38 @@ class _EmptyClassroomPageState extends State<EmptyClassroomPage> {
     _loadFuture = Future<void>.value();
   }
 
+  @override
+  void dispose() {
+    _courseSearch.dispose();
+    super.dispose();
+  }
+
   /// Restores the options and their matching selections and starts the query
   /// they describe right away.
   void _applyOptionsSnapshot(ClassroomSearchOptions options) {
-    final now = DateTime.now();
+    _applyOptions(options);
+    _search();
+  }
+
+  void _applyOptions(ClassroomSearchOptions options) {
+    final now = widget.fixedDate ? widget.initialDate : null;
+    final repository = widget.repository;
     _options = options;
     _selectedCampus = _validCampus(options);
-    _selectedBuilding = _validBuilding(options);
-    _selectedDate = widget.initialDate ??
-        widget.repository.defaultDateFor(options, now: now);
-    _selectedRange = widget.repository.defaultRangeFor(options, now: now);
-    _initialSelectionApplied = true;
-    _search();
+    _selectedBuilding = _validBuilding();
+    if (!_initialSelectionApplied) {
+      _selectedDate = widget.initialDate ?? repository.defaultDateFor(options);
+      _initialSelectionApplied = true;
+    }
+    final validSections = repository
+        .defaultRanges(options.sections)
+        .expand((range) => range.sections)
+        .toSet();
+    _selectedSections = _selectedSections.intersection(validSections);
+    if (_selectedSections.isEmpty) {
+      _selectedSections =
+          repository.defaultRangeFor(options, now: now).sections;
+    }
   }
 
   @override
@@ -136,74 +171,101 @@ class _EmptyClassroomPageState extends State<EmptyClassroomPage> {
       );
     }
     if (options.buildings.isEmpty) {
-      return const EmptyState(
-        icon: Icons.meeting_room_outlined,
-        title: '暂无教学楼',
-        message: '空教室系统没有返回可查询的教学楼。',
-      );
+      return const Center(child: _ResultMessage('暂无教学楼'));
     }
-    return Column(
-      children: [
-        ExcludeFocus(
-          excluding: _retryingMode != null,
-          child: AbsorbPointer(
-            absorbing: _retryingMode != null,
-            child: _SearchControls(
-              options: options,
-              selectedCampus: _selectedCampus,
-              selectedBuilding: _selectedBuilding,
-              selectedRange: _selectedRange,
-              selectedDate: _selectedDate,
-              fixedDate: widget.fixedDate,
-              ranges: widget.repository.defaultRanges(options.sections),
-              onCampusChanged: _setCampus,
-              onBuildingChanged: _setBuilding,
-              onRangeChanged: _setRange,
-              onPreviousRange: () => _stepRange(-1),
-              onNextRange: () => _stepRange(1),
-              onDateChanged: _setDate,
-              onKeywordChanged: (value) => setState(() => _keyword = value),
+    return SafeArea(
+      top: false,
+      child: RefreshIndicator(
+        onRefresh: _refresh,
+        child: CustomScrollView(
+          physics: const AlwaysScrollableScrollPhysics(),
+          keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
+          slivers: [
+            _filterSliver(
+              _SearchControls(
+                options: options,
+                selectedCampus: _selectedCampus,
+                selectedBuilding: _queryBuilding,
+                selectedSections: _selectedSections,
+                selectedDate: _selectedDate,
+                fixedDate: widget.fixedDate,
+                onCampusChanged: _setCampus,
+                onBuildingChanged: _searchingCampus ? null : _setBuilding,
+                onPickSections: _pickSections,
+                onPickDate: _pickDate,
+              ),
             ),
-          ),
+            _filterSliver(
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 4, 16, 8),
+                child: _ClassroomSegments(
+                  segments: const [
+                    ButtonSegment(
+                        value: _ClassroomView.available, label: Text('找空教室')),
+                    ButtonSegment(
+                        value: _ClassroomView.arrangements,
+                        label: Text('教室安排')),
+                  ],
+                  selected: _view,
+                  onChanged: _setView,
+                ),
+              ),
+            ),
+            if (_view == _ClassroomView.arrangements)
+              _filterSliver(
+                _ArrangementFilters(
+                  controller: _courseSearch,
+                  scope: _arrangementScope,
+                  onlyArranged: _onlyArranged,
+                  onSearch: _setKeyword,
+                  onClear: () {
+                    _courseSearch.clear();
+                    _setKeyword('');
+                  },
+                  onScope: (value) => setState(() => _arrangementScope = value),
+                  onOnlyArranged: (value) =>
+                      setState(() => _onlyArranged = value),
+                ),
+              ),
+            _results(),
+          ],
         ),
-        Expanded(child: _resultBody()),
-      ],
+      ),
     );
   }
 
-  Widget _resultBody() {
-    final retryingError = _retryingError;
-    if (retryingError != null) return _failureState(retryingError);
-    final future = _resultFuture;
-    if (future == null) {
-      return const EmptyState(
-        icon: Icons.search,
-        title: '选择条件后查询',
-        message: '请选择日期、教学楼和节次。',
+  Widget _filterSliver(Widget child) => SliverToBoxAdapter(
+        child: ExcludeFocus(
+          excluding: _retryingMode != null,
+          child: AbsorbPointer(absorbing: _retryingMode != null, child: child),
+        ),
+      );
+
+  Widget _results() {
+    final errors = _buildingLoads.map((load) => load.error).nonNulls.toList();
+    final allFailed =
+        errors.isNotEmpty && errors.length == _buildingLoads.length;
+    final error = _retryingError ??
+        (allFailed
+            ? errors.whereType<ClassroomWebVpnAuthException>().firstOrNull ??
+                errors.first
+            : null);
+    if (error != null) {
+      return SliverToBoxAdapter(child: _failureState(error));
+    }
+    if (_buildingLoads.length == 1 && _buildingLoads.single.pending) {
+      return const SliverFillRemaining(
+        hasScrollBody: false,
+        child: Center(child: CircularProgressIndicator(strokeWidth: 3)),
       );
     }
-    return FutureBuilder<_ClassroomQueryResult>(
-      future: future,
-      builder: (context, snapshot) {
-        // FutureBuilder retains the previous result while a new query runs.
-        // Keep it visible until the replacement is ready to avoid a flash.
-        if (snapshot.hasData) {
-          return RefreshIndicator(
-            onRefresh: _search,
-            child: _ClassroomResultList(
-              result: snapshot.data!,
-              keyword: _keyword,
-            ),
-          );
-        }
-        if (snapshot.connectionState != ConnectionState.done) {
-          return const Center(child: CircularProgressIndicator(strokeWidth: 3));
-        }
-        if (snapshot.hasError) {
-          return _failureState(snapshot.error!);
-        }
-        return const SizedBox.shrink();
-      },
+    return _ClassroomResults(
+      loads: _buildingLoads,
+      view: _view,
+      sections: _selectedSections,
+      scope: _arrangementScope,
+      keyword: _keyword,
+      onlyArranged: _onlyArranged,
     );
   }
 
@@ -233,21 +295,7 @@ class _EmptyClassroomPageState extends State<EmptyClassroomPage> {
       if (!mounted) {
         return;
       }
-      setState(() {
-        _options = options;
-        _selectedCampus = _validCampus(options);
-        _selectedBuilding = _validBuilding(options);
-        if (!_initialSelectionApplied) {
-          final now = DateTime.now();
-          if (widget.initialDate == null) {
-            _selectedDate = widget.repository.defaultDateFor(options, now: now);
-          }
-          _selectedRange = widget.repository.defaultRangeFor(options, now: now);
-          _initialSelectionApplied = true;
-        } else {
-          _selectedRange ??= widget.repository.defaultRangeFor(options);
-        }
-      });
+      setState(() => _applyOptions(options));
       await _search(forceRefresh: force, accessMode: mode);
     } finally {
       _loadingOptions = false;
@@ -271,10 +319,12 @@ class _EmptyClassroomPageState extends State<EmptyClassroomPage> {
   Future<T> _withWebVpnRecovery<T>(
     Future<T> Function() operation, {
     required ClassroomAccessMode accessMode,
+    bool Function()? isCurrent,
   }) async {
     final accessRevision = ClassroomUrlResolver.revision;
     bool canRecover() =>
         mounted &&
+        (isCurrent?.call() ?? true) &&
         accessMode == ClassroomAccessMode.webVpn &&
         ClassroomUrlResolver.usesWebVpn &&
         accessRevision == ClassroomUrlResolver.revision;
@@ -356,6 +406,7 @@ class _EmptyClassroomPageState extends State<EmptyClassroomPage> {
                 ),
       ),
     );
+    if (!initialLoad) return state;
     return LayoutBuilder(
       builder: (context, constraints) => SingleChildScrollView(
         child: ConstrainedBox(
@@ -394,7 +445,7 @@ class _EmptyClassroomPageState extends State<EmptyClassroomPage> {
         await _search(forceRefresh: true, accessMode: accessMode);
       }
     } on ClassroomApiException {
-      // _loadFuture and _resultFuture own the corresponding error UI.
+      // The current load owns the corresponding error UI.
     } finally {
       if (mounted) {
         setState(() {
@@ -419,71 +470,122 @@ class _EmptyClassroomPageState extends State<EmptyClassroomPage> {
     return names.isEmpty ? null : names.first;
   }
 
-  ClassroomBuilding? _validBuilding(ClassroomSearchOptions options) {
-    final campus = _selectedCampus;
-    final current = _selectedBuilding;
-    if (current == null && _resultFuture != null) {
+  ClassroomBuilding? _validBuilding() {
+    if (_selectedBuilding == null && _buildingLoads.isNotEmpty) {
       return null;
     }
-    final buildings = options.buildings
-        .where((building) => campus == null || building.campusName == campus)
-        .toList(growable: false);
-    if (current != null &&
-        buildings.any((building) => building.id == current.id)) {
-      return current;
+    final buildings = _campusBuildings();
+    return _buildingById(buildings, _selectedBuilding?.id) ??
+        _defaultBuilding(buildings);
+  }
+
+  ClassroomBuilding? _defaultBuilding(List<ClassroomBuilding> buildings) {
+    for (final building in buildings) {
+      if (building.campusName == ClassroomCampus.defaultName &&
+          building.name == 'A楼') {
+        return building;
+      }
     }
-    return buildings.isEmpty ? null : buildings.first;
+    return buildings.firstOrNull;
   }
 
   void _setCampus(String? value) {
-    final options = _options;
-    if (options == null || value == null) {
+    if (_options == null || value == null || value == _selectedCampus) {
       return;
     }
-    final buildings = options.buildings
-        .where((building) => building.campusName == value)
-        .toList(growable: false);
-    final keepAllBuildings = _selectedBuilding == null;
     setState(() {
       _selectedCampus = value;
-      _selectedBuilding =
-          keepAllBuildings || buildings.isEmpty ? null : buildings.first;
+      if (_selectedBuilding != null) {
+        _selectedBuilding = _defaultBuilding(_campusBuildings());
+      }
     });
     _search();
   }
 
   void _setBuilding(ClassroomBuilding? value) {
+    if (value?.id == _selectedBuilding?.id) return;
     setState(() => _selectedBuilding = value);
     _search();
   }
 
-  void _setRange(ClassroomSectionRange range) {
-    setState(() => _selectedRange = range);
-    _search();
+  void _setView(_ClassroomView value) {
+    if (value == _view) return;
+    FocusManager.instance.primaryFocus?.unfocus();
+    _updateArrangementQuery(() => _view = value);
   }
 
-  void _stepRange(int delta) {
+  void _setKeyword(String value) =>
+      _updateArrangementQuery(() => _keyword = value.trim().toLowerCase());
+
+  void _updateArrangementQuery(VoidCallback update) {
+    final previousBuildingId = _queryBuilding?.id;
+    setState(update);
+    // Edits within the same scope only filter the schedules already loading.
+    if (previousBuildingId != _queryBuilding?.id &&
+        _campusBuildings().length > 1) {
+      unawaited(_search());
+    }
+  }
+
+  Future<void> _pickSections() async {
     final options = _options;
-    if (options == null) {
-      return;
-    }
-    final ranges = widget.repository.defaultRanges(options.sections);
-    final currentIndex = ranges.indexWhere(
-      (range) =>
-          range.start == _selectedRange?.start &&
-          range.end == _selectedRange?.end,
+    if (options == null) return;
+    final selected = await showModalBottomSheet<Set<int>>(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: true,
+      useSafeArea: true,
+      builder: (context) => _SectionPickerSheet(
+        ranges: widget.repository.defaultRanges(options.sections),
+        sections: options.sections,
+        selected: _selectedSections,
+      ),
     );
-    if (currentIndex < 0) {
-      return;
-    }
-    final nextIndex = currentIndex + delta;
-    if (nextIndex < 0 || nextIndex >= ranges.length) {
-      return;
-    }
-    _setRange(ranges[nextIndex]);
+    if (!mounted || selected == null) return;
+    setState(() => _selectedSections = selected);
   }
 
-  void _setDate(DateTime date) {
+  Future<void> _pickDate() async {
+    final now = DateUtils.dateOnly(DateTime.now());
+    final firstDate = now.subtract(const Duration(days: 30));
+    final lastDate = now.add(const Duration(days: 180));
+    var selected =
+        _selectedDate.isBefore(firstDate) || _selectedDate.isAfter(lastDate)
+            ? now
+            : _selectedDate;
+    final date = await showDialog<DateTime>(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) => ShuYoDatePickerDialog(
+          title: '选择日期',
+          headerTrailing: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextButton(
+                onPressed: () => Navigator.of(context).pop(now),
+                child: const Text('今天'),
+              ),
+              TextButton(
+                onPressed: () => Navigator.of(context)
+                    .pop(DateTime(now.year, now.month, now.day + 1)),
+                child: const Text('明天'),
+              ),
+            ],
+          ),
+          child: ShuYoCalendarDatePicker(
+            firstDate: firstDate,
+            lastDate: lastDate,
+            focusedDate: selected,
+            selectedDate: selected,
+            onDateChanged: (date) => setDialogState(() => selected = date),
+          ),
+          onConfirm: () => Navigator.of(context).pop(selected),
+        ),
+      ),
+    );
+    if (!mounted || date == null || DateUtils.isSameDay(date, _selectedDate)) {
+      return;
+    }
     setState(() => _selectedDate = date);
     _search();
   }
@@ -492,27 +594,49 @@ class _EmptyClassroomPageState extends State<EmptyClassroomPage> {
     bool forceRefresh = false,
     ClassroomAccessMode? accessMode,
   }) async {
-    final range = _selectedRange;
-    if (range == null) {
-      return;
+    final building = _queryBuilding;
+    final buildings = building == null ? _campusBuildings() : [building];
+    final loads = buildings.map(_BuildingLoad.new).toList(growable: false);
+    final date = _selectedDate;
+    final mode = accessMode ?? ClassroomUrlResolver.accessMode;
+    setState(() => _buildingLoads = loads);
+    bool isCurrent() => mounted && identical(loads, _buildingLoads);
+
+    // Check the selected building first without changing how results are
+    // grouped. Its schedule is usually already in the repository cache.
+    final queue = [...loads];
+    final selected =
+        queue.indexWhere((load) => load.building.id == _selectedBuilding?.id);
+    if (selected > 0) queue.insert(0, queue.removeAt(selected));
+    for (final load in queue) {
+      if (!isCurrent()) return;
+      try {
+        final schedule = await _withWebVpnRecovery(
+          () => widget.repository.loadSchedule(
+            building: load.building,
+            date: date,
+            forceRefresh: forceRefresh,
+            accessMode: mode,
+          ),
+          accessMode: mode,
+          isCurrent: isCurrent,
+        );
+        if (!isCurrent()) return;
+        setState(() => load.schedule = schedule);
+      } on ClassroomApiException catch (error) {
+        if (!isCurrent()) return;
+        if (error is ClassroomWebVpnAuthException) {
+          // Authentication applies to the whole route, not one building.
+          setState(() {
+            for (final pending in loads.where((load) => load.pending)) {
+              pending.error = error;
+            }
+          });
+          return;
+        }
+        setState(() => load.error = error);
+      }
     }
-    final buildings = _selectedBuilding == null
-        ? _campusBuildings()
-        : <ClassroomBuilding>[_selectedBuilding!];
-    if (buildings.isEmpty) {
-      return;
-    }
-    final future = _searchBuildings(
-      buildings: buildings,
-      range: range,
-      date: _selectedDate,
-      forceRefresh: forceRefresh,
-      accessMode: accessMode ?? ClassroomUrlResolver.accessMode,
-    );
-    setState(() {
-      _resultFuture = future;
-    });
-    await future.then<void>((_) {}, onError: (_) {});
   }
 
   List<ClassroomBuilding> _campusBuildings() {
@@ -524,38 +648,6 @@ class _EmptyClassroomPageState extends State<EmptyClassroomPage> {
     return options.buildings
         .where((building) => campus == null || building.campusName == campus)
         .toList(growable: false);
-  }
-
-  Future<_ClassroomQueryResult> _searchBuildings({
-    required List<ClassroomBuilding> buildings,
-    required ClassroomSectionRange range,
-    required DateTime date,
-    required bool forceRefresh,
-    required ClassroomAccessMode accessMode,
-  }) async {
-    final results = <ClassroomAvailabilityResult>[];
-    for (final building in buildings) {
-      final result = await _withWebVpnRecovery(
-        () => widget.repository.search(
-          ClassroomAvailabilityQuery(
-            building: building,
-            date: date,
-            startSection: range.start,
-            endSection: range.end,
-          ),
-          forceRefresh: forceRefresh,
-          accessMode: accessMode,
-        ),
-        accessMode: accessMode,
-      );
-      results.add(result);
-    }
-    return _ClassroomQueryResult(
-      date: date,
-      startSection: range.start,
-      endSection: range.end,
-      results: results,
-    );
   }
 
   String _friendlyError(Object error) {
@@ -654,916 +746,15 @@ class _ClassroomFailureActions extends StatelessWidget {
   }
 }
 
-class _ClassroomQueryResult {
-  const _ClassroomQueryResult({
-    required this.date,
-    required this.startSection,
-    required this.endSection,
-    required this.results,
-  });
-
-  final DateTime date;
-  final int startSection;
-  final int endSection;
-  final List<ClassroomAvailabilityResult> results;
-
-  int get totalRooms =>
-      results.fold(0, (sum, result) => sum + result.totalRooms);
-
-  int get availableCount =>
-      results.fold(0, (sum, result) => sum + result.availableCount);
-
-  String get scopeLabel {
-    if (results.length == 1) {
-      return results.single.building.name;
-    }
-    return '全部教学楼';
-  }
-
-  List<_CourseLocationMatch> courseMatches(String keyword) {
-    final normalized = keyword.trim().toLowerCase();
-    if (normalized.isEmpty) {
-      return const <_CourseLocationMatch>[];
-    }
-    final matches = <_CourseLocationMatch>[];
-    for (final result in results) {
-      for (final floor in result.floors) {
-        for (final room in floor.rooms) {
-          for (final course in room.courses) {
-            final haystack =
-                '${result.building.name} ${room.name} ${course.courseName} ${course.teacherName}'
-                    .toLowerCase();
-            if (haystack.contains(normalized)) {
-              matches.add(
-                _CourseLocationMatch(
-                  building: result.building,
-                  room: room,
-                  course: course,
-                ),
-              );
-            }
-          }
-        }
-      }
-    }
-    matches.sort((a, b) {
-      final section = a.course.startSection.compareTo(b.course.startSection);
-      if (section != 0) {
-        return section;
-      }
-      final building = a.building.name.compareTo(b.building.name);
-      if (building != 0) {
-        return building;
-      }
-      return a.room.name.compareTo(b.room.name);
-    });
-    return matches;
-  }
-}
-
-class _CourseLocationMatch {
-  const _CourseLocationMatch({
-    required this.building,
-    required this.room,
-    required this.course,
-  });
-
-  final ClassroomBuilding building;
-  final ClassroomRoom room;
-  final ClassroomCourse course;
-}
-
-class _SearchControls extends StatelessWidget {
-  const _SearchControls({
-    required this.options,
-    required this.selectedCampus,
-    required this.selectedBuilding,
-    required this.selectedRange,
-    required this.selectedDate,
-    required this.fixedDate,
-    required this.ranges,
-    required this.onCampusChanged,
-    required this.onBuildingChanged,
-    required this.onRangeChanged,
-    required this.onPreviousRange,
-    required this.onNextRange,
-    required this.onDateChanged,
-    required this.onKeywordChanged,
-  });
-
-  final ClassroomSearchOptions options;
-  final String? selectedCampus;
-  final ClassroomBuilding? selectedBuilding;
-  final ClassroomSectionRange? selectedRange;
-  final DateTime selectedDate;
-  final bool fixedDate;
-  final List<ClassroomSectionRange> ranges;
-  final ValueChanged<String?> onCampusChanged;
-  final ValueChanged<ClassroomBuilding?> onBuildingChanged;
-  final ValueChanged<ClassroomSectionRange> onRangeChanged;
-  final VoidCallback onPreviousRange;
-  final VoidCallback onNextRange;
-  final ValueChanged<DateTime> onDateChanged;
-  final ValueChanged<String> onKeywordChanged;
-
-  @override
-  Widget build(BuildContext context) {
-    final colors = context.shuyoColors;
-    final campusBuildings = options.buildings
-        .where((building) =>
-            selectedCampus == null || building.campusName == selectedCampus)
-        .toList(growable: false);
-    return DecoratedBox(
-      decoration: BoxDecoration(
-        border: Border(bottom: BorderSide(color: colors.border)),
-      ),
-      child: Padding(
-        padding: const EdgeInsets.only(top: 8, bottom: 12),
-        child: Column(
-          children: [
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16),
-              child: Row(
-                children: [
-                  Expanded(
-                    child: DropdownButtonFormField<String>(
-                      key: ValueKey('campus-$selectedCampus'),
-                      initialValue: selectedCampus,
-                      decoration: const InputDecoration(
-                        labelText: '校区',
-                        border: OutlineInputBorder(),
-                        isDense: true,
-                      ),
-                      items: [
-                        for (final campus in options.campusNames)
-                          DropdownMenuItem(
-                            value: campus,
-                            child: Text(campus),
-                          ),
-                      ],
-                      onChanged: onCampusChanged,
-                    ),
-                  ),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: DropdownButtonFormField<int>(
-                      key: ValueKey(
-                        'building-$selectedCampus-${selectedBuilding?.id ?? 0}',
-                      ),
-                      initialValue: selectedBuilding?.id ?? 0,
-                      decoration: const InputDecoration(
-                        labelText: '教学楼',
-                        border: OutlineInputBorder(),
-                        isDense: true,
-                      ),
-                      items: [
-                        const DropdownMenuItem(
-                          value: 0,
-                          child: Text('全部教学楼'),
-                        ),
-                        for (final building in campusBuildings)
-                          DropdownMenuItem(
-                            value: building.id,
-                            child: Text(building.name),
-                          ),
-                      ],
-                      onChanged: (id) => onBuildingChanged(
-                        id == 0 ? null : _buildingById(campusBuildings, id),
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            const SizedBox(height: 10),
-            if (fixedDate)
-              Text(
-                  '演示日期 · ${selectedDate.year} 年 ${selectedDate.month} 月 ${selectedDate.day} 日')
-            else
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 16),
-                child: Row(
-                  children: [
-                    _DateButton(
-                      label: '今天',
-                      selected: _isSameDay(selectedDate, DateTime.now()),
-                      onTap: () => onDateChanged(DateTime.now()),
-                    ),
-                    const SizedBox(width: 8),
-                    _DateButton(
-                      label: '明天',
-                      selected: _isSameDay(
-                        selectedDate,
-                        DateTime.now().add(const Duration(days: 1)),
-                      ),
-                      onTap: () => onDateChanged(
-                        DateTime.now().add(const Duration(days: 1)),
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: OutlinedButton.icon(
-                        onPressed: () async {
-                          final picked = await showDatePicker(
-                            context: context,
-                            initialDate: selectedDate,
-                            firstDate: DateTime.now().subtract(
-                              const Duration(days: 30),
-                            ),
-                            lastDate: DateTime.now().add(
-                              const Duration(days: 180),
-                            ),
-                          );
-                          if (picked != null) {
-                            onDateChanged(picked);
-                          }
-                        },
-                        icon:
-                            const Icon(Icons.calendar_month_outlined, size: 18),
-                        label: Text(_dateLabel(selectedDate)),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            const SizedBox(height: 10),
-            _SectionRangeSelector(
-              ranges: ranges,
-              selectedRange: selectedRange,
-              onChanged: onRangeChanged,
-              onPrevious: onPreviousRange,
-              onNext: onNextRange,
-            ),
-            const SizedBox(height: 6),
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16),
-              child: _ClassroomSearchField(
-                onChanged: onKeywordChanged,
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _ClassroomSearchField extends StatefulWidget {
-  const _ClassroomSearchField({required this.onChanged});
-
-  final ValueChanged<String> onChanged;
-
-  @override
-  State<_ClassroomSearchField> createState() => _ClassroomSearchFieldState();
-}
-
-class _ClassroomSearchFieldState extends State<_ClassroomSearchField> {
-  final FocusNode _focusNode = FocusNode();
-
-  @override
-  void initState() {
-    super.initState();
-    _focusNode.addListener(_onFocusChanged);
-  }
-
-  void _onFocusChanged() => setState(() {});
-
-  @override
-  void dispose() {
-    _focusNode.removeListener(_onFocusChanged);
-    _focusNode.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final colors = context.shuyoColors;
-    return Container(
-      height: 52,
-      decoration: BoxDecoration(
-        border: Border(
-          bottom: BorderSide(
-            color: _focusNode.hasFocus ? colors.accent : colors.borderStrong,
-            width: _focusNode.hasFocus ? 1.5 : 1,
-          ),
-        ),
-      ),
-      child: Row(
-        children: [
-          GestureDetector(
-            onTap: _focusNode.requestFocus,
-            child: Padding(
-              padding: const EdgeInsets.only(left: 8, right: 12),
-              child: Icon(Icons.search, size: 20, color: colors.textSecondary),
-            ),
-          ),
-          Expanded(
-            child: TextField(
-              focusNode: _focusNode,
-              onTapOutside: (_) => _focusNode.unfocus(),
-              decoration: const InputDecoration(
-                hintText: '搜索课程、教师或教室',
-                border: InputBorder.none,
-                enabledBorder: InputBorder.none,
-                focusedBorder: InputBorder.none,
-                isCollapsed: true,
-              ),
-              textInputAction: TextInputAction.search,
-              onChanged: widget.onChanged,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _SectionRangeSelector extends StatelessWidget {
-  const _SectionRangeSelector({
-    required this.ranges,
-    required this.selectedRange,
-    required this.onChanged,
-    required this.onPrevious,
-    required this.onNext,
-  });
-
-  final List<ClassroomSectionRange> ranges;
-  final ClassroomSectionRange? selectedRange;
-  final ValueChanged<ClassroomSectionRange> onChanged;
-  final VoidCallback onPrevious;
-  final VoidCallback onNext;
-
-  @override
-  Widget build(BuildContext context) {
-    final selectedIndex = ranges.indexWhere(
-      (range) =>
-          range.start == selectedRange?.start &&
-          range.end == selectedRange?.end,
-    );
-    final canGoPrevious = selectedIndex > 0;
-    final canGoNext = selectedIndex >= 0 && selectedIndex < ranges.length - 1;
-    final selector = Row(
-      children: [
-        IconButton(
-          tooltip: '上一节',
-          onPressed: canGoPrevious ? onPrevious : null,
-          icon: const Icon(Icons.chevron_left),
-          visualDensity: VisualDensity.compact,
-        ),
-        Expanded(
-          child: LayoutBuilder(
-            builder: (context, constraints) {
-              const compactWidth = 18.0;
-              const gap = 6.0;
-              final compactTotal = (ranges.length - 1) * (compactWidth + gap);
-              final selectedWidth = (constraints.maxWidth - compactTotal)
-                  .clamp(72.0, 104.0)
-                  .toDouble();
-              final sideWidth =
-                  ((constraints.maxWidth - selectedWidth - compactTotal) / 2)
-                      .clamp(0.0, double.infinity);
-              return Stack(
-                children: [
-                  // Fill only the blank space beside the range buttons.
-                  Positioned.fill(
-                    child: Row(
-                      children: [
-                        SizedBox(
-                          width: sideWidth,
-                          child: GestureDetector(
-                            behavior: HitTestBehavior.opaque,
-                            excludeFromSemantics: true,
-                            onTap: canGoPrevious ? onPrevious : null,
-                          ),
-                        ),
-                        const Spacer(),
-                        SizedBox(
-                          width: sideWidth,
-                          child: GestureDetector(
-                            behavior: HitTestBehavior.opaque,
-                            excludeFromSemantics: true,
-                            onTap: canGoNext ? onNext : null,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      for (var index = 0; index < ranges.length; index++) ...[
-                        if (index > 0) const SizedBox(width: gap),
-                        _AnimatedRangeButton(
-                          range: ranges[index],
-                          selected: index == selectedIndex,
-                          selectedWidth: selectedWidth,
-                          onTap: () => onChanged(ranges[index]),
-                        ),
-                      ],
-                    ],
-                  ),
-                ],
-              );
-            },
-          ),
-        ),
-        IconButton(
-          tooltip: '下一节',
-          onPressed: canGoNext ? onNext : null,
-          icon: const Icon(Icons.chevron_right),
-          visualDensity: VisualDensity.compact,
-        ),
-      ],
-    );
-    return Stack(
-      children: [
-        Positioned.fill(
-          child: Row(
-            children: [
-              SizedBox(
-                width: 16,
-                child: GestureDetector(
-                  behavior: HitTestBehavior.opaque,
-                  excludeFromSemantics: true,
-                  onTap: canGoPrevious ? onPrevious : null,
-                ),
-              ),
-              const Spacer(),
-              SizedBox(
-                width: 16,
-                child: GestureDetector(
-                  behavior: HitTestBehavior.opaque,
-                  excludeFromSemantics: true,
-                  onTap: canGoNext ? onNext : null,
-                ),
-              ),
-            ],
-          ),
-        ),
-        Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 16),
-          child: selector,
-        ),
-      ],
-    );
-  }
-}
-
-class _AnimatedRangeButton extends StatefulWidget {
-  const _AnimatedRangeButton({
-    required this.range,
-    required this.selected,
-    required this.selectedWidth,
-    required this.onTap,
-  });
-
-  final ClassroomSectionRange range;
-  final bool selected;
-  final double selectedWidth;
-  final VoidCallback onTap;
-
-  @override
-  State<_AnimatedRangeButton> createState() => _AnimatedRangeButtonState();
-}
-
-class _AnimatedRangeButtonState extends State<_AnimatedRangeButton> {
-  static const _widthDuration = Duration(milliseconds: 500);
-  static const _labelDelay = Duration(milliseconds: 50);
-  Timer? _labelTimer;
-  late bool _showLabel;
-
-  @override
-  void initState() {
-    super.initState();
-    _showLabel = widget.selected;
-  }
-
-  @override
-  void didUpdateWidget(covariant _AnimatedRangeButton oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    if (oldWidget.selected == widget.selected) {
-      return;
-    }
-    _labelTimer?.cancel();
-    if (widget.selected) {
-      setState(() => _showLabel = false);
-      _labelTimer = Timer(_labelDelay, () {
-        if (mounted && widget.selected) {
-          setState(() => _showLabel = true);
-        }
-      });
-    } else {
-      setState(() => _showLabel = false);
-    }
-  }
-
-  @override
-  void dispose() {
-    _labelTimer?.cancel();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final colors = context.shuyoColors;
-    return MergeSemantics(
-      child: Semantics(
-        label: widget.range.label,
-        selected: widget.selected,
-        inMutuallyExclusiveGroup: true,
-        child: AnimatedContainer(
-          duration: _widthDuration,
-          curve: Curves.easeOutCubic,
-          width: widget.selected ? widget.selectedWidth : 18,
-          height: 44,
-          decoration: BoxDecoration(
-            color: widget.selected ? colors.accentSoft : colors.surfaceMuted,
-            border: Border.all(
-              color: widget.selected ? colors.accent : colors.borderStrong,
-              width: widget.selected ? 2 : 1,
-            ),
-            borderRadius: BorderRadius.circular(10),
-          ),
-          child: Material(
-            type: MaterialType.transparency,
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(10),
-            ),
-            clipBehavior: Clip.antiAlias,
-            child: InkWell(
-              onTap: widget.onTap,
-              borderRadius: BorderRadius.circular(10),
-              child: Center(
-                child: AnimatedOpacity(
-                  opacity: _showLabel ? 1 : 0,
-                  duration: _showLabel
-                      ? const Duration(milliseconds: 300)
-                      : Duration.zero,
-                  child: Text(
-                    widget.range.label,
-                    textAlign: TextAlign.center,
-                    style: TextStyle(
-                      color: colors.onAccentSoft,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                ),
-              ),
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class _DateButton extends StatelessWidget {
-  const _DateButton({
-    required this.label,
-    required this.selected,
-    required this.onTap,
-  });
-
-  final String label;
-  final bool selected;
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    return selected
-        ? FilledButton(onPressed: onTap, child: Text(label))
-        : OutlinedButton(onPressed: onTap, child: Text(label));
-  }
-}
-
-class _ClassroomResultList extends StatelessWidget {
-  const _ClassroomResultList({
-    required this.result,
-    required this.keyword,
-  });
-
-  final _ClassroomQueryResult result;
-  final String keyword;
-
-  @override
-  Widget build(BuildContext context) {
-    final normalizedKeyword = keyword.trim();
-    final matches = result.courseMatches(normalizedKeyword);
-    final colors = context.shuyoColors;
-
-    return ListView(
-      physics: const AlwaysScrollableScrollPhysics(),
-      padding: const EdgeInsets.fromLTRB(16, 12, 16, 26),
-      children: [
-        Text(
-          '${result.scopeLabel} · ${_dateLabel(result.date)} · '
-          '${result.startSection}-${result.endSection}节',
-          style: ShuYoTextStyles.title(
-            color: colors.textPrimary,
-            size: 16.5,
-            weight: FontWeight.w600,
-          ),
-        ),
-        const SizedBox(height: 5),
-        if (normalizedKeyword.isNotEmpty) ...[
-          Text(
-            '已按全天课程搜索，忽略当前节次',
-            style: TextStyle(color: colors.textTertiary),
-          ),
-          const SizedBox(height: 18),
-          _CourseMatches(matches: matches),
-        ] else ...[
-          Text(
-            '可用 ${result.availableCount} / ${result.totalRooms} 间',
-            style: TextStyle(color: colors.textTertiary),
-          ),
-          const SizedBox(height: 18),
-          if (result.availableCount == 0)
-            const Padding(
-              padding: EdgeInsets.only(top: 48),
-              child: EmptyState(
-                icon: Icons.event_busy_outlined,
-                title: '没有空教室',
-                message: '当前范围在所选节次没有可用教室。',
-              ),
-            )
-          else
-            for (final item in result.results)
-              _BuildingAvailableRooms(
-                result: item,
-                showBuildingName: result.results.length > 1,
-              ),
-        ],
-      ],
-    );
-  }
-}
-
-class _BuildingAvailableRooms extends StatelessWidget {
-  const _BuildingAvailableRooms({
-    required this.result,
-    required this.showBuildingName,
-  });
-
-  final ClassroomAvailabilityResult result;
-  final bool showBuildingName;
-
-  @override
-  Widget build(BuildContext context) {
-    final colors = context.shuyoColors;
-    final availableFloors = result.floors
-        .where((floor) => floor.availableRooms.isNotEmpty)
-        .toList(growable: false);
-    if (availableFloors.isEmpty) {
-      return const SizedBox.shrink();
-    }
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 16),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          if (showBuildingName) ...[
-            Text(
-              '${result.building.name} · ${result.availableCount}间',
-              style: ShuYoTextStyles.title(
-                color: colors.textPrimary,
-                size: 15.5,
-                weight: FontWeight.w600,
-              ),
-            ),
-            const SizedBox(height: 12),
-          ],
-          for (final floor in availableFloors)
-            _FloorAvailableRooms(
-              floor: floor,
-              startSection: result.startSection,
-              endSection: result.endSection,
-            ),
-        ],
-      ),
-    );
-  }
-}
-
-class _CourseMatches extends StatelessWidget {
-  const _CourseMatches({required this.matches});
-
-  final List<_CourseLocationMatch> matches;
-
-  @override
-  Widget build(BuildContext context) {
-    if (matches.isEmpty) {
-      return Text(
-        '未找到课程位置',
-        style: TextStyle(color: context.shuyoColors.textTertiary),
-      );
-    }
-    final colors = context.shuyoColors;
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text(
-          '课程位置',
-          style: TextStyle(
-            color: colors.textPrimary,
-            fontSize: 15.5,
-            fontWeight: FontWeight.w600,
-          ),
-        ),
-        const SizedBox(height: 8),
-        for (final match in matches)
-          Padding(
-            padding: const EdgeInsets.only(bottom: 8),
-            child: Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Icon(
-                  Icons.location_on_outlined,
-                  size: 18,
-                  color: colors.accent,
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Text(
-                    '${match.course.sectionText} · '
-                    '${match.building.name} ${match.room.name} · '
-                    '${match.course.courseName}'
-                    '${match.course.teacherName.isEmpty ? '' : ' · ${match.course.teacherName}'}',
-                    style: TextStyle(color: colors.textPrimary, height: 1.35),
-                  ),
-                ),
-              ],
-            ),
-          ),
-      ],
-    );
-  }
-}
-
-class _FloorAvailableRooms extends StatelessWidget {
-  const _FloorAvailableRooms({
-    required this.floor,
-    required this.startSection,
-    required this.endSection,
-  });
-
-  final ClassroomFloorAvailability floor;
-  final int startSection;
-  final int endSection;
-
-  @override
-  Widget build(BuildContext context) {
-    final colors = context.shuyoColors;
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 18),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            '${floor.floor.name} · ${floor.availableRooms.length}间',
-            style: TextStyle(
-              color: colors.textPrimary,
-              fontSize: 14.5,
-              fontWeight: FontWeight.w600,
-            ),
-          ),
-          const SizedBox(height: 10),
-          Wrap(
-            spacing: 8,
-            runSpacing: 8,
-            children: [
-              for (final room in floor.availableRooms)
-                _RoomChip(
-                  room: room,
-                  startSection: startSection,
-                  endSection: endSection,
-                ),
-            ],
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _RoomChip extends StatelessWidget {
-  const _RoomChip({
-    required this.room,
-    required this.startSection,
-    required this.endSection,
-  });
-
-  final ClassroomRoom room;
-  final int startSection;
-  final int endSection;
-
-  @override
-  Widget build(BuildContext context) {
-    return ActionChip(
-      label: Text(room.name),
-      avatar: const Icon(Icons.meeting_room_outlined, size: 17),
-      onPressed: () => _showRoomSheet(context),
-    );
-  }
-
-  void _showRoomSheet(BuildContext context) {
-    final selectedCourses = room.coursesFor(startSection, endSection);
-    final courses = [...room.courses]
-      ..sort((a, b) => a.startSection.compareTo(b.startSection));
-    showModalBottomSheet<void>(
-      context: context,
-      backgroundColor: Colors.transparent,
-      builder: (context) {
-        final colors = context.shuyoColors;
-        return SafeArea(
-          top: false,
-          bottom: false,
-          child: Container(
-            width: double.infinity,
-            padding: EdgeInsets.fromLTRB(
-              20,
-              16,
-              20,
-              20 + MediaQuery.of(context).viewPadding.bottom,
-            ),
-            decoration: BoxDecoration(
-              color: colors.surface,
-              borderRadius: const BorderRadius.vertical(
-                top: Radius.circular(8),
-              ),
-            ),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  room.name,
-                  style: TextStyle(
-                    color: colors.textPrimary,
-                    fontSize: 18,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-                if (room.fullName.isNotEmpty) ...[
-                  const SizedBox(height: 4),
-                  Text(
-                    room.fullName,
-                    style: TextStyle(color: colors.textTertiary),
-                  ),
-                ],
-                const SizedBox(height: 14),
-                Text(
-                  selectedCourses.isEmpty
-                      ? '$startSection-$endSection节空闲'
-                      : '$startSection-$endSection节已有安排',
-                  style: TextStyle(
-                    color: colors.accent,
-                    fontSize: 13,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-                const SizedBox(height: 12),
-                if (courses.isEmpty)
-                  Text(
-                    '当天没有课程安排',
-                    style: TextStyle(color: colors.textSecondary),
-                  )
-                else
-                  for (final course in courses)
-                    Padding(
-                      padding: const EdgeInsets.only(bottom: 9),
-                      child: Text(
-                        '${course.sectionText} · ${course.courseName}'
-                        '${course.teacherName.isEmpty ? '' : ' · ${course.teacherName}'}',
-                        style: TextStyle(
-                          color: colors.textPrimary,
-                          fontSize: 14.5,
-                          height: 1.46,
-                        ),
-                      ),
-                    ),
-              ],
-            ),
-          ),
-        );
-      },
-    );
-  }
-}
-
 String _dateLabel(DateTime date) {
   final now = DateTime.now();
-  if (_isSameDay(date, now)) {
+  if (DateUtils.isSameDay(date, now)) {
     return '今天 ${date.month}/${date.day}';
   }
-  if (_isSameDay(date, now.add(const Duration(days: 1)))) {
+  if (DateUtils.isSameDay(date, now.add(const Duration(days: 1)))) {
     return '明天 ${date.month}/${date.day}';
   }
   return '${date.month}/${date.day}';
-}
-
-bool _isSameDay(DateTime a, DateTime b) {
-  return a.year == b.year && a.month == b.month && a.day == b.day;
 }
 
 ClassroomBuilding? _buildingById(

@@ -12,7 +12,36 @@ void main() {
     expect(data.schedule.term.studentName, '演示同学');
     expect(data.schedule.term.studentId, 'DEMO0001');
     expect(data.announcements, hasLength(4));
-    expect(data.classroomSchedule.building.name, 'GA楼');
+    expect(data.classroomOptions.buildings.map((building) => building.name),
+        unorderedEquals(['A楼', 'GA楼']));
+    final rooms = data.classroomSchedules[930]!.rooms;
+    final example = rooms.singleWhere((room) => room.name == 'GA101');
+    expect(example.coursesFor({5, 6}).single.courseName, '线性代数');
+    expect(example.isFreeFor({3, 4, 7, 8}), isTrue);
+    expect(
+        rooms.expand((room) => room.courses).any((item) => item.source == '借'),
+        isTrue);
+  });
+
+  test('serves both classroom buildings offline on the preview date', () async {
+    final data = await DemoDataBundle.load();
+    final repository = DemoClassroomRepository(
+      options: data.classroomOptions,
+      schedules: data.classroomSchedules,
+    );
+    final options = await repository.loadOptions();
+    for (final (id, roomName, sections) in [
+      (303, 'A101', {7, 8}),
+      (930, 'GA101', {5, 6}),
+    ]) {
+      final schedule = await repository.loadSchedule(
+        building:
+            options.buildings.singleWhere((building) => building.id == id),
+        date: DemoDataBundle.previewTime,
+      );
+      final room = schedule.rooms.singleWhere((room) => room.name == roomName);
+      expect(room.coursesFor(sections).single.courseName, '线性代数');
+    }
   });
 
   test('demonstrates the bundled term and keeps schedule edits offline',

@@ -44,11 +44,16 @@ void main() {
         ),
       );
 
-  ClassroomAvailabilityQuery query() => ClassroomAvailabilityQuery(
+  Future<ClassroomBuildingSchedule> load(
+    ClassroomRepository repository, {
+    ClassroomAccessMode? accessMode,
+    bool forceRefresh = false,
+  }) =>
+      repository.loadSchedule(
         building: _building,
         date: DateTime(2026, 11, 8),
-        startSection: 1,
-        endSection: 2,
+        accessMode: accessMode,
+        forceRefresh: forceRefresh,
       );
 
   test('direct override is per operation and caches stay transport-specific',
@@ -57,10 +62,10 @@ void main() {
     final repo = repository(requests);
     final revision = ClassroomUrlResolver.revision;
 
-    await repo.search(query());
-    await repo.search(query(), accessMode: ClassroomAccessMode.direct);
-    await repo.search(query());
-    await repo.search(query(), accessMode: ClassroomAccessMode.direct);
+    await load(repo);
+    await load(repo, accessMode: ClassroomAccessMode.direct);
+    await load(repo);
+    await load(repo, accessMode: ClassroomAccessMode.direct);
 
     expect(requests.map((request) => request.url.host), [
       ClassroomUrlResolver.webVpnHost,
@@ -74,8 +79,8 @@ void main() {
   test('explicit retries bypass the chosen transport cache', () async {
     final requests = <http.Request>[];
     final repo = repository(requests);
-    await repo.search(query(), accessMode: ClassroomAccessMode.direct);
-    await repo.search(query(),
+    await load(repo, accessMode: ClassroomAccessMode.direct);
+    await load(repo,
         accessMode: ClassroomAccessMode.direct, forceRefresh: true);
     expect(requests, hasLength(2));
     expect(requests.every((r) => r.url.host == ClassroomUrlResolver.directHost),

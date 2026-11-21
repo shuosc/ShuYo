@@ -271,11 +271,11 @@ class DemoAnnouncementRepository extends AnnouncementRepository {
 class DemoClassroomRepository extends ClassroomRepository {
   DemoClassroomRepository({
     required this.options,
-    required this.schedule,
+    required this.schedules,
   });
 
   final ClassroomSearchOptions options;
-  final ClassroomBuildingSchedule schedule;
+  final Map<int, ClassroomBuildingSchedule> schedules;
 
   @override
   ClassroomSearchOptions? get optionsSnapshot => options;
@@ -288,37 +288,15 @@ class DemoClassroomRepository extends ClassroomRepository {
       options;
 
   @override
-  Future<ClassroomAvailabilityResult> search(
-    ClassroomAvailabilityQuery query, {
+  Future<ClassroomBuildingSchedule> loadSchedule({
+    required ClassroomBuilding building,
+    required DateTime date,
     bool forceRefresh = false,
     ClassroomAccessMode? accessMode,
   }) async {
-    final supported = query.building.id == schedule.building.id &&
-        query.date.year == 2026 &&
-        query.date.month == 9 &&
-        query.date.day == 1;
-    if (!supported) {
-      return ClassroomAvailabilityResult(
-        building: query.building,
-        date: query.date,
-        startSection: query.startSection,
-        endSection: query.endSection,
-        floors: const [],
-      );
-    }
-    final floors = schedule.floors.map((floor) {
-      final available = floor.rooms
-          .where((room) => room.isFreeFor(query.startSection, query.endSection))
-          .toList(growable: false);
-      return ClassroomFloorAvailability(
-          floor: floor, rooms: floor.rooms, availableRooms: available);
-    }).toList(growable: false);
-    return ClassroomAvailabilityResult(
-        building: query.building,
-        date: query.date,
-        startSection: query.startSection,
-        endSection: query.endSection,
-        floors: floors);
+    final previewDate = date.year == 2026 && date.month == 9 && date.day == 1;
+    return (previewDate ? schedules[building.id] : null) ??
+        ClassroomBuildingSchedule(building: building, floors: const []);
   }
 }
 

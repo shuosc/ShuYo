@@ -179,11 +179,12 @@ void main() {
 class _PendingRepository extends _SnapshotRepository {
   _PendingRepository() : super(snapshot: _SnapshotRepository.options);
 
-  final pending = Completer<ClassroomAvailabilityResult>();
+  final pending = Completer<ClassroomBuildingSchedule>();
 
   @override
-  Future<ClassroomAvailabilityResult> search(
-    ClassroomAvailabilityQuery query, {
+  Future<ClassroomBuildingSchedule> loadSchedule({
+    required ClassroomBuilding building,
+    required DateTime date,
     bool forceRefresh = false,
     ClassroomAccessMode? accessMode,
   }) {
@@ -191,8 +192,12 @@ class _PendingRepository extends _SnapshotRepository {
       searches++;
       return pending.future;
     }
-    return super
-        .search(query, forceRefresh: forceRefresh, accessMode: accessMode);
+    return super.loadSchedule(
+      building: building,
+      date: date,
+      forceRefresh: forceRefresh,
+      accessMode: accessMode,
+    );
   }
 }
 
@@ -226,18 +231,13 @@ class _SnapshotRepository extends ClassroomRepository {
       pendingLoad ?? Future.value(options);
 
   @override
-  Future<ClassroomAvailabilityResult> search(
-    ClassroomAvailabilityQuery query, {
+  Future<ClassroomBuildingSchedule> loadSchedule({
+    required ClassroomBuilding building,
+    required DateTime date,
     bool forceRefresh = false,
     ClassroomAccessMode? accessMode,
   }) async {
     searches += 1;
-    return ClassroomAvailabilityResult(
-      building: query.building,
-      date: query.date,
-      startSection: query.startSection,
-      endSection: query.endSection,
-      floors: const [],
-    );
+    return ClassroomBuildingSchedule(building: building, floors: const []);
   }
 }
