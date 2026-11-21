@@ -139,9 +139,10 @@ const _otherSchedule = ClassroomBuildingSchedule(
 );
 
 class _ScheduleRepository extends ClassroomRepository {
-  _ScheduleRepository({this.otherSchedule});
+  _ScheduleRepository({this.otherSchedule, this.floors = const [_floor]});
 
   final Future<ClassroomBuildingSchedule>? otherSchedule;
+  final List<ClassroomFloor> floors;
   final requestedBuildings = <int>[];
   int get loads => requestedBuildings.length;
 
@@ -172,7 +173,7 @@ class _ScheduleRepository extends ClassroomRepository {
     if (building.id == _otherBuilding.id) return otherSchedule!;
     return ClassroomBuildingSchedule(
       building: building,
-      floors: building.id == _building.id ? const [_floor] : const [],
+      floors: building.id == _building.id ? floors : const [],
     );
   }
 }
@@ -214,6 +215,95 @@ Future<void> _tap(WidgetTester tester, Finder finder) async {
 }
 
 void main() {
+  group('available room grid', () {
+    const upperRoomNames = ['GA21', 'GA202', 'GA203', 'GA24'];
+    const namesByFloor = [
+      ['GA101'],
+      upperRoomNames,
+    ];
+    final floors = [
+      ClassroomFloor(id: 1, name: '一层', rooms: [_floor.rooms.first]),
+      ClassroomFloor(
+        id: 2,
+        name: '二层',
+        rooms: [
+          for (final (index, name) in upperRoomNames.indexed)
+            ClassroomRoom(
+              id: 210 + index,
+              name: name,
+              floorName: '二层',
+              fullName: '',
+              courses: const [],
+            ),
+        ],
+      ),
+    ];
+
+    for (final (width, textScale, columns) in [
+      (391.0, 1.0, 3),
+      (320.0, 1.0, 2),
+      (391.0, 1.8, 2),
+      (320.0, 1.8, 1),
+    ]) {
+      testWidgets('$columns aligned columns at $width dp and ${textScale}x',
+          (tester) async {
+        tester.view.devicePixelRatio = 1;
+        tester.view.physicalSize = Size(width, 900);
+        addTearDown(tester.view.resetDevicePixelRatio);
+        addTearDown(tester.view.resetPhysicalSize);
+        await _open(tester, _ScheduleRepository(floors: floors),
+            textScale: textScale, dark: textScale > 1);
+
+        Finder tile(String name) => find.widgetWithText(OutlinedButton, name);
+        final first = tester.getRect(tile(namesByFloor.first.first));
+        const gap = 8.0;
+        expect(first.height, greaterThanOrEqualTo(44));
+        // Every floor uses the same full-width grid, even with empty cells.
+        expect(first.width * columns + gap * (columns - 1),
+            closeTo(width - 2 * first.left, 0.001));
+        for (final names in namesByFloor) {
+          final top = tester.getTopLeft(tile(names.first)).dy;
+          for (final (index, name) in names.indexed) {
+            final bounds = tester.getRect(tile(name));
+            expect(bounds.size, first.size);
+            expect(
+                bounds.left,
+                closeTo(first.left + (index % columns) * (first.width + gap),
+                    0.001));
+            expect(
+                bounds.top,
+                closeTo(
+                    top + (index ~/ columns) * (first.height + gap), 0.001));
+
+            final icon = find.descendant(
+              of: tile(name),
+              matching: find.byIcon(Icons.meeting_room_outlined),
+            );
+            expect(tester.getCenter(icon).dx,
+                lessThan(tester.getTopLeft(find.text(name)).dx));
+          }
+        }
+        expect(tester.takeException(), isNull);
+      });
+    }
+
+    testWidgets('tapping the tile edge opens the full-day schedule',
+        (tester) async {
+      final repository = _ScheduleRepository();
+      await _open(tester, repository);
+      final tile = tester.getRect(find.widgetWithText(OutlinedButton, 'GA101'));
+      await tester.tapAt(Offset(tile.right - 6, tile.center.dy));
+      await tester.pumpAndSettle();
+
+      final sheet = find.byType(BottomSheet);
+      expect(find.descendant(of: sheet, matching: find.text('全天')),
+          findsOneWidget);
+      expect(find.descendant(of: sheet, matching: find.text('线性代数')),
+          findsOneWidget);
+      expect(repository.loads, 1);
+    });
+  });
+
   testWidgets(
       'disjoint blocks intersect availability using the loaded schedule',
       (tester) async {
