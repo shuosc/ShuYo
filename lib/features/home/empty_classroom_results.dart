@@ -11,6 +11,8 @@ enum _ArrangementScope {
   final String label;
 }
 
+const _arrangementTitleWeight = FontWeight.w500;
+
 class _BuildingLoad {
   _BuildingLoad(this.building);
 
@@ -96,7 +98,10 @@ class _ClassroomResults extends StatelessWidget {
     for (final load in loads) {
       final schedule = load.schedule;
       if (schedule == null) {
-        rows.add(_BuildingStatus(load: load));
+        rows.add(_BuildingStatus(
+          load: load,
+          titleWeight: _arrangementTitleWeight,
+        ));
         continue;
       }
       final buildingRows = <Widget>[];
@@ -117,7 +122,12 @@ class _ClassroomResults extends StatelessWidget {
         }
       }
       if (buildingRows.isNotEmpty) {
-        if (loads.length > 1) rows.add(_BuildingLabel(schedule.building.name));
+        if (loads.length > 1) {
+          rows.add(_BuildingLabel(
+            schedule.building.name,
+            weight: _arrangementTitleWeight,
+          ));
+        }
         rows.addAll(buildingRows);
       }
     }
@@ -144,21 +154,24 @@ class _ClassroomResults extends StatelessWidget {
 }
 
 class _BuildingLabel extends StatelessWidget {
-  const _BuildingLabel(this.name);
+  const _BuildingLabel(this.name, {this.weight});
 
   final String name;
+  final FontWeight? weight;
 
   @override
   Widget build(BuildContext context) => Padding(
         padding: const EdgeInsets.only(top: 12),
-        child: Text(name, style: ShuYoTextStyles.sectionTitle()),
+        child: Text(name,
+            style: ShuYoTextStyles.sectionTitle().copyWith(fontWeight: weight)),
       );
 }
 
 class _BuildingStatus extends StatelessWidget {
-  const _BuildingStatus({required this.load});
+  const _BuildingStatus({required this.load, this.titleWeight});
 
   final _BuildingLoad load;
+  final FontWeight? titleWeight;
 
   @override
   Widget build(BuildContext context) {
@@ -169,7 +182,8 @@ class _BuildingStatus extends StatelessWidget {
         children: [
           Expanded(
               child: Text(load.building.name,
-                  style: ShuYoTextStyles.sectionTitle())),
+                  style: ShuYoTextStyles.sectionTitle()
+                      .copyWith(fontWeight: titleWeight))),
           if (load.pending)
             const SizedBox.square(
               dimension: 16,
@@ -330,7 +344,8 @@ class _RoomScheduleRow extends StatelessWidget {
                 Row(children: [
                   Expanded(
                       child: Text(room.name,
-                          style: ShuYoTextStyles.sectionTitle())),
+                          style: ShuYoTextStyles.sectionTitle()
+                              .copyWith(fontWeight: _arrangementTitleWeight))),
                   if (courses.isEmpty) ...[
                     Text('无安排',
                         style:
