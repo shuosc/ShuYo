@@ -8,6 +8,7 @@ import '../../data/repositories/academic_progress_repository.dart';
 import '../../data/repositories/academic_ranking_repository.dart';
 import '../../data/services/academic_progress_display_settings_service.dart';
 import '../../data/services/academic_schedule_api_client.dart';
+import '../../shared/theme/custom_background.dart';
 import '../../shared/theme/shuyo_theme.dart';
 import '../../shared/widgets/empty_state.dart';
 
@@ -692,7 +693,8 @@ class _AcademicProgressPageState extends State<AcademicProgressPage> {
     final colors = context.shuyoColors;
     return Container(
       decoration: BoxDecoration(
-        color: colors.surface,
+        color: CustomBackgroundScope.photoModuleSurfaceOf(context) ??
+            colors.surface,
         borderRadius: BorderRadius.circular(14),
         border: Border.all(color: colors.border),
       ),

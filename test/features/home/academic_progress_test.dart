@@ -18,6 +18,7 @@ import 'package:shuyo/data/services/academic_progress_display_settings_service.d
 import 'package:shuyo/data/services/academic_progress_parser.dart';
 import 'package:shuyo/data/services/academic_schedule_api_client.dart';
 import 'package:shuyo/features/home/academic_progress_page.dart';
+import 'package:shuyo/shared/theme/custom_background.dart';
 import 'package:shuyo/shared/theme/shuyo_theme.dart';
 
 class _AuthWithCookie extends AcademicAuthService {
@@ -328,6 +329,62 @@ void main() {
     expect(ranking.requests, 0);
     expect(find.text('学院排名'), findsOneWidget);
     expect(find.text('暂无排名'), findsOneWidget);
+  });
+
+  testWidgets('only the academic overview fill follows photo module opacity',
+      (tester) async {
+    const settings = CustomBackground(
+      imagePath: 'assets/images/icon.png',
+      opacity: 50,
+      background: Colors.white,
+      surface: Color(0xFFF1F3F5),
+      text: Colors.black,
+      accent: Colors.blue,
+    );
+    final builtInTheme = ShuYoThemes.byId(ShuYoThemes.defaultId);
+    final page = AcademicProgressPage(
+      repository: DemoAcademicProgressRepository(),
+      onLoginRequired: () async {},
+    );
+    final title = find.text('学业总览');
+    final overview = find.ancestor(
+      of: title,
+      matching: find.byWidgetPredicate(
+        (widget) => widget is Container && widget.decoration is BoxDecoration,
+      ),
+    );
+    final treeDot = find.byKey(const ValueKey('progress-node-dot-demo-basic'));
+
+    for (final (background, fill) in [
+      for (final opacity in [20, 60, 100])
+        (
+          settings.copyWith(moduleOpacity: opacity),
+          settings.surface.withValues(alpha: opacity / 100),
+        ),
+      (settings.copyWith(opacity: 0), settings.surface),
+      (settings.copyWith(imagePath: ''), settings.surface),
+      (null, builtInTheme.colors.surface),
+    ]) {
+      final theme = background?.theme ?? builtInTheme;
+      await tester.pumpWidget(MaterialApp(
+        theme: theme.themeData(),
+        builder: (_, child) =>
+            CustomBackgroundScope(settings: background, child: child!),
+        home: page,
+      ));
+      await tester.pumpAndSettle();
+
+      final decoration =
+          tester.widget<Container>(overview).decoration as BoxDecoration;
+      expect(decoration.color, fill);
+      expect(decoration.border, Border.all(color: theme.colors.border));
+      expect(tester.widget<Text>(title).style?.color, theme.colors.textPrimary);
+      expect(
+        (tester.widget<AnimatedContainer>(treeDot).decoration as BoxDecoration)
+            .color,
+        theme.colors.surface,
+      );
+    }
   });
 
   testWidgets('browses categories and refreshes from the More menu',
