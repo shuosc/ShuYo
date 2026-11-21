@@ -624,47 +624,33 @@ class _ClassroomFailureActions extends StatelessWidget {
       icon: _icon(ClassroomAccessMode.direct, Icons.swap_horiz),
       label: const Text('尝试直连'),
     );
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        LayoutBuilder(builder: (context, constraints) {
-          double buttonWidth(String label) {
-            final painter = TextPainter(
-              text: TextSpan(
-                text: label,
-                style: Theme.of(context).textTheme.labelLarge,
-              ),
-              textDirection: Directionality.of(context),
-              textScaler: MediaQuery.textScalerOf(context),
-            )..layout();
-            final width = painter.width + 18 + 8 + 48;
-            painter.dispose();
-            return width;
-          }
-
-          final requiredWidth =
-              buttonWidth('尝试直连') + buttonWidth('重试WebVPN') + 12;
-          if (constraints.maxWidth < requiredWidth) {
-            return Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [direct, const SizedBox(height: 10), retry],
-            );
-          }
-          return Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [direct, const SizedBox(width: 12), retry],
-          );
-        }),
-        const SizedBox(height: 8),
-        Text(
-          '尝试直连会关闭全局WebVPN，可在设置中重新开启',
-          textAlign: TextAlign.center,
-          style: ShuYoTextStyles.meta(
-            color: context.shuyoColors.textSecondary,
+    return LayoutBuilder(builder: (context, constraints) {
+      double buttonWidth(String label) {
+        final painter = TextPainter(
+          text: TextSpan(
+            text: label,
+            style: Theme.of(context).textTheme.labelLarge,
           ),
-        ),
-      ],
-    );
+          textDirection: Directionality.of(context),
+          textScaler: MediaQuery.textScalerOf(context),
+        )..layout();
+        final width = painter.width + 18 + 8 + 48;
+        painter.dispose();
+        return width;
+      }
+
+      final requiredWidth = buttonWidth('尝试直连') + buttonWidth('重试WebVPN') + 12;
+      if (constraints.maxWidth < requiredWidth) {
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [direct, const SizedBox(height: 10), retry],
+        );
+      }
+      return Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [direct, const SizedBox(width: 12), retry],
+      );
+    });
   }
 }
 
