@@ -211,20 +211,92 @@ class _AvailableFloor extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        _FloorLabel(floor.floor.name),
-        Wrap(
-          spacing: 8,
-          children: [
-            for (final room in floor.availableRooms)
-              ActionChip(
-                label: Text(room.name),
-                side: BorderSide(color: colors.borderStrong),
-                padding: const EdgeInsets.symmetric(horizontal: 6),
-                onPressed: () => _showRoomSchedule(context, building, room),
-              ),
-          ],
+        Padding(
+          padding: const EdgeInsets.only(top: 16, bottom: 6),
+          child: Text(
+            floor.floor.name,
+            style: ShuYoTextStyles.meta(
+              color: colors.textSecondary,
+              weight: FontWeight.w500,
+            ),
+          ),
+        ),
+        LayoutBuilder(
+          builder: (context, constraints) {
+            const gap = 8.0;
+            final minWidth = _AvailableRoomTile.minimumWidth(
+              MediaQuery.textScalerOf(context),
+            );
+            final columns = ((constraints.maxWidth + gap) / (minWidth + gap))
+                .floor()
+                .clamp(1, 3);
+            final width =
+                (constraints.maxWidth - (columns - 1) * gap) / columns;
+            return Wrap(
+              spacing: gap,
+              runSpacing: gap,
+              children: [
+                for (final room in floor.availableRooms)
+                  SizedBox(
+                    width: width,
+                    child: _AvailableRoomTile(building: building, room: room),
+                  ),
+              ],
+            );
+          },
         ),
       ],
+    );
+  }
+}
+
+class _AvailableRoomTile extends StatelessWidget {
+  const _AvailableRoomTile({required this.building, required this.room});
+
+  static const _labelSize = 14.0;
+  static const _labelWidthInEms = 4;
+  static const _iconSize = 17.0;
+  static const _iconGap = 7.0;
+  static const _padding = EdgeInsets.symmetric(horizontal: 10, vertical: 8);
+
+  static double minimumWidth(TextScaler scaler) =>
+      _padding.horizontal +
+      _iconSize +
+      _iconGap +
+      _labelWidthInEms * scaler.scale(_labelSize);
+
+  final ClassroomBuilding building;
+  final ClassroomRoom room;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = context.shuyoColors;
+    return OutlinedButton(
+      onPressed: () => _showRoomSchedule(context, building, room),
+      style: OutlinedButton.styleFrom(
+        backgroundColor: colors.surface,
+        foregroundColor: colors.textPrimary,
+        textStyle: ShuYoTextStyles.label(size: _labelSize).copyWith(
+          fontFeatures: const [FontFeature.tabularFigures()],
+        ),
+        minimumSize: const Size(0, 44),
+        padding: _padding,
+        visualDensity: VisualDensity.standard,
+        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+        side: BorderSide(color: colors.borderStrong),
+      ),
+      child: Row(
+        children: [
+          Icon(Icons.meeting_room_outlined,
+              size: _iconSize, color: colors.accentAlt),
+          const SizedBox(width: _iconGap),
+          Flexible(
+            child:
+                Text(room.name, maxLines: 1, overflow: TextOverflow.ellipsis),
+          ),
+        ],
+      ),
     );
   }
 }
