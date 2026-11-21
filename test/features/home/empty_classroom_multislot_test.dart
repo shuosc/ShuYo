@@ -218,8 +218,7 @@ Future<void> _tap(WidgetTester tester, Finder finder) async {
 }
 
 void main() {
-  testWidgets(
-      'only classroom result blocks follow visible photo module opacity',
+  testWidgets('only available room tiles follow visible photo module opacity',
       (tester) async {
     tester.view.devicePixelRatio = 1;
     tester.view.physicalSize = const Size(410, 900);
@@ -235,16 +234,10 @@ void main() {
     );
     final repository = _ScheduleRepository();
     final tile = find.widgetWithText(OutlinedButton, 'GA101');
-    final arrangedRoom = find.byKey(ValueKey((_building.id, 101)));
-    final emptyRoom = find.byKey(ValueKey((_building.id, 104)));
-    final arrangedFill = find.descendant(
-      of: arrangedRoom,
-      matching: find.byType(Material),
-    );
-    final emptyFill = find.descendant(
-      of: emptyRoom,
-      matching: find.byType(Material),
-    );
+    final arrangementRows = [
+      find.byKey(ValueKey((_building.id, 101))),
+      find.byKey(ValueKey((_building.id, 104))),
+    ];
 
     for (final (background, fill, dark) in [
       for (final opacity in [20, 60, 100])
@@ -265,15 +258,11 @@ void main() {
       expect(style.side!.resolve({})!.color, colors.borderStrong);
 
       await _tap(tester, find.text('教室安排'));
-      expect(emptyRoom, findsOneWidget);
-      expect(emptyFill, findsNothing);
-      if (fill == null) {
-        expect(arrangedFill, findsNothing);
-      } else {
-        expect(tester.widget<Material>(arrangedFill).color, fill);
+      for (final row in arrangementRows) {
+        expect(row, findsOneWidget);
         expect(
-          find.descendant(of: arrangedFill, matching: find.text('线性代数')),
-          findsOneWidget,
+          find.descendant(of: row, matching: find.byType(Material)),
+          findsNothing,
         );
       }
       await _tap(tester, find.text('找空教室'));

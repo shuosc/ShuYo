@@ -330,43 +330,41 @@ class _RoomScheduleRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colors = context.shuyoColors;
-    final surface = courses.isEmpty
-        ? null
-        : CustomBackgroundScope.photoModuleSurfaceOf(context);
-    final row = InkWell(
-      onTap: () => _showRoomSchedule(context, building, room),
-      child: Container(
-        alignment: Alignment.centerLeft,
-        constraints: const BoxConstraints(minHeight: 48),
-        padding: const EdgeInsets.symmetric(vertical: 9),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(children: [
-              Expanded(
-                  child: Text(room.name,
-                      style: ShuYoTextStyles.sectionTitle()
-                          .copyWith(fontWeight: _arrangementTitleWeight))),
-              if (courses.isEmpty) ...[
-                Text('无安排',
-                    style: ShuYoTextStyles.meta(color: colors.textSecondary)),
-                const SizedBox(width: 6),
-              ],
-              Icon(Icons.chevron_right, size: 19, color: colors.textTertiary),
-            ]),
-            for (final course in courses)
-              Padding(
-                padding: const EdgeInsets.only(top: 4),
-                child: _CourseLine(course),
-              ),
-          ],
-        ),
-      ),
-    );
     return Column(
       children: [
-        if (surface == null) row else Material(color: surface, child: row),
+        InkWell(
+          onTap: () => _showRoomSchedule(context, building, room),
+          child: Container(
+            alignment: Alignment.centerLeft,
+            constraints: const BoxConstraints(minHeight: 48),
+            padding: const EdgeInsets.symmetric(vertical: 9),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(children: [
+                  Expanded(
+                      child: Text(room.name,
+                          style: ShuYoTextStyles.sectionTitle()
+                              .copyWith(fontWeight: _arrangementTitleWeight))),
+                  if (courses.isEmpty) ...[
+                    Text('无安排',
+                        style:
+                            ShuYoTextStyles.meta(color: colors.textSecondary)),
+                    const SizedBox(width: 6),
+                  ],
+                  Icon(Icons.chevron_right,
+                      size: 19, color: colors.textTertiary),
+                ]),
+                for (final course in courses)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 4),
+                    child: _CourseLine(course),
+                  ),
+              ],
+            ),
+          ),
+        ),
         const Divider(),
       ],
     );
