@@ -21,6 +21,7 @@ class EmptyClassroomPage extends StatefulWidget {
     this.initialCampus = ClassroomCampus.defaultName,
     this.onWebVpnExpired,
     this.onWebVpnRecoveryRequired,
+    this.onDisableWebVpn,
     this.webVpnServiceStatus,
   });
 
@@ -31,6 +32,9 @@ class EmptyClassroomPage extends StatefulWidget {
   final Future<void> Function()? onWebVpnExpired;
   final Future<WebVpnRecoveryOutcome> Function(bool interactive)?
       onWebVpnRecoveryRequired;
+
+  /// Turns off global WebVPN and reports whether direct retry can proceed.
+  final Future<bool> Function()? onDisableWebVpn;
   final WebVpnServiceStatus Function()? webVpnServiceStatus;
 
   @override
@@ -332,6 +336,7 @@ class _EmptyClassroomPageState extends State<EmptyClassroomPage> {
         : ClassroomUrlResolver.accessMode;
     final needsAuthentication =
         error is ClassroomWebVpnAuthException && !_webVpnServiceUnavailable;
+    final disableWebVpn = widget.onDisableWebVpn;
     final state = EmptyState(
       icon: initialLoad ? Icons.meeting_room_outlined : Icons.error_outline,
       title: initialLoad ? '空教室加载失败' : '查询失败',
@@ -342,11 +347,13 @@ class _EmptyClassroomPageState extends State<EmptyClassroomPage> {
         retryingMode: _retryingMode,
         onRetry: () =>
             _retry(error, initialLoad: initialLoad, accessMode: mode),
-        onTryDirect: () => _retry(
-          error,
-          initialLoad: initialLoad,
-          accessMode: ClassroomAccessMode.direct,
-        ),
+        onTryDirect: disableWebVpn == null
+            ? null
+            : () => _retry(
+                  error,
+                  initialLoad: initialLoad,
+                  disableWebVpn: disableWebVpn,
+                ),
       ),
     );
     return LayoutBuilder(
@@ -362,16 +369,21 @@ class _EmptyClassroomPageState extends State<EmptyClassroomPage> {
   Future<void> _retry(
     Object error, {
     required bool initialLoad,
-    required ClassroomAccessMode accessMode,
+    ClassroomAccessMode? accessMode,
+    Future<bool> Function()? disableWebVpn,
   }) async {
     if (_retryingMode != null || _loadingOptions) return;
     setState(() {
       _retryingError = error;
-      _retryingMode = accessMode;
+      _retryingMode = accessMode ?? ClassroomAccessMode.direct;
     });
     try {
-      // Bypass query caches so choosing a transport really tries that route.
-      // The override belongs to this operation, never the global resolver.
+      // With no access-mode override, the retry follows the saved preference.
+      if (disableWebVpn != null) {
+        final disabled = await disableWebVpn();
+        if (!disabled || !mounted) return;
+      }
+      // Bypass query caches so the retry actually tries the selected route.
       if (initialLoad) {
         final future = _loadOptions(force: true, accessMode: accessMode);
         setState(() {
@@ -578,7 +590,7 @@ class _ClassroomFailureActions extends StatelessWidget {
   final bool needsAuthentication;
   final ClassroomAccessMode? retryingMode;
   final VoidCallback onRetry;
-  final VoidCallback onTryDirect;
+  final VoidCallback? onTryDirect;
 
   Widget _icon(ClassroomAccessMode mode, IconData fallback) =>
       retryingMode == mode
@@ -592,22 +604,25 @@ class _ClassroomFailureActions extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final busy = retryingMode != null;
-    if (accessMode == ClassroomAccessMode.direct || needsAuthentication) {
-      return FilledButton.icon(
-        onPressed: busy ? null : onRetry,
-        icon: _icon(accessMode, Icons.refresh),
-        label: Text(needsAuthentication ? '恢复WebVPN登录' : '重试'),
-      );
+    final retryLabel = needsAuthentication
+        ? '恢复WebVPN登录'
+        : accessMode == ClassroomAccessMode.webVpn
+            ? '重试WebVPN'
+            : '重试';
+    final retry = FilledButton.icon(
+      onPressed: busy ? null : onRetry,
+      icon: _icon(accessMode, Icons.refresh),
+      label: Text(retryLabel),
+    );
+    if (accessMode == ClassroomAccessMode.direct ||
+        needsAuthentication ||
+        onTryDirect == null) {
+      return retry;
     }
     final direct = OutlinedButton.icon(
       onPressed: busy ? null : onTryDirect,
       icon: _icon(ClassroomAccessMode.direct, Icons.swap_horiz),
       label: const Text('尝试直连'),
-    );
-    final retry = FilledButton.icon(
-      onPressed: busy ? null : onRetry,
-      icon: _icon(ClassroomAccessMode.webVpn, Icons.refresh),
-      label: const Text('重试WebVPN'),
     );
     return Column(
       mainAxisSize: MainAxisSize.min,
@@ -642,7 +657,7 @@ class _ClassroomFailureActions extends StatelessWidget {
         }),
         const SizedBox(height: 8),
         Text(
-          '本次直连不改变全局WebVPN设置',
+          '尝试直连会关闭全局WebVPN，可在设置中重新开启',
           textAlign: TextAlign.center,
           style: ShuYoTextStyles.meta(
             color: context.shuyoColors.textSecondary,

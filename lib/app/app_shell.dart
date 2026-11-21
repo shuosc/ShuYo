@@ -327,8 +327,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
     widget.onboardingController.setAccountLogoutHandlers(
       onAcademicLogout: _logoutAcademicAccount,
     );
-    widget.onboardingController
-        .setWebVpnChangeHandler(_changeWebVpnFromAccountManager);
+    widget.onboardingController.setWebVpnChangeHandler(_changeWebVpnPreference);
     widget.onboardingController.setProfileChangeHandlers(
       onNicknameChanged: _saveNickname,
       onCampusChanged: _savePreferredCampus,
@@ -1088,6 +1087,8 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
                     interactive: interactive,
                     enableWebVpn: false,
                   ),
+          onDisableWebVpn:
+              widget.isDemo ? null : () => _changeWebVpnPreference(false),
           webVpnServiceStatus: () => _webVpnServiceStatus,
         ),
       ),
@@ -1426,8 +1427,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
                   chaoxingClient: _chaoxingBookingClient ??=
                       ChaoxingBookingClient(),
                   useWebVpn: useWebVpn,
-                  onWebVpnSessionRequired: () =>
-                      _changeWebVpnFromAccountManager(true),
+                  onWebVpnSessionRequired: () => _changeWebVpnPreference(true),
                   onWebVpnRecoveryRequired: (interactive) =>
                       _recoverWebVpnForFeature(interactive: interactive),
                   onCampusSessionExpired: (interactive) =>
@@ -1762,7 +1762,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
     }
   }
 
-  Future<bool> _changeWebVpnFromAccountManager(bool enabled) async {
+  Future<bool> _changeWebVpnPreference(bool enabled) async {
     if (widget.isDemo || !mounted) return false;
     if (enabled) {
       return _recoverWebVpnForFeature();

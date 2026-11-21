@@ -2,7 +2,6 @@ import 'dart:async';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:material_ui/material_ui.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 import 'package:shuyo/core/classroom_url_resolver.dart';
 import 'package:shuyo/data/models/classroom.dart';
 import 'package:shuyo/data/models/client_backend.dart';
@@ -27,10 +26,16 @@ Finder _button(String label) => find
     )
     .first;
 
+Future<bool> _disableWebVpn() async {
+  ClassroomUrlResolver.configure(useWebVpn: false);
+  return true;
+}
+
 Future<void> _open(
   WidgetTester tester,
   _RoutingRepository repository, {
   Future<WebVpnRecoveryOutcome> Function(bool)? recover,
+  Future<bool> Function()? disableWebVpn,
   WebVpnServiceStatus Function()? health,
   double textScale = 1,
 }) async {
@@ -44,6 +49,7 @@ Future<void> _open(
       repository: repository,
       initialDate: DateTime(2026, 11, 8),
       onWebVpnRecoveryRequired: recover,
+      onDisableWebVpn: disableWebVpn ?? _disableWebVpn,
       webVpnServiceStatus: health,
     ),
   ));
@@ -51,11 +57,7 @@ Future<void> _open(
 }
 
 void main() {
-  setUp(() {
-    SharedPreferences.setMockInitialValues(
-        {'client.network.webvpn.enabled': true});
-    ClassroomUrlResolver.configure(useWebVpn: true);
-  });
+  setUp(() => ClassroomUrlResolver.configure(useWebVpn: true));
   tearDown(() => ClassroomUrlResolver.configure(useWebVpn: false));
 
   testWidgets(
@@ -69,6 +71,7 @@ void main() {
     expect(find.textContaining('开启WebVPN'), findsNothing);
     expect(find.text('尝试直连'), findsOneWidget);
     expect(find.text('重试WebVPN'), findsOneWidget);
+    expect(find.textContaining('会关闭全局WebVPN'), findsOneWidget);
     expect(find.byType(DropdownButtonFormField<String>), findsOneWidget);
     await tester.ensureVisible(_button('尝试直连'));
     expect(tester.getRect(_button('尝试直连')).right,
@@ -107,22 +110,28 @@ void main() {
   });
 
   testWidgets(
-      'direct cold retry covers options and query without changing global preferences',
+      'cold retry waits for global WebVPN to turn off and keeps using direct',
       (tester) async {
+    final settingPending = Completer<void>();
     final options = Completer<ClassroomSearchOptions>();
+    var settingChanges = 0;
     final repository = _RoutingRepository(hasSnapshot: false)
       ..onLoad = (mode) => mode == ClassroomAccessMode.webVpn
           ? Future.error(TimeoutException('gateway unavailable'))
           : options.future;
-    await _open(tester, repository);
+    await _open(tester, repository, disableWebVpn: () async {
+      settingChanges++;
+      await settingPending.future;
+      return _disableWebVpn();
+    });
     final revision = ClassroomUrlResolver.revision;
     expect(find.text('空教室加载失败'), findsOneWidget);
 
     await tester.tap(_button('尝试直连'));
     await tester.tap(_button('重试WebVPN'));
     await tester.pump();
-    expect(repository.loadModes,
-        [ClassroomAccessMode.webVpn, ClassroomAccessMode.direct]);
+    expect(settingChanges, 1);
+    expect(repository.loadModes, [ClassroomAccessMode.webVpn]);
     expect(tester.widget<ButtonStyleButton>(_button('尝试直连')).onPressed, isNull);
     expect(tester.widget<ButtonStyleButton>(_button('重试WebVPN')).onPressed,
         isNull);
@@ -134,25 +143,34 @@ void main() {
     expect(ClassroomUrlResolver.usesWebVpn, isTrue);
     expect(ClassroomUrlResolver.revision, revision);
 
+    settingPending.complete();
+    await tester.pump();
+    expect(ClassroomUrlResolver.usesWebVpn, isFalse);
+    expect(ClassroomUrlResolver.revision, revision + 1);
+    expect(repository.loadModes,
+        [ClassroomAccessMode.webVpn, ClassroomAccessMode.direct]);
+
     options.complete(_options);
     await tester.pumpAndSettle();
     expect(repository.searchModes, [ClassroomAccessMode.direct]);
     expect(repository.loadRefreshes, [false, true]);
     expect(repository.searchRefreshes, [true]);
     expect(find.text('没有空教室'), findsOneWidget);
-    expect(
-        (await SharedPreferences.getInstance())
-            .getBool('client.network.webvpn.enabled'),
-        isTrue);
-    expect(ClassroomUrlResolver.revision, revision);
 
     await tester.tap(find.text('明天'));
     await tester.pumpAndSettle();
-    expect(repository.searchModes.last, ClassroomAccessMode.webVpn);
+    expect(repository.searchModes, hasLength(2));
+    expect(repository.searchModes.last, ClassroomAccessMode.direct);
+    await tester.tap(find.byTooltip('刷新'));
+    await tester.pumpAndSettle();
+    expect(repository.loadModes, hasLength(3));
+    expect(repository.searchModes, hasLength(3));
+    expect(repository.loadModes.last, ClassroomAccessMode.direct);
+    expect(repository.searchModes.last, ClassroomAccessMode.direct);
   });
 
   testWidgets(
-      'a failed direct cold retry renders the direct error and remains retryable',
+      'a failed direct cold retry leaves global WebVPN off and stays retryable',
       (tester) async {
     final repository = _RoutingRepository(hasSnapshot: false)
       ..onLoad = (_) async => throw TimeoutException('connection failed');
@@ -162,7 +180,7 @@ void main() {
     expect(find.text('空教室加载失败'), findsOneWidget);
     expect(find.text('重试'), findsOneWidget);
     expect(find.text('重试WebVPN'), findsNothing);
-    expect(find.textContaining('开启WebVPN'), findsNothing);
+    expect(ClassroomUrlResolver.usesWebVpn, isFalse);
     await tester.tap(_button('重试'));
     await tester.pumpAndSettle();
     expect(repository.loadModes, [
@@ -171,6 +189,21 @@ void main() {
       ClassroomAccessMode.direct
     ]);
     expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('failure to turn off WebVPN does not start a direct request',
+      (tester) async {
+    final repository = _RoutingRepository(hasSnapshot: false)
+      ..onLoad = (_) async => throw TimeoutException('gateway unavailable');
+    await _open(tester, repository, disableWebVpn: () async => false);
+    await tester.tap(_button('尝试直连'));
+    await tester.pumpAndSettle();
+
+    expect(ClassroomUrlResolver.usesWebVpn, isTrue);
+    expect(repository.loadModes, [ClassroomAccessMode.webVpn]);
+    expect(
+        tester.widget<ButtonStyleButton>(_button('尝试直连')).onPressed, isNotNull);
+    expect(find.text('重试WebVPN'), findsOneWidget);
   });
 
   testWidgets(
@@ -214,7 +247,7 @@ void main() {
   });
 
   testWidgets(
-      'query fallback preserves selection and ordinary retry stays on the failed direct route',
+      'query fallback switches off WebVPN and preserves the current selection',
       (tester) async {
     final repository = _RoutingRepository()
       ..onSearch =
@@ -229,7 +262,6 @@ void main() {
         [ClassroomAccessMode.webVpn, ClassroomAccessMode.direct]);
     expect(find.text('重试'), findsOneWidget);
     expect(find.text('重试WebVPN'), findsNothing);
-    expect(find.textContaining('开启WebVPN'), findsNothing);
     await tester.ensureVisible(_button('重试'));
     await tester.tap(_button('重试'));
     await tester.pumpAndSettle();
@@ -241,7 +273,7 @@ void main() {
             q.startSection == query.startSection &&
             q.endSection == query.endSection),
         isTrue);
-    expect(ClassroomUrlResolver.usesWebVpn, isTrue);
+    expect(ClassroomUrlResolver.usesWebVpn, isFalse);
   });
 
   testWidgets('WebVPN retry shows progress and blocks duplicate route requests',
@@ -265,6 +297,7 @@ void main() {
         findsOneWidget);
     expect(repository.searchModes,
         [ClassroomAccessMode.webVpn, ClassroomAccessMode.webVpn]);
+    expect(ClassroomUrlResolver.usesWebVpn, isTrue);
     pending.complete(_emptyResult(repository.queries.last));
     await tester.pumpAndSettle();
     expect(find.text('没有空教室'), findsOneWidget);
