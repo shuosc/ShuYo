@@ -65,11 +65,13 @@ import '../features/library_booking/library_booking_page.dart';
 import '../features/onboarding/startup_onboarding.dart';
 import '../features/rate/rate_home_page.dart';
 import '../features/settings/client_settings_page.dart';
+import '../shared/layout/adaptive_layout.dart';
 import '../shared/navigation/shuyo_route.dart';
+import '../shared/theme/custom_background.dart';
+import '../shared/theme/shuyo_theme.dart';
 import '../shared/widgets/app_header.dart';
 import '../shared/widgets/client_update_prompt.dart';
 import '../shared/widgets/info_confirm_dialog.dart';
-import '../shared/theme/custom_background.dart';
 
 class AppShell extends StatefulWidget {
   const AppShell({
@@ -144,6 +146,7 @@ class AppShell extends StatefulWidget {
 }
 
 class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
+  static const _readingPaneMaxWidth = 820.0;
   static const _exitBackPressInterval = Duration(seconds: 2);
   static const _webVpnStatusRefreshInterval = Duration(minutes: 5);
 
@@ -419,7 +422,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
 
   @override
   Widget build(BuildContext context) {
-    final scheduleDataRevision = _scheduleDataRevision;
+    final expanded = usesExpandedLayout(context);
     return PopScope(
       canPop: false,
       onPopInvokedWithResult: (didPop, result) {
@@ -427,86 +430,142 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
       },
       child: Scaffold(
         body: SafeArea(
-          child: Column(
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              if (_tab == AppTab.home)
-                AppHeader(
-                  title: AppTab.home.label,
-                  showSettings: true,
-                  onSettings: _openClientSettings,
-                  onNotification: _openNotifications,
-                ),
+              if (expanded) ...[
+                _buildNavigationRail(context),
+                const VerticalDivider(width: 1),
+              ],
+              // Keep the tab stack mounted when the navigation changes.
               Expanded(
-                child: IndexedStack(
-                  index: _tab.index,
-                  children: [
-                    _homeBody(),
-                    _rateTabInitialized
-                        ? RateHomePage(
-                            key: ValueKey(_scheduleDataRevision),
-                            repository: _courseReviewRepository,
-                            active: _tab == AppTab.rate,
-                            scheduleRevision: _rateScheduleRevision,
-                          )
-                        : const SizedBox.expand(),
-                    _progressTabInitialized
-                        ? AcademicProgressPage(
-                            key: ValueKey(_progressDataRevision),
-                            repository: _progressRepository,
-                            rankingRepository: _rankingRepository,
-                            onLoginRequired: _handleInvalidAcademicSession,
-                            isDemo: widget.isDemo,
-                          )
-                        : const SizedBox.expand(),
-                    _scheduleTabInitialized
-                        ? AcademicSchedulePage(
-                            key: ValueKey(_scheduleDataRevision),
-                            repository: _scheduleRepository,
-                            isDemo: widget.isDemo,
-                            notificationService: _scheduleNotificationService,
-                            widgetService: _scheduleWidgetService,
-                            onLoginRequired: _handleInvalidAcademicSession,
-                            onRecoverSession: () =>
-                                _recoverInvalidAcademicSession(
-                              resumeScheduleDiscovery: false,
-                            ),
-                            onPrimaryScheduleChanged:
-                                _refreshScheduleSummaryQuietly,
-                            onViewedScheduleChanged: (schedule) =>
-                                _viewedScheduleChanged(
-                                    schedule, scheduleDataRevision),
-                            studentIdentityService: _studentIdentityService,
-                            initialState: widget.initialOpenSchedule &&
-                                    _scheduleDataRevision == 0
-                                ? widget.initialScheduleState
-                                : null,
-                            initialDisplayState: widget.initialOpenSchedule &&
-                                    _scheduleDataRevision == 0
-                                ? widget.initialScheduleDisplayState
-                                : null,
-                            initialLoadError: widget.initialOpenSchedule &&
-                                    _scheduleDataRevision == 0
-                                ? widget.initialScheduleLoadError
-                                : null,
-                          )
-                        : const SizedBox.expand(),
-                  ],
+                key: const ValueKey('app-tab-content'),
+                child: Align(
+                  alignment: Alignment.topCenter,
+                  child: ConstrainedBox(
+                    constraints: BoxConstraints(
+                      maxWidth: expanded && _tab != AppTab.schedule
+                          ? _readingPaneMaxWidth
+                          : double.infinity,
+                    ),
+                    child: SizedBox.expand(child: _buildTabContent()),
+                  ),
                 ),
               ),
             ],
           ),
         ),
-        bottomNavigationBar: BottomNavigationBar(
-          currentIndex: _tab.index,
-          type: BottomNavigationBarType.fixed,
-          onTap: (index) => _selectTab(AppTab.values[index]),
-          items: [
-            for (final tab in AppTab.values)
-              BottomNavigationBarItem(
-                  icon: Icon(_tabIcon(tab)), label: tab.label),
-          ],
-        ),
+        bottomNavigationBar: expanded ? null : _buildBottomNavigation(),
       ),
+    );
+  }
+
+  Widget _buildBottomNavigation() => BottomNavigationBar(
+        currentIndex: _tab.index,
+        type: BottomNavigationBarType.fixed,
+        onTap: (index) => _selectTab(AppTab.values[index]),
+        items: [
+          for (final tab in AppTab.values)
+            BottomNavigationBarItem(
+                icon: Icon(_tabIcon(tab)), label: tab.label),
+        ],
+      );
+
+  Widget _buildNavigationRail(BuildContext context) {
+    final colors = context.shuyoColors;
+    return NavigationRail(
+      backgroundColor: Colors.transparent,
+      minWidth: 72,
+      labelType: NavigationRailLabelType.all,
+      scrollable: true,
+      selectedIndex: _tab.index,
+      onDestinationSelected: (index) => _selectTab(AppTab.values[index]),
+      useIndicator: true,
+      indicatorColor: colors.accentSoft,
+      selectedIconTheme: IconThemeData(color: colors.onAccentSoft),
+      unselectedIconTheme: IconThemeData(color: colors.navUnselected),
+      selectedLabelTextStyle: TextStyle(
+        color: colors.navSelected,
+        fontWeight: FontWeight.w600,
+      ),
+      unselectedLabelTextStyle: TextStyle(color: colors.navUnselected),
+      destinations: [
+        for (final tab in AppTab.values)
+          NavigationRailDestination(
+            icon: Icon(_tabIcon(tab)),
+            label: Text(tab.label),
+          ),
+      ],
+    );
+  }
+
+  Widget _buildTabContent() {
+    final scheduleDataRevision = _scheduleDataRevision;
+    return Column(
+      children: [
+        if (_tab == AppTab.home)
+          AppHeader(
+            title: AppTab.home.label,
+            showSettings: true,
+            onSettings: _openClientSettings,
+            onNotification: _openNotifications,
+          ),
+        Expanded(
+          child: IndexedStack(
+            index: _tab.index,
+            children: [
+              _homeBody(),
+              _rateTabInitialized
+                  ? RateHomePage(
+                      key: ValueKey(_scheduleDataRevision),
+                      repository: _courseReviewRepository,
+                      active: _tab == AppTab.rate,
+                      scheduleRevision: _rateScheduleRevision,
+                    )
+                  : const SizedBox.expand(),
+              _progressTabInitialized
+                  ? AcademicProgressPage(
+                      key: ValueKey(_progressDataRevision),
+                      repository: _progressRepository,
+                      rankingRepository: _rankingRepository,
+                      onLoginRequired: _handleInvalidAcademicSession,
+                      isDemo: widget.isDemo,
+                    )
+                  : const SizedBox.expand(),
+              _scheduleTabInitialized
+                  ? AcademicSchedulePage(
+                      key: ValueKey(_scheduleDataRevision),
+                      repository: _scheduleRepository,
+                      isDemo: widget.isDemo,
+                      notificationService: _scheduleNotificationService,
+                      widgetService: _scheduleWidgetService,
+                      onLoginRequired: _handleInvalidAcademicSession,
+                      onRecoverSession: () => _recoverInvalidAcademicSession(
+                        resumeScheduleDiscovery: false,
+                      ),
+                      onPrimaryScheduleChanged: _refreshScheduleSummaryQuietly,
+                      onViewedScheduleChanged: (schedule) =>
+                          _viewedScheduleChanged(
+                              schedule, scheduleDataRevision),
+                      studentIdentityService: _studentIdentityService,
+                      initialState: widget.initialOpenSchedule &&
+                              _scheduleDataRevision == 0
+                          ? widget.initialScheduleState
+                          : null,
+                      initialDisplayState: widget.initialOpenSchedule &&
+                              _scheduleDataRevision == 0
+                          ? widget.initialScheduleDisplayState
+                          : null,
+                      initialLoadError: widget.initialOpenSchedule &&
+                              _scheduleDataRevision == 0
+                          ? widget.initialScheduleLoadError
+                          : null,
+                    )
+                  : const SizedBox.expand(),
+            ],
+          ),
+        ),
+      ],
     );
   }
 

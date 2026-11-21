@@ -18,14 +18,18 @@ import '../../data/services/academic_schedule_widget_service.dart';
 import '../../data/services/student_identity_service.dart';
 import '../../data/services/schedule_share_service.dart';
 import '../../data/services/schedule_comparison.dart';
-import '../../shared/shuyo_text_styles.dart';
+import '../../shared/layout/adaptive_layout.dart';
 import '../../shared/navigation/shuyo_route.dart';
+import '../../shared/shuyo_text_styles.dart';
 import '../../shared/theme/shuyo_theme.dart';
 import '../../shared/widgets/empty_state.dart';
 import 'academic_schedule_editor_page.dart';
 import 'academic_schedule_collection_page.dart';
 import 'schedule_share_page.dart';
 
+const _scheduleTimeColumnWidth = 68.0;
+const _scheduleDayHeaderHeight = 54.0;
+const _scheduleSectionHeight = 68.0;
 const _scheduleCellInset = 2.5;
 const _scheduleCourseInset = 2.5;
 const _scheduleCellRadius = 4.0;
@@ -2973,51 +2977,108 @@ class _ScheduleBody extends StatelessWidget {
     final untimed = schedule.untimedForWeek(displayedWeek);
     const weekdays = [1, 2, 3, 4, 5, 6, 7];
 
+    final expanded = usesExpandedLayout(context);
+    final textScale = expanded
+        ? max(1.0, MediaQuery.textScalerOf(context).scale(12.5) / 12.5)
+        : 1.0;
+    final expandedHeaderHeight = _scheduleDayHeaderHeight * textScale;
+
     return LayoutBuilder(
       builder: (context, constraints) {
-        final weekdayWidth =
-            (constraints.maxWidth - _ScheduleGrid.leftWidth) / 5;
-        final gridWidth =
-            _ScheduleGrid.leftWidth + weekdays.length * weekdayWidth;
+        const wideInsets = EdgeInsets.symmetric(horizontal: 12);
+        const minDayWidth = 78.0;
+        final paddedWidth = constraints.maxWidth - wideInsets.horizontal;
+        // Check local height too: the pinned header must leave room to scroll.
+        final fullWeek = expanded &&
+            constraints.maxHeight >= expandedHeaderHeight + 120 &&
+            paddedWidth >=
+                _scheduleTimeColumnWidth + weekdays.length * minDayWidth;
+        // Keep the existing five-day viewport on compact screens. The weekend
+        // remains reachable by scrolling the dates and course rows together.
+        final dayWidth = fullWeek
+            ? (paddedWidth - _scheduleTimeColumnWidth) / weekdays.length
+            : (constraints.maxWidth - _scheduleTimeColumnWidth) / 5;
+        final gridWidth = _scheduleTimeColumnWidth + weekdays.length * dayWidth;
+        const verticalScrollKey =
+            PageStorageKey('academic-schedule-vertical-scroll');
+        final weekSwitcher = _WeekSwitcher(
+          week: displayedWeek,
+          maxWeek: schedule.maxWeek,
+          onPrevious: onPreviousWeek,
+          onNext: onNextWeek,
+          onQuickWeekSelected: onQuickWeekSelected,
+          pinnedHeaderHeight: fullWeek ? expandedHeaderHeight : 0,
+        );
+        final dayHeaders = _ScheduleDayHeaders(
+          weekdays: weekdays,
+          dayWidth: dayWidth,
+          height: fullWeek ? expandedHeaderHeight : _scheduleDayHeaderHeight,
+          fitLabels: fullWeek,
+          monday: weekState.anchorMonday.add(
+            Duration(days: (displayedWeek - weekState.currentWeek) * 7),
+          ),
+          onDayHeaderTap: onDayHeaderTap,
+        );
+        final grid = _ScheduleGrid(
+          sessions: sessions,
+          weekdays: weekdays,
+          dayWidth: dayWidth,
+          rowHeight: _scheduleSectionHeight * (fullWeek ? textScale : 1.0),
+          displayedWeek: displayedWeek,
+          displaySettings: displaySettings,
+          courseColorValues: courseColorValues,
+          selectedManualSlot: selectedManualSlot,
+          canAddCourse: canAddCourse,
+          onEmptySlotTap: onEmptySlotTap,
+          onCourseTap: onCourseTap,
+          freeSlots: freeSlots,
+          sectionCount: sectionCount ?? _gridSectionCount(schedule),
+        );
+        final footer = [
+          if (untimed.isNotEmpty) _UntimedCourseList(courses: untimed),
+          const SizedBox(height: 24),
+        ];
+        if (fullWeek) {
+          return Padding(
+            padding: wideInsets,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Center(
+                  child: ConstrainedBox(
+                    constraints: const BoxConstraints(maxWidth: 460),
+                    child: weekSwitcher,
+                  ),
+                ),
+                dayHeaders,
+                Expanded(
+                  child: SingleChildScrollView(
+                    key: verticalScrollKey,
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [grid, ...footer],
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          );
+        }
         return SingleChildScrollView(
-          key: const PageStorageKey('academic-schedule-vertical-scroll'),
+          key: verticalScrollKey,
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              _WeekSwitcher(
-                week: displayedWeek,
-                maxWeek: schedule.maxWeek,
-                onPrevious: onPreviousWeek,
-                onNext: onNextWeek,
-                onQuickWeekSelected: onQuickWeekSelected,
-              ),
+              weekSwitcher,
               SingleChildScrollView(
+                key:
+                    const PageStorageKey('academic-schedule-horizontal-scroll'),
                 scrollDirection: Axis.horizontal,
                 child: SizedBox(
                   width: gridWidth,
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      _ScheduleGrid(
-                        sessions: sessions,
-                        weekdays: weekdays,
-                        weekState: weekState,
-                        displayedWeek: displayedWeek,
-                        displaySettings: displaySettings,
-                        courseColorValues: courseColorValues,
-                        selectedManualSlot: selectedManualSlot,
-                        canAddCourse: canAddCourse,
-                        onEmptySlotTap: onEmptySlotTap,
-                        onCourseTap: onCourseTap,
-                        onDayHeaderTap: onDayHeaderTap,
-                        freeSlots: freeSlots,
-                        sectionCount:
-                            sectionCount ?? _gridSectionCount(schedule),
-                      ),
-                      if (untimed.isNotEmpty)
-                        _UntimedCourseList(courses: untimed),
-                      const SizedBox(height: 24),
-                    ],
+                    children: [dayHeaders, grid, ...footer],
                   ),
                 ),
               ),
@@ -3029,6 +3090,49 @@ class _ScheduleBody extends StatelessWidget {
   }
 }
 
+class _ScheduleDayHeaders extends StatelessWidget {
+  const _ScheduleDayHeaders({
+    required this.weekdays,
+    required this.dayWidth,
+    required this.height,
+    required this.fitLabels,
+    required this.monday,
+    required this.onDayHeaderTap,
+  });
+
+  final List<int> weekdays;
+  final double dayWidth;
+  final double height;
+  final bool fitLabels;
+  final DateTime monday;
+  final ValueChanged<int>? onDayHeaderTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      height: height,
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          const SizedBox(width: _scheduleTimeColumnWidth),
+          for (final weekday in weekdays)
+            SizedBox(
+              width: dayWidth,
+              child: _DayHeader(
+                weekday: weekday,
+                date: monday.add(Duration(days: weekday - DateTime.monday)),
+                fitLabels: fitLabels,
+                onTap: onDayHeaderTap == null
+                    ? null
+                    : () => onDayHeaderTap!(weekday),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
 class _WeekSwitcher extends StatefulWidget {
   const _WeekSwitcher({
     required this.week,
@@ -3036,6 +3140,7 @@ class _WeekSwitcher extends StatefulWidget {
     required this.onPrevious,
     required this.onNext,
     required this.onQuickWeekSelected,
+    required this.pinnedHeaderHeight,
   });
 
   final int week;
@@ -3043,6 +3148,7 @@ class _WeekSwitcher extends StatefulWidget {
   final VoidCallback? onPrevious;
   final VoidCallback? onNext;
   final ValueChanged<int> onQuickWeekSelected;
+  final double pinnedHeaderHeight;
 
   @override
   State<_WeekSwitcher> createState() => _WeekSwitcherState();
@@ -3054,7 +3160,6 @@ class _WeekSwitcherState extends State<_WeekSwitcher> {
   double _dragStartDx = 0;
   int _dragStartWeek = 1;
   double _dragWidth = 1;
-  double _scheduleAreaTop = 0;
   OverlayEntry? _previewOverlay;
 
   @override
@@ -3188,18 +3293,28 @@ class _WeekSwitcherState extends State<_WeekSwitcher> {
 
   void _showPreviewOverlay() {
     _removePreviewOverlay();
-    final renderObject = context.findRenderObject();
-    if (renderObject is RenderBox) {
-      _scheduleAreaTop =
-          renderObject.localToGlobal(Offset(0, renderObject.size.height)).dy;
+    final overlay = Overlay.of(context);
+    final switcher = context.findRenderObject();
+    final overlayBox = overlay.context.findRenderObject();
+    var top = 0.0;
+    var left = 0.0;
+    var right = 0.0;
+    if (switcher is RenderBox && overlayBox is RenderBox) {
+      final origin = switcher.localToGlobal(Offset.zero, ancestor: overlayBox);
+      top = origin.dy + switcher.size.height;
+      if (widget.pinnedHeaderHeight > 0) {
+        top += widget.pinnedHeaderHeight;
+        left = origin.dx;
+        right = overlayBox.size.width - origin.dx - switcher.size.width;
+      }
     }
     _previewOverlay = OverlayEntry(
       builder: (context) {
         final colors = context.shuyoColors;
         return Positioned(
-          top: _scheduleAreaTop,
-          left: 0,
-          right: 0,
+          top: top,
+          left: left,
+          right: right,
           bottom: 0,
           child: IgnorePointer(
             child: Center(
@@ -3227,7 +3342,7 @@ class _WeekSwitcherState extends State<_WeekSwitcher> {
         );
       },
     );
-    Overlay.of(context).insert(_previewOverlay!);
+    overlay.insert(_previewOverlay!);
   }
 
   void _removePreviewOverlay() {
@@ -3294,7 +3409,8 @@ class _ScheduleGrid extends StatelessWidget {
   const _ScheduleGrid({
     required this.sessions,
     required this.weekdays,
-    required this.weekState,
+    required this.dayWidth,
+    required this.rowHeight,
     required this.displayedWeek,
     required this.displaySettings,
     required this.courseColorValues,
@@ -3302,18 +3418,14 @@ class _ScheduleGrid extends StatelessWidget {
     required this.canAddCourse,
     required this.onEmptySlotTap,
     required this.onCourseTap,
-    required this.onDayHeaderTap,
     this.freeSlots,
     required this.sectionCount,
   });
 
-  static const leftWidth = 68.0;
-  static const _headerHeight = 54.0;
-  static const _rowHeight = 68.0;
-
   final List<CourseSession> sessions;
   final List<int> weekdays;
-  final ScheduleWeekState weekState;
+  final double dayWidth;
+  final double rowHeight;
   final int displayedWeek;
   final AcademicScheduleDisplaySettings displaySettings;
   final Map<String, int> courseColorValues;
@@ -3321,62 +3433,49 @@ class _ScheduleGrid extends StatelessWidget {
   final bool canAddCourse;
   final ValueChanged<_ScheduleSlot> onEmptySlotTap;
   final ValueChanged<CourseSession> onCourseTap;
-  final ValueChanged<int>? onDayHeaderTap;
   final Set<_ScheduleSlot>? freeSlots;
   final int sectionCount;
 
   @override
   Widget build(BuildContext context) {
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        final dayWidth = (constraints.maxWidth - leftWidth) / weekdays.length;
-        final height = _headerHeight + sectionCount * _rowHeight;
-        return SizedBox(
-          height: height,
-          child: Stack(
-            children: [
-              _GridBackground(
-                sessions: sessions,
-                weekdays: weekdays,
-                dayWidth: dayWidth,
-                leftWidth: leftWidth,
-                headerHeight: _headerHeight,
-                rowHeight: _rowHeight,
-                sectionCount: sectionCount,
-                weekState: weekState,
-                displayedWeek: displayedWeek,
-                selectedManualSlot: selectedManualSlot,
-                canAddCourse: canAddCourse,
-                onEmptySlotTap: onEmptySlotTap,
-                onDayHeaderTap: onDayHeaderTap,
-                freeSlots: freeSlots,
-              ),
-              for (final session in sessions)
-                if (weekdays.contains(session.weekday))
-                  Positioned(
-                    left: leftWidth +
-                        weekdays.indexOf(session.weekday) * dayWidth +
-                        _scheduleCourseInset,
-                    top: _headerHeight +
-                        (session.startSection - 1) * _rowHeight +
-                        _scheduleCourseInset,
-                    width: dayWidth - _scheduleCourseInset * 2,
-                    height: (session.endSection - session.startSection + 1) *
-                            _rowHeight -
-                        _scheduleCourseInset * 2,
-                    child: _CourseBlock(
-                      key: ValueKey('schedule-course-${session.id}'),
-                      session: session,
-                      isCurrentWeek: session.occursInWeek(displayedWeek),
-                      displaySettings: displaySettings,
-                      courseColorValues: courseColorValues,
-                      onTap: () => onCourseTap(session),
-                    ),
-                  ),
-            ],
+    return SizedBox(
+      height: sectionCount * rowHeight,
+      child: Stack(
+        children: [
+          _GridBackground(
+            sessions: sessions,
+            weekdays: weekdays,
+            dayWidth: dayWidth,
+            rowHeight: rowHeight,
+            sectionCount: sectionCount,
+            selectedManualSlot: selectedManualSlot,
+            canAddCourse: canAddCourse,
+            onEmptySlotTap: onEmptySlotTap,
+            freeSlots: freeSlots,
           ),
-        );
-      },
+          for (final session in sessions)
+            if (weekdays.contains(session.weekday))
+              Positioned(
+                left: _scheduleTimeColumnWidth +
+                    weekdays.indexOf(session.weekday) * dayWidth +
+                    _scheduleCourseInset,
+                top: (session.startSection - 1) * rowHeight +
+                    _scheduleCourseInset,
+                width: dayWidth - _scheduleCourseInset * 2,
+                height: (session.endSection - session.startSection + 1) *
+                        rowHeight -
+                    _scheduleCourseInset * 2,
+                child: _CourseBlock(
+                  key: ValueKey('schedule-course-${session.id}'),
+                  session: session,
+                  isCurrentWeek: session.occursInWeek(displayedWeek),
+                  displaySettings: displaySettings,
+                  courseColorValues: courseColorValues,
+                  onTap: () => onCourseTap(session),
+                ),
+              ),
+        ],
+      ),
     );
   }
 }
@@ -3386,68 +3485,38 @@ class _GridBackground extends StatelessWidget {
     required this.sessions,
     required this.weekdays,
     required this.dayWidth,
-    required this.leftWidth,
-    required this.headerHeight,
     required this.rowHeight,
     required this.sectionCount,
-    required this.weekState,
-    required this.displayedWeek,
     required this.selectedManualSlot,
     required this.canAddCourse,
     required this.onEmptySlotTap,
-    required this.onDayHeaderTap,
     this.freeSlots,
   });
 
   final List<CourseSession> sessions;
   final List<int> weekdays;
   final double dayWidth;
-  final double leftWidth;
-  final double headerHeight;
   final double rowHeight;
   final int sectionCount;
-  final ScheduleWeekState weekState;
-  final int displayedWeek;
   final _ScheduleSlot? selectedManualSlot;
   final bool canAddCourse;
   final ValueChanged<_ScheduleSlot> onEmptySlotTap;
-  final ValueChanged<int>? onDayHeaderTap;
   final Set<_ScheduleSlot>? freeSlots;
 
   @override
   Widget build(BuildContext context) {
     return Stack(
       children: [
-        for (var index = 0; index < weekdays.length; index++)
-          Positioned(
-            left: leftWidth + index * dayWidth,
-            top: 0,
-            width: dayWidth,
-            height: headerHeight,
-            child: _DayHeader(
-              weekday: weekdays[index],
-              date: weekState.anchorMonday.add(
-                Duration(
-                  days: (displayedWeek - weekState.currentWeek) * 7 +
-                      weekdays[index] -
-                      1,
-                ),
-              ),
-              onTap: onDayHeaderTap == null
-                  ? null
-                  : () => onDayHeaderTap!(weekdays[index]),
-            ),
-          ),
         for (var section = 1; section <= sectionCount; section++)
           Positioned(
             left: 0,
             right: 0,
-            top: headerHeight + (section - 1) * rowHeight,
+            top: (section - 1) * rowHeight,
             height: rowHeight,
             child: Row(
               children: [
                 SizedBox(
-                  width: leftWidth,
+                  width: _scheduleTimeColumnWidth,
                   child: _SectionLabel(section: section),
                 ),
                 for (var index = 0; index < weekdays.length; index++)
@@ -3539,36 +3608,46 @@ class _DayHeader extends StatelessWidget {
   const _DayHeader({
     required this.weekday,
     required this.date,
+    required this.fitLabels,
     this.onTap,
   });
 
   final int weekday;
   final DateTime date;
+  final bool fitLabels;
   final VoidCallback? onTap;
 
   @override
   Widget build(BuildContext context) {
     final colors = context.shuyoColors;
+    Widget fitLabel(Text label) => fitLabels
+        ? Expanded(child: FittedBox(fit: BoxFit.scaleDown, child: label))
+        : label;
     return InkWell(
       onTap: onTap,
       borderRadius: BorderRadius.circular(8),
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          Text(
-            _weekdayName(weekday),
-            style: TextStyle(
-              color: colors.textPrimary,
-              fontWeight: FontWeight.w600,
-              fontSize: 12.5,
-            ),
-          ),
-          const SizedBox(height: 3),
-          Text(
-            '${date.month}/${date.day}',
-            style: TextStyle(color: colors.textMuted, fontSize: 11.5),
-          ),
-        ],
+      child: Padding(
+        padding: fitLabels
+            ? const EdgeInsets.symmetric(vertical: 8)
+            : EdgeInsets.zero,
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            fitLabel(Text(
+              _weekdayName(weekday),
+              style: TextStyle(
+                color: colors.textPrimary,
+                fontWeight: FontWeight.w600,
+                fontSize: 12.5,
+              ),
+            )),
+            const SizedBox(height: 3),
+            fitLabel(Text(
+              '${date.month}/${date.day}',
+              style: TextStyle(color: colors.textMuted, fontSize: 11.5),
+            )),
+          ],
+        ),
       ),
     );
   }
