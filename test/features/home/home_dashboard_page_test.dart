@@ -54,6 +54,8 @@ void main() {
     expect(todayTheme.splashFactory, NoSplash.splashFactory);
     expect(todayTheme.splashColor, Colors.transparent);
     expect(todayTheme.highlightColor, Colors.transparent);
+    final campusCardTheme = Theme.of(tester.element(find.text('校园卡')));
+    expect(campusCardTheme.splashFactory, todayTheme.splashFactory);
     expect(
         tester
             .widget<ColoredBox>(find.byKey(const ValueKey('home-background')))
@@ -120,6 +122,9 @@ void main() {
           String? displayName,
           ShuYoThemeSpec? theme,
           HomeLayout? layout,
+          VoidCallback? onOpenCampusCard,
+          VoidCallback? onRefreshCampusCard,
+          bool isCampusCardRefreshing = false,
           TextScaler textScaler = TextScaler.noScaling,
           String todayCourseContent = '今日无课',
           String announcementContent = '查看公告'}) =>
@@ -141,11 +146,55 @@ void main() {
             onOpenAnnouncements: () {},
             onOpenEmptyClassroom: () {},
             onOpenOtp: () {},
+            onOpenCampusCard: onOpenCampusCard,
+            onRefreshCampusCard: onRefreshCampusCard,
+            isCampusCardRefreshing: isCampusCardRefreshing,
             todayCourseContent: todayCourseContent,
             announcementContent: announcementContent,
           ),
         ),
       );
+
+  testWidgets('campus card shares the row ripple but refresh stays separate',
+      (tester) async {
+    var opened = 0;
+    var refreshed = 0;
+    final title = find.text('校园卡');
+    final rowInk = find.ancestor(of: title, matching: find.byType(InkWell));
+
+    for (final refreshing in [false, true]) {
+      await tester.pumpWidget(page(
+        loggedIn: true,
+        theme: ShuYoThemes.byId(ShuYoThemes.defaultId),
+        onOpenCampusCard: () => opened++,
+        onRefreshCampusCard: () => refreshed++,
+        isCampusCardRefreshing: refreshing,
+      ));
+      final rowTheme = Theme.of(tester.element(rowInk));
+      final todayTheme = Theme.of(tester.element(find.text('今日课程')));
+      expect(rowTheme.splashFactory, todayTheme.splashFactory);
+      expect(rowTheme.splashFactory, isNot(NoSplash.splashFactory));
+
+      final refresh = find.byTooltip(refreshing ? '正在刷新校园卡余额' : '刷新校园卡余额');
+      final button = tester.widget<IconButton>(
+        find.ancestor(of: refresh, matching: find.byType(IconButton)),
+      );
+      expect(button.style?.splashFactory, NoSplash.splashFactory);
+      expect(button.style?.overlayColor?.resolve({WidgetState.pressed}),
+          Colors.transparent);
+      final hits = tester.hitTestOnBinding(tester.getCenter(refresh)).path;
+      expect(hits.map((hit) => hit.target),
+          isNot(contains(tester.renderObject(rowInk))));
+
+      await tester.tap(refresh);
+      expect(refreshed, 1);
+      expect(opened, 0);
+    }
+
+    await tester.tap(title);
+    expect(opened, 1);
+    expect(refreshed, 1);
+  });
 
   testWidgets('campus login shows student greeting and campus services',
       (tester) async {

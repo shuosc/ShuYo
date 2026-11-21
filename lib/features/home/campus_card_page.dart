@@ -71,7 +71,6 @@ class _CampusCardPageState extends State<CampusCardPage> {
   List<CampusCardBill>? _chartBills;
   List<double?>? _billBalances;
   DateTime? _billsQueriedAt;
-  DateTime? _chartQueriedAt;
   bool _receivedCardData = false;
   bool _receivedBillsData = false;
   bool _receivedChartData = false;
@@ -125,7 +124,6 @@ class _CampusCardPageState extends State<CampusCardPage> {
     if (!_receivedChartData && chart != null) {
       _chartBills = chart.bills;
       _chartEndDate = chart.endDate;
-      _chartQueriedAt = chart.queriedAt;
     }
   }
 
@@ -412,14 +410,13 @@ class _CampusCardPageState extends State<CampusCardPage> {
           _chartBills = List.unmodifiable(bills);
         }
         _chartEndDate = today;
-        _chartQueriedAt = DateTime.now();
         _receivedChartData = true;
       });
       final cache = widget.cache;
       if (cache != null) {
         unawaited(cache.rememberChart(
           CampusCardChartSnapshot(
-              bills: _chartBills!, endDate: today, queriedAt: _chartQueriedAt!),
+              bills: _chartBills!, endDate: today, queriedAt: DateTime.now()),
           revision: cacheRevision!,
         ));
       }
@@ -467,7 +464,6 @@ class _CampusCardPageState extends State<CampusCardPage> {
     _chartBills = null;
     _billBalances = null;
     _billsQueriedAt = null;
-    _chartQueriedAt = null;
     _pendingBalanceSnapshot = null;
     _loadingCard = false;
     _loadingBills = false;
@@ -523,7 +519,6 @@ class _CampusCardPageState extends State<CampusCardPage> {
             _loadingChart = false;
             _billBalances = null;
             _billsQueriedAt = null;
-            _chartQueriedAt = null;
             _receivedCardData = false;
             _receivedBillsData = false;
             _receivedChartData = false;
@@ -730,11 +725,6 @@ class _CampusCardPageState extends State<CampusCardPage> {
                             ? () => _login()
                             : _loadChart,
                   ),
-                  if (_chartQueriedAt != null) ...[
-                    const SizedBox(height: 4),
-                    _updatedAt(
-                        _chartQueriedAt!, 'campus-card-chart-updated-at'),
-                  ],
                   const SizedBox(height: 28),
                   Semantics(
                     header: true,
@@ -744,11 +734,6 @@ class _CampusCardPageState extends State<CampusCardPage> {
                           color: colors.textPrimary),
                     ),
                   ),
-                  if (_billsQueriedAt != null) ...[
-                    const SizedBox(height: 4),
-                    _updatedAt(
-                        _billsQueriedAt!, 'campus-card-bills-updated-at'),
-                  ],
                   if (!_loadingBills && _billsError != null) ...[
                     const SizedBox(height: 16),
                     _errorSection(_billsError!,
@@ -881,12 +866,6 @@ class _CampusCardPageState extends State<CampusCardPage> {
       ],
     );
   }
-
-  Widget _updatedAt(DateTime time, String key) => Text(
-        '更新时间：${_formatUpdateTime(time)}',
-        key: ValueKey(key),
-        style: ShuYoTextStyles.meta(color: context.shuyoColors.textTertiary),
-      );
 
   String _formatUpdateTime(DateTime? time) {
     if (time == null) return '—';

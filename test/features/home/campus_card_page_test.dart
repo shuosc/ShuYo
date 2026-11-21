@@ -133,10 +133,9 @@ void main() {
     expect(_spendingChart(tester).endDate, original.snapshot!.chart!.endDate);
     expect(DateUtils.isSameDay(_spendingChart(tester).endDate, DateTime.now()),
         isFalse);
-    expect(find.byKey(const ValueKey('campus-card-chart-updated-at')),
+    expect(find.byKey(const ValueKey('campus-card-balance-updated-at')),
         findsOneWidget);
-    expect(find.byKey(const ValueKey('campus-card-bills-updated-at')),
-        findsOneWidget);
+    expect(find.textContaining('更新时间：'), findsOneWidget);
   });
 
   testWidgets(
@@ -601,6 +600,7 @@ void main() {
     final expected = '更新时间：${time.year}-${two(time.month)}-${two(time.day)} '
         '${two(time.hour)}:${two(time.minute)}:${two(time.second)}';
     expect(tester.widget<Text>(updateLabel).data, expected);
+    expect(find.textContaining('更新时间：'), findsOneWidget);
 
     final failedCard = Completer<CampusCardInfo>();
     service.nextCard = failedCard;

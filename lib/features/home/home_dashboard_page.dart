@@ -141,7 +141,7 @@ class HomeDashboardPage extends StatelessWidget {
                       endIndent: 0,
                     )
                   else
-                    _moduleRow(entry.module!),
+                    _moduleRow(context, entry.module!),
               ],
             ),
         ],
@@ -149,7 +149,7 @@ class HomeDashboardPage extends StatelessWidget {
     );
   }
 
-  Widget _moduleRow(HomeModule module) {
+  Widget _moduleRow(BuildContext context, HomeModule module) {
     final key = ValueKey('home-module:${module.id}');
     final previewDate = coursePreviewDate;
     return switch (module) {
@@ -168,10 +168,10 @@ class HomeDashboardPage extends StatelessWidget {
           title: module.title,
           content: campusCardContent,
           onTap: onOpenCampusCard,
-          disableRipple: true,
-          trailing: IconButton(
+          trailingAction: IconButton(
             tooltip: isCampusCardRefreshing ? '正在刷新校园卡余额' : '刷新校园卡余额',
             onPressed: isCampusCardRefreshing ? null : onRefreshCampusCard,
+            color: context.shuyoColors.textSecondary,
             style: const ButtonStyle(
               splashFactory: NoSplash.splashFactory,
               overlayColor: WidgetStatePropertyAll(Colors.transparent),
@@ -393,26 +393,28 @@ class _HomeRow extends StatelessWidget {
     required this.content,
     this.icon,
     this.trailing,
+    this.trailingAction,
     this.onTap,
-    this.disableRipple = false,
   });
 
   final String title;
   final String content;
   final IconData? icon;
   final Widget? trailing;
+  final Widget? trailingAction;
   final VoidCallback? onTap;
-  final bool disableRipple;
 
   @override
   Widget build(BuildContext context) {
     final colors = context.shuyoColors;
     final customBackground = CustomBackgroundScope.maybeOf(context) != null;
+    final action = trailingAction;
+    final contentPadding = EdgeInsetsDirectional.only(
+      start: 16,
+      end: trailing == null && action == null ? 24 : 10,
+    );
     final tile = ListTile(
-      contentPadding: EdgeInsetsDirectional.only(
-        start: 16,
-        end: trailing == null ? 24 : 10,
-      ),
+      contentPadding: contentPadding,
       minVerticalPadding: 8,
       minLeadingWidth: 24,
       horizontalTitleGap: 16,
@@ -445,10 +447,31 @@ class _HomeRow extends StatelessWidget {
           letterSpacing: 0.25,
         ),
       ),
-      trailing: trailing,
+      trailing: action == null
+          ? trailing
+          : const SizedBox(width: kMinInteractiveDimension),
       onTap: onTap,
     );
-    if (!customBackground && !disableRipple) return tile;
+    final row = action == null
+        ? tile
+        : Stack(
+            alignment: AlignmentDirectional.centerEnd,
+            children: [
+              tile,
+              Padding(
+                padding: EdgeInsetsDirectional.only(end: contentPadding.end),
+                child: SizedBox.square(
+                  dimension: kMinInteractiveDimension,
+                  // Keep this hit area out of the tile even while disabled.
+                  child: Listener(
+                    behavior: HitTestBehavior.opaque,
+                    child: action,
+                  ),
+                ),
+              ),
+            ],
+          );
+    if (!customBackground) return row;
     return Theme(
       data: Theme.of(context).copyWith(
         splashFactory: NoSplash.splashFactory,
@@ -456,7 +479,7 @@ class _HomeRow extends StatelessWidget {
         highlightColor: Colors.transparent,
         hoverColor: Colors.transparent,
       ),
-      child: tile,
+      child: row,
     );
   }
 }

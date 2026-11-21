@@ -58,6 +58,7 @@ void main() {
         matching: find.byType(Scrollable),
       ),
     );
+    await tester.pumpAndSettle();
     await tester.tap(historyButton);
     await tester.pumpAndSettle();
     expect(find.text('历史消费'), findsOneWidget);
