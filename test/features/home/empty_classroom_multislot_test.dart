@@ -6,6 +6,7 @@ import 'package:shuyo/core/classroom_url_resolver.dart';
 import 'package:shuyo/data/models/classroom.dart';
 import 'package:shuyo/data/repositories/classroom_repository.dart';
 import 'package:shuyo/features/home/empty_classroom_page.dart';
+import 'package:shuyo/shared/theme/custom_background.dart';
 import 'package:shuyo/shared/theme/shuyo_theme.dart';
 
 const _building = ClassroomBuilding(
@@ -184,15 +185,17 @@ Finder _slot(int start, int end) =>
     find.byKey(ValueKey('classroom-slot-$start-$end'));
 
 Future<void> _open(WidgetTester tester, _ScheduleRepository repository,
-    {double textScale = 1, bool dark = false}) async {
+    {double textScale = 1,
+    bool dark = false,
+    CustomBackground? background}) async {
+  final theme = background?.theme ??
+      ShuYoThemes.byId(dark ? ShuYoThemes.systemDarkId : ShuYoThemes.defaultId);
   await tester.pumpWidget(MaterialApp(
-    theme: ShuYoThemes.byId(
-            dark ? ShuYoThemes.systemDarkId : ShuYoThemes.defaultId)
-        .themeData(),
+    theme: theme.themeData(),
     builder: (context, child) => MediaQuery(
       data: MediaQuery.of(context)
           .copyWith(textScaler: TextScaler.linear(textScale)),
-      child: child!,
+      child: CustomBackgroundScope(settings: background, child: child!),
     ),
     home: EmptyClassroomPage(
       repository: repository,
@@ -215,6 +218,77 @@ Future<void> _tap(WidgetTester tester, Finder finder) async {
 }
 
 void main() {
+  testWidgets(
+      'only classroom result blocks follow visible photo module opacity',
+      (tester) async {
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(410, 900);
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    const settings = CustomBackground(
+      imagePath: 'assets/images/icon.png',
+      opacity: 50,
+      background: Colors.white,
+      surface: Color(0xFFF1F3F5),
+      text: Colors.black,
+      accent: Colors.blue,
+    );
+    final repository = _ScheduleRepository();
+    final tile = find.widgetWithText(OutlinedButton, 'GA101');
+    final arrangedRoom = find.byKey(ValueKey((_building.id, 101)));
+    final emptyRoom = find.byKey(ValueKey((_building.id, 104)));
+    final arrangedFill = find.descendant(
+      of: arrangedRoom,
+      matching: find.byType(Material),
+    );
+    final emptyFill = find.descendant(
+      of: emptyRoom,
+      matching: find.byType(Material),
+    );
+
+    for (final (background, fill, dark) in [
+      for (final opacity in [20, 60, 100])
+        (
+          settings.copyWith(moduleOpacity: opacity),
+          settings.surface.withValues(alpha: opacity / 100),
+          false,
+        ),
+      (settings.copyWith(opacity: 0), null, false),
+      (settings.copyWith(imagePath: ''), null, false),
+      (null, null, false),
+      (null, null, true),
+    ]) {
+      await _open(tester, repository, background: background, dark: dark);
+      final colors = tester.element(tile).shuyoColors;
+      final style = tester.widget<OutlinedButton>(tile).style!;
+      expect(style.backgroundColor!.resolve({}), fill ?? colors.surface);
+      expect(style.side!.resolve({})!.color, colors.borderStrong);
+
+      await _tap(tester, find.text('教室安排'));
+      expect(emptyRoom, findsOneWidget);
+      expect(emptyFill, findsNothing);
+      if (fill == null) {
+        expect(arrangedFill, findsNothing);
+      } else {
+        expect(tester.widget<Material>(arrangedFill).color, fill);
+        expect(
+          find.descendant(of: arrangedFill, matching: find.text('线性代数')),
+          findsOneWidget,
+        );
+      }
+      await _tap(tester, find.text('找空教室'));
+    }
+
+    await _open(tester, repository, background: settings);
+    await _tap(tester, find.text('教室安排'));
+    await _tap(tester, find.text('线性代数'));
+    expect(
+      find.descendant(
+          of: find.byType(BottomSheet), matching: find.text('线性代数')),
+      findsOneWidget,
+    );
+  });
+
   group('available room grid', () {
     const upperRoomNames = ['GA21', 'GA202', 'GA203', 'GA24'];
     const namesByFloor = [
