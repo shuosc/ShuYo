@@ -27,6 +27,14 @@ class _SearchControls extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final colors = context.shuyoColors;
+    final buttonStyle = OutlinedButton.styleFrom(
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+      minimumSize: const Size(0, 42),
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+      side: BorderSide(color: colors.borderStrong),
+    );
+    const calendarIcon = Icon(Icons.calendar_today_outlined, size: 17);
     final buildings = options.buildings
         .where(
           (building) =>
@@ -70,17 +78,26 @@ class _SearchControls extends StatelessWidget {
           const SizedBox(height: 6),
           _ControlPair(
             first: fixedDate
-                ? Center(child: Text(_dateLabel(selectedDate)))
+                ? Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      calendarIcon,
+                      const SizedBox(width: 8),
+                      Flexible(child: Text(_dateLabel(selectedDate))),
+                    ],
+                  )
                 : OutlinedButton.icon(
                     key: const ValueKey('classroom-date'),
+                    style: buttonStyle,
                     onPressed: onPickDate,
-                    icon: const Icon(Icons.calendar_today_outlined, size: 17),
+                    icon: calendarIcon,
                     label: Text(_dateLabel(selectedDate)),
                   ),
             second: OutlinedButton.icon(
               key: const ValueKey('classroom-sections'),
+              style: buttonStyle,
               onPressed: onPickSections,
-              icon: const Icon(Icons.schedule, size: 18),
+              icon: const Icon(Icons.schedule, size: 18, semanticLabel: '选择节次'),
               label: Text(_sectionLabel(selectedSections),
                   textAlign: TextAlign.center),
             ),
@@ -114,6 +131,89 @@ class _ControlPair extends StatelessWidget {
           ]);
         },
       );
+}
+
+class _ArrangementFilters extends StatelessWidget {
+  const _ArrangementFilters({
+    required this.controller,
+    required this.scope,
+    required this.onlyArranged,
+    required this.onSearch,
+    required this.onClear,
+    required this.onScope,
+    required this.onOnlyArranged,
+  });
+
+  final TextEditingController controller;
+  final _ArrangementScope scope;
+  final bool onlyArranged;
+  final ValueChanged<String> onSearch;
+  final VoidCallback onClear;
+  final ValueChanged<_ArrangementScope> onScope;
+  final ValueChanged<bool> onOnlyArranged;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = context.shuyoColors;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 0, 16, 4),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          TextField(
+            controller: controller,
+            onChanged: onSearch,
+            onTapOutside: (_) => FocusManager.instance.primaryFocus?.unfocus(),
+            textInputAction: TextInputAction.search,
+            decoration: InputDecoration(
+              hintText: '搜课程、教师或教室',
+              isDense: true,
+              prefixIcon: const Icon(Icons.search, size: 20),
+              suffixIcon: controller.text.isEmpty
+                  ? null
+                  : IconButton(
+                      tooltip: '清除搜索',
+                      onPressed: onClear,
+                      icon: const Icon(Icons.close, size: 18),
+                    ),
+            ),
+          ),
+          const SizedBox(height: 4),
+          Wrap(
+            spacing: 8,
+            children: [
+              for (final value in _ArrangementScope.values)
+                ChoiceChip(
+                  label: Text(value.label),
+                  selected: scope == value,
+                  selectedColor: colors.accentSoft,
+                  side: BorderSide(color: colors.borderStrong),
+                  showCheckmark: false,
+                  labelStyle: TextStyle(
+                    color: scope == value
+                        ? colors.onAccentSoft
+                        : colors.textSecondary,
+                  ),
+                  onSelected: (_) => onScope(value),
+                ),
+              FilterChip(
+                label: const Text('仅看有安排'),
+                selected: onlyArranged,
+                selectedColor: colors.accentSoft,
+                checkmarkColor: colors.onAccentSoft,
+                side: BorderSide(color: colors.borderStrong),
+                labelStyle: TextStyle(
+                  color:
+                      onlyArranged ? colors.onAccentSoft : colors.textSecondary,
+                ),
+                onSelected: onOnlyArranged,
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
 }
 
 enum _SectionGranularity { blocks, single }
@@ -195,6 +295,7 @@ class _SectionPickerSheetState extends State<_SectionPickerSheet> {
                     (constraints.maxWidth - (columns - 1) * gap) / columns;
                 return Wrap(
                   spacing: gap,
+                  runSpacing: gap,
                   children: [
                     for (final range in ranges)
                       SizedBox(
@@ -224,33 +325,48 @@ class _SectionPickerSheetState extends State<_SectionPickerSheet> {
     final partial = !selected && numbers.any(_selected.contains);
     final start = times[range.start]?.startTime ?? '';
     final end = times[range.end]?.endTime ?? '';
+    final active = selected || partial;
     return Semantics(
+      key: ValueKey('classroom-slot-${range.start}-${range.end}'),
+      selected: selected,
       value: partial ? '部分已选' : null,
-      child: FilterChip(
-        key: ValueKey('classroom-slot-${range.start}-${range.end}'),
-        selected: selected,
-        selectedColor: colors.accentSoft,
-        checkmarkColor: colors.onAccentSoft,
-        side: BorderSide(
-            color: selected || partial ? colors.accent : colors.borderStrong),
-        avatar:
-            partial ? Icon(Icons.remove, color: colors.accent, size: 18) : null,
-        label: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Text(range.label,
-                style: TextStyle(
-                    color:
-                        selected ? colors.onAccentSoft : colors.textPrimary)),
-            if (start.isNotEmpty && end.isNotEmpty)
-              Text('$start–$end',
-                  style: ShuYoTextStyles.bodyCompact(
-                      color: colors.textSecondary, size: 12)),
-          ],
+      child: OutlinedButton(
+        style: OutlinedButton.styleFrom(
+          backgroundColor: active ? colors.accentSoft : colors.surface,
+          foregroundColor: active ? colors.onAccentSoft : colors.textPrimary,
+          minimumSize: const Size(0, 52),
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+          side: BorderSide(color: active ? colors.accent : colors.borderStrong),
         ),
-        onSelected: (_) => setState(() {
+        onPressed: () => setState(() {
           selected ? _selected.removeAll(numbers) : _selected.addAll(numbers);
         }),
+        child: Row(
+          children: [
+            Expanded(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(range.label),
+                  if (start.isNotEmpty && end.isNotEmpty)
+                    Text('$start–$end',
+                        style: ShuYoTextStyles.meta(
+                            color: colors.textSecondary, size: 12)),
+                ],
+              ),
+            ),
+            const SizedBox(width: 4),
+            SizedBox(
+              width: 18,
+              child: active
+                  ? Icon(selected ? Icons.check : Icons.remove, size: 18)
+                  : null,
+            ),
+          ],
+        ),
       ),
     );
   }
