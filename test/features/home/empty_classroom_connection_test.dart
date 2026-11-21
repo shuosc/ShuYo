@@ -157,6 +157,8 @@ void main() {
     expect(repository.searchRefreshes, [true]);
     expect(find.text('没有空教室'), findsOneWidget);
 
+    await tester.tap(find.byKey(const ValueKey('classroom-date')));
+    await tester.pumpAndSettle();
     await tester.tap(find.text('明天'));
     await tester.pumpAndSettle();
     expect(repository.searchModes, hasLength(2));

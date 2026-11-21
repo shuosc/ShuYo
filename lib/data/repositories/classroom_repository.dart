@@ -16,7 +16,7 @@ class ClassroomSectionRange {
   final int start;
   final int end;
 
-  String get label => start == end ? '$start节' : '$start-$end节';
+  String get label => start == end ? '$start节' : '$start–$end节';
 
   bool contains(int section) => section >= start && section <= end;
 
@@ -106,14 +106,14 @@ class ClassroomRepository {
   }
 
   List<ClassroomSectionRange> defaultRanges(List<ClassroomSection> sections) {
-    final maxSection = sections.isEmpty
-        ? 12
-        : sections.map((section) => section.index).reduce(
-              (a, b) => a > b ? a : b,
-            );
+    final indexes = sections.isEmpty
+        ? {for (var i = 1; i <= 12; i++) i}
+        : sections.map((section) => section.index).toSet();
     final ranges = <ClassroomSectionRange>[];
-    for (var start = 1; start <= maxSection; start += 2) {
-      final end = start + 1 <= maxSection ? start + 1 : start;
+    for (final start in indexes.toList()..sort()) {
+      if (start.isEven && indexes.contains(start - 1)) continue;
+      final end =
+          start.isOdd && indexes.contains(start + 1) ? start + 1 : start;
       ranges.add(ClassroomSectionRange(start: start, end: end));
     }
     return ranges;
@@ -124,9 +124,6 @@ class ClassroomRepository {
     DateTime? now,
   }) {
     final ranges = defaultRanges(options.sections);
-    if (ranges.isEmpty) {
-      return const ClassroomSectionRange(start: 1, end: 2);
-    }
     final section = _sectionFromTime(options.sections, now ?? DateTime.now());
     if (section != null) {
       return ranges.firstWhere(
