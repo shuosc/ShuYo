@@ -289,7 +289,7 @@ class _AvailableRoomTile extends StatelessWidget {
       child: Row(
         children: [
           Icon(Icons.meeting_room_outlined,
-              size: _iconSize, color: colors.accentAlt),
+              size: _iconSize, color: colors.accent),
           const SizedBox(width: _iconGap),
           Flexible(
             child:

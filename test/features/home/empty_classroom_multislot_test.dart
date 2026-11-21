@@ -279,6 +279,8 @@ void main() {
               of: tile(name),
               matching: find.byIcon(Icons.meeting_room_outlined),
             );
+            expect(tester.widget<Icon>(icon).color,
+                tester.element(icon).shuyoColors.accent);
             expect(tester.getCenter(icon).dx,
                 lessThan(tester.getTopLeft(find.text(name)).dx));
           }
