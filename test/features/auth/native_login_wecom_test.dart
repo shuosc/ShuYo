@@ -206,7 +206,7 @@ void main() {
     await tester.pumpWidget(const MaterialApp(home: NativeLoginPage()));
     await tester.pumpAndSettle();
 
-    final title = tester.getRect(find.text('上大校园账户'));
+    final title = tester.getRect(find.text('本科生系统'));
     final body = tester.getRect(find.byType(SingleChildScrollView));
     expect(title.top, lessThan(body.center.dy - 160));
     expect(find.text('学/工号'), findsOneWidget);
@@ -229,7 +229,7 @@ void main() {
     expect(tester.widget<AnimatedOpacity>(passwordAction).opacity, 0);
 
     expect(tester.testTextInput.isVisible, isTrue);
-    await tester.tap(find.text('上大校园账户'));
+    await tester.tap(find.text('本科生系统'));
     await tester.pumpAndSettle();
     expect(tester.testTextInput.isVisible, isFalse);
     expect(tester.takeException(), isNull);

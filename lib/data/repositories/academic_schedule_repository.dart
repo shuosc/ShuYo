@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../../core/campus_system.dart';
 import '../models/academic_schedule.dart';
 import '../models/academic_schedule_collection.dart';
 import '../services/academic_schedule_collection_store.dart';
@@ -103,9 +104,11 @@ class AcademicScheduleRepository {
 
   Future<AcademicSchedule?> loadCachedSchedule() async {
     final prefs = await _preferencesLoader();
-    final studentId = await AcademicAccountStore(
+    final account = AcademicAccountStore(
       preferencesLoader: _preferencesLoader,
-    ).loadDataStudentId();
+    );
+    if (await account.loadSystem() == CampusSystem.graduate) return null;
+    final studentId = await account.loadDataStudentId();
     if (studentId != null) {
       final primary = await _collection.primaryKey(studentId);
       if (primary != null) {
@@ -115,7 +118,10 @@ class AcademicScheduleRepository {
           final currentOwner = await AcademicAccountStore(
             preferencesLoader: _preferencesLoader,
           ).loadDataStudentId();
-          return currentOwner == studentId ? record.schedule : null;
+          return currentOwner == studentId &&
+                  await account.loadSystem() == CampusSystem.undergraduate
+              ? record.schedule
+              : null;
         }
       }
     }
@@ -126,10 +132,11 @@ class AcademicScheduleRepository {
     final schedule = AcademicSchedule.fromJson(decoded);
     if (studentId != null && schedule.term.studentId != studentId) return null;
     await _migrateLegacy(schedule, prefs);
-    final currentOwner = await AcademicAccountStore(
-      preferencesLoader: _preferencesLoader,
-    ).loadDataStudentId();
-    return currentOwner == studentId ? schedule : null;
+    final currentOwner = await account.loadDataStudentId();
+    return currentOwner == studentId &&
+            await account.loadSystem() == CampusSystem.undergraduate
+        ? schedule
+        : null;
   }
 
   Future<AcademicScheduleCacheState> loadCachedState({DateTime? now}) async {

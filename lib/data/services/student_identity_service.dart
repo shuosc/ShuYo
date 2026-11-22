@@ -7,6 +7,7 @@ import 'package:http/io_client.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../core/academic_url_resolver.dart';
+import '../../core/campus_system.dart';
 import '../../core/client_backend_constants.dart';
 import 'academic_account_store.dart';
 import 'academic_auth_service.dart';
@@ -181,27 +182,37 @@ class StudentIdentityService extends ChangeNotifier {
   }
 
   Future<StudentIdentitySession?> loadLocalSession() async {
-    final raw = await _secureStore.read(_sessionKey);
-    if (raw == null) {
+    if (await _accountStore.loadSystem() == CampusSystem.graduate) {
       _setVerified(false);
       return null;
     }
+    final session = await _readStoredSession();
+    if (await _accountStore.loadSystem() == CampusSystem.graduate) {
+      _setVerified(false);
+      return null;
+    }
+    _setVerified(session != null);
+    return session;
+  }
+
+  Future<StudentIdentitySession?> _readStoredSession() async {
+    final raw = await _secureStore.read(_sessionKey);
+    if (raw == null) return null;
     try {
       final session = StudentIdentitySession.fromJson(jsonDecode(raw));
       if (session != null && !session.isExpired) {
-        _setVerified(true);
         return session;
       }
     } on Object {
       // Damaged secure storage should not block the rest of the app.
     }
     await _secureStore.delete(_sessionKey);
-    _setVerified(false);
     return null;
   }
 
   Future<void> ensureAfterCampusLogin() async {
     try {
+      if (await _accountStore.loadSystem() == CampusSystem.graduate) return;
       await retryPendingRevocations();
       final studentId = await _accountStore.loadStudentId();
       if (studentId == null) return;
@@ -224,6 +235,9 @@ class StudentIdentityService extends ChangeNotifier {
 
   Future<StudentIdentitySession> bindCurrentStudent(
       {bool force = false, bool manual = false}) async {
+    if (await _accountStore.loadSystem() == CampusSystem.graduate) {
+      throw const StudentIdentityException('研究生 ShuYo 认证暂未开放。');
+    }
     if (!manual && await _requiresManualReverification()) {
       throw const StudentIdentityException('请手动重新认证。');
     }
@@ -271,7 +285,9 @@ class StudentIdentityService extends ChangeNotifier {
     if (session == null) {
       throw const StudentIdentityException('服务器返回的身份凭证无效。');
     }
-    if (epoch != _epoch || (await _accountStore.loadStudentId()) != studentId) {
+    if (epoch != _epoch ||
+        await _accountStore.loadSystem() != CampusSystem.undergraduate ||
+        (await _accountStore.loadStudentId()) != studentId) {
       await _revokeOrQueue(session.token);
       throw const StudentIdentityException('校园账户已切换，请重新核验。');
     }
@@ -399,7 +415,7 @@ class StudentIdentityService extends ChangeNotifier {
   }
 
   Future<void> _clearCurrentSession() async {
-    final session = await loadLocalSession();
+    final session = await _readStoredSession();
     await _secureStore.delete(_sessionKey);
     _setVerified(false);
     if (session != null) await _revokeOrQueue(session.token);

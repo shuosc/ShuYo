@@ -329,6 +329,37 @@ class AcademicScheduleNotificationService {
     return operation;
   }
 
+  /// Remove the previous system's scheduled courses without changing the
+  /// user's reminder settings or reading the previous system's timetable.
+  Future<void> clearScheduledCourses() {
+    final operation = _reminderSync.then((_) async {
+      if (await supportsEarlyClassAlarms()) {
+        try {
+          await _alarmChannel.invokeMethod<int>('sync', {
+            'enabled': false,
+            'alarms': const [],
+          });
+        } on PlatformException {
+          // Continue clearing the other kinds of reminders.
+        }
+      }
+      if (await supportsCourseLiveActivities()) {
+        try {
+          await _liveActivityChannel.invokeMapMethod<String, Object?>('sync', {
+            'enabled': false,
+            'courses': const [],
+          });
+        } on PlatformException {
+          // Continue clearing ordinary notifications.
+        }
+      }
+      await _ensureInitialized();
+      await _cancelCourseReminders();
+    });
+    _reminderSync = operation.then<void>((_) {}, onError: (Object error) {});
+    return operation;
+  }
+
   Future<int> _syncScheduleReminders(
       {required bool requestPermission, DateTime? now}) async {
     final instant = now ?? DateTime.now();

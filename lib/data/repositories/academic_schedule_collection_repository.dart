@@ -150,10 +150,13 @@ extension AcademicScheduleCollection on AcademicScheduleRepository {
   }
 
   Future<void> _checkAccount(String? studentId, int generation) async {
-    final current = await AcademicAccountStore(
+    final account = AcademicAccountStore(
       preferencesLoader: _preferencesLoader,
-    ).loadStudentId();
-    if (current != studentId || generation != _discoveryGeneration) {
+    );
+    final current = await account.loadStudentId();
+    if (await account.loadSystem() == CampusSystem.graduate ||
+        current != studentId ||
+        generation != _discoveryGeneration) {
       throw const AcademicApiException('账号或应用状态已变化，已停止课表同步');
     }
   }
@@ -348,9 +351,11 @@ extension AcademicScheduleCollection on AcademicScheduleRepository {
   }) async {
     if (!supportsTermDiscovery) return;
     final generation = _discoveryGeneration;
-    final studentId = await AcademicAccountStore(
+    final account = AcademicAccountStore(
       preferencesLoader: _preferencesLoader,
-    ).loadStudentId();
+    );
+    if (await account.loadSystem() == CampusSystem.graduate) return;
+    final studentId = await account.loadStudentId();
     if (studentId == null) {
       discoveryState.value = const ScheduleDiscoveryState(
           requiresLogin: true, message: '请先登录校园账户再查找课表');

@@ -4,6 +4,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:shuyo/core/campus_system.dart';
 import 'package:shuyo/data/services/academic_account_store.dart';
 import 'package:shuyo/data/services/academic_auth_service.dart';
 import 'package:shuyo/data/services/secure_app_store.dart';
@@ -38,6 +39,40 @@ class _SchoolAuth extends AcademicAuthService {
 
 void main() {
   setUp(() => SharedPreferences.setMockInitialValues({}));
+
+  test('graduate login cannot inherit or issue a ShuYo student credential',
+      () async {
+    final accounts = AcademicAccountStore();
+    const studentId = 'test-student';
+    await accounts.saveStudentId(studentId);
+    await accounts.saveStudentId(studentId, system: CampusSystem.graduate);
+    final secure = _MemorySecureStore();
+    const sessionKey = 'shuyo.student.session.v1';
+    secure.values[sessionKey] = jsonEncode({
+      'token': 'fixture-credential',
+      'studentId': studentId,
+      'expiresAt': '2099-01-01T00:00:00Z',
+    });
+    final school = _SchoolAuth();
+    final service = StudentIdentityService(
+      accountStore: accounts,
+      secureStore: secure,
+      academicAuthService: school,
+      httpClient: MockClient((_) async => fail('unexpected identity request')),
+    );
+    addTearDown(service.dispose);
+    await service.grantConsent();
+    expect(await service.loadLocalSession(), isNotNull);
+
+    await accounts.saveSystem(CampusSystem.graduate);
+    expect(await service.checkCurrentSession(), isNull);
+    expect(service.isVerified, isFalse);
+    await service.ensureAfterCampusLogin();
+    await expectLater(service.bindCurrentStudent(manual: true),
+        throwsA(isA<StudentIdentityException>()));
+    expect(school.reads, 0);
+    expect(secure.values[sessionKey], isNotNull);
+  });
 
   test('binds only after consent, then reuses the ShuYo session', () async {
     final secure = _MemorySecureStore();

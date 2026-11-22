@@ -10,6 +10,7 @@ import '../../core/client_user_agent.dart';
 import '../../core/wecom_constants.dart';
 import 'academic_auth_service.dart';
 import 'academic_account_store.dart';
+import 'graduate_session_store.dart';
 import 'http_timeout.dart';
 import 'session_cookie_jar.dart';
 import 'webvpn_device_id.dart';
@@ -17,7 +18,7 @@ import 'webvpn_session_store.dart';
 
 enum AcademicVerificationMethod { wecom, sms }
 
-enum _NativeAuthTarget { academic, webVpn, there, campusCard }
+enum _NativeAuthTarget { academic, graduate, webVpn, there, campusCard }
 
 class AcademicLoginChallenge {
   const AcademicLoginChallenge({required this.methods});
@@ -68,6 +69,12 @@ class AcademicNativeAuthService {
     _client.connectionTimeout = HttpTimeout.connect;
   }
 
+  AcademicNativeAuthService.forGraduate({HttpClient? httpClient})
+      : _target = _NativeAuthTarget.graduate,
+        _client = httpClient ?? HttpClient() {
+    _client.connectionTimeout = HttpTimeout.connect;
+  }
+
   AcademicNativeAuthService.forWebVpn({
     HttpClient? httpClient,
   })  : _target = _NativeAuthTarget.webVpn,
@@ -88,17 +95,22 @@ class AcademicNativeAuthService {
   }
 
   static const _newssoPathMarker = '/oauth2/login/';
+  static const _ssoHost = 'newsso.shu.edu.cn';
   static const _tenantId = '上海大学';
   static const _maxRedirects = 16;
   static Uri get _academicEntry => AcademicUrlResolver.entryUri;
   static const _webVpnPortal = 'https://webvpn.shu.edu.cn';
   static const _webVpnHost = 'webvpn.shu.edu.cn';
   static const _thereEntry = 'https://there.shu.edu.cn/login?from=web';
+  static const _graduateCallbackPrefix =
+      '/gsapp/sys/yjsrzfwapp/oauth_shu/callback/';
+  static const graduateLoginRequired = 'graduateLoginRequired';
   final _NativeAuthTarget _target;
   final HttpClient _client;
   final AcademicSessionCookieStore _cookieStore = AcademicSessionCookieStore();
 
   Uri? _loginUri;
+  Uri? _graduateAuthorizeUri;
   String? _params;
   String? _username;
   String? _encryptedPassword;
@@ -163,10 +175,15 @@ class AcademicNativeAuthService {
   /// The API clients read that jar rather than this instance, so a completed
   /// login has to hand its session over before anything else uses it.
   Future<void> publishSessionCookies() async {
+    final graduate = _target == _NativeAuthTarget.graduate;
+    if (graduate) await _publishGraduateSession(GraduateSessionStore());
     final published = <String>[];
     for (final stored in _cookieStore.entries) {
       final cookie = stored.cookie;
-      if (cookie.value.isEmpty) continue;
+      if (cookie.value.isEmpty ||
+          (graduate && stored.domain == GraduateSessionStore.host)) {
+        continue;
+      }
       published.add('${cookie.name}@${stored.domain}${stored.path}');
       await SessionCookieJar.shared.setCookie(
         SessionCookie(
@@ -181,6 +198,36 @@ class AcademicNativeAuthService {
       published.sort();
       debugPrint('[SHU_AUTH] published session cookies $published');
     }
+  }
+
+  Future<void> _publishGraduateSession(GraduateSessionStore store) async {
+    // Prune expired cookies before publishing the new portal snapshot.
+    _cookieStore.headerFor(GraduateSessionStore.portalUri);
+    final cookies = _cookieStore.entries;
+    Cookie? renewalCookie;
+    for (final entry in cookies) {
+      if (entry.domain == _ssoHost &&
+          entry.path == '/' &&
+          entry.cookie.name == WeComConstants.sessionCookieName) {
+        renewalCookie = entry.cookie;
+        break;
+      }
+    }
+    try {
+      await store.saveRenewalCookie(renewalCookie);
+    } on Object {
+      // A secure storage failure should not discard a verified portal session.
+    }
+    await store.replacePortalCookies([
+      for (final entry in cookies)
+        if (entry.domain == GraduateSessionStore.host)
+          SessionCookie(
+            name: entry.cookie.name,
+            value: entry.cookie.value,
+            domain: entry.domain,
+            path: entry.path,
+          ),
+    ]);
   }
 
   /// Removes the WebVPN and identity cookies left on the gateway hosts, so a
@@ -232,6 +279,9 @@ class AcademicNativeAuthService {
     required String password,
   }) async {
     _clearChallenge();
+    // Explicit sign-in must use the submitted account, not the SSO cookie
+    // from an earlier attempt on this page (e.g. after backing out of 2FA).
+    _cookieStore.clear();
     final loginUri = await _discoverLoginUri();
     if (isAuthorizedCallback(loginUri)) {
       // 复用仍然有效的 SSO 会话，授权码已就绪，无需再提交凭据。
@@ -277,15 +327,11 @@ class AcademicNativeAuthService {
       );
     }
 
-    final redirect = response['redirectUri']?.toString();
-    if (redirect == null || redirect.isEmpty) {
-      throw const AcademicNativeAuthException(
-        'missingRedirect',
-        '登录成功，但学校未返回授权地址',
-      );
-    }
-    final callbackUri = canonicalSsoUri(loginUri.resolve(redirect));
-    _validateUri(callbackUri);
+    final callbackUri = _ssoRedirect(
+      response,
+      loginUri,
+      '登录成功，但学校未返回授权地址',
+    );
     _clearChallenge();
     return AcademicLoginResult(callbackUri: callbackUri);
   }
@@ -339,16 +385,30 @@ class AcademicNativeAuthService {
       referer: loginUri,
     );
     _requireSuccess(response);
+    final callbackUri = _ssoRedirect(
+      response,
+      loginUri,
+      '验证成功，但学校未返回授权地址',
+    );
+    _clearChallenge();
+    return callbackUri;
+  }
+
+  Uri _ssoRedirect(
+    Map<String, dynamic> response,
+    Uri loginUri,
+    String errorMessage,
+  ) {
     final redirect = response['redirectUri']?.toString();
     if (redirect == null || redirect.isEmpty) {
-      throw const AcademicNativeAuthException(
-        'missingRedirect',
-        '验证成功，但学校未返回授权地址',
-      );
+      // The YJS browser flow can authorize again after successful SSO. Use
+      // the same portal-supplied state and callback, not a reconstructed URL.
+      final authorize = _graduateAuthorizeUri;
+      if (authorize != null) return authorize;
+      throw AcademicNativeAuthException('missingRedirect', errorMessage);
     }
     final callbackUri = canonicalSsoUri(loginUri.resolve(redirect));
     _validateUri(callbackUri);
-    _clearChallenge();
     return callbackUri;
   }
 
@@ -371,6 +431,8 @@ class AcademicNativeAuthService {
     switch (_target) {
       case _NativeAuthTarget.academic:
         await _completeAcademicLogin(callbackUri);
+      case _NativeAuthTarget.graduate:
+        await _completeGraduateLogin(callbackUri);
       case _NativeAuthTarget.there:
         // The booking service exchanges its own code, so its callback never
         // reaches the shared jar: see ThereBookingClient.completeOAuth.
@@ -387,6 +449,84 @@ class AcademicNativeAuthService {
         await _completeWebVpnLogin(callbackUri);
     }
     if (publish) await publishSessionCookies();
+  }
+
+  /// Probe the YJS session, or exchange the current account's SSO session
+  /// through a new authorization issued by YJS. Never replay a callback.
+  Future<void> restoreGraduateSession({bool Function()? canPublish}) async {
+    if (_target != _NativeAuthTarget.graduate) {
+      throw StateError('This authentication client is not for YJS');
+    }
+    final store = GraduateSessionStore();
+    await _runAuthenticationStage(
+      'restore-graduate',
+      HttpTimeout.oauthCompletion,
+      () async {
+        _cookieStore.clear();
+        final sso = await store.loadRenewalCookie();
+        final portal = await store.loadCookies();
+        if (sso == null &&
+            !portal.any((cookie) =>
+                cookie.name == GraduateSessionStore.sessionCookieName)) {
+          throw _graduateReauthenticationRequired;
+        }
+        adoptSessionCookies([
+          if (sso != null) (cookie: sso, domain: _ssoHost, path: '/'),
+          for (final cookie in portal)
+            (
+              cookie: Cookie(cookie.name, cookie.value),
+              domain: cookie.domain,
+              path: cookie.path,
+            ),
+        ]);
+        await _completeGraduateLogin(GraduateSessionStore.portalUri);
+      },
+    );
+    if (canPublish?.call() ?? true) {
+      // A YJS recovery must not replace the SSO session of other services.
+      await _publishGraduateSession(store);
+    }
+  }
+
+  static const _graduateReauthenticationRequired = AcademicNativeAuthException(
+    graduateLoginRequired,
+    '研究生系统需要重新登录',
+  );
+
+  Future<void> _completeGraduateLogin(Uri start) async {
+    var current = start;
+    for (var redirects = 0; redirects < _maxRedirects; redirects++) {
+      final response = await _request('GET', current);
+      final next = _redirectTarget(response, current);
+      await response.drain<void>().timeout(HttpTimeout.normal);
+      // A new sign-in page means the SSO session could not be reused.
+      if (current.path.startsWith(_newssoPathMarker) ||
+          next?.path.startsWith(_newssoPathMarker) == true ||
+          response.statusCode == HttpStatus.unauthorized) {
+        throw _graduateReauthenticationRequired;
+      }
+      if (next != null) {
+        current = next;
+        continue;
+      }
+      if (response.statusCode == HttpStatus.ok &&
+          current.host == GraduateSessionStore.host &&
+          current.path == GraduateSessionStore.portalUri.path &&
+          _cookieStore.hasCookie(
+            current,
+            GraduateSessionStore.sessionCookieName,
+          )) {
+        return;
+      }
+      throw const AcademicNativeAuthException(
+        'graduateSessionUnavailable',
+        '未能确认研究生系统会话，请稍后重试',
+      );
+    }
+    throw const AcademicNativeAuthException(
+      'tooManyRedirects',
+      '研究生系统登录跳转次数过多',
+    );
   }
 
   /// Follows the jwxt callback until it reaches a page only a live session can
@@ -494,6 +634,7 @@ class AcademicNativeAuthService {
       return _startWebVpnOAuth();
     }
     var uri = switch (_target) {
+      _NativeAuthTarget.graduate => GraduateSessionStore.entryUri,
       _NativeAuthTarget.there => Uri.parse(_thereEntry),
       _NativeAuthTarget.campusCard => Uri.parse(WeComConstants.ssoBase).replace(
           path: WeComConstants.authorizePath,
@@ -507,17 +648,29 @@ class AcademicNativeAuthService {
       _ => _academicEntry,
     };
     for (var redirects = 0; redirects < _maxRedirects; redirects++) {
+      if (_target == _NativeAuthTarget.graduate &&
+          uri.host == _ssoHost &&
+          uri.path == WeComConstants.authorizePath) {
+        _graduateAuthorizeUri = uri;
+      }
       final response = await _request('GET', uri);
       final location = response.headers.value(HttpHeaders.locationHeader);
       if (kDebugMode) {
         debugPrint(
           '[SHU_AUTH] discover target=${_target.name} '
-          'status=${response.statusCode} uri=${uri.host}${uri.path} '
+          'status=${response.statusCode} uri=${_describeUri(uri)} '
           'location=${location == null ? '-' : _safeLocation(location)}',
         );
       }
       final next = _redirectTarget(response, uri);
       await response.drain<void>().timeout(HttpTimeout.normal);
+      if (_target == _NativeAuthTarget.graduate &&
+          next != null &&
+          next.host == GraduateSessionStore.host &&
+          next.path.startsWith(_graduateCallbackPrefix) &&
+          isAuthorizedCallback(next)) {
+        return next;
+      }
       if (_target == _NativeAuthTarget.campusCard &&
           next != null &&
           next.host == 'eportal.shu.edu.cn' &&
@@ -686,11 +839,10 @@ class AcademicNativeAuthService {
   /// A host-scoped SHU_OAUTH2 cookie can be reused only on newsso itself.
   @visibleForTesting
   static Uri canonicalSsoUri(Uri uri) {
-    const newsso = 'newsso.shu.edu.cn';
     const proxy = 'https-newsso-shu-edu-cn-443.webvpn.shu.edu.cn';
     if ((uri.host == 'oauth.shu.edu.cn' || uri.host == proxy) &&
         (uri.path.startsWith('/oauth/') || uri.path.startsWith('/oauth2/'))) {
-      return uri.replace(scheme: 'https', host: newsso);
+      return uri.replace(scheme: 'https', host: _ssoHost);
     }
     return uri;
   }
@@ -705,7 +857,7 @@ class AcademicNativeAuthService {
     if (kDebugMode) {
       debugPrint(
         '[SHU_AUTH] native request-start method=$method '
-        'uri=${uri.host}${uri.path}',
+        'uri=${_describeUri(uri)}',
       );
     }
     final request = await _client.openUrl(method, uri).timeout(
@@ -746,7 +898,7 @@ class AcademicNativeAuthService {
         ..sort();
       debugPrint(
         '[SHU_AUTH] native response method=$method '
-        'status=${response.statusCode} uri=${uri.host}${uri.path} '
+        'status=${response.statusCode} uri=${_describeUri(uri)} '
         'setCookieNames=$setCookieNames',
       );
     }
@@ -798,7 +950,8 @@ class AcademicNativeAuthService {
       if (kDebugMode) {
         debugPrint(
           '[SHU_AUTH] stage-failed target=${_target.name} stage=$stage '
-          'type=${error.runtimeType} error=$error',
+          'type=${error.runtimeType}'
+          '${_target == _NativeAuthTarget.graduate ? '' : ' error=$error'}',
         );
         debugPrintStack(label: '[SHU_AUTH] stack', stackTrace: stackTrace);
       }
@@ -818,6 +971,7 @@ class AcademicNativeAuthService {
     if (next.scheme == 'http' && _isShuHost(next.host)) {
       next = next.replace(scheme: 'https');
     }
+    if (_target == _NativeAuthTarget.graduate) next = canonicalSsoUri(next);
     _validateUri(next);
     return next;
   }
@@ -825,12 +979,45 @@ class AcademicNativeAuthService {
   String _safeLocation(String value) {
     final uri = Uri.tryParse(value);
     if (uri == null) return '<invalid>';
-    return '${uri.host}${uri.path} '
+    return '${_describeUri(uri)} '
         'queryKeys=${uri.queryParameters.keys.toList()..sort()}';
   }
 
+  String _describeUri(Uri uri) {
+    final path = uri.path;
+    if (path.startsWith(_graduateCallbackPrefix)) {
+      return '${uri.host}$_graduateCallbackPrefix<flow>.do';
+    }
+    if (_target == _NativeAuthTarget.graduate &&
+        path.startsWith(_newssoPathMarker)) {
+      return '${uri.host}$_newssoPathMarker<params>';
+    }
+    return '${uri.host}$path';
+  }
+
   void _saveCookies(Uri source, List<Cookie> cookies) {
-    _cookieStore.save(source, cookies);
+    if (_target != _NativeAuthTarget.graduate) {
+      _cookieStore.save(source, cookies);
+      return;
+    }
+    final lastSlash = source.path.lastIndexOf('/');
+    final defaultPath =
+        lastSlash > 0 ? source.path.substring(0, lastSlash) : '/';
+    final now = DateTime.now();
+    final scoped = <Cookie>[];
+    for (final cookie in cookies) {
+      final domain =
+          cookie.domain?.replaceFirst(RegExp(r'^\.'), '').toLowerCase();
+      if (domain != null && domain.isNotEmpty && domain != source.host) {
+        continue;
+      }
+      cookie.domain = source.host;
+      if (cookie.path?.startsWith('/') != true) cookie.path = defaultPath;
+      final maxAge = cookie.maxAge;
+      if (maxAge != null) cookie.expires = now.add(Duration(seconds: maxAge));
+      scoped.add(cookie);
+    }
+    _cookieStore.save(source, scoped);
   }
 
   String _cookieHeader(Uri uri) => _cookieStore.headerFor(uri);
@@ -871,6 +1058,7 @@ class AcademicNativeAuthService {
 
   void _clearChallenge() {
     _loginUri = null;
+    _graduateAuthorizeUri = null;
     _params = null;
     _username = null;
     _encryptedPassword = null;
@@ -884,7 +1072,12 @@ class AcademicNativeAuthService {
 
   void _validateUri(Uri uri) {
     final host = uri.host.toLowerCase();
-    if (uri.scheme != 'https' || !_isShuHost(host)) {
+    final allowed = _target == _NativeAuthTarget.graduate
+        ? (host == GraduateSessionStore.host || host == _ssoHost) &&
+            uri.port == 443 &&
+            uri.userInfo.isEmpty
+        : _isShuHost(host);
+    if (uri.scheme != 'https' || !allowed) {
       throw const AcademicNativeAuthException(
           'unsafeRedirect', '认证服务返回了非上海大学的跳转地址');
     }
@@ -919,7 +1112,9 @@ class _StoredCookie {
     final hostMatches = uri.host == domain || uri.host.endsWith('.$domain');
     // Uri.path 对 "https://host" 形式返回空串，但 HTTP 语义上等价于 "/"。
     final requestPath = uri.path.isEmpty ? '/' : uri.path;
-    return hostMatches && requestPath.startsWith(path);
+    return hostMatches &&
+        (requestPath == path ||
+            requestPath.startsWith(path.endsWith('/') ? path : '$path/'));
   }
 }
 
@@ -929,6 +1124,14 @@ class _StoredCookie {
 /// 这一行为可以脱离具体服务单独测试。
 class AcademicSessionCookieStore {
   final List<_StoredCookie> _cookies = [];
+
+  void clear() => _cookies.clear();
+
+  bool hasCookie(Uri uri, String name) {
+    headerFor(uri); // Drop expired cookies before testing for a live session.
+    return _cookies
+        .any((entry) => entry.cookie.name == name && entry.matches(uri));
+  }
 
   void removeByName(String name) {
     _cookies.removeWhere((stored) => stored.cookie.name == name);

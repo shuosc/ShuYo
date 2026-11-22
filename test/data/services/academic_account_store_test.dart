@@ -1,9 +1,34 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:shuyo/core/campus_system.dart';
 import 'package:shuyo/data/services/academic_account_store.dart';
 
 void main() {
   setUp(() => SharedPreferences.setMockInitialValues({}));
+
+  test('only the selected system supplies the active account and expiry',
+      () async {
+    final store = AcademicAccountStore();
+    await store.saveStudentId('undergrad-fixture');
+    expect(await store.loadSystem(), CampusSystem.undergraduate);
+
+    await store.saveStudentId('graduate-fixture',
+        system: CampusSystem.graduate);
+    expect(await store.loadStudentId(), 'undergrad-fixture');
+    await store.saveSystem(CampusSystem.graduate);
+
+    final reopened = AcademicAccountStore();
+    expect(await reopened.loadSystem(), CampusSystem.graduate);
+    expect(await reopened.loadStudentId(), 'graduate-fixture');
+    await reopened.clear(system: CampusSystem.graduate, sessionExpired: true);
+    expect(await reopened.loadStudentId(), isNull);
+    expect(await reopened.loadDataStudentId(), 'graduate-fixture');
+    expect(await reopened.isSessionExpired(), isTrue);
+
+    await reopened.saveSystem(CampusSystem.undergraduate);
+    expect(await reopened.loadStudentId(), 'undergrad-fixture');
+    expect(await reopened.isSessionExpired(), isFalse);
+  });
 
   test('first login is recorded per student before any data is fetched',
       () async {

@@ -10,6 +10,7 @@ import 'package:url_launcher/url_launcher.dart';
 
 import '../../core/client_app_info.dart';
 import '../../core/app_tab.dart';
+import '../../core/campus_system.dart';
 import '../../core/client_update_policy.dart';
 import '../../data/models/announcement_source.dart';
 import '../../data/repositories/client_backend_repository.dart';
@@ -45,6 +46,7 @@ class ClientSettingsPage extends StatelessWidget {
     this.customBackground,
     this.onCustomBackgroundChanged,
     required this.selectedStartupTab,
+    this.campusSystem = CampusSystem.undergraduate,
     required this.onStartupTabChanged,
     required this.webVpnController,
     this.hasAcademicAccount = false,
@@ -66,6 +68,7 @@ class ClientSettingsPage extends StatelessWidget {
   final CustomBackground? customBackground;
   final Future<void> Function(CustomBackground)? onCustomBackgroundChanged;
   final AppTab selectedStartupTab;
+  final CampusSystem campusSystem;
   final Future<void> Function(AppTab tab) onStartupTabChanged;
   final StartupOnboardingController webVpnController;
   final bool hasAcademicAccount;
@@ -118,7 +121,8 @@ class ClientSettingsPage extends StatelessWidget {
             onTap: () => Navigator.of(context).push<void>(
               shuyoRoute(
                 builder: (context) => _StartupDisplayPage(
-                  selectedTab: selectedStartupTab,
+                  selectedTab: campusSystem.supportedTab(selectedStartupTab),
+                  availableTabs: campusSystem.tabs,
                   onChanged: onStartupTabChanged,
                 ),
               ),
@@ -153,6 +157,7 @@ class ClientSettingsPage extends StatelessWidget {
                 builder: (context) => _AboutClientPage(
                   backendRepository: backendRepository,
                   isDemo: isDemo,
+                  campusSystem: campusSystem,
                 ),
               ),
             ),
@@ -166,6 +171,7 @@ class ClientSettingsPage extends StatelessWidget {
             _AccountLogoutRow(
               hasAcademicAccount: hasAcademicAccount,
               hasWebVpnSession: hasWebVpnSession,
+              campusSystem: campusSystem,
               onAcademicLogout: onAcademicLogout,
             ),
         ],
@@ -286,10 +292,12 @@ class _DefaultAnnouncementPageState extends State<_DefaultAnnouncementPage> {
 class _StartupDisplayPage extends StatefulWidget {
   const _StartupDisplayPage({
     required this.selectedTab,
+    required this.availableTabs,
     required this.onChanged,
   });
 
   final AppTab selectedTab;
+  final List<AppTab> availableTabs;
   final Future<void> Function(AppTab tab) onChanged;
 
   @override
@@ -306,7 +314,7 @@ class _StartupDisplayPageState extends State<_StartupDisplayPage> {
       appBar: AppBar(title: const Text('启动显示')),
       body: ListView(
         children: [
-          for (final tab in AppTab.values)
+          for (final tab in widget.availableTabs)
             ListTile(
               title: Text(tab.label),
               trailing: _savingTab == tab
@@ -445,11 +453,13 @@ class _AccountLogoutRow extends StatefulWidget {
     required this.hasAcademicAccount,
     required this.hasWebVpnSession,
     required this.onAcademicLogout,
+    required this.campusSystem,
   });
 
   final bool hasAcademicAccount;
   final bool hasWebVpnSession;
   final Future<bool> Function()? onAcademicLogout;
+  final CampusSystem campusSystem;
 
   @override
   State<_AccountLogoutRow> createState() => _AccountLogoutRowState();
@@ -503,7 +513,9 @@ class _AccountLogoutRowState extends State<_AccountLogoutRow> {
           context: context,
           builder: (context) => AlertDialog(
             title: const Text('确认退出'),
-            content: const Text('退出后将需要重新登录，仍可查看已保存的课表和学业信息'),
+            content: Text(widget.campusSystem == CampusSystem.graduate
+                ? '退出后将需要重新登录研究生系统'
+                : '退出后将需要重新登录，仍可查看已保存的课表和学业信息'),
             actions: [
               TextButton(
                 onPressed: () => Navigator.of(context).pop(false),
@@ -539,10 +551,12 @@ class _AboutClientPage extends StatefulWidget {
   const _AboutClientPage({
     required this.backendRepository,
     required this.isDemo,
+    required this.campusSystem,
   });
 
   final ClientBackendRepository backendRepository;
   final bool isDemo;
+  final CampusSystem campusSystem;
 
   @override
   State<_AboutClientPage> createState() => _AboutClientPageState();
@@ -665,6 +679,7 @@ class _AboutClientPageState extends State<_AboutClientPage> {
                 shuyoRoute(
                   builder: (context) => ClientFeedbackPage(
                     repository: widget.backendRepository,
+                    campusSystem: widget.campusSystem,
                   ),
                 ),
               ),

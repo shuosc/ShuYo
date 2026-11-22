@@ -7,6 +7,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../core/academic_constants.dart';
 import '../../core/academic_url_resolver.dart';
+import '../../core/campus_system.dart';
 import '../../core/client_user_agent.dart';
 import '../../core/webvpn_urls.dart';
 import 'academic_account_store.dart';
@@ -169,7 +170,18 @@ class AcademicAuthService {
     );
   }
 
-  Future<WebVpnSessionStatus> _validateDirectAcademicSessionOverNetwork(
+  /// Probe an in-flight JWXT login without replacing the active session.
+  static Future<WebVpnSessionStatus> validateDirectAcademicCookieHeader(
+    String header,
+  ) async {
+    if (header.isEmpty) return WebVpnSessionStatus.loginRequired;
+    return _validateDirectAcademicSessionOverNetwork(header).timeout(
+      HttpTimeout.normal,
+      onTimeout: () => WebVpnSessionStatus.unavailable,
+    );
+  }
+
+  static Future<WebVpnSessionStatus> _validateDirectAcademicSessionOverNetwork(
     String cookieHeader,
   ) async {
     final client = HttpClient()..connectionTimeout = HttpTimeout.connect;
@@ -267,7 +279,7 @@ class AcademicAuthService {
         : WebVpnSessionStatus.unavailable;
   }
 
-  bool _isAllowedAcademicHost(String host) {
+  static bool _isAllowedAcademicHost(String host) {
     final normalized = host.toLowerCase();
     return normalized == 'shu.edu.cn' || normalized.endsWith('.shu.edu.cn');
   }
@@ -422,6 +434,7 @@ class AcademicAuthService {
     Uri? targetUri,
     required bool persistSession,
   }) async {
+    if (await _accountStore.loadSystem() == CampusSystem.graduate) return null;
     final webVpn = AcademicUrlResolver.usesWebVpn;
     final cached = await _loadCachedCookies(webVpn: webVpn);
     final live = await _loadLiveCookies(webVpn: webVpn);
@@ -695,13 +708,13 @@ class AcademicAuthService {
     return 'cached=${describe(cached)} live=${describe(live)}';
   }
 
-  String _describeUri(Uri uri) {
+  static String _describeUri(Uri uri) {
     final queryKeys = uri.queryParameters.keys.toList()..sort();
     return '${uri.host}${uri.path}'
         '${queryKeys.isEmpty ? '' : ' queryKeys=$queryKeys'}';
   }
 
-  String _describeLocation(Uri current, String? location) {
+  static String _describeLocation(Uri current, String? location) {
     if (location == null || location.isEmpty) return '-';
     try {
       return _describeUri(current.resolve(location));
@@ -710,7 +723,7 @@ class AcademicAuthService {
     }
   }
 
-  void _debug(String message) {
+  static void _debug(String message) {
     if (kDebugMode) debugPrint('[SHU_ACADEMIC_AUTH] $message');
   }
 }

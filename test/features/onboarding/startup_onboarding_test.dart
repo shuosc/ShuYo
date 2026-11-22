@@ -4,7 +4,10 @@ import 'dart:convert';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:material_ui/material_ui.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:shuyo/core/campus_system.dart';
+import 'package:shuyo/data/services/client_settings_service.dart';
 import 'package:shuyo/data/services/student_identity_service.dart';
+import 'package:shuyo/features/auth/native_login_page.dart';
 import 'package:shuyo/features/onboarding/startup_onboarding.dart';
 import 'package:shuyo/shared/widgets/webvpn_toggle.dart';
 
@@ -19,7 +22,7 @@ void main() {
       home: StartupOnboarding(
         initiallyCompleted: true,
         initialAcademicLoggedIn: false,
-        onAcademicLoginCompleted: () {},
+        onAcademicLoginCompleted: (_) {},
         controller: controller,
         child: const Scaffold(body: Text('主页')),
       ),
@@ -45,7 +48,7 @@ void main() {
       home: StartupOnboarding(
         initiallyCompleted: true,
         initialAcademicLoggedIn: true,
-        onAcademicLoginCompleted: () {},
+        onAcademicLoginCompleted: (_) {},
         controller: controller,
         child: const Scaffold(body: Text('主页')),
       ),
@@ -55,7 +58,7 @@ void main() {
       webVpnEnabled: false,
     );
     await tester.pumpAndSettle();
-    expect(find.text('上大校园账户'), findsOneWidget);
+    expect(find.text('本科生系统'), findsOneWidget);
     expect(find.text('使用WebVPN连接'), findsOneWidget);
     expect(find.textContaining('乐乎'), findsNothing);
   });
@@ -92,7 +95,7 @@ void main() {
       home: StartupOnboarding(
         initiallyCompleted: true,
         initialAcademicLoggedIn: true,
-        onAcademicLoginCompleted: () {},
+        onAcademicLoginCompleted: (_) {},
         controller: controller,
         child: const Scaffold(body: Text('主页')),
       ),
@@ -145,7 +148,7 @@ void main() {
       home: StartupOnboarding(
         initiallyCompleted: true,
         initialAcademicLoggedIn: true,
-        onAcademicLoginCompleted: () {},
+        onAcademicLoginCompleted: (_) {},
         controller: controller,
         child: const Scaffold(body: Text('主页')),
       ),
@@ -173,7 +176,7 @@ void main() {
       home: StartupOnboarding(
         initiallyCompleted: true,
         initialAcademicLoggedIn: true,
-        onAcademicLoginCompleted: () {},
+        onAcademicLoginCompleted: (_) {},
         controller: controller,
         child: const Scaffold(body: Text('主页')),
       ),
@@ -203,7 +206,7 @@ void main() {
       home: StartupOnboarding(
         initiallyCompleted: true,
         initialAcademicLoggedIn: true,
-        onAcademicLoginCompleted: () {},
+        onAcademicLoginCompleted: (_) {},
         controller: controller,
         child: const Scaffold(body: Text('主页')),
       ),
@@ -265,7 +268,7 @@ void main() {
       home: StartupOnboarding(
         initiallyCompleted: false,
         initialAcademicLoggedIn: false,
-        onAcademicLoginCompleted: () {},
+        onAcademicLoginCompleted: (_) {},
         controller: controller,
         child: const Scaffold(body: Text('主页')),
       ),
@@ -275,7 +278,7 @@ void main() {
     expect(find.textContaining('乐乎'), findsNothing);
   });
 
-  testWidgets('new users can defer identity verification after notifications',
+  testWidgets('first run selects a system before offering ShuYo verification',
       (tester) async {
     tester.view.physicalSize = const Size(320, 640);
     tester.view.devicePixelRatio = 1;
@@ -289,7 +292,7 @@ void main() {
       home: StartupOnboarding(
         initiallyCompleted: false,
         initialAcademicLoggedIn: false,
-        onAcademicLoginCompleted: () {},
+        onAcademicLoginCompleted: (_) {},
         notificationPermissionRequester: () async => false,
         studentIdentityService: identity,
         controller: controller,
@@ -307,7 +310,23 @@ void main() {
     expect(notificationButton, welcomeButton);
     await tester.tap(find.text('继续'));
     await tester.pumpAndSettle();
-    expect(find.text('身份验证'), findsOneWidget);
+    expect(find.text('账号管理'), findsOneWidget);
+    expect(find.text('请选择你的身份'), findsOneWidget);
+    expect(find.text('ShuYo 认证'), findsNothing);
+    for (final system in CampusSystem.values) {
+      final style = tester.widget<Text>(find.text(system.label)).style;
+      expect(style?.fontSize, 16);
+      expect(style?.fontWeight, FontWeight.w600);
+    }
+    await tester.tap(find.text('本科生系统'));
+    await tester.pumpAndSettle();
+    final login = find.byType(NativeLoginPage);
+    expect(tester.widget<NativeLoginPage>(login).destination,
+        NativeLoginDestination.academic);
+    expect(find.text('本科生系统'), findsOneWidget);
+    Navigator.of(tester.element(login)).pop(NativeLoginResult.authenticated);
+    await tester.pumpAndSettle();
+    expect(find.text('ShuYo 认证'), findsOneWidget);
     final identityButton =
         tester.getRect(find.widgetWithText(FilledButton, '确认'));
     expect(identityButton, welcomeButton);
@@ -329,8 +348,95 @@ void main() {
     await tester.pumpAndSettle();
     expect(await identity.hasAnsweredConsent(), isTrue);
     expect(await identity.hasConsent(), isFalse);
-    expect(find.text('账号管理'), findsOneWidget);
-    expect(find.text('上大校园账户'), findsOneWidget);
+    expect(find.text('账号管理'), findsNothing);
+    expect(
+        await ClientSettingsService().loadStartupOnboardingCompleted(), isTrue);
+  });
+
+  testWidgets('graduate first run does not ask for ShuYo verification',
+      (tester) async {
+    final controller = StartupOnboardingController();
+    final identity = StudentIdentityService();
+    addTearDown(controller.dispose);
+    addTearDown(identity.dispose);
+    CampusSystem? completedSystem;
+    await tester.pumpWidget(MaterialApp(
+      home: StartupOnboarding(
+        initiallyCompleted: false,
+        initialAcademicLoggedIn: false,
+        onAcademicLoginCompleted: (system) => completedSystem = system,
+        notificationPermissionRequester: () async => true,
+        studentIdentityService: identity,
+        controller: controller,
+        child: const Scaffold(body: Text('主页')),
+      ),
+    ));
+    await tester.pumpAndSettle();
+    for (var index = 0; index < 2; index++) {
+      await tester.tap(find.text('继续'));
+      await tester.pumpAndSettle();
+    }
+    await tester.tap(find.text('研究生系统'));
+    await tester.pumpAndSettle();
+    final login = find.byType(NativeLoginPage);
+    expect(tester.widget<NativeLoginPage>(login).destination,
+        NativeLoginDestination.graduate);
+    expect(find.text('研究生系统'), findsOneWidget);
+    expect(find.text('使用上海大学统一认证账户来访问各类校园服务'), findsOneWidget);
+    expect(find.text('使用企业微信登录'), findsNothing);
+    Navigator.of(tester.element(login)).pop(NativeLoginResult.authenticated);
+    await tester.pumpAndSettle();
+    expect(completedSystem, CampusSystem.graduate);
+    expect(find.text('ShuYo 认证'), findsNothing);
+    expect(await identity.hasAnsweredConsent(), isFalse);
+    expect(
+        await ClientSettingsService().loadStartupOnboardingCompleted(), isTrue);
+  });
+
+  testWidgets('switching keeps the previous system until login succeeds',
+      (tester) async {
+    final controller = StartupOnboardingController();
+    final identity = StudentIdentityService();
+    addTearDown(controller.dispose);
+    addTearDown(identity.dispose);
+    await identity.declineConsent();
+    var current = CampusSystem.undergraduate;
+    await tester.pumpWidget(MaterialApp(
+      home: StatefulBuilder(builder: (_, setState) {
+        return StartupOnboarding(
+          initiallyCompleted: true,
+          initialAcademicLoggedIn: true,
+          campusSystem: current,
+          onAcademicLoginCompleted: (system) =>
+              setState(() => current = system),
+          studentIdentityService: identity,
+          controller: controller,
+          child: const Scaffold(body: Text('主页')),
+        );
+      }),
+    ));
+    controller.openAccountManager(academicLoggedIn: true);
+    await tester.pumpAndSettle();
+    expect(find.text('本科生系统'), findsOneWidget);
+    await tester.tap(find.text('切换登录系统'));
+    await tester.pumpAndSettle();
+    expect(find.text('请选择你的身份'), findsOneWidget);
+    expect(find.text('当前'), findsOneWidget);
+    await tester.tap(find.text('研究生系统'));
+    await tester.pumpAndSettle();
+    final login = find.byType(NativeLoginPage);
+    Navigator.of(tester.element(login)).pop();
+    await tester.pumpAndSettle();
+    expect(current, CampusSystem.undergraduate);
+    await tester.tap(find.text('研究生系统'));
+    await tester.pumpAndSettle();
+    Navigator.of(tester.element(login)).pop(NativeLoginResult.authenticated);
+    await tester.pumpAndSettle();
+    expect(current, CampusSystem.graduate);
+    expect(find.text('研究生系统'), findsOneWidget);
+    expect(find.text('已登录'), findsOneWidget);
+    expect(find.text('研究生 ShuYo 认证暂未开放'), findsOneWidget);
+    expect(find.text('切换登录系统'), findsOneWidget);
   });
 
   testWidgets('existing users get the same identity choice once',
@@ -342,16 +448,16 @@ void main() {
     await tester.pumpWidget(MaterialApp(
       home: StartupOnboarding(
         initiallyCompleted: true,
-        initialAcademicLoggedIn: false,
-        onAcademicLoginCompleted: () {},
+        initialAcademicLoggedIn: true,
+        onAcademicLoginCompleted: (_) {},
         studentIdentityService: identity,
         controller: controller,
         child: const Scaffold(body: Text('主页')),
       ),
     ));
-    controller.openAccountManager(academicLoggedIn: false);
+    controller.openAccountManager(academicLoggedIn: true);
     await tester.pumpAndSettle();
-    expect(find.text('身份验证'), findsOneWidget);
+    expect(find.text('ShuYo 认证'), findsOneWidget);
     await tester.tap(find.text('确认'));
     await tester.pumpAndSettle();
     expect(await identity.hasConsent(), isTrue);
@@ -368,9 +474,9 @@ void main() {
     expect(tester.getCenter(status).dx, closeTo(400, 1));
     controller.dismissAccountManager();
     await tester.pumpAndSettle();
-    controller.openAccountManager(academicLoggedIn: false);
+    controller.openAccountManager(academicLoggedIn: true);
     await tester.pumpAndSettle();
-    expect(find.text('身份验证'), findsNothing);
+    expect(find.text('ShuYo 认证'), findsNothing);
   });
 
   testWidgets('account manager back button returns to earlier pages',
@@ -386,7 +492,7 @@ void main() {
       home: StartupOnboarding(
         initiallyCompleted: true,
         initialAcademicLoggedIn: false,
-        onAcademicLoginCompleted: () {},
+        onAcademicLoginCompleted: (_) {},
         studentIdentityService: identity,
         controller: controller,
         child: const Scaffold(body: Text('主页')),
@@ -395,9 +501,6 @@ void main() {
     controller.openAccountManager(academicLoggedIn: false);
     await tester.pumpAndSettle();
     expect(find.text('账号管理'), findsOneWidget);
-    await tester.tap(find.byTooltip('返回上一页'));
-    await tester.pumpAndSettle();
-    expect(find.text('身份验证'), findsOneWidget);
     await tester.tap(find.byTooltip('返回上一页'));
     await tester.pumpAndSettle();
     expect(find.text('开启通知权限'), findsOneWidget);
@@ -417,13 +520,13 @@ void main() {
       home: StartupOnboarding(
         initiallyCompleted: true,
         initialAcademicLoggedIn: false,
-        onAcademicLoginCompleted: () {},
+        onAcademicLoginCompleted: (_) {},
         studentIdentityService: identity,
         controller: controller,
         child: const Scaffold(body: Text('主页')),
       ),
     ));
-    controller.openAccountManager(academicLoggedIn: false);
+    controller.openAccountManager(academicLoggedIn: true);
     await tester.pumpAndSettle();
     await tester.tap(find.text('暂不'));
     await tester.pumpAndSettle();
@@ -464,7 +567,7 @@ void main() {
       home: StartupOnboarding(
         initiallyCompleted: true,
         initialAcademicLoggedIn: false,
-        onAcademicLoginCompleted: () {},
+        onAcademicLoginCompleted: (_) {},
         studentIdentityService: identity,
         controller: controller,
         child: const Scaffold(body: Text('主页')),

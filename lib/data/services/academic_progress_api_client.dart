@@ -34,9 +34,10 @@ class AcademicProgressApiClient {
 
   /// QR authentication has no typed username. Resolve only the authenticated
   /// identity; do not fetch course details or update any academic data cache.
-  Future<String> fetchAuthenticatedStudentId() async {
+  Future<String> fetchAuthenticatedStudentId({String? sessionCookie}) async {
     final indexUri = AcademicUrlResolver.uri(studentIdentityPath);
-    final cookie = await _authService.cookieHeader(targetUri: indexUri);
+    final cookie =
+        sessionCookie ?? await _authService.cookieHeader(targetUri: indexUri);
     if (cookie == null || cookie.isEmpty) {
       throw const AcademicAuthException('请先登录上大校园账户');
     }

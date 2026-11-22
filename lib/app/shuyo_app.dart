@@ -5,6 +5,7 @@ import 'package:material_ui/material_ui.dart';
 
 import '../core/client_app_info.dart';
 import '../core/app_tab.dart';
+import '../core/campus_system.dart';
 import '../core/classroom_url_resolver.dart';
 import '../core/otp_url_resolver.dart';
 import '../data/demo/demo_data_bundle.dart';
@@ -56,6 +57,7 @@ class _ShuYoAppState extends State<ShuYoApp> with WidgetsBindingObserver {
   DemoDataBundle? _demoData;
   AppTab _demoStartupTab = AppTab.home;
   int _academicLoginSignal = 0;
+  CampusSystem? _loggedInCampusSystem;
   late final Future<bool> _initialScheduleWidgetLaunch;
   bool _initialWidgetLaunchConsumed = false;
   Brightness _systemBrightness =
@@ -129,6 +131,9 @@ class _ShuYoAppState extends State<ShuYoApp> with WidgetsBindingObserver {
           }
           final data = snapshot.data!;
           final demo = _demoMode && _demoData != null;
+          final campusSystem = demo
+              ? CampusSystem.undergraduate
+              : _loggedInCampusSystem ?? data.campusSystem;
           final demoTerm = demo ? _demoData!.schedule.term : null;
           final controller =
               demo ? _demoOnboardingController : _onboardingController;
@@ -137,8 +142,12 @@ class _ShuYoAppState extends State<ShuYoApp> with WidgetsBindingObserver {
             initiallyCompleted: demo || data.onboardingCompleted,
             initialAcademicLoggedIn: demo || data.hasAcademicSession,
             initialAcademicSessionExpired: !demo && data.academicSessionExpired,
-            onAcademicLoginCompleted: () {
-              setState(() => _academicLoginSignal++);
+            campusSystem: campusSystem,
+            onAcademicLoginCompleted: (system) {
+              setState(() {
+                _loggedInCampusSystem = system;
+                _academicLoginSignal++;
+              });
             },
             onDemoLogin: _activateDemoMode,
             controller: controller,
@@ -156,6 +165,7 @@ class _ShuYoAppState extends State<ShuYoApp> with WidgetsBindingObserver {
               onFollowSystemThemeChanged: _changeFollowSystemTheme,
               onCustomBackgroundChanged: _changeCustomBackground,
               academicLoginSignal: _academicLoginSignal,
+              campusSystem: campusSystem,
               initialHasAcademicSession: demo || data.hasAcademicSession,
               initialAcademicSessionExpired:
                   !demo && data.academicSessionExpired,
@@ -217,9 +227,12 @@ class _ShuYoAppState extends State<ShuYoApp> with WidgetsBindingObserver {
     );
     OtpUrlResolver.configure(useWebVpn: networkSettings.webVpnEnabled);
     final academicAccountStore = AcademicAccountStore();
-    await academicAccountStore.rememberExistingAccounts();
-    if (await academicAccountStore.hasLegacyExpiredAccount()) {
-      await AcademicAuthService().clearAccount();
+    final campusSystem = await academicAccountStore.loadSystem();
+    if (campusSystem == CampusSystem.undergraduate) {
+      await academicAccountStore.rememberExistingAccounts();
+      if (await academicAccountStore.hasLegacyExpiredAccount()) {
+        await AcademicAuthService().clearAccount();
+      }
     }
     final academicStudentId = await academicAccountStore.loadStudentId();
     final profilePreferences = AcademicProfilePreferences();
@@ -229,7 +242,9 @@ class _ShuYoAppState extends State<ShuYoApp> with WidgetsBindingObserver {
     final preferredCampus = await profilePreferences.loadPreferredCampus();
     final onboardingCompleted =
         await _settingsService.loadStartupOnboardingCompleted();
-    final initialScheduleLoad = openScheduleFromWidget && onboardingCompleted
+    final initialScheduleLoad = openScheduleFromWidget &&
+            onboardingCompleted &&
+            campusSystem == CampusSystem.undergraduate
         ? await _loadInitialScheduleState(AcademicScheduleRepository())
         : const _InitialScheduleLoad();
     return _StartupData(
@@ -240,6 +255,7 @@ class _ShuYoAppState extends State<ShuYoApp> with WidgetsBindingObserver {
       hasAcademicSession: academicStudentId != null,
       academicSessionExpired: await academicAccountStore.isSessionExpired(),
       academicStudentId: academicStudentId,
+      campusSystem: campusSystem,
       nickname: nickname,
       preferredCampus: preferredCampus,
       startupTab: startupTab,
@@ -325,6 +341,7 @@ class _ShuYoAppState extends State<ShuYoApp> with WidgetsBindingObserver {
     setState(() {
       _demoMode = false;
       _demoData = null;
+      _loggedInCampusSystem = null;
       // Reload the normal startup state after leaving the bundled demo.
       _startupFuture = _loadStartup();
     });
@@ -412,6 +429,7 @@ class _StartupData {
     required this.hasAcademicSession,
     this.academicSessionExpired = false,
     required this.academicStudentId,
+    this.campusSystem = CampusSystem.undergraduate,
     this.nickname,
     this.preferredCampus = ClassroomCampus.defaultName,
     this.startupTab = AppTab.home,
@@ -429,6 +447,7 @@ class _StartupData {
   final bool hasAcademicSession;
   final bool academicSessionExpired;
   final String? academicStudentId;
+  final CampusSystem campusSystem;
   final String? nickname;
   final String preferredCampus;
   final AppTab startupTab;
