@@ -3,12 +3,12 @@ import 'dart:async';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:material_ui/material_ui.dart';
 import 'package:qr_flutter/qr_flutter.dart';
-import 'package:shuyo/core/wecom_constants.dart';
 import 'package:shuyo/data/services/wecom_auth_service.dart';
 import 'package:shuyo/features/auth/wecom_scan_page.dart';
 
 const _session = WeComQrSession(
   key: 'test-session',
+  state: 'test-context',
   confirmUrl: 'https://example.invalid/confirm?k=test-session',
   wxWorkSchemeUrl: 'wxwork://test',
 );
@@ -35,7 +35,6 @@ void main() {
       home: WeComScanPage(
         session: _session,
         authService: service,
-        target: WeComOAuthTarget.academic,
       ),
     ));
     await tester.pump();
@@ -94,7 +93,6 @@ void main() {
                   builder: (_) => WeComScanPage(
                     session: _session,
                     authService: service,
-                    target: WeComOAuthTarget.academic,
                   ),
                 ),
               ),

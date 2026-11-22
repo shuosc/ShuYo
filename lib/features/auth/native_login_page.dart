@@ -42,7 +42,7 @@ typedef CampusAccountChange = Future<void> Function(
 
 /// 该次登录是否已在扫码页内完成 WebVPN 握手。
 ///
-/// 企微扫码登录 WebVPN 时，[WeComScanPage] 会在同一原生 Cookie 会话内自行走完
+/// 企微扫码登录 WebVPN 时，扫码流程会在同一原生 Cookie 会话内走完
 /// `auth/start → auth/finish → user/info`，此时 [WeComRedeemResult.callbackUri]
 /// 是登录后的落地页，没有可兑换的 `code`。教务等其余目标只拿到授权码，仍须跟随
 /// 回调兑换会话。
@@ -62,7 +62,7 @@ class NativeLoginPage extends StatefulWidget {
     this.onCampusAccountChange,
     this.expectedCampusAccount,
     @visibleForTesting this.authServiceFactory,
-    @visibleForTesting this.startWeComSession,
+    @visibleForTesting this.weComAuthServiceFactory,
     @visibleForTesting this.loginForTesting,
     @visibleForTesting this.sendCodeForTesting,
     @visibleForTesting this.verifyCodeForTesting,
@@ -76,7 +76,7 @@ class NativeLoginPage extends StatefulWidget {
         onCampusAccountChange = null,
         expectedCampusAccount = null,
         authServiceFactory = null,
-        startWeComSession = null,
+        weComAuthServiceFactory = null,
         loginForTesting = null,
         sendCodeForTesting = null,
         verifyCodeForTesting = null,
@@ -90,7 +90,7 @@ class NativeLoginPage extends StatefulWidget {
         onCampusAccountChange = null,
         expectedCampusAccount = null,
         authServiceFactory = null,
-        startWeComSession = null,
+        weComAuthServiceFactory = null,
         loginForTesting = null,
         sendCodeForTesting = null,
         verifyCodeForTesting = null,
@@ -104,7 +104,7 @@ class NativeLoginPage extends StatefulWidget {
         onCampusAccountChange = null,
         expectedCampusAccount = null,
         authServiceFactory = null,
-        startWeComSession = null,
+        weComAuthServiceFactory = null,
         loginForTesting = null,
         sendCodeForTesting = null,
         verifyCodeForTesting = null,
@@ -119,7 +119,7 @@ class NativeLoginPage extends StatefulWidget {
         onCampusAccountChange = null,
         expectedCampusAccount = null,
         authServiceFactory = null,
-        startWeComSession = null,
+        weComAuthServiceFactory = null,
         loginForTesting = null,
         sendCodeForTesting = null,
         verifyCodeForTesting = null;
@@ -133,7 +133,7 @@ class NativeLoginPage extends StatefulWidget {
   final AcademicNativeAuthService Function()? authServiceFactory;
   final StudentIdentityService? studentIdentityService;
   @visibleForTesting
-  final Future<WeComQrSession> Function()? startWeComSession;
+  final WeComAuthService Function()? weComAuthServiceFactory;
   @visibleForTesting
   final Future<AcademicLoginResult> Function({
     required String username,
@@ -155,21 +155,22 @@ class NativeLoginPage extends StatefulWidget {
 class _NativeLoginPageState extends State<NativeLoginPage> {
   AcademicNativeAuthService? _authServiceInstance;
   AcademicNativeAuthService get _authService =>
-      _authServiceInstance ??= widget.authServiceFactory?.call() ??
-          switch (widget.destination) {
-            NativeLoginDestination.webVpn =>
-              AcademicNativeAuthService.forWebVpn(),
-            NativeLoginDestination.academic => AcademicNativeAuthService(),
-            NativeLoginDestination.graduate =>
-              AcademicNativeAuthService.forGraduate(),
-            NativeLoginDestination.there =>
-              AcademicNativeAuthService.forThere(),
-            NativeLoginDestination.campusCard =>
-              AcademicNativeAuthService.forCampusCard(),
-            NativeLoginDestination.dataDeletion => AcademicNativeAuthService(),
-          };
+      _authServiceInstance ??= _createAuthService();
+
+  AcademicNativeAuthService _createAuthService() =>
+      widget.authServiceFactory?.call() ??
+      switch (widget.destination) {
+        NativeLoginDestination.webVpn => AcademicNativeAuthService.forWebVpn(),
+        NativeLoginDestination.academic => AcademicNativeAuthService(),
+        NativeLoginDestination.graduate =>
+          AcademicNativeAuthService.forGraduate(),
+        NativeLoginDestination.there => AcademicNativeAuthService.forThere(),
+        NativeLoginDestination.campusCard =>
+          AcademicNativeAuthService.forCampusCard(),
+        NativeLoginDestination.dataDeletion => AcademicNativeAuthService(),
+      };
+
   final _verificationDeliveryService = VerificationDeliveryService();
-  final _weComAuthService = WeComAuthService();
   final _studentId = TextEditingController();
   final _studentIdFocusNode = FocusNode();
   final _password = TextEditingController();
@@ -211,7 +212,6 @@ class _NativeLoginPageState extends State<NativeLoginPage> {
   void dispose() {
     _countdownTimer?.cancel();
     _authServiceInstance?.dispose();
-    _weComAuthService.dispose();
     _studentId.dispose();
     _studentIdFocusNode.dispose();
     _password.dispose();
@@ -417,9 +417,7 @@ class _NativeLoginPageState extends State<NativeLoginPage> {
                         child:
                             _buttonContent('继续', loading: _busy && !_weComBusy),
                       ),
-                      // YJS's independent WeCom OAuth exchange is not yet
-                      // verified. SSO's WeCom second factor is unchanged.
-                      if (!dataDeletion && campus != CampusSystem.graduate) ...[
+                      if (!dataDeletion) ...[
                         const SizedBox(height: 12),
                         OutlinedButton.icon(
                           onPressed: _busy ? null : _startWeComLogin,
@@ -771,25 +769,54 @@ class _NativeLoginPageState extends State<NativeLoginPage> {
       _busy = true;
       _weComBusy = true;
     });
+    final weCom = widget.weComAuthServiceFactory?.call() ?? WeComAuthService();
+    AcademicNativeAuthService? graduateAuth;
     try {
-      final session = await (widget.startWeComSession?.call() ??
-          _weComAuthService.startQrSession());
-      if (!mounted) return;
-      final redeemed = await Navigator.of(context).push<WeComRedeemResult>(
+      if (_campusSystem == CampusSystem.graduate) {
+        // Keep the portal challenge and both cookie jars local to this attempt.
+        graduateAuth = _createAuthService();
+      }
+      final challenge = await graduateAuth?.prepareGraduateWeComLogin();
+      if (!mounted || _routeClosed) return;
+      final session = await weCom.startQrSession(state: challenge?.state);
+      if (!mounted || _routeClosed) return;
+      final redeemed = await Navigator.of(context).push<WeComSessionResult>(
         MaterialPageRoute(
           builder: (_) => ShuYoRouteSurface(
             child: WeComScanPage(
               session: session,
-              authService: _weComAuthService,
-              target: _weComTarget,
+              authService: weCom,
             ),
           ),
         ),
       );
-      if (redeemed == null || !mounted) return;
+      if (redeemed == null || !mounted || _routeClosed) return;
+      if (graduateAuth != null && challenge != null) {
+        final studentId = await graduateAuth.completeGraduateWeComLogin(
+          challenge,
+          redirectUri: redeemed.redirectUri,
+          ssoCookies: redeemed.sessionCookies,
+        );
+        await _commitCampusLogin(
+          CampusSystem.graduate,
+          studentId,
+          authService: graduateAuth,
+          savePassword: false,
+        );
+        return;
+      }
+
+      final target = _weComTarget;
+      final result = target.kind == WeComOAuthTargetKind.webVpn
+          ? await weCom.completeWebVpnLogin()
+          : WeComRedeemResult(
+              callbackUri: await weCom.authorizeTarget(target),
+              sessionCookies: weCom.cookieJar,
+            );
+      if (!mounted || _routeClosed) return;
       await _completeLogin(
-        redeemed.callbackUri,
-        weComRedeem: redeemed,
+        result.callbackUri,
+        weComRedeem: result,
       );
     } on AcademicNativeAuthException catch (error) {
       _showError(error.message);
@@ -797,12 +824,13 @@ class _NativeLoginPageState extends State<NativeLoginPage> {
       _showError(error.message);
     } on Object catch (error, stackTrace) {
       if (kDebugMode) {
-        debugPrint('[SHU_WECOM] unexpected error type=${error.runtimeType} '
-            'error=$error');
+        debugPrint('[SHU_WECOM] unexpected error type=${error.runtimeType}');
         debugPrintStack(label: '[SHU_WECOM] stack', stackTrace: stackTrace);
       }
       _showError('无法连接企业微信服务，请稍后再试');
     } finally {
+      graduateAuth?.dispose();
+      weCom.dispose();
       if (mounted) {
         setState(() {
           _busy = false;
@@ -818,7 +846,7 @@ class _NativeLoginPageState extends State<NativeLoginPage> {
         NativeLoginDestination.webVpn => WeComOAuthTarget.webVpn,
         NativeLoginDestination.academic => WeComOAuthTarget.academic,
         NativeLoginDestination.graduate =>
-          throw StateError('研究生系统暂不支持企业微信扫码登录'),
+          throw StateError('YJS authorization must come from the portal'),
         NativeLoginDestination.there => WeComOAuthTarget.there,
         NativeLoginDestination.campusCard => WeComOAuthTarget.campusCard,
         NativeLoginDestination.dataDeletion => WeComOAuthTarget.academic,
@@ -1034,7 +1062,6 @@ class _NativeLoginPageState extends State<NativeLoginPage> {
     // Keep the old campus and shared SSO sessions until this login has
     // produced a valid business session in its own cookie jar.
     await _authService.completeLogin(callbackUri, publish: false);
-    final auth = AcademicAuthService();
     var studentId = _studentId.text.trim();
     if (system == CampusSystem.undergraduate) {
       final status =
@@ -1055,6 +1082,21 @@ class _NativeLoginPageState extends State<NativeLoginPage> {
         );
       }
     }
+    await _commitCampusLogin(
+      system,
+      studentId,
+      authService: _authService,
+      savePassword: !weCom,
+    );
+  }
+
+  Future<void> _commitCampusLogin(
+    CampusSystem system,
+    String studentId, {
+    required AcademicNativeAuthService authService,
+    required bool savePassword,
+  }) async {
+    if (!mounted || _routeClosed) return;
     final expected = widget.expectedCampusAccount;
     if (expected != null && expected.toLowerCase() != studentId.toLowerCase()) {
       _showError('登录账号须与当前校园账户一致');
@@ -1070,6 +1112,7 @@ class _NativeLoginPageState extends State<NativeLoginPage> {
     setState(() => _committingCampusLogin = true);
     try {
       Future<void> commit() async {
+        final auth = AcademicAuthService();
         if (systemChanged || accountChanged) {
           await ShuSsoSessionStore().clearSession();
         }
@@ -1086,7 +1129,7 @@ class _NativeLoginPageState extends State<NativeLoginPage> {
                     system: CampusSystem.undergraduate),
           );
         }
-        await _authService.publishSessionCookies();
+        await authService.publishSessionCookies();
         await accounts.saveStudentId(studentId, system: system);
         if (system == CampusSystem.undergraduate) await auth.markLoggedIn();
         await accounts.saveSystem(system);
@@ -1098,7 +1141,7 @@ class _NativeLoginPageState extends State<NativeLoginPage> {
       } else {
         await commit();
       }
-      _closeWith(NativeLoginResult.authenticated, savePassword: !weCom);
+      _closeWith(NativeLoginResult.authenticated, savePassword: savePassword);
     } finally {
       if (mounted) setState(() => _committingCampusLogin = false);
     }

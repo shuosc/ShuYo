@@ -44,6 +44,9 @@ void main() {
       final login = Uri.parse(
         'https://newsso.shu.edu.cn/oauth2/login/SECRET_CONTEXT',
       );
+      final graduateCallback = Uri.parse(
+        'https://yjs.shu.edu.cn/gsapp/sys/yjsrzfwapp/oauth_shu/callback/SECRET_FLOW.do?code=SECRET_CODE&state=SECRET_STATE',
+      );
       final callbackLog = WeComAuthService.describeUrlForLog(callback);
       final loginLog = WeComAuthService.describeUrlForLog(login);
       expect(callbackLog, contains('login-oauth2'));
@@ -52,6 +55,8 @@ void main() {
       expect(callbackLog, isNot(contains('SECRET_STATE')));
       expect(loginLog, contains('/oauth2/login/{context}'));
       expect(loginLog, isNot(contains('SECRET_CONTEXT')));
+      expect(WeComAuthService.describeUrlForLog(graduateCallback),
+          isNot(contains('SECRET_')));
     });
 
     test('encodeOAuthParams produces base64url without padding', () {
@@ -91,10 +96,7 @@ void main() {
       expect(const WeComScanResult.succeeded('abc123').authCode, 'abc123');
     });
 
-    test('weComRedeemState always encodes the academic client', () {
-      // state 固定编码 jwxt 参数：企微自建应用只绑定教务系统，其他参数
-      // 会被 /oauth/wecom/qrcode 判为 badRequestParams。目标系统的差异在
-      // authorizeTarget 阶段处理。
+    test('the default QR context encodes the academic client', () {
       final decoded = jsonDecode(
         utf8.decode(base64Url.decode(base64Url.normalize(
           WeComAuthService.weComRedeemState,
@@ -153,6 +155,52 @@ void main() {
       expect(first, matches(RegExp(r'^[0-9a-f]{32}$')));
       expect(second, first);
     });
+  });
+
+  test('uses the supplied QR context and returns the SSO redirect untouched',
+      () async {
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    final service = WeComAuthService(
+      httpClient:
+          _LoopbackHttpClient(Uri.parse('http://127.0.0.1:${server.port}')),
+    );
+    addTearDown(() async {
+      service.dispose();
+      await server.close(force: true);
+    });
+    final visited = <Uri>[];
+    server.listen((request) async {
+      visited.add(request.uri);
+      final response = request.response;
+      if (request.uri.path.endsWith('/qrConnect')) {
+        response.write('<img src="/qrImg?key=a1b2c3">');
+      } else if (request.uri.path == '/oauth/wecom/qrcode') {
+        response.statusCode = HttpStatus.found;
+        response.cookies
+            .add(Cookie('SHU_OAUTH2', 'fixture-session')..path = '/');
+        response.headers.set(HttpHeaders.locationHeader,
+            '/oauth/authorize?state=fixture-oauth-state');
+      } else {
+        response.statusCode = HttpStatus.notFound;
+      }
+      await response.close();
+    });
+
+    final session = await service.startQrSession(state: 'graduate-context');
+    final result = await service.redeem('fixture-code', session.state);
+    expect(session.state, 'graduate-context');
+    expect(visited.map((uri) => uri.path), [
+      '/wwopen/sso/qrConnect',
+      '/oauth/wecom/qrcode',
+    ]);
+    expect(visited.map((uri) => uri.queryParameters['state']),
+        ['graduate-context', 'graduate-context']);
+    expect(
+        result.redirectUri,
+        Uri.https('newsso.shu.edu.cn', '/oauth/authorize', {
+          'state': 'fixture-oauth-state',
+        }));
+    expect(result.sessionCookies.single.name, 'SHU_OAUTH2');
   });
 
   group('OAuth authorization state', () {

@@ -237,13 +237,9 @@ void main() {
 
   testWidgets('WeCom login shows loading on its own button and recovers',
       (tester) async {
-    final session = Completer<WeComQrSession>();
-    var starts = 0;
+    final service = _StartingWeComAuth();
     await tester.pumpWidget(MaterialApp(
-      home: NativeLoginPage(startWeComSession: () {
-        starts++;
-        return session.future;
-      }),
+      home: NativeLoginPage(weComAuthServiceFactory: () => service),
     ));
     await tester.pumpAndSettle();
 
@@ -274,9 +270,9 @@ void main() {
     await tester.tap(weComButton, warnIfMissed: false);
     await tester.tap(continueButton, warnIfMissed: false);
     await tester.pump();
-    expect(starts, 1);
+    expect(service.starts, 1);
 
-    session.completeError(const WeComAuthException('test', '登录失败'));
+    service.session.completeError(const WeComAuthException('test', '登录失败'));
     await tester.pumpAndSettle();
 
     expect(find.text('登录失败'), findsOneWidget);
@@ -415,4 +411,16 @@ void main() {
     expect(tester.widget<TextButton>(sendButton).onPressed, isNotNull);
     expect(tester.widget<FilledButton>(verifyButton).onPressed, isNotNull);
   });
+}
+
+class _StartingWeComAuth extends WeComAuthService {
+  final session = Completer<WeComQrSession>();
+  int starts = 0;
+
+  @override
+  Future<WeComQrSession> startQrSession({String? state}) {
+    starts++;
+    expect(state, isNull);
+    return session.future;
+  }
 }

@@ -17,6 +17,10 @@ class GraduateSessionStore {
   static final entryUri = Uri.https(host, '/');
   static final portalUri =
       Uri.https(host, '/gsapp/sys/yjsemaphome/portal/index.do');
+  static final userInfoUri = Uri.https(
+    host,
+    '/gsapp/sys/yjsemaphome/modules/pubWork/getUserInfo.do',
+  );
 
   final SessionCookieJar _cookieJar;
   final SecureAppStore _secureStore;

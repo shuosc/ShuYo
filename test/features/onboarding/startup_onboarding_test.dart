@@ -383,7 +383,7 @@ void main() {
         NativeLoginDestination.graduate);
     expect(find.text('研究生系统'), findsOneWidget);
     expect(find.text('使用上海大学统一认证账户来访问各类校园服务'), findsOneWidget);
-    expect(find.text('使用企业微信登录'), findsNothing);
+    expect(find.text('使用企业微信登录'), findsOneWidget);
     Navigator.of(tester.element(login)).pop(NativeLoginResult.authenticated);
     await tester.pumpAndSettle();
     expect(completedSystem, CampusSystem.graduate);

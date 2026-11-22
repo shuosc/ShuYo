@@ -5,26 +5,21 @@ import 'package:material_ui/material_ui.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 import 'package:url_launcher/url_launcher.dart';
 
-import '../../core/wecom_constants.dart';
 import '../../data/services/wecom_auth_service.dart';
 
 /// 企业微信扫码登录等待页。
 ///
 /// 在本地根据确认链接生成二维码，并支持点击拉起企业微信确认页。在后台长轮询
-/// 等待用户扫码确认，成功后返回换取到的 SSO 会话结果。
+/// 等待用户扫码确认，成功后将 SSO 会话交给发起本次登录的页面。
 class WeComScanPage extends StatefulWidget {
   const WeComScanPage({
     super.key,
     required this.session,
     required this.authService,
-    required this.target,
   });
 
   final WeComQrSession session;
   final WeComAuthService authService;
-
-  /// 本次扫码要登录的目标系统，决定 SSO 下发授权码的归属。
-  final WeComOAuthTarget target;
 
   @override
   State<WeComScanPage> createState() => _WeComScanPageState();
@@ -48,7 +43,9 @@ class _WeComScanPageState extends State<WeComScanPage> {
     super.dispose();
   }
 
-  /// 后台长轮询，状态变化时刷新界面，成功后换取目标业务系统回调地址。
+  bool get _active => mounted && !_cancelled;
+
+  /// 后台长轮询，状态变化时刷新界面，成功后换取 SSO 会话。
   Future<void> _waitForScan() async {
     final WeComScanResult result;
     try {
@@ -56,55 +53,30 @@ class _WeComScanPageState extends State<WeComScanPage> {
         widget.session.key,
         isCancelled: () => _cancelled,
         onStatusChanged: (status) {
-          if (mounted && status != _status) {
+          if (_active && status != _status) {
             setState(() => _status = status);
           }
         },
       );
     } on Object {
-      if (mounted) _showError('无法连接企业微信服务，请稍后再试');
+      if (_active) _showError('无法连接企业微信服务，请稍后再试');
       return;
     }
-    if (!mounted) return;
+    if (!_active) return;
     if (!result.isSuccess) {
       _showError('二维码已过期或已取消，请重新尝试');
       return;
     }
     try {
-      // 阶段一：auth_code → SSO 会话（state 固定为教务参数）。
-      await widget.authService.redeem(
+      final session = await widget.authService.redeem(
         result.authCode!,
-        WeComAuthService.weComRedeemState,
+        widget.session.state,
       );
-      if (mounted) {
-        setState(() => _status = WeComScanStatus.succeeded);
-      }
-      // WebVPN 的 OAuth callback 只是 SPA 入口，还必须在同一原生
-      // Cookie 会话中完成 auth/finish 并用 user/info 确认身份。
-      if (widget.target.kind == WeComOAuthTargetKind.webVpn) {
-        final webVpnResult = await widget.authService.completeWebVpnLogin();
-        if (!mounted) return;
-        Navigator.of(context).pop(webVpnResult);
-        return;
-      }
-      final callbackUri =
-          await widget.authService.authorizeTarget(widget.target);
-      if (!mounted) return;
-      final cookies = widget.authService.cookieJar;
-      Navigator.of(context).pop(
-        WeComRedeemResult(
-          callbackUri: callbackUri,
-          sessionCookies: cookies,
-        ),
-      );
+      if (mounted && !_cancelled) Navigator.of(context).pop(session);
     } on WeComAuthException catch (error) {
-      if (mounted) {
-        _showError(error.message);
-      }
+      if (_active) _showError(error.message);
     } on Object {
-      if (mounted) {
-        _showError('企业微信授权失败，请重新尝试');
-      }
+      if (_active) _showError('企业微信授权失败，请重新尝试');
     }
   }
 
@@ -143,7 +115,14 @@ class _WeComScanPageState extends State<WeComScanPage> {
   }
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context) => PopScope<WeComSessionResult>(
+        onPopInvokedWithResult: (didPop, _) {
+          if (didPop) _cancelled = true;
+        },
+        child: _buildScaffold(),
+      );
+
+  Widget _buildScaffold() {
     return Scaffold(
       appBar: AppBar(
         title: const Text('企业微信登录'),
@@ -220,7 +199,7 @@ class _WeComScanPageState extends State<WeComScanPage> {
           Icons.android,
         ),
       WeComScanStatus.succeeded => (
-          '登录成功',
+          '已确认，正在登录…',
           Icons.check_circle,
         ),
       WeComScanStatus.expired => (

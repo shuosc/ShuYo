@@ -96,6 +96,140 @@ void main() {
     expect(portal.visited.where((uri) => uri == portal.callback), hasLength(1));
   });
 
+  for (final viaSso in [false, true]) {
+    test(
+        'WeCom validates YJS account ${viaSso ? 'via authorize' : 'via callback'}',
+        () async {
+      final challenge = await auth.prepareGraduateWeComLogin();
+      expect(challenge.state, portal.loginContext);
+      final afterStart = portal.visited.length;
+      final account = await auth.completeGraduateWeComLogin(
+        challenge,
+        redirectUri: viaSso ? portal.authorize : portal.callback,
+        ssoCookies: [_ssoCookie()],
+      );
+      expect(account, 'fixture-account');
+      expect(portal.visited.skip(afterStart), [
+        if (viaSso) portal.authorize,
+        portal.callback,
+        GraduateSessionStore.portalUri,
+        GraduateSessionStore.userInfoUri,
+      ]);
+      if (viaSso) expect(portal.atAuthorizeCookie, 'SHU_OAUTH2=fixture-sso');
+      expect(portal.atCallbackCookie, isEmpty);
+      expect(portal.atUserInfo, ('POST', 'GS_SESSIONID=fixture-yjs'));
+      expect(await GraduateSessionStore().loadCookies(), isEmpty);
+      expect(await GraduateSessionStore().loadRenewalCookie(), isNull);
+
+      await auth.publishSessionCookies();
+      expect((await GraduateSessionStore().loadCookies()).single.name,
+          'GS_SESSIONID');
+      expect((await GraduateSessionStore().loadRenewalCookie())?.value,
+          'fixture-sso');
+    });
+  }
+
+  for (final (name, redirect)
+      in <(String, Uri Function(_GraduatePortalFixture))>[
+    (
+      'wrong host',
+      (portal) => portal.callback.replace(host: 'example.invalid')
+    ),
+    (
+      'different YJS flow',
+      (portal) => portal.callback.replace(
+            path:
+                portal.callback.path.replaceFirst('fixture-flow', 'other-flow'),
+          )
+    ),
+    (
+      'wrong state',
+      (portal) => portal.callback.replace(queryParameters: {
+            ...portal.callback.queryParameters,
+            'state': 'other-state',
+          })
+    ),
+    (
+      'duplicate state',
+      (portal) => portal.callback.replace(
+            query: '${portal.callback.query}&state=${portal.flow}',
+          )
+    ),
+    (
+      'missing code',
+      (portal) => portal.callback.replace(queryParameters: {
+            'state': portal.flow,
+          })
+    ),
+    (
+      'wrong authorization',
+      (portal) => portal.authorize.replace(
+            queryParameters: {
+              ...portal.authorize.queryParameters,
+              'client_id': 'another-client',
+            },
+          )
+    ),
+  ]) {
+    test('WeCom rejects $name before sending the callback', () async {
+      final challenge = await auth.prepareGraduateWeComLogin();
+      final requests = portal.visited.length;
+      await expectLater(
+        auth.completeGraduateWeComLogin(
+          challenge,
+          redirectUri: redirect(portal),
+          ssoCookies: [_ssoCookie()],
+        ),
+        throwsA(isA<AcademicNativeAuthException>()),
+      );
+      expect(portal.visited, hasLength(requests));
+      expect(await GraduateSessionStore().loadCookies(), isEmpty);
+    });
+  }
+
+  test('WeCom rejects a callback from an earlier QR attempt', () async {
+    final first = await auth.prepareGraduateWeComLogin();
+    final previousCallback = portal.callback;
+    portal.flow = 'new-fixture-flow';
+    final next = await auth.prepareGraduateWeComLogin();
+    expect(next.state, isNot(first.state));
+    final requests = portal.visited.length;
+    await expectLater(
+      auth.completeGraduateWeComLogin(
+        first,
+        redirectUri: previousCallback,
+        ssoCookies: [_ssoCookie()],
+      ),
+      throwsA(isA<AcademicNativeAuthException>()),
+    );
+    expect(portal.visited, hasLength(requests));
+    expect(
+        await auth.completeGraduateWeComLogin(
+          next,
+          redirectUri: portal.callback,
+          ssoCookies: [_ssoCookie()],
+        ),
+        'fixture-account');
+  });
+
+  test('WeCom does not accept a YJS portal session with no user ID', () async {
+    final challenge = await auth.prepareGraduateWeComLogin();
+    portal.userId = null;
+    await expectLater(
+      auth.completeGraduateWeComLogin(
+        challenge,
+        redirectUri: portal.callback,
+        ssoCookies: [_ssoCookie()],
+      ),
+      throwsA(isA<AcademicNativeAuthException>().having(
+        (error) => error.code,
+        'code',
+        'graduateAccountMissing',
+      )),
+    );
+    expect(await GraduateSessionStore().loadCookies(), isEmpty);
+  });
+
   test('a durable YJS session can be restored without visiting SSO', () async {
     await jar.setCookie(const SessionCookie(
       name: 'GS_SESSIONID',
@@ -177,30 +311,37 @@ void main() {
   });
 }
 
-/// Replays the observed credential, OTP and dynamic OAuth legs with local
-/// requests only; the fixture contains no real user data or credentials.
+Cookie _ssoCookie() => Cookie('SHU_OAUTH2', 'fixture-sso')..path = '/';
+
+/// Synthetic server for password, OTP and dynamic OAuth with no real accounts.
 class _GraduatePortalFixture {
   _GraduatePortalFixture(this.server) : client = _LoopbackClient(server);
 
   final HttpServer server;
   final _LoopbackClient client;
-  final callback = Uri.https(GraduateSessionStore.host,
-      '/gsapp/sys/yjsrzfwapp/oauth_shu/callback/fixture-flow.do', {
-    'code': 'fixture-code',
-    'state': 'fixture-flow',
-  });
-  late final authorize = Uri.https('newsso.shu.edu.cn', '/oauth/authorize', {
-    'client_id': 'fixture-client',
-    'response_type': 'code',
-    'redirect_uri': callback.replace(query: '').toString(),
-    'state': 'fixture-flow',
-  });
+  String flow = 'fixture-flow';
+  String get loginContext => 'portal-context-$flow';
+  String get _callbackPath =>
+      '/gsapp/sys/yjsrzfwapp/oauth_shu/callback/$flow.do';
+  Uri get callback => Uri.https(GraduateSessionStore.host, _callbackPath, {
+        'code': 'fixture-code',
+        'state': flow,
+      });
+  Uri get authorize => Uri.https('newsso.shu.edu.cn', '/oauth/authorize', {
+        'client_id': 'fixture-client',
+        'response_type': 'code',
+        'redirect_uri':
+            Uri.https(GraduateSessionStore.host, _callbackPath).toString(),
+        'state': flow,
+      });
   List<Uri> get visited => client.visited;
   bool issueBusinessSession = true;
   bool includeSsoRedirect = true;
   bool returnedFromCallback = false;
   String? atAuthorizeCookie;
   String? atCallbackCookie;
+  (String, String)? atUserInfo;
+  String? userId = 'fixture-account';
 
   static Future<_GraduatePortalFixture> start() async {
     final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
@@ -230,9 +371,10 @@ class _GraduatePortalFixture {
         if (cookie.contains('SHU_OAUTH2=fixture-sso')) {
           redirect(callback);
         } else {
-          redirect(Uri.https('newsso.shu.edu.cn', '/oauth2/login/fixture'));
+          redirect(
+              Uri.https('newsso.shu.edu.cn', '/oauth2/login/$loginContext'));
         }
-      case '/oauth2/login/fixture':
+      case final path when path == '/oauth2/login/$loginContext':
         response.write('login');
       case '/oauth/userLogin':
         await request.drain<void>();
@@ -249,7 +391,7 @@ class _GraduatePortalFixture {
           ..path = '/'
           ..maxAge = const Duration(days: 3).inSeconds);
         json({if (includeSsoRedirect) 'redirectUri': authorize.toString()});
-      case '/gsapp/sys/yjsrzfwapp/oauth_shu/callback/fixture-flow.do':
+      case final path when path == _callbackPath:
         atCallbackCookie = cookie;
         returnedFromCallback = true;
         response.cookies.add(Cookie('GS_LTYPE', 'deleted')
@@ -265,6 +407,17 @@ class _GraduatePortalFixture {
         if (returnedFromCallback ||
             cookie.contains('GS_SESSIONID=fixture-yjs')) {
           response.write('portal');
+        } else {
+          redirect(authorize);
+        }
+      case final path when path == GraduateSessionStore.userInfoUri.path:
+        atUserInfo = (request.method, cookie);
+        await request.drain<void>();
+        if (cookie.contains('GS_SESSIONID=fixture-yjs')) {
+          json({
+            'code': '0',
+            'data': {if (userId != null) 'userId': userId}
+          });
         } else {
           redirect(authorize);
         }

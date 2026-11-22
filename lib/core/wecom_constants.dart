@@ -61,11 +61,7 @@ class WeComConstants {
   static const sessionCookieName = 'SHU_OAUTH2';
 }
 
-/// 扫码登录后要登录的目标业务系统。
-///
-/// 注意：企微扫码换取 SSO 会话时用的 `state` **始终是教务系统参数**
-/// （见 `WeComAuthTarget.academic`），与这里的目标系统无关；目标系统只影响
-/// SSO 会话建立之后的 `authorize` 阶段。
+/// 现有两阶段扫码流程的静态授权目标。YJS 由门户动态提供授权地址。
 class WeComOAuthTarget {
   const WeComOAuthTarget({
     required this.kind,

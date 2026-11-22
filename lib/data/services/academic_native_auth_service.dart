@@ -32,6 +32,21 @@ class AcademicLoginResult {
   final Uri? callbackUri;
 }
 
+/// One YJS authorization, including the original login context for WeCom.
+class GraduateWeComChallenge {
+  const GraduateWeComChallenge._(
+    this.state,
+    this._authorizeUri,
+    this._callbackUri,
+    this._oauthState,
+  );
+
+  final String state;
+  final Uri _authorizeUri;
+  final Uri _callbackUri;
+  final String _oauthState;
+}
+
 class AcademicNativeAuthException implements Exception {
   const AcademicNativeAuthException(this.code, this.message);
   final String code;
@@ -111,6 +126,7 @@ class AcademicNativeAuthService {
 
   Uri? _loginUri;
   Uri? _graduateAuthorizeUri;
+  GraduateWeComChallenge? _graduateWeComChallenge;
   String? _params;
   String? _username;
   String? _encryptedPassword;
@@ -451,6 +467,144 @@ class AcademicNativeAuthService {
     if (publish) await publishSessionCookies();
   }
 
+  /// Start at YJS, just like its web login. The QR state is the login page's
+  /// encoded context, not a JWXT context or a locally generated OAuth state.
+  Future<GraduateWeComChallenge> prepareGraduateWeComLogin() {
+    if (_target != _NativeAuthTarget.graduate) {
+      throw StateError('This authentication client is not for YJS');
+    }
+    return _runAuthenticationStage(
+      'prepare-graduate-wecom',
+      HttpTimeout.authentication,
+      () async {
+        _clearChallenge();
+        _cookieStore.clear();
+        final login = await _discoverLoginUri();
+        final authorize = _graduateAuthorizeUri;
+        final query = authorize?.queryParametersAll;
+        final callbackValue = query?['redirect_uri'];
+        final oauthState = query?['state'];
+        final callback = callbackValue?.length == 1
+            ? Uri.tryParse(callbackValue!.single)
+            : null;
+        if (authorize == null ||
+            login.host != _ssoHost ||
+            !login.path.startsWith(_newssoPathMarker) ||
+            login.pathSegments.length != 3 ||
+            login.pathSegments.last.isEmpty ||
+            callback == null ||
+            callback.host != GraduateSessionStore.host ||
+            !callback.path.startsWith(_graduateCallbackPrefix) ||
+            callback.hasQuery ||
+            callback.hasFragment ||
+            oauthState?.length != 1 ||
+            oauthState!.single.isEmpty) {
+          throw const AcademicNativeAuthException(
+            'graduateWeComContextMissing',
+            '未能取得研究生系统的企业微信授权入口',
+          );
+        }
+        _validateUri(callback);
+        return _graduateWeComChallenge = GraduateWeComChallenge._(
+          login.pathSegments.last,
+          authorize,
+          callback,
+          oauthState.single,
+        );
+      },
+    );
+  }
+
+  /// Finish a new QR login in the temporary session and return its YJS account.
+  /// The caller may publish cookies only after accepting that identity.
+  Future<String> completeGraduateWeComLogin(
+    GraduateWeComChallenge challenge, {
+    required Uri? redirectUri,
+    required List<Cookie> ssoCookies,
+  }) {
+    if (_target != _NativeAuthTarget.graduate) {
+      throw StateError('This authentication client is not for YJS');
+    }
+    return _runAuthenticationStage(
+      'complete-graduate-wecom',
+      HttpTimeout.oauthCompletion,
+      () async {
+        if (!identical(challenge, _graduateWeComChallenge)) {
+          throw _invalidGraduateWeComRedirect;
+        }
+        _graduateWeComChallenge = null;
+        if (redirectUri == null || redirectUri.hasFragment) {
+          throw _invalidGraduateWeComRedirect;
+        }
+        _validateUri(redirectUri);
+        _saveCookies(Uri.parse(WeComConstants.redirectUri), ssoCookies);
+        // SSO may send the business callback directly or send the browser
+        // through authorize. Only the YJS authorization for this QR is valid.
+        final Uri start;
+        if (redirectUri.host == GraduateSessionStore.host &&
+            redirectUri.path == challenge._callbackUri.path) {
+          start = redirectUri;
+        } else if (redirectUri.host == _ssoHost &&
+            redirectUri.path == WeComConstants.authorizePath &&
+            _matchesGraduateAuthorization(redirectUri, challenge) &&
+            _cookieStore.hasCookie(
+              challenge._authorizeUri,
+              WeComConstants.sessionCookieName,
+            )) {
+          start = challenge._authorizeUri;
+        } else {
+          throw _invalidGraduateWeComRedirect;
+        }
+        await _completeGraduateLogin(start, weComChallenge: challenge);
+        return _readGraduateAccount();
+      },
+    );
+  }
+
+  static const _invalidGraduateWeComRedirect = AcademicNativeAuthException(
+    'graduateWeComRedirectInvalid',
+    '企业微信未返回本次研究生系统的授权，请重新扫码',
+  );
+
+  bool _matchesGraduateAuthorization(
+    Uri uri,
+    GraduateWeComChallenge challenge,
+  ) {
+    final incoming = uri.queryParametersAll;
+    final original = challenge._authorizeUri.queryParameters;
+    return const ['client_id', 'response_type', 'redirect_uri', 'state'].every(
+      (key) =>
+          incoming[key]?.length == 1 && incoming[key]!.single == original[key],
+    );
+  }
+
+  Future<String> _readGraduateAccount() async {
+    final response = await _request(
+      'POST',
+      GraduateSessionStore.userInfoUri,
+      referer: GraduateSessionStore.portalUri,
+    );
+    final body = await utf8.decodeStream(response).timeout(HttpTimeout.normal);
+    if (response.statusCode == HttpStatus.ok) {
+      try {
+        final json = jsonDecode(body);
+        if (json is Map && (json['code'] == '0' || json['code'] == 0)) {
+          final data = json['data'];
+          final account = data is Map ? data['userId'] : null;
+          if (account is String && account.trim().isNotEmpty) {
+            return account.trim();
+          }
+        }
+      } on FormatException {
+        // A login page or malformed payload cannot establish identity.
+      }
+    }
+    throw const AcademicNativeAuthException(
+      'graduateAccountMissing',
+      '未能确认研究生系统的登录账号，请重新登录',
+    );
+  }
+
   /// Probe the YJS session, or exchange the current account's SSO session
   /// through a new authorization issued by YJS. Never replay a callback.
   Future<void> restoreGraduateSession({bool Function()? canPublish}) async {
@@ -493,9 +647,31 @@ class AcademicNativeAuthService {
     '研究生系统需要重新登录',
   );
 
-  Future<void> _completeGraduateLogin(Uri start) async {
+  Future<void> _completeGraduateLogin(
+    Uri start, {
+    GraduateWeComChallenge? weComChallenge,
+  }) async {
     var current = start;
+    var usedWeComCallback = false;
     for (var redirects = 0; redirects < _maxRedirects; redirects++) {
+      if (weComChallenge != null &&
+          current.host == GraduateSessionStore.host &&
+          current.path.startsWith(_graduateCallbackPrefix)) {
+        final query = current.queryParametersAll;
+        final state = query['state'];
+        final code = query['code'];
+        if (usedWeComCallback ||
+            current.path != weComChallenge._callbackUri.path ||
+            current.hasFragment ||
+            query.containsKey('error') ||
+            state?.length != 1 ||
+            state!.single != weComChallenge._oauthState ||
+            code?.length != 1 ||
+            code!.single.trim().isEmpty) {
+          throw _invalidGraduateWeComRedirect;
+        }
+        usedWeComCallback = true;
+      }
       final response = await _request('GET', current);
       final next = _redirectTarget(response, current);
       await response.drain<void>().timeout(HttpTimeout.normal);
@@ -510,6 +686,7 @@ class AcademicNativeAuthService {
         continue;
       }
       if (response.statusCode == HttpStatus.ok &&
+          (weComChallenge == null || usedWeComCallback) &&
           current.host == GraduateSessionStore.host &&
           current.path == GraduateSessionStore.portalUri.path &&
           _cookieStore.hasCookie(
@@ -1059,6 +1236,7 @@ class AcademicNativeAuthService {
   void _clearChallenge() {
     _loginUri = null;
     _graduateAuthorizeUri = null;
+    _graduateWeComChallenge = null;
     _params = null;
     _username = null;
     _encryptedPassword = null;

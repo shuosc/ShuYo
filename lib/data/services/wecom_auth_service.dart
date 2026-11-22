@@ -18,10 +18,14 @@ class WeComQrSession {
     required this.key,
     required this.confirmUrl,
     required this.wxWorkSchemeUrl,
+    required this.state,
   });
 
   /// 企微扫码会话标识，用于长轮询与确认页地址。
   final String key;
+
+  /// 与二维码绑定的授权上下文，换取 SSO 会话时须原样使用。
+  final String state;
 
   /// 扫码后企微内置浏览器打开的确认页地址。
   final String confirmUrl;
@@ -71,10 +75,12 @@ class WeComSessionResult {
   const WeComSessionResult({
     required this.sessionCookies,
     required this.cookieSourceUri,
+    this.redirectUri,
   });
 
   final List<Cookie> sessionCookies;
   final Uri cookieSourceUri;
+  final Uri? redirectUri;
 }
 
 /// 一条带作用域的 Cookie，供写入会话 Cookie 罐时使用。
@@ -137,8 +143,8 @@ class WeComAuthException implements Exception {
 /// 6. WebVPN 作为例外，还会用 code 调用 `auth/finish` 并通过
 ///    `user/info` 验证会话。
 ///
-/// 整个流程共享同一个 Cookie 容器，否则第 5 步会因缺少 `SHU_OAUTH2`
-/// 而被判定为未登录。
+/// YJS 从门户发起动态授权，不使用第 4、5 步的静态目标逻辑，而是将
+/// 第 3 步的重定向和 Cookie 交回同一次 YJS 登录流程。
 class WeComAuthService {
   static const scanTimeout = Duration(seconds: 90);
 
@@ -201,6 +207,8 @@ class WeComAuthService {
       '/wwopen/sso/qrConnect' => '/wwopen/sso/qrConnect',
       '/wwopen/sso/l/qrConnect' => '/wwopen/sso/l/qrConnect',
       _ when uri.path.startsWith('/oauth2/login/') => '/oauth2/login/{context}',
+      _ when uri.path.startsWith('/gsapp/sys/yjsrzfwapp/oauth_shu/callback/') =>
+        '/gsapp/sys/yjsrzfwapp/oauth_shu/callback/{flow}',
       _ => '/{other:${uri.pathSegments.length}}',
     };
     final keys = uri.queryParameters.keys.toList()..sort();
@@ -215,23 +223,22 @@ class WeComAuthService {
     return base64Url.encode(utf8.encode(json)).replaceAll('=', '');
   }
 
-  /// 企微扫码换取 SSO 会话时固定使用的 `state`。
+  /// 旧的通用 SSO 换取流程使用本科教务系统的登录上下文。
   ///
-  /// `state` 固定编码教务系统参数——企微自建应用只绑定教务系统，
-  /// `/oauth/wecom/qrcode` 用它校验请求合法性；换成其他参数会返回
-  /// `{"message":"badRequestParams"}`。目标系统的差异在阶段二处理。
+  /// 研究生扫码则使用 YJS 当次发起的、由学校生成的登录上下文。
   static String get weComRedeemState =>
       encodeOAuthParams(WeComOAuthTarget.academic.toParams());
 
   /// 发起企微扫码会话，返回二维码与唤起链接。
-  Future<WeComQrSession> startQrSession() async {
+  Future<WeComQrSession> startQrSession({String? state}) async {
     _debug('startQrSession begin');
+    final redeemState = state ?? weComRedeemState;
     final uri = Uri.parse(WeComConstants.qrConnectBase).replace(
       queryParameters: {
         'appid': WeComConstants.appId,
         'agentid': WeComConstants.agentId,
         'redirect_uri': WeComConstants.redirectUri,
-        'state': weComRedeemState,
+        'state': redeemState,
         'lang': 'zh',
         'version': '1.2.7',
         'login_type': 'jssdk',
@@ -252,6 +259,7 @@ class WeComAuthService {
     final confirmUrl = '${WeComConstants.confirmBase}?k=$key&notretry=yes';
     return WeComQrSession(
       key: key,
+      state: redeemState,
       confirmUrl: confirmUrl,
       wxWorkSchemeUrl:
           '${WeComConstants.schemeJumpBase}${Uri.encodeComponent(confirmUrl)}',
@@ -301,7 +309,7 @@ class WeComAuthService {
 
   /// 阶段一：把企微 `auth_code` 换成 SSO 会话。
   ///
-  /// [state] 必须为 [weComRedeemState]（教务参数），且必须携带 `appid`。
+  /// [state] 与生成本次二维码时的值一致。这里只读取重定向，不访问它。
   Future<WeComSessionResult> redeem(String authCode, String state) async {
     _debug('redeem begin');
     final uri =
@@ -315,12 +323,12 @@ class WeComAuthService {
     final response = await _get(uri, host: _RequestHost.sso);
     final statusCode = response.statusCode;
     final cookies = _parseCookies(response);
-    final location = response.headers.value(HttpHeaders.locationHeader) ?? '';
+    final location = response.headers.value(HttpHeaders.locationHeader);
     // 失败判定：Location 含 message=wecomAuthFailed，或响应体含
     // badRequestParams（缺 appid / state 非 base64url 时都会命中）。
     if (statusCode < 300 ||
         statusCode >= 400 ||
-        location.contains('wecomAuthFailed')) {
+        location?.contains('wecomAuthFailed') == true) {
       final text = await response
           .transform(utf8.decoder)
           .join()
@@ -332,11 +340,18 @@ class WeComAuthService {
             : '企业微信授权失败（HTTP $statusCode）',
       );
     }
+    final parsed = location == null ? null : Uri.tryParse(location);
+    final redirect = parsed == null ? null : uri.resolveUri(parsed);
     _debug('redeem ok status=$statusCode '
-        'cookies=${cookies.map((c) => c.name).toList()}');
+        'cookies=${cookies.map((c) => c.name).toList()} '
+        'location=${redirect == null ? '-' : describeUrlForLog(redirect)}');
     _cookies.save(uri, cookies);
-    await response.drain<void>();
-    return WeComSessionResult(sessionCookies: cookies, cookieSourceUri: uri);
+    await response.drain<void>().timeout(HttpTimeout.normal);
+    return WeComSessionResult(
+      sessionCookies: cookies,
+      cookieSourceUri: uri,
+      redirectUri: redirect,
+    );
   }
 
   /// 阶段二：用已建立的 SSO 会话向 [target] 换取业务系统授权码回调地址。
