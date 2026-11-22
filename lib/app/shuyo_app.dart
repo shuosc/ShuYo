@@ -242,10 +242,9 @@ class _ShuYoAppState extends State<ShuYoApp> with WidgetsBindingObserver {
     final preferredCampus = await profilePreferences.loadPreferredCampus();
     final onboardingCompleted =
         await _settingsService.loadStartupOnboardingCompleted();
-    final initialScheduleLoad = openScheduleFromWidget &&
-            onboardingCompleted &&
-            campusSystem == CampusSystem.undergraduate
-        ? await _loadInitialScheduleState(AcademicScheduleRepository())
+    final initialScheduleLoad = openScheduleFromWidget && onboardingCompleted
+        ? await _loadInitialScheduleState(
+            AcademicScheduleRepository(campusSystem: campusSystem))
         : const _InitialScheduleLoad();
     return _StartupData(
       webVpnEnabled: networkSettings.webVpnEnabled,
@@ -296,8 +295,11 @@ class _ShuYoAppState extends State<ShuYoApp> with WidgetsBindingObserver {
   ) async {
     try {
       final state = await repository.loadCachedState();
-      final displayState = await AcademicScheduleDisplaySettingsService()
-          .loadState(term: state.schedule?.term);
+      final displayState = await AcademicScheduleDisplaySettingsService(
+        scope: repository.supportsTermSelection
+            ? repository.campusSystem.name
+            : null,
+      ).loadState(term: state.schedule?.term);
       return _InitialScheduleLoad(
         state: state,
         displayState: displayState,

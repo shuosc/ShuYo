@@ -42,7 +42,7 @@ void main() {
     final phone = tester.widget<BottomNavigationBar>(bottomBar);
     expect(phone.items.map((item) => item.label), ['首页', '日程']);
     expect(phone.currentIndex, 0);
-    expect(find.text('研究生课表暂未接入'), findsOneWidget);
+    expect(find.text('点击同步研究生课表'), findsOneWidget);
 
     await tester.tap(find.byTooltip('设置'));
     await tester.pumpAndSettle();
@@ -59,9 +59,9 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.descendant(of: bottomBar, matching: find.text('日程')));
     await tester.pumpAndSettle();
-    expect(find.text('研究生课表暂未接入'), findsOneWidget);
-    expect(
-        find.byType(AcademicSchedulePage, skipOffstage: false), findsNothing);
+    expect(find.byType(AcademicSchedulePage), findsOneWidget);
+    expect(find.text('同步课表'), findsOneWidget);
+    expect(find.text('选择学期'), findsOneWidget);
 
     tester.view.physicalSize = const Size(820, 1100);
     await tester.pumpAndSettle();

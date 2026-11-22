@@ -85,7 +85,11 @@ class _AcademicSchedulePageState extends State<AcademicSchedulePage> {
   bool _followsCurrentWeek = true;
   Timer? _weekTimer;
   late final _displaySettingsService = AcademicScheduleDisplaySettingsService(
-    scope: widget.isDemo ? 'demo' : null,
+    scope: widget.isDemo
+        ? 'demo'
+        : widget.repository.supportsTermSelection
+            ? widget.repository.campusSystem.name
+            : null,
   );
   AcademicScheduleDisplaySettings _displaySettings =
       const AcademicScheduleDisplaySettings(
@@ -153,7 +157,7 @@ class _AcademicSchedulePageState extends State<AcademicSchedulePage> {
                 splashFactory: NoSplash.splashFactory,
                 highlightColor: Colors.transparent,
                 borderRadius: BorderRadius.circular(4),
-                onTap: widget.repository.supportsTermDiscovery
+                onTap: widget.repository.supportsScheduleManagement
                     ? _openTermPicker
                     : null,
                 child: Padding(
@@ -162,7 +166,7 @@ class _AcademicSchedulePageState extends State<AcademicSchedulePage> {
                     Flexible(
                         child: Text(_schedule?.term.displayName ?? '课表',
                             maxLines: 1, overflow: TextOverflow.ellipsis)),
-                    if (widget.repository.supportsTermDiscovery)
+                    if (widget.repository.supportsScheduleManagement)
                       const Icon(Icons.arrow_drop_down, size: 20),
                   ]),
                 ),
@@ -267,15 +271,30 @@ class _AcademicSchedulePageState extends State<AcademicSchedulePage> {
     final schedule = _schedule;
     final weekState = _weekState;
     if (schedule == null || weekState == null) {
+      final selectTerm = widget.repository.supportsTermSelection;
+      final sync = FilledButton.icon(
+        onPressed: _refreshSchedule,
+        icon: const Icon(Icons.refresh),
+        label: const Text('同步课表'),
+      );
       return EmptyState(
         icon: Icons.calendar_month_outlined,
         title: '还没有课表',
-        message: '登录教务后刷新一次，就可以在本地显示课表。',
-        action: FilledButton.icon(
-          onPressed: _refreshSchedule,
-          icon: const Icon(Icons.refresh),
-          label: const Text('同步课表'),
-        ),
+        message:
+            selectTerm ? '同步研究生系统的当前课表，或选择其他学期导入。' : '登录教务后刷新一次，就可以在本地显示课表。',
+        action: selectTerm
+            ? Wrap(
+                spacing: 8,
+                alignment: WrapAlignment.center,
+                children: [
+                  sync,
+                  TextButton(
+                    onPressed: _openScheduleManager,
+                    child: const Text('选择学期'),
+                  ),
+                ],
+              )
+            : sync,
       );
     }
     return _ScheduleBody(
@@ -565,12 +584,16 @@ class _AcademicSchedulePageState extends State<AcademicSchedulePage> {
         if (!mounted) return;
         final key = targetKey;
         if (key == null) {
-          _showSnack('当前学期暂无课表，可在管理页查找其他学期');
+          _showSnack(widget.repository.supportsTermSelection
+              ? '当前学期暂无课表，可以选择其他学期导入'
+              : '当前学期暂无课表，可在管理页查找其他学期');
         } else {
           final confirmed = await showDialog<bool>(
             context: context,
             builder: (context) => AlertDialog(
-              title: const Text('教务返回空课表'),
+              title: Text(widget.repository.supportsTermSelection
+                  ? '研究生系统返回空课表'
+                  : '教务返回空课表'),
               content: Text('是否将 $targetName 替换为空课表？'),
               actions: [
                 TextButton(
@@ -601,7 +624,9 @@ class _AcademicSchedulePageState extends State<AcademicSchedulePage> {
       }
       await _showErrorDialog(
         title: '课表刷新失败',
-        message: '教务登录恢复后仍无法同步，请稍后重试',
+        message: widget.repository.supportsTermSelection
+            ? '研究生系统登录恢复后仍无法同步，请重新登录后再试'
+            : '教务登录恢复后仍无法同步，请稍后重试',
       );
     } on Object catch (error, stackTrace) {
       if (kDebugMode) {
@@ -1485,7 +1510,7 @@ class _AcademicSchedulePageState extends State<AcademicSchedulePage> {
                     onTap: () => Navigator.of(context)
                         .pop(_ScheduleMenuAction.updateSchedule),
                   ),
-                  if (widget.repository.supportsTermDiscovery)
+                  if (widget.repository.supportsScheduleManagement)
                     ListTile(
                       leading: const Icon(Icons.folder_outlined),
                       title: const Text('管理课表'),

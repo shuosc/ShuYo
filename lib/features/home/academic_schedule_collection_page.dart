@@ -225,6 +225,7 @@ class _CollectionPageState extends State<AcademicScheduleCollectionPage> {
   final _busy = <String>{};
   bool _loading = true;
   bool _discovering = false;
+  bool _selectingTerm = false;
 
   @override
   void initState() {
@@ -323,6 +324,56 @@ class _CollectionPageState extends State<AcademicScheduleCollectionPage> {
     }
     await widget.onLoginRequired();
     return mounted;
+  }
+
+  Future<void> _selectGraduateTerm() async {
+    if (_selectingTerm) return;
+    setState(() => _selectingTerm = true);
+    try {
+      final catalog = await requestWithAcademicSessionRecovery(
+        request: widget.repository.loadSelectableTerms,
+        recoverSession: _recoverSession,
+      );
+      if (catalog == null || !mounted) return;
+      final term = await showDialog<AcademicTermQuery>(
+        context: context,
+        builder: (context) => SimpleDialog(
+          title: const Text('选择学期', style: _regularTextStyle),
+          children: [
+            for (final option in catalog.terms)
+              SimpleDialogOption(
+                onPressed: () => Navigator.of(context).pop(option),
+                child: Text(
+                  '${option.academicYearName} 学年 ${option.termName}季学期'
+                  '${option.key == catalog.currentTerm.key ? '（当前学期）' : ''}',
+                  style: _regularTextStyle,
+                ),
+              ),
+          ],
+        ),
+      );
+      if (term == null || !mounted) return;
+      final key = await requestWithAcademicSessionRecovery(
+        request: () => widget.repository.importSelectedTerm(
+          term,
+          isCurrent: term.key == catalog.currentTerm.key,
+        ),
+        recoverSession: _recoverSession,
+      );
+      if (key == null || !mounted) return;
+      if (key == await widget.repository.loadPrimaryTermKey()) {
+        await widget.onPrimaryChanged();
+      }
+      if (mounted) Navigator.of(context).pop(key);
+    } on AcademicNoScheduleException {
+      _message('该学期暂无课表，可以选择其他学期');
+    } on AcademicAuthException {
+      _message('研究生系统登录恢复后仍无法同步，请重新登录后再试');
+    } on Object catch (error) {
+      _message(error.toString());
+    } finally {
+      if (mounted) setState(() => _selectingTerm = false);
+    }
   }
 
   Future<void> _discover({bool full = false, bool failedOnly = false}) async {
@@ -487,6 +538,7 @@ class _CollectionPageState extends State<AcademicScheduleCollectionPage> {
 
   @override
   Widget build(BuildContext context) {
+    final selectTerm = widget.repository.supportsTermSelection;
     final saved = _records.where((r) => r.hasSavedSchedule).toList();
     final failed = _records
         .where((r) => r.availability == ScheduleAvailability.failed)
@@ -511,15 +563,16 @@ class _CollectionPageState extends State<AcademicScheduleCollectionPage> {
       appBar: AppBar(
         title: const Text('管理课表', style: _regularTextStyle),
         actions: [
-          PopupMenuButton<String>(
-            tooltip: '更多检查选项',
-            onSelected: (_) => unawaited(_discover(full: true)),
-            itemBuilder: (_) => [
-              const PopupMenuItem(
-                  value: 'full',
-                  child: Text('完整检查所有学年', style: _regularTextStyle)),
-            ],
-          ),
+          if (!selectTerm)
+            PopupMenuButton<String>(
+              tooltip: '更多检查选项',
+              onSelected: (_) => unawaited(_discover(full: true)),
+              itemBuilder: (_) => [
+                const PopupMenuItem(
+                    value: 'full',
+                    child: Text('完整检查所有学年', style: _regularTextStyle)),
+              ],
+            ),
         ],
       ),
       body: _loading
@@ -533,54 +586,73 @@ class _CollectionPageState extends State<AcademicScheduleCollectionPage> {
                         .titleMedium
                         ?.merge(_regularTextStyle)),
               ),
-              ValueListenableBuilder<ScheduleDiscoveryState>(
-                valueListenable: widget.repository.discoveryState,
-                builder: (context, state, _) {
-                  final discovering = _discovering || state.running;
-                  return Padding(
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        if (discovering) const LinearProgressIndicator(),
-                        if (!state.requiresLogin &&
-                            (state.running || state.message != null))
-                          Padding(
-                              padding: const EdgeInsets.only(top: 8),
-                              child: Text(state.description)),
-                        const SizedBox(height: 8),
-                        Wrap(spacing: 8, children: [
-                          FilledButton.tonalIcon(
-                            onPressed: discovering ? null : () => _discover(),
-                            icon: const Icon(Icons.search),
-                            label:
-                                const Text('查找其他课表', style: _regularTextStyle),
-                          ),
-                          if (failed.isNotEmpty)
-                            TextButton(
-                              onPressed: discovering
-                                  ? null
-                                  : () => _discover(failedOnly: true),
-                              child: Text('重试失败项（${failed.length}）',
+              if (selectTerm)
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(20, 8, 20, 12),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      if (_selectingTerm) const LinearProgressIndicator(),
+                      FilledButton.tonalIcon(
+                        onPressed: _selectingTerm ? null : _selectGraduateTerm,
+                        icon: const Icon(Icons.calendar_month_outlined),
+                        label: const Text('按学期导入', style: _regularTextStyle),
+                      ),
+                    ],
+                  ),
+                )
+              else
+                ValueListenableBuilder<ScheduleDiscoveryState>(
+                  valueListenable: widget.repository.discoveryState,
+                  builder: (context, state, _) {
+                    final discovering = _discovering || state.running;
+                    return Padding(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 20, vertical: 8),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          if (discovering) const LinearProgressIndicator(),
+                          if (!state.requiresLogin &&
+                              (state.running || state.message != null))
+                            Padding(
+                                padding: const EdgeInsets.only(top: 8),
+                                child: Text(state.description)),
+                          const SizedBox(height: 8),
+                          Wrap(spacing: 8, children: [
+                            FilledButton.tonalIcon(
+                              onPressed: discovering ? null : () => _discover(),
+                              icon: const Icon(Icons.search),
+                              label: const Text('查找其他课表',
                                   style: _regularTextStyle),
                             ),
-                          if (state.running)
-                            TextButton(
-                              onPressed: widget.repository.pauseDiscovery,
-                              child: const Text('暂停', style: _regularTextStyle),
-                            ),
-                        ]),
-                      ],
-                    ),
-                  );
-                },
-              ),
+                            if (failed.isNotEmpty)
+                              TextButton(
+                                onPressed: discovering
+                                    ? null
+                                    : () => _discover(failedOnly: true),
+                                child: Text('重试失败项（${failed.length}）',
+                                    style: _regularTextStyle),
+                              ),
+                            if (state.running)
+                              TextButton(
+                                onPressed: widget.repository.pauseDiscovery,
+                                child:
+                                    const Text('暂停', style: _regularTextStyle),
+                              ),
+                          ]),
+                        ],
+                      ),
+                    );
+                  },
+                ),
               const Divider(),
               if (saved.isEmpty)
-                const Padding(
-                    padding: EdgeInsets.all(20),
-                    child: Text('尚未发现课表，可点击上方按钮查找。')),
+                Padding(
+                    padding: const EdgeInsets.all(20),
+                    child: Text(selectTerm
+                        ? '尚未保存课表，可以选择有课的学期导入。'
+                        : '尚未发现课表，可点击上方按钮查找。')),
               ...rows,
               if (failed.isNotEmpty) ...[
                 const Padding(

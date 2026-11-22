@@ -11,14 +11,19 @@ import '../models/academic_schedule_collection.dart';
 class AcademicScheduleCollectionStore {
   AcademicScheduleCollectionStore({
     Future<SharedPreferences> Function()? preferencesLoader,
+    this.scope,
   }) : _preferencesLoader = preferencesLoader ?? SharedPreferences.getInstance;
 
+  final String? scope;
   final Future<SharedPreferences> Function() _preferencesLoader;
   final changes = ValueNotifier<int>(0);
   Future<void>? _writes;
 
-  String _prefix(String studentId) =>
-      'academic.schedule.collection.${Uri.encodeComponent(studentId)}.';
+  String _prefix(String studentId) {
+    final namespace = scope == null ? '' : '$scope.';
+    return 'academic.schedule.${namespace}collection.${Uri.encodeComponent(studentId)}.';
+  }
+
   String _recordKey(String studentId, String termKey) =>
       '${_prefix(studentId)}term.$termKey';
 
