@@ -799,7 +799,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
     });
     _otpTokenRepository.resetSession();
     _syncOnboardingAccountStatus();
-    unawaited(_studentIdentityService.refreshLocalStatus());
+    unawaited(_studentIdentityService.ensureAfterCampusLogin());
     unawaited(_initializeCampusCardBalance());
     _connectSharedCampusServices();
     await _clearUndergraduateScheduleSurfaces();
@@ -896,6 +896,15 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
       } on Object {
         // A transient cookie delay can recover on a manual refresh.
       }
+      if (!_currentCampusAccount(revision)) return;
+      // The school session already supplies the account. ShuYo verification
+      // must not wait for a timetable or academic-progress refresh.
+      unawaited(() async {
+        await _studentIdentityService.ensureAfterCampusLogin();
+        if (_currentCampusAccount(revision)) {
+          await _clientBackendRepository.reportPresence();
+        }
+      }());
       await _refreshScheduleSummaryQuietly();
       if (!_currentCampusAccount(revision)) return;
       try {
@@ -906,10 +915,6 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
       if (!_currentCampusAccount(revision)) return;
       if (!firstLogin) {
         if (resumeScheduleDiscovery) unawaited(_resumeScheduleDiscovery());
-        unawaited(() async {
-          await _studentIdentityService.ensureAfterCampusLogin();
-          await _clientBackendRepository.reportPresence();
-        }());
         if (showRecoveryNotice) {
           _showSnack('登录已恢复，请再次点击刷新更新数据');
         }
@@ -918,12 +923,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
       await _syncScheduleAfterAcademicLogin();
       if (!_currentCampusAccount(revision) || !_hasAcademicSession) return;
       if (resumeScheduleDiscovery) unawaited(_resumeScheduleDiscovery());
-      unawaited(() async {
-        await _syncAcademicExtrasAfterLogin();
-        if (!_currentCampusAccount(revision)) return;
-        await _studentIdentityService.ensureAfterCampusLogin();
-        await _clientBackendRepository.reportPresence();
-      }());
+      unawaited(_syncAcademicExtrasAfterLogin());
     } finally {
       if (_completingAcademicLoginRevision == revision) {
         _completingAcademicLoginRevision = null;
@@ -942,13 +942,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
     _syncingAcademicExtras = true;
     Future<bool> syncProgress() async {
       try {
-        final progress = await _progressRepository.refreshProgress();
-        if (progress.studentId.isNotEmpty &&
-            _currentCampusAccount(revision) &&
-            _hasAcademicSession) {
-          await AcademicAccountStore().saveStudentId(progress.studentId);
-          await _loadAcademicStudentId();
-        }
+        await _progressRepository.refreshProgress();
         return true;
       } on Object {
         return false;
@@ -1049,13 +1043,6 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
         ),
       );
       if (refreshed == null || !_currentCampusAccount(revision)) return false;
-      final schedule = await _scheduleRepository.loadCachedSchedule();
-      if (!_currentCampusAccount(revision)) return false;
-      final studentId = schedule?.term.studentId ?? '';
-      if (studentId.isNotEmpty) {
-        await AcademicAccountStore().saveStudentId(studentId);
-        await _loadAcademicStudentId();
-      }
       final summary = await _scheduleRepository.homeSummary();
       if (!_currentCampusAccount(revision)) return false;
       unawaited(_scheduleWidgetService.syncFromCache());
@@ -1802,7 +1789,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
     _changingCampusAccount = true;
     _campusAccountRevision++;
     try {
-      return await _clearCampusServices(revokeShuYo: !_isGraduate);
+      return await _clearCampusServices(revokeShuYo: true);
     } finally {
       _changingCampusAccount = false;
     }

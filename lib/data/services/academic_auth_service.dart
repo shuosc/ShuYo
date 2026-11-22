@@ -170,17 +170,6 @@ class AcademicAuthService {
     );
   }
 
-  /// Probe an in-flight JWXT login without replacing the active session.
-  static Future<WebVpnSessionStatus> validateDirectAcademicCookieHeader(
-    String header,
-  ) async {
-    if (header.isEmpty) return WebVpnSessionStatus.loginRequired;
-    return _validateDirectAcademicSessionOverNetwork(header).timeout(
-      HttpTimeout.normal,
-      onTimeout: () => WebVpnSessionStatus.unavailable,
-    );
-  }
-
   static Future<WebVpnSessionStatus> _validateDirectAcademicSessionOverNetwork(
     String cookieHeader,
   ) async {
@@ -448,6 +437,11 @@ class AcademicAuthService {
     for (final group in groups) {
       for (final cookie in merged[group] ?? const <SessionCookie>[]) {
         if (cookie.name.isNotEmpty && cookie.value.isNotEmpty) {
+          if (!persistSession &&
+              cookie.domain.toLowerCase().replaceFirst(RegExp(r'^\.'), '') !=
+                  targetUri?.host) {
+            continue;
+          }
           if (targetUri != null && !_cookieMatches(cookie, targetUri)) {
             continue;
           }

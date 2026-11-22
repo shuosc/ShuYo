@@ -42,9 +42,7 @@ void main() {
     await _pumpSettings(tester, studentIdentityService: identity);
     await tester.tap(find.text('隐私与数据'));
     await tester.pumpAndSettle();
-    expect(
-        find.text(
-            'ShuYo 通过核实学号来确认你的上海大学学生身份。撤销设备认证后，服务器会保留你使用反馈、课表分享等功能产生的数据。'),
+    expect(find.text('ShuYo 向学校核实当前登录账号的学号。撤销设备认证后，服务器会保留你使用反馈、课表分享等功能产生的数据。'),
         findsOneWidget);
     await tester.tap(find.text('删除 ShuYo 数据'));
     await tester.pumpAndSettle();

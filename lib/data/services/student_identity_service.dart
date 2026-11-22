@@ -11,7 +11,7 @@ import '../../core/campus_system.dart';
 import '../../core/client_backend_constants.dart';
 import 'academic_account_store.dart';
 import 'academic_auth_service.dart';
-import 'academic_progress_api_client.dart';
+import 'graduate_session_store.dart';
 import 'http_timeout.dart';
 import 'secure_app_store.dart';
 
@@ -99,11 +99,13 @@ class StudentIdentityService extends ChangeNotifier {
     SecureAppStore? secureStore,
     AcademicAccountStore? accountStore,
     AcademicAuthService? academicAuthService,
+    GraduateSessionStore? graduateSessionStore,
     Future<SharedPreferences> Function()? preferencesLoader,
     http.Client? httpClient,
   })  : _secureStore = secureStore ?? SecureAppStore(),
         _accountStore = accountStore ?? AcademicAccountStore(),
         _academicAuthService = academicAuthService,
+        _graduateSessionStore = graduateSessionStore ?? GraduateSessionStore(),
         _preferencesLoader = preferencesLoader ?? SharedPreferences.getInstance,
         _httpClient = httpClient ??
             IOClient(HttpClient()..connectionTimeout = HttpTimeout.connect);
@@ -122,6 +124,7 @@ class StudentIdentityService extends ChangeNotifier {
   AcademicAuthService? _academicAuthService;
   AcademicAuthService get _schoolAuth =>
       _academicAuthService ??= AcademicAuthService();
+  final GraduateSessionStore _graduateSessionStore;
   final Future<SharedPreferences> Function() _preferencesLoader;
   final http.Client _httpClient;
   int _epoch = 0;
@@ -182,18 +185,18 @@ class StudentIdentityService extends ChangeNotifier {
   }
 
   Future<StudentIdentitySession?> loadLocalSession() async {
-    if (await _accountStore.loadSystem() == CampusSystem.graduate) {
-      _setVerified(false);
-      return null;
-    }
+    final epoch = _epoch;
     final session = await _readStoredSession();
-    if (await _accountStore.loadSystem() == CampusSystem.graduate) {
-      _setVerified(false);
-      return null;
-    }
-    _setVerified(session != null);
-    return session;
+    final studentId = await _accountStore.loadDataStudentId();
+    if (epoch != _epoch) return null;
+    final matches =
+        session != null && _sameStudentId(session.studentId, studentId);
+    _setVerified(matches);
+    return matches ? session : null;
   }
+
+  static bool _sameStudentId(String a, String? b) =>
+      a.trim().toUpperCase() == b?.trim().toUpperCase();
 
   Future<StudentIdentitySession?> _readStoredSession() async {
     final raw = await _secureStore.read(_sessionKey);
@@ -212,16 +215,9 @@ class StudentIdentityService extends ChangeNotifier {
 
   Future<void> ensureAfterCampusLogin() async {
     try {
-      if (await _accountStore.loadSystem() == CampusSystem.graduate) return;
       await retryPendingRevocations();
-      final studentId = await _accountStore.loadStudentId();
-      if (studentId == null) return;
-      final existing = await loadLocalSession();
-      if (existing != null && existing.studentId != studentId) {
-        await _clearCurrentSession();
-      } else if (existing != null) {
-        return;
-      }
+      if (await loadLocalSession() != null) return;
+      if (await _accountStore.loadStudentId() == null) return;
       if (!await hasConsent()) return;
       if (await _requiresManualReverification()) return;
       if ((await _preferencesLoader()).getBool(_pendingEnrollmentKey) != true) {
@@ -235,38 +231,49 @@ class StudentIdentityService extends ChangeNotifier {
 
   Future<StudentIdentitySession> bindCurrentStudent(
       {bool force = false, bool manual = false}) async {
-    if (await _accountStore.loadSystem() == CampusSystem.graduate) {
-      throw const StudentIdentityException('研究生 ShuYo 认证暂未开放。');
-    }
     if (!manual && await _requiresManualReverification()) {
       throw const StudentIdentityException('请手动重新认证。');
     }
     final epoch = _epoch;
-    final studentId = await _accountStore.loadStudentId();
+    final system = await _accountStore.loadSystem();
+    final studentId = await _accountStore.loadStudentId(system: system);
     if (studentId == null) {
       throw const StudentIdentityException('请先登录校园账户。');
     }
-    var previous = await loadLocalSession();
-    if (previous != null && previous.studentId != studentId) {
+    Future<bool> sameLogin() async =>
+        await _accountStore.loadSystem() == system &&
+        _sameStudentId(
+            studentId, await _accountStore.loadStudentId(system: system)) &&
+        epoch == _epoch;
+    const changed = StudentIdentityException('校园账户已切换，请重新核验。');
+    var previous = await _readStoredSession();
+    if (!await sameLogin()) throw changed;
+    if (previous != null && !_sameStudentId(previous.studentId, studentId)) {
       await _clearCurrentSession();
       previous = null;
     }
-    if (!force && previous != null) return previous;
-    final schoolUri = AcademicUrlResolver.uri(
-      AcademicProgressApiClient.studentIdentityPath,
-    );
-    final schoolCookie = await _schoolAuth.cookieHeaderForIdentityVerification(
-        targetUri: schoolUri);
-    if (schoolCookie == null || schoolCookie.isEmpty) {
-      throw const StudentIdentityException('当前教务会话不可用，请重新登录校园账户。',
-          code: 'no_school_session');
+    if (!force && previous != null) {
+      _setVerified(true);
+      return previous;
     }
+    if (!manual || !await hasConsent()) {
+      throw const StudentIdentityException('请确认并手动发起认证。');
+    }
+    final schoolCookie = switch (system) {
+      CampusSystem.undergraduate =>
+        await _schoolAuth.cookieHeaderForIdentityVerification(
+            targetUri: AcademicUrlResolver.studentIdentityUri),
+      CampusSystem.graduate =>
+        await _graduateSessionStore.cookieHeaderForIdentityVerification(),
+    };
+    final proof = _schoolProof(system, schoolCookie);
+    if (!await sameLogin()) throw changed;
     final response = await _request(
       'POST',
       '/api/v1/student/sessions',
       token: previous?.token,
       body: {
-        'schoolCookie': schoolCookie,
+        'schoolSession': proof,
         'expectedStudentId': studentId,
         'deviceLabel': Platform.isIOS ? 'iPhone' : 'Android',
         'userInitiated': manual,
@@ -285,17 +292,17 @@ class StudentIdentityService extends ChangeNotifier {
     if (session == null) {
       throw const StudentIdentityException('服务器返回的身份凭证无效。');
     }
-    if (epoch != _epoch ||
-        await _accountStore.loadSystem() != CampusSystem.undergraduate ||
-        (await _accountStore.loadStudentId()) != studentId) {
+    if (!await sameLogin()) {
       await _revokeOrQueue(session.token);
-      throw const StudentIdentityException('校园账户已切换，请重新核验。');
+      throw changed;
     }
     await _secureStore.write(_sessionKey, jsonEncode(session.toJson()));
-    if (epoch != _epoch) {
-      await _secureStore.delete(_sessionKey);
+    if (!await sameLogin()) {
+      if ((await _readStoredSession())?.token == session.token) {
+        await _secureStore.delete(_sessionKey);
+      }
       await _revokeOrQueue(session.token);
-      throw const StudentIdentityException('校园账户已退出，请重新核验。');
+      throw changed;
     }
     _setVerified(true);
     if (manual) {
@@ -314,19 +321,17 @@ class StudentIdentityService extends ChangeNotifier {
   Future<StudentIdentitySession?> checkCurrentSession() async {
     final session = await loadLocalSession();
     if (session == null) return null;
-    final currentStudentId = await _accountStore.loadStudentId();
-    if (currentStudentId != null && currentStudentId != session.studentId) {
-      await _clearCurrentSession();
-      return null;
-    }
     try {
       await _request('GET', '/api/v1/student/session', token: session.token);
-      return session;
+      final current = await loadLocalSession();
+      return current?.token == session.token ? current : null;
     } on StudentIdentityException catch (error) {
       if (error.code == 'unauthorized') {
-        await _secureStore.delete(_sessionKey);
-        await _requireManualReverification();
-        _setVerified(false);
+        if ((await _readStoredSession())?.token == session.token) {
+          await _secureStore.delete(_sessionKey);
+          await _requireManualReverification();
+          _setVerified(false);
+        }
         return null;
       }
       rethrow;
@@ -367,6 +372,7 @@ class StudentIdentityService extends ChangeNotifier {
   }
 
   Future<StudentDataDeletionGrant> beginDataDeletion({
+    CampusSystem system = CampusSystem.undergraduate,
     required String schoolCookie,
     required String expectedStudentId,
   }) async {
@@ -374,7 +380,7 @@ class StudentIdentityService extends ChangeNotifier {
       'POST',
       '/api/v1/student/data-deletion/verify',
       body: {
-        'schoolCookie': schoolCookie,
+        'schoolSession': _schoolProof(system, schoolCookie),
         'expectedStudentId': expectedStudentId,
       },
     );
@@ -386,6 +392,28 @@ class StudentIdentityService extends ChangeNotifier {
       throw const StudentIdentityException('服务器未返回删除验证结果。');
     }
     return grant;
+  }
+
+  static Map<String, String> _schoolProof(CampusSystem system, String? header) {
+    final cookies = (header ?? '').split(';').map((part) => part.trim());
+    final businessCookies = cookies.where((part) {
+      final equals = part.indexOf('=');
+      if (equals < 1 || equals == part.length - 1) return false;
+      final name = part.substring(0, equals);
+      return switch (system) {
+        CampusSystem.undergraduate => !const {
+            'shu_oauth2',
+            'webvpn-token',
+            'gs_sessionid'
+          }.contains(name.toLowerCase()),
+        CampusSystem.graduate => name == GraduateSessionStore.sessionCookieName,
+      };
+    }).join('; ');
+    if (businessCookies.isEmpty) {
+      throw const StudentIdentityException('当前学校会话不可用，请重新登录校园账户。',
+          code: 'no_school_session');
+    }
+    return {'source': system.identitySource, 'cookie': businessCookies};
   }
 
   Future<void> completeDataDeletion(StudentDataDeletionGrant grant) async {
@@ -474,7 +502,7 @@ class StudentIdentityService extends ChangeNotifier {
     Map<String, Object?>? body,
   }) async {
     final uri = Uri.parse('${ClientBackendConstants.baseUrl}$path');
-    final request = http.Request(method, uri);
+    final request = http.Request(method, uri)..followRedirects = false;
     request.headers['accept'] = 'application/json';
     if (token != null) request.headers['authorization'] = 'Bearer $token';
     if (body != null) {
@@ -497,7 +525,7 @@ class StudentIdentityService extends ChangeNotifier {
     if (response.statusCode == 401) {
       throw StudentIdentityException(
         decoded['error']?.toString() ?? '身份已失效。',
-        code: 'unauthorized',
+        code: decoded['code']?.toString() ?? 'unauthorized',
       );
     }
     if (response.statusCode < 200 || response.statusCode >= 300) {

@@ -146,6 +146,7 @@ class ClientSettingsPage extends StatelessWidget {
                 shuyoRoute(
                   builder: (_) => PrivacyDataPage(
                     identityService: studentIdentityService!,
+                    campusSystem: campusSystem,
                   ),
                 ),
               ),
@@ -157,7 +158,6 @@ class ClientSettingsPage extends StatelessWidget {
                 builder: (context) => _AboutClientPage(
                   backendRepository: backendRepository,
                   isDemo: isDemo,
-                  campusSystem: campusSystem,
                 ),
               ),
             ),
@@ -551,12 +551,10 @@ class _AboutClientPage extends StatefulWidget {
   const _AboutClientPage({
     required this.backendRepository,
     required this.isDemo,
-    required this.campusSystem,
   });
 
   final ClientBackendRepository backendRepository;
   final bool isDemo;
-  final CampusSystem campusSystem;
 
   @override
   State<_AboutClientPage> createState() => _AboutClientPageState();
@@ -679,7 +677,6 @@ class _AboutClientPageState extends State<_AboutClientPage> {
                 shuyoRoute(
                   builder: (context) => ClientFeedbackPage(
                     repository: widget.backendRepository,
-                    campusSystem: widget.campusSystem,
                   ),
                 ),
               ),

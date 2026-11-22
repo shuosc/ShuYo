@@ -343,9 +343,7 @@ class _StartupOnboardingState extends State<StartupOnboarding>
 
   Future<void> _maybePresentOldUserIdentityChoice() async {
     final service = widget.studentIdentityService;
-    if (service == null || widget.campusSystem != CampusSystem.undergraduate) {
-      return;
-    }
+    if (service == null) return;
     try {
       await service.refreshLocalStatus();
       final answered = await service.hasAnsweredConsent();
@@ -354,7 +352,6 @@ class _StartupOnboardingState extends State<StartupOnboarding>
           !_visible ||
           !_academicLoggedIn ||
           _selectingCampusSystem ||
-          widget.campusSystem != CampusSystem.undergraduate ||
           answered ||
           service.isVerified) {
         return;
@@ -505,7 +502,7 @@ class _StartupOnboardingState extends State<StartupOnboarding>
       });
       widget.onAcademicLoginCompleted(system);
       final service = widget.studentIdentityService;
-      if (system == CampusSystem.undergraduate && service != null) {
+      if (service != null) {
         try {
           if (!await service.hasAnsweredConsent() && mounted) {
             await _showIdentityChoicePage();
@@ -907,7 +904,7 @@ class _StartupOnboardingState extends State<StartupOnboarding>
           Padding(
             padding: const EdgeInsets.fromLTRB(24, 8, 24, 16),
             child: Text(
-              '为避免身份冒用，ShuYo将验证你的校园身份，认证后可使用分享课程表、课程评价等功能。',
+              'ShuYo 服务器会临时使用你当前校园系统的会话向学校核实学号。认证后可使用问题反馈等功能。',
               textAlign: TextAlign.center,
               style: TextStyle(
                 color: Theme.of(context).colorScheme.onSurface,
@@ -938,10 +935,7 @@ class _StartupOnboardingState extends State<StartupOnboarding>
             ),
             if (!_showSystemChoices) ...[
               const SizedBox(height: 8),
-              if (widget.campusSystem == CampusSystem.graduate) ...[
-                const Text('研究生 ShuYo 认证暂未开放'),
-                const SizedBox(height: 6),
-              ] else if (widget.studentIdentityService != null) ...[
+              if (widget.studentIdentityService != null) ...[
                 _identityStatusUnderTitle(context),
                 const SizedBox(height: 6),
               ],
@@ -957,7 +951,7 @@ class _StartupOnboardingState extends State<StartupOnboarding>
                 context,
                 icon: Icons.school_outlined,
                 title: system.label,
-                description: '登入上海大学本科生系统',
+                description: '登录上海大学${system.label}',
                 statusLabel: _isCurrentLogin(system) ? '当前' : null,
                 onTap: _openingCampusLogin || _isCurrentLogin(system)
                     ? null

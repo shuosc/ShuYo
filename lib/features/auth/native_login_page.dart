@@ -10,7 +10,6 @@ import '../../core/wecom_constants.dart';
 import '../../data/services/academic_native_auth_service.dart';
 import '../../data/services/academic_account_store.dart';
 import '../../data/services/academic_auth_service.dart';
-import '../../data/services/academic_progress_api_client.dart';
 import '../../data/services/campus_card_service.dart';
 import '../../data/services/graduate_session_store.dart';
 import '../../data/services/shu_sso_session_store.dart';
@@ -66,7 +65,8 @@ class NativeLoginPage extends StatefulWidget {
     @visibleForTesting this.loginForTesting,
     @visibleForTesting this.sendCodeForTesting,
     @visibleForTesting this.verifyCodeForTesting,
-  }) : studentIdentityService = null;
+  })  : studentIdentityService = null,
+        deletionSystem = null;
 
   const NativeLoginPage.webVpn({
     super.key,
@@ -76,6 +76,7 @@ class NativeLoginPage extends StatefulWidget {
         onCampusAccountChange = null,
         expectedCampusAccount = null,
         authServiceFactory = null,
+        deletionSystem = null,
         weComAuthServiceFactory = null,
         loginForTesting = null,
         sendCodeForTesting = null,
@@ -90,6 +91,7 @@ class NativeLoginPage extends StatefulWidget {
         onCampusAccountChange = null,
         expectedCampusAccount = null,
         authServiceFactory = null,
+        deletionSystem = null,
         weComAuthServiceFactory = null,
         loginForTesting = null,
         sendCodeForTesting = null,
@@ -104,6 +106,7 @@ class NativeLoginPage extends StatefulWidget {
         onCampusAccountChange = null,
         expectedCampusAccount = null,
         authServiceFactory = null,
+        deletionSystem = null,
         weComAuthServiceFactory = null,
         loginForTesting = null,
         sendCodeForTesting = null,
@@ -113,12 +116,13 @@ class NativeLoginPage extends StatefulWidget {
   const NativeLoginPage.dataDeletion({
     super.key,
     required this.studentIdentityService,
+    this.deletionSystem = CampusSystem.undergraduate,
     this.title,
     this.description,
+    @visibleForTesting this.authServiceFactory,
   })  : destination = NativeLoginDestination.dataDeletion,
         onCampusAccountChange = null,
         expectedCampusAccount = null,
-        authServiceFactory = null,
         weComAuthServiceFactory = null,
         loginForTesting = null,
         sendCodeForTesting = null,
@@ -132,6 +136,7 @@ class NativeLoginPage extends StatefulWidget {
   @visibleForTesting
   final AcademicNativeAuthService Function()? authServiceFactory;
   final StudentIdentityService? studentIdentityService;
+  final CampusSystem? deletionSystem;
   @visibleForTesting
   final WeComAuthService Function()? weComAuthServiceFactory;
   @visibleForTesting
@@ -167,7 +172,10 @@ class _NativeLoginPageState extends State<NativeLoginPage> {
         NativeLoginDestination.there => AcademicNativeAuthService.forThere(),
         NativeLoginDestination.campusCard =>
           AcademicNativeAuthService.forCampusCard(),
-        NativeLoginDestination.dataDeletion => AcademicNativeAuthService(),
+        NativeLoginDestination.dataDeletion =>
+          widget.deletionSystem == CampusSystem.graduate
+              ? AcademicNativeAuthService.forGraduate()
+              : AcademicNativeAuthService(),
       };
 
   final _verificationDeliveryService = VerificationDeliveryService();
@@ -925,15 +933,19 @@ class _NativeLoginPageState extends State<NativeLoginPage> {
   }) async {
     if (widget.destination == NativeLoginDestination.dataDeletion) {
       try {
+        final system = widget.deletionSystem!;
         await _authService.completeLogin(callbackUri, publish: false);
-        final schoolUri = AcademicUrlResolver.uri(
-            AcademicProgressApiClient.studentIdentityPath);
+        final schoolUri = switch (system) {
+          CampusSystem.undergraduate => AcademicUrlResolver.studentIdentityUri,
+          CampusSystem.graduate => GraduateSessionStore.userInfoUri,
+        };
         final schoolCookie = _authService.cookieHeaderFor(schoolUri);
         if (schoolCookie.isEmpty) {
           _showError('学校登录未完成，请重试');
           return;
         }
         final grant = await widget.studentIdentityService!.beginDataDeletion(
+          system: system,
           schoolCookie: schoolCookie,
           expectedStudentId: _studentId.text.trim(),
         );
@@ -1062,25 +1074,11 @@ class _NativeLoginPageState extends State<NativeLoginPage> {
     // Keep the old campus and shared SSO sessions until this login has
     // produced a valid business session in its own cookie jar.
     await _authService.completeLogin(callbackUri, publish: false);
-    var studentId = _studentId.text.trim();
-    if (system == CampusSystem.undergraduate) {
-      final status =
-          await AcademicAuthService.validateDirectAcademicCookieHeader(
-        _authService.cookieHeaderFor(AcademicUrlResolver.homeUri),
-      );
-      if (status != WebVpnSessionStatus.valid) {
-        _showError('教务系统登录未完成，请重试');
-        return;
-      }
-      if (weCom) {
-        final uri = AcademicUrlResolver.uri(
-          AcademicProgressApiClient.studentIdentityPath,
-        );
-        studentId =
-            await AcademicProgressApiClient().fetchAuthenticatedStudentId(
-          sessionCookie: _authService.cookieHeaderFor(uri),
-        );
-      }
+    final studentId = await _authService.readCampusAccount();
+    if (!weCom &&
+        studentId.toUpperCase() != _studentId.text.trim().toUpperCase()) {
+      _showError('学校返回的学号与输入的学号不一致');
+      return;
     }
     await _commitCampusLogin(
       system,

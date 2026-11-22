@@ -18,6 +18,8 @@ class AcademicUrlResolver {
 
   static Uri get entryUri => Uri.parse('$baseUrl/');
 
+  static Uri get studentIdentityUri => uri('$homePath?jsdm=xs&echarts=1');
+
   static Uri get homeUri {
     final timestamp = DateTime.now().millisecondsSinceEpoch;
     return Uri.parse(

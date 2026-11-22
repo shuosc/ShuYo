@@ -92,7 +92,7 @@ class _StudentIdentityPageState extends State<StudentIdentityPage> {
       await widget.service.bindCurrentStudent(manual: true);
       if (mounted) setState(() => _message = '身份已认证');
       _refresh();
-    } on Object {
+    } on Object catch (error) {
       StudentIdentitySession? confirmed;
       try {
         confirmed = await widget.service.checkCurrentSession();
@@ -101,8 +101,13 @@ class _StudentIdentityPageState extends State<StudentIdentityPage> {
         // cannot establish a valid session.
       }
       if (mounted) {
-        setState(() =>
-            _message = confirmed == null ? '当前暂时无法验证您的身份，请稍后再试' : '身份已认证');
+        setState(() {
+          _message = confirmed != null
+              ? '身份已认证'
+              : error is StudentIdentityException
+                  ? error.message
+                  : '当前暂时无法验证您的身份，请稍后再试';
+        });
         if (confirmed != null) _refresh();
       }
     } finally {
@@ -119,7 +124,7 @@ class _StudentIdentityPageState extends State<StudentIdentityPage> {
             mainAxisSize: MainAxisSize.min,
             children: [
               const Text(
-                '为避免身份冒用，ShuYo将验证你的校园身份，认证后可使用分享课程表、课程评价等功能。',
+                'ShuYo 服务器会临时使用你当前校园系统的会话向学校核实学号。认证后可使用问题反馈等功能。',
               ),
               TextButton(
                 onPressed: () => launchUrl(

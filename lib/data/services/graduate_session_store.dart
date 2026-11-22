@@ -31,6 +31,17 @@ class GraduateSessionStore {
           if (cookie.domain == host) cookie,
       ];
 
+  Future<String?> cookieHeaderForIdentityVerification() async {
+    final matches = (await _cookieJar.getCookies(domain: userInfoUri))
+        .where((cookie) =>
+            cookie.domain == host &&
+            cookie.name == sessionCookieName &&
+            cookie.value.isNotEmpty)
+        .toList()
+      ..sort((a, b) => b.path.length.compareTo(a.path.length));
+    return matches.isEmpty ? null : '$sessionCookieName=${matches.first.value}';
+  }
+
   /// Never renew YJS using a shared SSO cookie that may have been replaced by
   /// a different login (e.g. a standalone campus service).
   Future<Cookie?> loadRenewalCookie() async {

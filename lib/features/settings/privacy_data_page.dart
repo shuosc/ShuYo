@@ -1,12 +1,18 @@
 import 'package:material_ui/material_ui.dart';
+import '../../core/campus_system.dart';
 import '../../data/services/student_identity_service.dart';
 import '../../shared/navigation/shuyo_route.dart';
 import '../auth/native_login_page.dart';
 
 class PrivacyDataPage extends StatelessWidget {
-  const PrivacyDataPage({super.key, required this.identityService});
+  const PrivacyDataPage({
+    super.key,
+    required this.identityService,
+    required this.campusSystem,
+  });
 
   final StudentIdentityService identityService;
+  final CampusSystem campusSystem;
 
   @override
   Widget build(BuildContext context) => Scaffold(
@@ -16,7 +22,7 @@ class PrivacyDataPage extends StatelessWidget {
             const Padding(
               padding: EdgeInsets.fromLTRB(20, 20, 20, 12),
               child: Text(
-                'ShuYo 通过核实学号来确认你的上海大学学生身份。撤销设备认证后，服务器会保留你使用反馈、课表分享等功能产生的数据。',
+                'ShuYo 向学校核实当前登录账号的学号。撤销设备认证后，服务器会保留你使用反馈、课表分享等功能产生的数据。',
               ),
             ),
             ListTile(
@@ -29,6 +35,7 @@ class PrivacyDataPage extends StatelessWidget {
                 shuyoRoute(
                   builder: (_) => _DeleteShuYoDataPage(
                     identityService: identityService,
+                    campusSystem: campusSystem,
                   ),
                 ),
               ),
@@ -39,9 +46,13 @@ class PrivacyDataPage extends StatelessWidget {
 }
 
 class _DeleteShuYoDataPage extends StatefulWidget {
-  const _DeleteShuYoDataPage({required this.identityService});
+  const _DeleteShuYoDataPage({
+    required this.identityService,
+    required this.campusSystem,
+  });
 
   final StudentIdentityService identityService;
+  final CampusSystem campusSystem;
 
   @override
   State<_DeleteShuYoDataPage> createState() => _DeleteShuYoDataPageState();
@@ -57,6 +68,7 @@ class _DeleteShuYoDataPageState extends State<_DeleteShuYoDataPage> {
       shuyoRoute(
         builder: (_) => NativeLoginPage.dataDeletion(
           studentIdentityService: widget.identityService,
+          deletionSystem: widget.campusSystem,
         ),
       ),
     );

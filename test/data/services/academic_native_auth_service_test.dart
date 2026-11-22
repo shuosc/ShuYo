@@ -2,9 +2,67 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:shuyo/core/academic_url_resolver.dart';
 import 'package:shuyo/data/services/academic_native_auth_service.dart';
 
 void main() {
+  test('native JWXT login resolves the account only from the homepage',
+      () async {
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    final client = _IdentityHttpClient(server.port);
+    final service = AcademicNativeAuthService(httpClient: client);
+    addTearDown(() async {
+      service.dispose();
+      await server.close(force: true);
+    });
+    service.adoptSessionCookies([
+      (
+        cookie: Cookie('JSESSIONID', 'jwxt-fixture'),
+        domain: 'jwxt.shu.edu.cn',
+        path: '/jwglxt/',
+      ),
+      (
+        cookie: Cookie('SHU_OAUTH2', 'sso-fixture'),
+        domain: 'newsso.shu.edu.cn',
+        path: '/',
+      ),
+    ]);
+    var status = HttpStatus.ok;
+    const input = '<input type="hidden" id="sessionUserKey" value="23123456">';
+    var body = input;
+    final captured = <(String, Uri, String?)>[];
+    server.listen((request) async {
+      captured.add((
+        request.method,
+        request.uri,
+        request.headers.value(HttpHeaders.cookieHeader)
+      ));
+      request.response.statusCode = status;
+      if (status == HttpStatus.found) {
+        request.response.headers.set(HttpHeaders.locationHeader,
+            'https://newsso.shu.edu.cn/oauth2/login/');
+      }
+      request.response.write(body);
+      await request.response.close();
+    });
+
+    expect(await service.readCampusAccount(), '23123456');
+    expect(captured.single, (
+      'GET',
+      Uri.parse('/jwglxt/xtgl/index_initMenu.html?jsdm=xs&echarts=1'),
+      'JSESSIONID=jwxt-fixture',
+    ));
+    body = '$input$input';
+    await expectLater(service.readCampusAccount(),
+        throwsA(isA<AcademicNativeAuthException>()));
+    body = '';
+    status = HttpStatus.found;
+    await expectLater(service.readCampusAccount(),
+        throwsA(isA<AcademicNativeAuthException>()));
+    expect(
+        client.visited, List.filled(3, AcademicUrlResolver.studentIdentityUri));
+  });
+
   test('academic password encryption produces randomized 1024-bit RSA data',
       () {
     final first = AcademicPasswordEncryptor.encrypt('test-password');
@@ -132,4 +190,25 @@ void main() {
       expect(store.headerFor(Uri.parse(newsso)), 'SHU_OAUTH2=new');
     });
   });
+}
+
+class _IdentityHttpClient extends Fake implements HttpClient {
+  _IdentityHttpClient(this.port);
+
+  final int port;
+  final _client = HttpClient();
+  final visited = <Uri>[];
+
+  @override
+  set connectionTimeout(Duration? value) => _client.connectionTimeout = value;
+
+  @override
+  Future<HttpClientRequest> openUrl(String method, Uri url) {
+    visited.add(url);
+    return _client.openUrl(
+        method, url.replace(scheme: 'http', host: '127.0.0.1', port: port));
+  }
+
+  @override
+  void close({bool force = false}) => _client.close(force: force);
 }

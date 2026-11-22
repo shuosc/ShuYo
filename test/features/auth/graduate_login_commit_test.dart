@@ -186,6 +186,12 @@ class _GraduateAuth implements AcademicNativeAuthService {
   }
 
   @override
+  Future<String> readCampusAccount() async {
+    expect(completed, isTrue);
+    return '25800001';
+  }
+
+  @override
   Future<GraduateWeComChallenge> prepareGraduateWeComLogin() async =>
       qrChallenge = _GraduateQrChallenge();
 

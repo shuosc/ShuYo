@@ -5,6 +5,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:material_ui/material_ui.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:shuyo/core/campus_system.dart';
+import 'package:shuyo/data/services/academic_account_store.dart';
 import 'package:shuyo/data/services/client_settings_service.dart';
 import 'package:shuyo/data/services/student_identity_service.dart';
 import 'package:shuyo/features/auth/native_login_page.dart';
@@ -331,7 +332,7 @@ void main() {
         tester.getRect(find.widgetWithText(FilledButton, '确认'));
     expect(identityButton, welcomeButton);
     expect(
-      find.text('为避免身份冒用，ShuYo将验证你的校园身份，认证后可使用分享课程表、课程评价等功能。'),
+      find.text('ShuYo 服务器会临时使用你当前校园系统的会话向学校核实学号。认证后可使用问题反馈等功能。'),
       findsOneWidget,
     );
     expect(tester.getTopLeft(find.text('暂不')).dy,
@@ -353,7 +354,7 @@ void main() {
         await ClientSettingsService().loadStartupOnboardingCompleted(), isTrue);
   });
 
-  testWidgets('graduate first run does not ask for ShuYo verification',
+  testWidgets('graduate first run offers the same optional ShuYo verification',
       (tester) async {
     final controller = StartupOnboardingController();
     final identity = StudentIdentityService();
@@ -387,8 +388,12 @@ void main() {
     Navigator.of(tester.element(login)).pop(NativeLoginResult.authenticated);
     await tester.pumpAndSettle();
     expect(completedSystem, CampusSystem.graduate);
-    expect(find.text('ShuYo 认证'), findsNothing);
+    expect(find.text('ShuYo 认证'), findsOneWidget);
     expect(await identity.hasAnsweredConsent(), isFalse);
+    await tester.tap(find.text('暂不'));
+    await tester.pumpAndSettle();
+    expect(await identity.hasAnsweredConsent(), isTrue);
+    expect(await identity.hasConsent(), isFalse);
     expect(
         await ClientSettingsService().loadStartupOnboardingCompleted(), isTrue);
   });
@@ -435,7 +440,9 @@ void main() {
     expect(current, CampusSystem.graduate);
     expect(find.text('研究生系统'), findsOneWidget);
     expect(find.text('已登录'), findsOneWidget);
-    expect(find.text('研究生 ShuYo 认证暂未开放'), findsOneWidget);
+    expect(find.text('未认证'), findsOneWidget);
+    expect(
+        find.byKey(const ValueKey('student-identity-status')), findsOneWidget);
     expect(find.text('切换登录系统'), findsOneWidget);
   });
 
@@ -551,6 +558,7 @@ void main() {
   testWidgets('verified status uses the theme color below the title',
       (tester) async {
     SharedPreferences.setMockInitialValues({
+      AcademicAccountStore.lastStudentIdKey: '23123456',
       'shuyo.student.identity.consent.v1': true,
       'shuyo.student.session.v1': jsonEncode({
         'token': 'a' * 43,

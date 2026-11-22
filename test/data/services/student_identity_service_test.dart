@@ -1,13 +1,17 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:shuyo/core/academic_url_resolver.dart';
 import 'package:shuyo/core/campus_system.dart';
 import 'package:shuyo/data/services/academic_account_store.dart';
 import 'package:shuyo/data/services/academic_auth_service.dart';
+import 'package:shuyo/data/services/graduate_session_store.dart';
 import 'package:shuyo/data/services/secure_app_store.dart';
+import 'package:shuyo/data/services/session_cookie_jar.dart';
 import 'package:shuyo/data/services/student_identity_service.dart';
 
 class _MemorySecureStore extends SecureAppStore {
@@ -32,46 +36,126 @@ class _SchoolAuth extends AcademicAuthService {
   @override
   Future<String?> cookieHeaderForIdentityVerification(
       {required Uri targetUri}) async {
+    expect(targetUri, AcademicUrlResolver.studentIdentityUri);
     reads++;
-    return 'JSESSIONID=school-session';
+    return 'JSESSIONID=school-session; SHU_OAUTH2=must-not-leave-app';
   }
 }
 
 void main() {
   setUp(() => SharedPreferences.setMockInitialValues({}));
 
-  test('graduate login cannot inherit or issue a ShuYo student credential',
+  test(
+      'YJS verifies with its own scoped cookie and reuses the same student identity',
       () async {
     final accounts = AcademicAccountStore();
-    const studentId = 'test-student';
-    await accounts.saveStudentId(studentId);
+    const studentId = '23abc456';
     await accounts.saveStudentId(studentId, system: CampusSystem.graduate);
+    await accounts.saveSystem(CampusSystem.graduate);
     final secure = _MemorySecureStore();
-    const sessionKey = 'shuyo.student.session.v1';
-    secure.values[sessionKey] = jsonEncode({
-      'token': 'fixture-credential',
-      'studentId': studentId,
-      'expiresAt': '2099-01-01T00:00:00Z',
-    });
+    final jar = SessionCookieJar(secureStore: secure);
+    final graduate = GraduateSessionStore(cookieJar: jar, secureStore: secure);
+    for (final cookie in const [
+      SessionCookie(
+          name: 'GS_SESSIONID',
+          value: 'yjs-fixture',
+          domain: GraduateSessionStore.host,
+          path: '/gsapp/'),
+      SessionCookie(
+          name: 'GS_SESSIONID',
+          value: 'wrong-path',
+          domain: GraduateSessionStore.host,
+          path: '/separate/'),
+      SessionCookie(
+          name: 'GS_SESSIONID',
+          value: 'parent-domain',
+          domain: 'shu.edu.cn',
+          path: '/gsapp/'),
+      SessionCookie(
+          name: 'SHU_OAUTH2',
+          value: 'sso-fixture',
+          domain: 'newsso.shu.edu.cn'),
+      SessionCookie(
+          name: 'JSESSIONID', value: 'jwxt-fixture', domain: 'jwxt.shu.edu.cn'),
+    ]) {
+      await jar.setCookie(cookie);
+    }
     final school = _SchoolAuth();
+    var enrollments = 0;
     final service = StudentIdentityService(
       accountStore: accounts,
       secureStore: secure,
       academicAuthService: school,
-      httpClient: MockClient((_) async => fail('unexpected identity request')),
+      graduateSessionStore: graduate,
+      httpClient: MockClient((request) async {
+        if (request.method == 'GET') return http.Response('{}', 200);
+        expect(request.url.path, '/api/v1/student/sessions');
+        expect(request.followRedirects, isFalse);
+        expect(
+            jsonDecode(request.body),
+            containsPair('schoolSession', {
+              'source': 'yjs',
+              'cookie': 'GS_SESSIONID=yjs-fixture',
+            }));
+        expect(jsonDecode(request.body)['expectedStudentId'], studentId);
+        expect(jsonDecode(request.body)['userInitiated'], isTrue);
+        enrollments++;
+        return _issuedSession();
+      }),
+    );
+    addTearDown(service.dispose);
+    await expectLater(service.bindCurrentStudent(manual: true),
+        throwsA(isA<StudentIdentityException>()));
+    expect(enrollments, 0);
+    await service.grantConsent();
+    await service.ensureAfterCampusLogin();
+    expect(enrollments, 1);
+    expect((await service.checkCurrentSession())?.studentId, studentId);
+
+    await accounts.saveStudentId(studentId.toUpperCase());
+    await accounts.saveSystem(CampusSystem.undergraduate);
+    expect(
+        (await service.bindCurrentStudent(manual: true)).studentId, studentId);
+    expect(enrollments, 1);
+    expect(school.reads, 0);
+
+    await accounts.saveStudentId('another-campus-account');
+    expect(await service.checkCurrentSession(), isNull);
+    expect(service.isVerified, isFalse);
+  });
+
+  test('an enrollment finishing after a school switch cannot install its token',
+      () async {
+    final accounts = AcademicAccountStore();
+    await accounts.saveStudentId('23123456');
+    final secure = _MemorySecureStore();
+    final started = Completer<void>();
+    final reply = Completer<http.Response>();
+    final service = StudentIdentityService(
+      accountStore: accounts,
+      secureStore: secure,
+      academicAuthService: _SchoolAuth(),
+      httpClient: MockClient((request) {
+        if (request.method == 'POST') {
+          started.complete();
+          return reply.future;
+        }
+        expect(request.method, 'DELETE');
+        expect(request.headers['authorization'], 'Bearer ${'a' * 43}');
+        return Future.value(http.Response('', 204));
+      }),
     );
     addTearDown(service.dispose);
     await service.grantConsent();
-    expect(await service.loadLocalSession(), isNotNull);
-
-    await accounts.saveSystem(CampusSystem.graduate);
-    expect(await service.checkCurrentSession(), isNull);
-    expect(service.isVerified, isFalse);
-    await service.ensureAfterCampusLogin();
-    await expectLater(service.bindCurrentStudent(manual: true),
+    final rejected = expectLater(service.bindCurrentStudent(manual: true),
         throwsA(isA<StudentIdentityException>()));
-    expect(school.reads, 0);
-    expect(secure.values[sessionKey], isNotNull);
+    await started.future;
+    await accounts.saveStudentId('23123456', system: CampusSystem.graduate);
+    await accounts.saveSystem(CampusSystem.graduate);
+    reply.complete(_issuedSession());
+    await rejected;
+    expect(secure.values['shuyo.student.session.v1'], isNull);
+    expect(service.isVerified, isFalse);
   });
 
   test('binds only after consent, then reuses the ShuYo session', () async {
@@ -87,7 +171,10 @@ void main() {
       if (request.url.path == '/api/v1/student/sessions') {
         enrollmentCount++;
         final body = jsonDecode(request.body) as Map<String, dynamic>;
-        expect(body['schoolCookie'], 'JSESSIONID=school-session');
+        expect(body['schoolSession'], {
+          'source': 'jwxt',
+          'cookie': 'JSESSIONID=school-session',
+        });
         expect(body['expectedStudentId'], '23123456');
         expect(body['userInitiated'], isTrue);
         return http.Response(
@@ -222,7 +309,10 @@ void main() {
       if (request.url.path == '/api/v1/student/data-deletion/verify') {
         expect(request.method, 'POST');
         final body = jsonDecode(request.body) as Map<String, dynamic>;
-        expect(body['schoolCookie'], 'JSESSIONID=fresh-login');
+        expect(body['schoolSession'], {
+          'source': 'yjs',
+          'cookie': 'GS_SESSIONID=fresh-login',
+        });
         expect(body['expectedStudentId'], '23123456');
         return http.Response(
           jsonEncode({
@@ -248,7 +338,8 @@ void main() {
     );
     await service.grantConsent();
     final grant = await service.beginDataDeletion(
-      schoolCookie: 'JSESSIONID=fresh-login',
+      system: CampusSystem.graduate,
+      schoolCookie: 'GS_SESSIONID=fresh-login; SHU_OAUTH2=must-not-leave-app',
       expectedStudentId: '23123456',
     );
     expect(grant.maskedStudentId, '23****56');
@@ -306,12 +397,17 @@ void main() {
     final secure = _MemorySecureStore();
     final accounts = AcademicAccountStore();
     await accounts.saveStudentId('23123456');
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool('shuyo.student.identity.consent.v1', true);
+    var preferenceReads = 0;
     final service = StudentIdentityService(
       secureStore: secure,
       accountStore: accounts,
       academicAuthService: _SchoolAuth(),
-      preferencesLoader: () async =>
-          throw StateError('preferences unavailable'),
+      preferencesLoader: () async {
+        if (++preferenceReads == 1) return prefs;
+        throw StateError('preferences unavailable');
+      },
       httpClient: MockClient((request) async => http.Response(
             jsonEncode({
               'data': {
@@ -330,3 +426,14 @@ void main() {
     service.dispose();
   });
 }
+
+http.Response _issuedSession() => http.Response(
+      jsonEncode({
+        'data': {
+          'token': 'a' * 43,
+          'maskedStudentId': '23****56',
+          'expiresAt': '2099-01-01T00:00:00Z',
+        },
+      }),
+      201,
+    );

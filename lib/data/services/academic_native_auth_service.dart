@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
+import 'package:html/parser.dart' as html_parser;
 import 'package:pointycastle/export.dart';
 
 import '../../core/academic_url_resolver.dart';
@@ -556,7 +557,7 @@ class AcademicNativeAuthService {
           throw _invalidGraduateWeComRedirect;
         }
         await _completeGraduateLogin(start, weComChallenge: challenge);
-        return _readGraduateAccount();
+        return _readCampusAccount();
       },
     );
   }
@@ -578,14 +579,69 @@ class AcademicNativeAuthService {
     );
   }
 
+  /// Resolve the account from the temporary business session, before the
+  /// caller publishes cookies or changes the current campus account.
+  Future<String> readCampusAccount() => _runAuthenticationStage(
+        'read-campus-account',
+        HttpTimeout.normal,
+        _readCampusAccount,
+      );
+
+  Future<String> _readCampusAccount() async {
+    switch (_target) {
+      case _NativeAuthTarget.academic:
+        final uri = AcademicUrlResolver.studentIdentityUri;
+        final response = await _request('GET', uri, referer: uri);
+        final body = await _readIdentityResponse(response, 512 * 1024);
+        if (body != null) {
+          final inputs = html_parser.parse(body).querySelectorAll(
+                'input[id="sessionUserKey"]',
+              );
+          if (inputs.length == 1 &&
+              inputs.single.attributes['type']?.toLowerCase() == 'hidden') {
+            final account = inputs.single.attributes['value']?.trim() ?? '';
+            if (RegExp(r'^[A-Za-z0-9]{6,24}$').hasMatch(account)) {
+              return account;
+            }
+          }
+        }
+        throw const AcademicNativeAuthException(
+          'academicAccountMissing',
+          '未能确认本科生系统的登录账号，请重新登录',
+        );
+      case _NativeAuthTarget.graduate:
+        return _readGraduateAccount();
+      default:
+        throw StateError('Only campus systems provide a campus account');
+    }
+  }
+
+  Future<String?> _readIdentityResponse(
+    HttpClientResponse response,
+    int limit,
+  ) async {
+    var bytesRead = 0;
+    final decoded = response.map((chunk) {
+      bytesRead += chunk.length;
+      if (bytesRead > limit) throw const FormatException('Oversized response');
+      return chunk;
+    });
+    try {
+      final body = await utf8.decodeStream(decoded).timeout(HttpTimeout.normal);
+      return response.statusCode == HttpStatus.ok ? body : null;
+    } on FormatException {
+      return null;
+    }
+  }
+
   Future<String> _readGraduateAccount() async {
     final response = await _request(
       'POST',
       GraduateSessionStore.userInfoUri,
       referer: GraduateSessionStore.portalUri,
     );
-    final body = await utf8.decodeStream(response).timeout(HttpTimeout.normal);
-    if (response.statusCode == HttpStatus.ok) {
+    final body = await _readIdentityResponse(response, 64 * 1024);
+    if (body != null) {
       try {
         final json = jsonDecode(body);
         if (json is Map && (json['code'] == '0' || json['code'] == 0)) {

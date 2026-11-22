@@ -1,6 +1,5 @@
 import 'package:material_ui/material_ui.dart';
 
-import '../../core/campus_system.dart';
 import '../../data/models/client_backend.dart';
 import '../../data/repositories/client_backend_repository.dart';
 import '../../data/services/student_identity_service.dart';
@@ -16,11 +15,9 @@ class ClientFeedbackPage extends StatefulWidget {
   const ClientFeedbackPage({
     super.key,
     required this.repository,
-    this.campusSystem = CampusSystem.undergraduate,
   });
 
   final ClientBackendRepository repository;
-  final CampusSystem campusSystem;
 
   @override
   State<ClientFeedbackPage> createState() => _ClientFeedbackPageState();
@@ -38,9 +35,7 @@ class _ClientFeedbackPageState extends State<ClientFeedbackPage> {
   @override
   void initState() {
     super.initState();
-    if (widget.campusSystem == CampusSystem.undergraduate) {
-      _future = _loadTickets();
-    }
+    _future = _loadTickets();
   }
 
   @override
@@ -53,16 +48,6 @@ class _ClientFeedbackPageState extends State<ClientFeedbackPage> {
 
   @override
   Widget build(BuildContext context) {
-    if (widget.campusSystem == CampusSystem.graduate) {
-      return Scaffold(
-        appBar: AppBar(title: const Text('问题与反馈')),
-        body: const EmptyState(
-          icon: Icons.feedback_outlined,
-          title: '研究生 ShuYo 认证暂未开放',
-          message: '完成 ShuYo 认证后才能提交和查看反馈',
-        ),
-      );
-    }
     return Scaffold(
       appBar: AppBar(
         title: const Text('问题与反馈'),

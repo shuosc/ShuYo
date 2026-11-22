@@ -30,14 +30,6 @@ class AcademicProgressIndex {
 class AcademicProgressParser {
   const AcademicProgressParser._();
 
-  static String parseStudentId(String source) =>
-      html_parser
-          .parse(source)
-          .querySelector('form#form input[name="xh_id"]')
-          ?.attributes['value']
-          ?.trim() ??
-      '';
-
   // The school's index response contains JavaScript that builds the tree. Its
   // <ul class="treeview"> is empty until that script runs in a browser.
   static final _nodePattern = RegExp(

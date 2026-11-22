@@ -266,45 +266,6 @@ void main() {
         hasLength(1));
   });
 
-  test(
-      'QR identity lookup reads only the index without fetching or caching data',
-      () async {
-    final requests = <http.Request>[];
-    final api = AcademicProgressApiClient(
-      authService: _AuthWithCookie(),
-      httpClient: MockClient((request) async {
-        requests.add(request);
-        return http.Response(
-          '<form id="form"><input name="xh_id" value=" QR_ACCOUNT "></form>',
-          200,
-        );
-      }),
-    );
-    expect(await api.fetchAuthenticatedStudentId(), 'QR_ACCOUNT');
-    expect(requests, hasLength(1));
-    expect(requests.single.method, 'GET');
-    expect(requests.single.headers['cookie'], 'JSESSIONID=test');
-    final preferences = await SharedPreferences.getInstance();
-    expect(
-        preferences.containsKey(AcademicProgressRepository.cacheKey), isFalse);
-    expect(
-        preferences.containsKey(AcademicRankingRepository.cacheKey), isFalse);
-  });
-
-  test('QR identity lookup rejects missing identity and expired login',
-      () async {
-    var response = '<form id="form"></form>';
-    final api = AcademicProgressApiClient(
-      authService: _AuthWithCookie(),
-      httpClient: MockClient((_) async => http.Response(response, 200)),
-    );
-    await expectLater(api.fetchAuthenticatedStudentId(),
-        throwsA(isA<AcademicApiException>()));
-    response = '<html>newsso.shu.edu.cn/oauth2/login</html>';
-    await expectLater(api.fetchAuthenticatedStudentId(),
-        throwsA(isA<AcademicAuthException>()));
-  });
-
   testWidgets('changing ranking visibility does not fetch missing ranking',
       (tester) async {
     final ranking = _RefreshingRankingRepository(

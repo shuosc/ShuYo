@@ -20,7 +20,7 @@ class AcademicProgressApiClient {
   })  : _authService = authService ?? AcademicAuthService(),
         _httpClient = httpClient ?? IOClient(HttpClient());
 
-  static const studentIdentityPath =
+  static const _progressIndexPath =
       '/jwglxt/xsxy/xsxyqk_cxXsxyqkIndex.html?echarts=1&gnmkdm=N105515&layout=default';
   static const _coursePath =
       '/jwglxt/xsxy/xsxyqk_cxJxzxjhxfyqKcxx.html?gnmkdm=N105515';
@@ -32,29 +32,8 @@ class AcademicProgressApiClient {
   final AcademicAuthService _authService;
   final http.Client _httpClient;
 
-  /// QR authentication has no typed username. Resolve only the authenticated
-  /// identity; do not fetch course details or update any academic data cache.
-  Future<String> fetchAuthenticatedStudentId({String? sessionCookie}) async {
-    final indexUri = AcademicUrlResolver.uri(studentIdentityPath);
-    final cookie =
-        sessionCookie ?? await _authService.cookieHeader(targetUri: indexUri);
-    if (cookie == null || cookie.isEmpty) {
-      throw const AcademicAuthException('请先登录上大校园账户');
-    }
-    final response = await HttpTimeout.request(
-      _httpClient.get(indexUri, headers: _headers(cookie, indexUri)),
-      message: '账户信息请求超时，请重新尝试登录',
-    );
-    _ensureResponse(response);
-    final studentId = AcademicProgressParser.parseStudentId(response.body);
-    if (studentId.isEmpty) {
-      throw const AcademicApiException('未能确认登录学号，请重新尝试登录');
-    }
-    return studentId;
-  }
-
   Future<AcademicProgress> fetchProgress() async {
-    final indexUri = AcademicUrlResolver.uri(studentIdentityPath);
+    final indexUri = AcademicUrlResolver.uri(_progressIndexPath);
     final cookie = await _authService.cookieHeader(targetUri: indexUri);
     if (cookie == null || cookie.isEmpty) {
       throw const AcademicAuthException('请先登录上大校园账户');

@@ -191,19 +191,22 @@ void main() {
         SessionCookie(
           name: 'JSESSIONID',
           value: 'test-session',
-          domain: AcademicConstants.host,
+          domain: '.${AcademicConstants.host}',
+        ),
+        const SessionCookie(
+          name: 'SSO_SCOPE',
+          value: 'unrelated-parent-domain-session',
+          domain: 'shu.edu.cn',
         ),
       ],
       cookieSetter: (_) async {},
     );
 
     final header = await service.cookieHeaderForIdentityVerification(
-      targetUri: AcademicUrlResolver.uri(
-        '/jwglxt/xsxy/xsxyqk_cxXsxyqkIndex.html',
-      ),
+      targetUri: AcademicUrlResolver.studentIdentityUri,
     );
 
-    expect(header, contains('JSESSIONID=test-session'));
+    expect(header, 'JSESSIONID=test-session');
     expect(prefs.getBool('academic.auth.explicitly_signed_out'), isTrue);
     expect(prefs.getString('academic.auth.cached_cookies.direct'), isNull);
   });
