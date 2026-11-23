@@ -443,6 +443,48 @@ void main() {
     expect(find.byType(NativeLoginPage), findsNothing);
   });
 
+  testWidgets('graduate logout allows demo login from the same account page',
+      (tester) async {
+    final controller = StartupOnboardingController();
+    addTearDown(controller.dispose);
+    controller.setAccountLogoutHandlers(onAcademicLogout: () async {
+      controller.updateAccountStatus(academicLoggedIn: false);
+      return true;
+    });
+    await tester.pumpWidget(MaterialApp(
+      home: StartupOnboarding(
+        initiallyCompleted: true,
+        initialAcademicLoggedIn: true,
+        campusSystem: CampusSystem.graduate,
+        onAcademicLoginCompleted: (_) => fail('Unexpected campus login'),
+        onDemoLogin: DemoSession.enable,
+        controller: controller,
+        child: const Scaffold(body: Text('主页')),
+      ),
+    ));
+    controller.openAccountManager(academicLoggedIn: true);
+    await tester.pumpAndSettle();
+    expect(find.text('已登录'), findsOneWidget);
+
+    await tester.tap(find.text('研究生系统'));
+    await tester.pumpAndSettle();
+    expect(find.text('确认退出'), findsOneWidget);
+    await tester.tap(find.widgetWithText(FilledButton, '退出'));
+    await tester.pumpAndSettle();
+    expect(find.text('未登录'), findsOneWidget);
+
+    await tester.tap(find.text('研究生系统'));
+    await tester.pumpAndSettle();
+    final fields = find.byType(TextFormField);
+    await tester.enterText(fields.first, DemoSession.username);
+    await tester.enterText(fields.last, DemoSession.password);
+    await tester.tap(find.widgetWithText(FilledButton, '继续'));
+    await tester.pumpAndSettle();
+    expect(await DemoSession.isEnabled(), isTrue);
+    expect(controller.accountManagerOpen, isFalse);
+    expect(find.byType(NativeLoginPage), findsNothing);
+  });
+
   testWidgets('graduate session recovery does not accept the demo credentials',
       (tester) async {
     final controller = StartupOnboardingController();
@@ -471,7 +513,7 @@ void main() {
     await tester.enterText(fields.last, DemoSession.password);
     await tester.tap(find.widgetWithText(FilledButton, '继续'));
     await tester.pumpAndSettle();
-    expect(find.text('请从本科生系统登录页进入演示模式'), findsOneWidget);
+    expect(find.text('请使用校园账户登录'), findsOneWidget);
     expect(find.byType(NativeLoginPage), findsOneWidget);
   });
 

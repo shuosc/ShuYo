@@ -727,7 +727,7 @@ class _NativeLoginPageState extends State<NativeLoginPage> {
               (widget.destination == NativeLoginDestination.graduate &&
                   widget.allowGraduateDemo);
       if (!allowsDemo) {
-        _showError('请从本科生系统登录页进入演示模式');
+        _showError('请使用校园账户登录');
       } else if (DemoSession.matchesCredentials(
           _studentId.text, _password.text)) {
         _closeWith(NativeLoginResult.demo);

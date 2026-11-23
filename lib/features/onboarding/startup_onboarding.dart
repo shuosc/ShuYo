@@ -475,7 +475,9 @@ class _StartupOnboardingState extends State<StartupOnboarding>
 
   Future<void> _openAcademicLogin(CampusSystem system) async {
     if (_openingCampusLogin) return;
-    final allowGraduateDemo = _showSystemChoices && widget.onDemoLogin != null;
+    final signedOut = !_academicLoggedIn && !_academicSessionExpired;
+    final allowGraduateDemo =
+        widget.onDemoLogin != null && (_showSystemChoices || signedOut);
     setState(() => _openingCampusLogin = true);
     try {
       final result = await Navigator.of(context).push<NativeLoginResult>(
