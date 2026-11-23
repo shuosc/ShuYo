@@ -5,6 +5,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:material_ui/material_ui.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:shuyo/core/campus_system.dart';
+import 'package:shuyo/data/demo/demo_session.dart';
 import 'package:shuyo/data/services/academic_account_store.dart';
 import 'package:shuyo/data/services/client_settings_service.dart';
 import 'package:shuyo/data/services/student_identity_service.dart';
@@ -396,6 +397,82 @@ void main() {
     expect(await identity.hasConsent(), isFalse);
     expect(
         await ClientSettingsService().loadStartupOnboardingCompleted(), isTrue);
+  });
+
+  testWidgets('graduate system selection accepts the offline demo credentials',
+      (tester) async {
+    final controller = StartupOnboardingController();
+    addTearDown(controller.dispose);
+    CampusSystem? completedSystem;
+    var demoLogins = 0;
+    await tester.pumpWidget(MaterialApp(
+      home: StartupOnboarding(
+        initiallyCompleted: false,
+        initialAcademicLoggedIn: false,
+        onAcademicLoginCompleted: (system) => completedSystem = system,
+        onDemoLogin: () async {
+          demoLogins++;
+        },
+        notificationPermissionRequester: () async => false,
+        controller: controller,
+        child: const Scaffold(body: Text('主页')),
+      ),
+    ));
+    await tester.pumpAndSettle();
+    for (var index = 0; index < 2; index++) {
+      await tester.tap(find.widgetWithText(FilledButton, '继续'));
+      await tester.pumpAndSettle();
+    }
+    await tester.tap(find.text('研究生系统'));
+    await tester.pumpAndSettle();
+
+    final fields = find.byType(TextFormField);
+    final submit = find.widgetWithText(FilledButton, '继续');
+    await tester.enterText(fields.first, DemoSession.username);
+    await tester.enterText(fields.last, 'wrong');
+    await tester.tap(submit);
+    await tester.pumpAndSettle();
+    expect(find.text('演示账号密码不正确'), findsOneWidget);
+    expect(demoLogins, 0);
+
+    await tester.enterText(fields.last, DemoSession.password);
+    await tester.tap(submit);
+    await tester.pumpAndSettle();
+    expect(demoLogins, 1);
+    expect(completedSystem, isNull);
+    expect(find.byType(NativeLoginPage), findsNothing);
+  });
+
+  testWidgets('graduate session recovery does not accept the demo credentials',
+      (tester) async {
+    final controller = StartupOnboardingController();
+    addTearDown(controller.dispose);
+    await tester.pumpWidget(MaterialApp(
+      home: StartupOnboarding(
+        initiallyCompleted: true,
+        initialAcademicLoggedIn: false,
+        campusSystem: CampusSystem.graduate,
+        onAcademicLoginCompleted: (_) => fail('Unexpected campus login'),
+        onDemoLogin: () async => fail('Unexpected demo login'),
+        controller: controller,
+        child: const Scaffold(body: Text('主页')),
+      ),
+    ));
+    controller.openAccountManager(
+      academicLoggedIn: false,
+      academicSessionExpired: true,
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('研究生系统'));
+    await tester.pumpAndSettle();
+
+    final fields = find.byType(TextFormField);
+    await tester.enterText(fields.first, DemoSession.username);
+    await tester.enterText(fields.last, DemoSession.password);
+    await tester.tap(find.widgetWithText(FilledButton, '继续'));
+    await tester.pumpAndSettle();
+    expect(find.text('请从本科生系统登录页进入演示模式'), findsOneWidget);
+    expect(find.byType(NativeLoginPage), findsOneWidget);
   });
 
   testWidgets('switching keeps the previous system until login succeeds',

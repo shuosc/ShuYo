@@ -60,6 +60,7 @@ class NativeLoginPage extends StatefulWidget {
     this.description,
     this.onCampusAccountChange,
     this.expectedCampusAccount,
+    this.allowGraduateDemo = false,
     @visibleForTesting this.authServiceFactory,
     @visibleForTesting this.weComAuthServiceFactory,
     @visibleForTesting this.loginForTesting,
@@ -75,6 +76,7 @@ class NativeLoginPage extends StatefulWidget {
   })  : destination = NativeLoginDestination.webVpn,
         onCampusAccountChange = null,
         expectedCampusAccount = null,
+        allowGraduateDemo = false,
         authServiceFactory = null,
         deletionSystem = null,
         weComAuthServiceFactory = null,
@@ -90,6 +92,7 @@ class NativeLoginPage extends StatefulWidget {
   })  : destination = NativeLoginDestination.there,
         onCampusAccountChange = null,
         expectedCampusAccount = null,
+        allowGraduateDemo = false,
         authServiceFactory = null,
         deletionSystem = null,
         weComAuthServiceFactory = null,
@@ -105,6 +108,7 @@ class NativeLoginPage extends StatefulWidget {
   })  : destination = NativeLoginDestination.campusCard,
         onCampusAccountChange = null,
         expectedCampusAccount = null,
+        allowGraduateDemo = false,
         authServiceFactory = null,
         deletionSystem = null,
         weComAuthServiceFactory = null,
@@ -123,6 +127,7 @@ class NativeLoginPage extends StatefulWidget {
   })  : destination = NativeLoginDestination.dataDeletion,
         onCampusAccountChange = null,
         expectedCampusAccount = null,
+        allowGraduateDemo = false,
         weComAuthServiceFactory = null,
         loginForTesting = null,
         sendCodeForTesting = null,
@@ -133,6 +138,9 @@ class NativeLoginPage extends StatefulWidget {
   final String? description;
   final CampusAccountChange? onCampusAccountChange;
   final String? expectedCampusAccount;
+
+  /// 仅在调用方处理 [NativeLoginResult.demo] 时开放研究生演示入口。
+  final bool allowGraduateDemo;
   @visibleForTesting
   final AcademicNativeAuthService Function()? authServiceFactory;
   final StudentIdentityService? studentIdentityService;
@@ -714,7 +722,11 @@ class _NativeLoginPageState extends State<NativeLoginPage> {
     }
     // 演示模式完全离线，在发起网络请求之前处理。
     if (DemoSession.isDemoUsername(_studentId.text)) {
-      if (widget.destination != NativeLoginDestination.academic) {
+      final allowsDemo =
+          widget.destination == NativeLoginDestination.academic ||
+              (widget.destination == NativeLoginDestination.graduate &&
+                  widget.allowGraduateDemo);
+      if (!allowsDemo) {
         _showError('请从本科生系统登录页进入演示模式');
       } else if (DemoSession.matchesCredentials(
           _studentId.text, _password.text)) {

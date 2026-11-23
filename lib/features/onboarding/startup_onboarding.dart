@@ -475,6 +475,7 @@ class _StartupOnboardingState extends State<StartupOnboarding>
 
   Future<void> _openAcademicLogin(CampusSystem system) async {
     if (_openingCampusLogin) return;
+    final allowGraduateDemo = _showSystemChoices && widget.onDemoLogin != null;
     setState(() => _openingCampusLogin = true);
     try {
       final result = await Navigator.of(context).push<NativeLoginResult>(
@@ -485,6 +486,7 @@ class _StartupOnboardingState extends State<StartupOnboarding>
                   ? NativeLoginDestination.graduate
                   : NativeLoginDestination.academic,
               onCampusAccountChange: widget.controller.onCampusAccountChange,
+              allowGraduateDemo: allowGraduateDemo,
             ),
           ),
         ),
