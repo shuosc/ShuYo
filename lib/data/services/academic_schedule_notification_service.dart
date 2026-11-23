@@ -267,22 +267,27 @@ class AcademicScheduleNotificationService {
   Future<AcademicScheduleAlarmSettings> saveAlarmSettingsAndSync(
     AcademicScheduleAlarmSettings settings, {
     bool requestPermission = false,
-  }) async {
-    var next = settings;
-    if (next.enabled && requestPermission) {
-      final allowed =
-          await _alarmChannel.invokeMethod<bool>('requestAuthorization') ??
-              false;
-      if (!allowed) {
-        next = next.copyWith(enabled: false);
+  }) {
+    return _enqueueReminderSync(() async {
+      var next = settings;
+      if (next.enabled && requestPermission) {
+        final allowed =
+            await _alarmChannel.invokeMethod<bool>('requestAuthorization') ??
+                false;
+        if (!allowed) {
+          next = next.copyWith(enabled: false);
+        }
       }
-    }
-    await saveAlarmSettings(next);
-    await syncEarlyClassAlarms();
-    return loadAlarmSettings();
+      await saveAlarmSettings(next);
+      await _syncEarlyClassAlarms(DateTime.now());
+      return loadAlarmSettings();
+    });
   }
 
-  Future<int> syncEarlyClassAlarms({DateTime? now}) async {
+  Future<int> syncEarlyClassAlarms({DateTime? now}) =>
+      _enqueueReminderSync(() => _syncEarlyClassAlarms(now ?? DateTime.now()));
+
+  Future<int> _syncEarlyClassAlarms(DateTime now) async {
     if (!await supportsEarlyClassAlarms()) {
       return 0;
     }
@@ -292,14 +297,16 @@ class AcademicScheduleNotificationService {
         settings.enabled ? await _repository.loadCachedSchedule() : null;
     final alarms = <_EarlyClassAlarm>[];
     if (schedule != null && await _repository.primaryCalendarConfigured()) {
-      final weekState = await _repository.loadWeekState();
+      final weekState = await _repository.loadWeekState(
+        now: timezone.TZDateTime.from(now, timezone.local),
+      );
       alarms.addAll(
         _upcomingEarlyClassAlarms(
           schedule: schedule,
           weekState: weekState,
           leadMinutes: settings.leadMinutes,
           vibrationEnabled: settings.vibrationEnabled,
-          now: now ?? DateTime.now(),
+          now: now,
         ),
       );
     }
@@ -318,21 +325,17 @@ class AcademicScheduleNotificationService {
   }
 
   Future<int> syncScheduleReminders(
-      {bool requestPermission = false, DateTime? now}) async {
-    final operation = _reminderSync.then((_) => _syncScheduleReminders(
+      {bool requestPermission = false, DateTime? now}) {
+    return _enqueueReminderSync(() => _syncScheduleReminders(
           requestPermission: requestPermission,
           now: now,
         ));
-    // Serialize edits and settings changes; an older sync must not rearm a
-    // reminder after a newer request has cancelled it.
-    _reminderSync = operation.then<void>((_) {}, onError: (Object error) {});
-    return operation;
   }
 
   /// Remove the previous system's scheduled courses without changing the
   /// user's reminder settings or reading the previous system's timetable.
   Future<void> clearScheduledCourses() {
-    final operation = _reminderSync.then((_) async {
+    return _enqueueReminderSync(() async {
       if (await supportsEarlyClassAlarms()) {
         try {
           await _alarmChannel.invokeMethod<int>('sync', {
@@ -356,6 +359,12 @@ class AcademicScheduleNotificationService {
       await _ensureInitialized();
       await _cancelCourseReminders();
     });
+  }
+
+  Future<T> _enqueueReminderSync<T>(Future<T> Function() run) {
+    // Read the alarm settings inside the same queue that updates and applies
+    // them so an older snapshot cannot arrive at the native scheduler last.
+    final operation = _reminderSync.then((_) => run());
     _reminderSync = operation.then<void>((_) {}, onError: (Object error) {});
     return operation;
   }
@@ -364,7 +373,7 @@ class AcademicScheduleNotificationService {
       {required bool requestPermission, DateTime? now}) async {
     final instant = now ?? DateTime.now();
     try {
-      await syncEarlyClassAlarms();
+      await _syncEarlyClassAlarms(instant);
     } on PlatformException catch (error) {
       debugPrint(
           'Early class alarm sync failed: ${error.code}: ${error.message}');

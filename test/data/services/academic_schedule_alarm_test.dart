@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
@@ -132,6 +134,55 @@ void main() {
 
     expect(saved.enabled, isFalse);
     expect(saved.leadMinutes, 30);
+  });
+
+  test('reminder sync waits for in-flight alarm authorization and save',
+      () async {
+    final repository = AcademicScheduleRepository(
+      apiClient: _UnusedAcademicScheduleApiClient(),
+    );
+    await repository.saveCachedSchedule(_schedule);
+    await repository.setCurrentWeek(1, now: DateTime(2026, 8, 31));
+    final service = AcademicScheduleNotificationService(
+      repository: repository,
+      alarmChannel: channel,
+    );
+    final authStarted = Completer<void>();
+    final releaseAuth = Completer<void>();
+    final syncedEnabled = <bool>[];
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(channel, (call) async {
+      switch (call.method) {
+        case 'isAvailable':
+          return true;
+        case 'requestAuthorization':
+          authStarted.complete();
+          await releaseAuth.future;
+          return true;
+        case 'sync':
+          final arguments = call.arguments as Map<Object?, Object?>;
+          syncedEnabled.add(arguments['enabled']! as bool);
+          return (arguments['alarms'] as List<Object?>).length;
+      }
+      return null;
+    });
+
+    final save = service.saveAlarmSettingsAndSync(
+      const AcademicScheduleAlarmSettings(enabled: true, leadMinutes: 20),
+      requestPermission: true,
+    );
+    await authStarted.future;
+    final reminderSync = service.syncScheduleReminders(
+      now: DateTime.utc(2026, 8, 30, 21),
+    );
+    await pumpEventQueue();
+    expect(syncedEnabled, isEmpty);
+
+    releaseAuth.complete();
+    await Future.wait<Object?>([save, reminderSync]);
+
+    expect(syncedEnabled, [true, true]);
+    expect((await service.loadAlarmSettings()).enabled, isTrue);
   });
 
   testWidgets('iOS 26 schedule settings request AlarmKit permission when saved',
