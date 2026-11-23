@@ -774,6 +774,7 @@ void main() {
       expect(find.text('照片与图片'), findsOneWidget);
       await tester.scrollUntilVisible(find.text('开机后恢复提醒'), 200);
       expect(find.text('开机后恢复提醒'), findsOneWidget);
+      await _expectLocationPermissionLast(tester);
     } finally {
       debugDefaultTargetPlatformOverride = null;
     }
@@ -792,8 +793,7 @@ void main() {
       expect(find.text('闹钟'), findsOneWidget);
       expect(find.textContaining('AlarmKit'), findsOneWidget);
       expect(find.text('精确闹钟'), findsNothing);
-      await tester.drag(find.byType(ListView), const Offset(0, -800));
-      await tester.pumpAndSettle();
+      await _expectLocationPermissionLast(tester);
       expect(find.text('开机后恢复提醒'), findsNothing);
     } finally {
       debugDefaultTargetPlatformOverride = null;
@@ -844,6 +844,15 @@ void main() {
     expect(tester.widget<ListTile>(find.widgetWithText(ListTile, '退出登录')).onTap,
         isNull);
   });
+}
+
+Future<void> _expectLocationPermissionLast(WidgetTester tester) async {
+  await tester.scrollUntilVisible(find.textContaining('你可以在系统设置中'), 200);
+  expect(
+    find.descendant(of: find.byType(ListTile).last, matching: find.text('定位')),
+    findsOneWidget,
+  );
+  expect(find.text('用于在校园地图中显示你的当前位置，帮助查找附近地点。'), findsOneWidget);
 }
 
 Future<void> _pumpSettings(

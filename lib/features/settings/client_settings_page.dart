@@ -891,6 +891,11 @@ class _PermissionInfoPage extends StatelessWidget {
               title: '开机后恢复提醒',
               body: '用于设备重启后恢复已设置的课程提醒。',
             ),
+          const _PermissionItem(
+            icon: Icons.location_on_outlined,
+            title: '定位',
+            body: '用于在校园地图中显示你的当前位置，帮助查找附近地点。',
+          ),
           const SizedBox(height: 8),
           Text(
             '你可以在系统设置中随时查看或更改已授予的权限。拒绝某项权限只会影响对应功能。',
