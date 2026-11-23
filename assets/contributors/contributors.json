@@ -1,16 +1,16 @@
 {
   "schemaVersion": 1,
   "repository": "shuosc/ShuYo",
-  "generatedAt": "2026-10-29T12:09:20.967201Z",
+  "generatedAt": "2026-11-23T04:10:54.053703Z",
   "contributors": [
     {
       "login": "Lilin-1024",
       "name": "Lilin",
       "avatarUrl": "https://avatars.githubusercontent.com/u/179945128?v=4",
       "profileUrl": "https://github.com/Lilin-1024",
-      "commits": 377,
-      "additions": 170658,
-      "deletions": 93855,
+      "commits": 431,
+      "additions": 191185,
+      "deletions": 98786,
       "statisticsMessage": null
     },
     {
@@ -18,9 +18,9 @@
       "name": "Preca",
       "avatarUrl": "https://avatars.githubusercontent.com/u/185678356?v=4",
       "profileUrl": "https://github.com/preca-hoshino",
-      "commits": 77,
-      "additions": 29570,
-      "deletions": 8551,
+      "commits": 81,
+      "additions": 29710,
+      "deletions": 8580,
       "statisticsMessage": null
     },
     {
@@ -28,9 +28,19 @@
       "name": "Yuchen Zhang",
       "avatarUrl": "https://avatars.githubusercontent.com/u/134716838?v=4",
       "profileUrl": "https://github.com/DanielZhangyc",
-      "commits": 11,
-      "additions": 4537,
-      "deletions": 364,
+      "commits": 14,
+      "additions": 6378,
+      "deletions": 761,
+      "statisticsMessage": null
+    },
+    {
+      "login": "HANBIYUYU",
+      "name": "鱼",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/223879105?v=4",
+      "profileUrl": "https://github.com/HANBIYUYU",
+      "commits": 4,
+      "additions": 286,
+      "deletions": 50,
       "statisticsMessage": null
     },
     {
@@ -54,10 +64,10 @@
       "statisticsMessage": null
     },
     {
-      "login": "Sun-haonan233",
+      "login": "Eutopia-Nan",
       "name": null,
       "avatarUrl": "https://avatars.githubusercontent.com/u/301698711?v=4",
-      "profileUrl": "https://github.com/Sun-haonan233",
+      "profileUrl": "https://github.com/Eutopia-Nan",
       "commits": 1,
       "additions": 1078,
       "deletions": 3,
