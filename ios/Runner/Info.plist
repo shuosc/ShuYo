@@ -48,7 +48,7 @@
 		<string>wxwork</string>
 	</array>
 	<key>NSPhotoLibraryAddUsageDescription</key>
-	<string>保存 ShuYo 中的课表、公告等图片到系统相册。</string>
+	<string>将 ShuYo 中的图片保存到系统相册。</string>
 	<key>NSLocationWhenInUseUsageDescription</key>
 	<string>在校园地图中显示你的位置，帮助查找附近地点。</string>
 	<key>NSPhotoLibraryUsageDescription</key>
