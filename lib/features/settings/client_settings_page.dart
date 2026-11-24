@@ -139,14 +139,15 @@ class ClientSettingsPage extends StatelessWidget {
               ),
             ),
           ),
-          if (!isDemo && studentIdentityService != null)
+          if (isDemo || studentIdentityService != null)
             _SettingsRow(
               title: '隐私与数据',
               onTap: () => Navigator.of(context).push<void>(
                 shuyoRoute(
                   builder: (_) => PrivacyDataPage(
-                    identityService: studentIdentityService!,
+                    identityService: isDemo ? null : studentIdentityService,
                     campusSystem: campusSystem,
+                    isDemo: isDemo,
                   ),
                 ),
               ),
