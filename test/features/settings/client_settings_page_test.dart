@@ -811,6 +811,24 @@ void main() {
     expect(find.text('检查更新'), findsNothing);
   });
 
+  testWidgets('demo settings still shows privacy and data deletion guidance',
+      (tester) async {
+    await _pumpSettings(tester, isDemo: true);
+    expect(find.text('隐私与数据'), findsOneWidget);
+
+    await tester.tap(find.text('隐私与数据'));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('当前为演示模式'), findsOneWidget);
+
+    await tester.tap(find.text('删除 ShuYo 数据'));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('未在 ShuYo 服务器保存个人数据'), findsOneWidget);
+    final action = tester.widget<FilledButton>(
+      find.widgetWithText(FilledButton, '演示模式无云端数据'),
+    );
+    expect(action.onPressed, isNull);
+  });
+
   testWidgets('WebVPN session alone uses the full campus logout',
       (tester) async {
     var logoutCalls = 0;

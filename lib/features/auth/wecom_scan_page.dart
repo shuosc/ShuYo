@@ -196,7 +196,7 @@ class _WeComScanPageState extends State<WeComScanPage> {
         ),
       WeComScanStatus.confirmedPending => (
           '已扫码，请在手机企业微信确认',
-          Icons.android,
+          Icons.smartphone,
         ),
       WeComScanStatus.succeeded => (
           '已确认，正在登录…',

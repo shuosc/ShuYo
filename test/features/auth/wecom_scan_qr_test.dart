@@ -15,6 +15,7 @@ const _session = WeComQrSession(
 
 class _WaitingWeComAuthService extends WeComAuthService {
   final result = Completer<WeComScanResult>();
+  void Function(WeComScanStatus status)? statusListener;
 
   @override
   Future<WeComScanResult> waitForScan(
@@ -22,8 +23,10 @@ class _WaitingWeComAuthService extends WeComAuthService {
     Duration timeout = WeComAuthService.scanTimeout,
     void Function(WeComScanStatus status)? onStatusChanged,
     bool Function()? isCancelled,
-  }) =>
-      result.future;
+  }) {
+    statusListener = onStatusChanged;
+    return result.future;
+  }
 }
 
 void main() {
@@ -61,6 +64,12 @@ void main() {
     });
     expect(find.byType(Image), findsNothing);
     expect(tester.takeException(), isNull);
+
+    service.statusListener?.call(WeComScanStatus.confirmedPending);
+    await tester.pump();
+    expect(find.text('已扫码，请在手机企业微信确认'), findsOneWidget);
+    expect(find.byIcon(Icons.smartphone), findsOneWidget);
+    expect(find.byIcon(Icons.android), findsNothing);
 
     await tester.pumpWidget(const SizedBox());
     service.result.complete(const WeComScanResult.expired());
