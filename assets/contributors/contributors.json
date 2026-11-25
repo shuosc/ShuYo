@@ -1,16 +1,16 @@
 {
   "schemaVersion": 1,
   "repository": "shuosc/ShuYo",
-  "generatedAt": "2026-11-23T04:10:54.053703Z",
+  "generatedAt": "2026-11-25T16:00:37.711339Z",
   "contributors": [
     {
       "login": "Lilin-1024",
       "name": "Lilin",
       "avatarUrl": "https://avatars.githubusercontent.com/u/179945128?v=4",
       "profileUrl": "https://github.com/Lilin-1024",
-      "commits": 431,
-      "additions": 191185,
-      "deletions": 98786,
+      "commits": 434,
+      "additions": 191508,
+      "deletions": 98852,
       "statisticsMessage": null
     },
     {
@@ -28,9 +28,9 @@
       "name": "Yuchen Zhang",
       "avatarUrl": "https://avatars.githubusercontent.com/u/134716838?v=4",
       "profileUrl": "https://github.com/DanielZhangyc",
-      "commits": 14,
-      "additions": 6378,
-      "deletions": 761,
+      "commits": 19,
+      "additions": 6792,
+      "deletions": 808,
       "statisticsMessage": null
     },
     {
