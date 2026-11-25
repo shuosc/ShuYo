@@ -9,6 +9,7 @@ import 'package:shuyo/data/models/academic_schedule_collection.dart';
 import 'package:shuyo/data/repositories/academic_schedule_repository.dart';
 import 'package:shuyo/data/services/academic_account_store.dart';
 import 'package:shuyo/data/services/academic_schedule_api_client.dart';
+import 'package:shuyo/data/services/academic_schedule_collection_store.dart';
 
 const current = AcademicTermQuery(
     yearCode: '2026',
@@ -207,8 +208,7 @@ void main() {
     expect(await repo.loadPrimaryTermKey(), current.key);
   });
 
-  test(
-      'a default empty term records admission year without creating a timetable',
+  test('a default empty term is recorded and discovery selects a nonempty term',
       () async {
     api.responses[current.key] = scheduleFor(current, empty: true);
     api.responses[history.key] = scheduleFor(history);
@@ -218,8 +218,79 @@ void main() {
     expect((await repo.loadTermRecord(current.key))!.hasSavedSchedule, isFalse);
     await repo.discoverSchedules(now: now);
     expect((await repo.loadTermRecord(history.key))!.hasSavedSchedule, isTrue);
+    expect(api.calls.where((key) => key == current.key), hasLength(1));
+    expect(await repo.loadPrimaryTermKey(), history.key);
+    expect((await repo.loadCachedSchedule())!.term.yearCode, history.yearCode);
+    expect(await repo.primaryCalendarConfigured(), isFalse);
+  });
+
+  test('initial primary uses academic term order, not portal or fetch order',
+      () async {
+    const spring = AcademicTermQuery(yearCode: '2026', termCode: '16');
+    const previousSummer = AcademicTermQuery(yearCode: '2025', termCode: '32');
+    api.catalog = const AcademicTermCatalog(
+        currentTerm: current, terms: [current, spring, previousSummer]);
+    api.responses[spring.key] = scheduleFor(spring, untimedOnly: true);
+    api.responses[previousSummer.key] = scheduleFor(previousSummer);
+
+    await repo.discoverSchedules(now: now);
+
+    expect(api.calls, [current.key, spring.key, previousSummer.key]);
+    expect(await repo.loadPrimaryTermKey(), spring.key);
+    expect((await repo.loadCachedSchedule())!.untimedCourses, isNotEmpty);
+  });
+
+  test('all-empty discovery does not set a primary', () async {
+    api.responses[current.key] = scheduleFor(current, empty: true);
+
+    await repo.discoverSchedules(now: now);
+
+    expect((await repo.loadTermRecord(current.key))!.availability,
+        ScheduleAvailability.empty);
+    expect(repo.discoveryState.value.saved, 0);
     expect(await repo.loadPrimaryTermKey(), isNull);
     expect(await repo.loadCachedSchedule(), isNull);
+  });
+
+  test('a primary chosen during discovery is not replaced', () async {
+    api.responses[history.key] = scheduleFor(history);
+    final gate = Completer<void>();
+    api.gates[older.key] = gate;
+    final task = repo.discoverSchedules(now: now);
+    while (!api.calls.contains(older.key)) {
+      await Future<void>.delayed(Duration.zero);
+    }
+    await repo.setPrimaryTerm(history.key);
+    gate.complete();
+    await task;
+
+    expect((await repo.loadTermRecord(current.key))!.hasSavedSchedule, isTrue);
+    expect(await repo.loadPrimaryTermKey(), history.key);
+  });
+
+  test('completed discovery without a primary uses saved data on startup',
+      () async {
+    final store = AcademicScheduleCollectionStore();
+    await store.update('A', history.key, (_) async {
+      return AcademicScheduleRecord(
+        studentId: 'A',
+        yearCode: history.yearCode,
+        termCode: history.termCode,
+        academicYearName: history.academicYearName,
+        termName: history.termName,
+        availability: ScheduleAvailability.available,
+        schedule: scheduleFor(history),
+      );
+    });
+    for (final metadata in ['discoveryAttempt', 'discoveryCompleted']) {
+      await store.setMetadata('A', metadata, now.toIso8601String());
+    }
+
+    await repo.discoverSchedules(now: now);
+
+    expect(api.catalogs, 0);
+    expect(api.calls, isEmpty);
+    expect(await repo.loadPrimaryTermKey(), history.key);
   });
 
   test('startup does not repeat a completed discovery or download saved terms',
@@ -474,6 +545,7 @@ void main() {
         ScheduleAvailability.failed);
     expect((await repo.loadTermRecord(history.key))!.hasSavedSchedule, isTrue);
     expect(api.calls.where((key) => key == current.key), hasLength(1));
+    expect(await repo.loadPrimaryTermKey(), history.key);
   });
 
   test(
@@ -483,7 +555,6 @@ void main() {
     const last = AcademicTermQuery(yearCode: '2025', termCode: '32');
     api.catalog = const AcademicTermCatalog(
         currentTerm: current, terms: [current, history, older, next, last]);
-    await repo.refreshSchedule();
     for (final query in [history, older, next, last]) {
       api.errors[query.key] = const AcademicApiException('offline');
     }
@@ -492,6 +563,7 @@ void main() {
     expect(repo.discoveryState.value.failed, 3);
     expect(repo.discoveryState.value.running, isFalse);
     expect(await repo.loadTermRecord(last.key), isNull);
+    expect(await repo.loadPrimaryTermKey(), current.key);
   });
 
   test('edits made while an explicit refresh is in flight are preserved',

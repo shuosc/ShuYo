@@ -332,6 +332,34 @@ extension AcademicScheduleCollection on AcademicScheduleRepository {
     });
   }
 
+  Future<void> _initializeDiscoveredPrimary(String studentId, int generation,
+      {List<AcademicScheduleRecord>? records}) async {
+    if (await _collection.primaryKey(studentId) != null) return;
+    // The portal default and the order in which terms were checked need not
+    // reflect the newest term with courses.
+    const termOrder = {'3': 0, '12': 1, '16': 2, '32': 3};
+    final candidates = (records ?? await _collection.list(studentId))
+        .where((record) =>
+            record.availability == ScheduleAvailability.available &&
+            record.courseCount > 0)
+        .toList()
+      ..sort((a, b) {
+        final year = (int.tryParse(b.yearCode) ?? 0)
+            .compareTo(int.tryParse(a.yearCode) ?? 0);
+        return year != 0
+            ? year
+            : (termOrder[b.termCode] ?? -1)
+                .compareTo(termOrder[a.termCode] ?? -1);
+      });
+    if (candidates.isEmpty) return;
+    final newest = candidates.first;
+    await _checkAccount(studentId, generation);
+    await _collection.setPrimaryKey(studentId, newest.key, onlyIfAbsent: true);
+    if (await _collection.primaryKey(studentId) == newest.key) {
+      await _mirrorPrimary(newest);
+    }
+  }
+
   void pauseDiscovery() {
     _discoveryPaused = _discoveryTask != null || discoveryState.value.running;
     _discoveryGeneration++;
@@ -395,28 +423,34 @@ extension AcademicScheduleCollection on AcademicScheduleRepository {
       return;
     }
     if (generation != _discoveryGeneration) return;
-    if (!force) {
-      final last = DateTime.tryParse(
-          await _collection.metadata(studentId, 'discoveryAttempt') ?? '');
-      final completed = DateTime.tryParse(
-          await _collection.metadata(studentId, 'discoveryCompleted') ?? '');
-      if (last != null && now.difference(last) < const Duration(minutes: 5)) {
-        return;
-      }
-      if (completed != null &&
-          (last == null || !completed.isBefore(last)) &&
-          now.difference(completed) < const Duration(hours: 24)) {
-        return;
-      }
-    }
-    await _collection.setMetadata(
-        studentId, 'discoveryAttempt', now.toIso8601String());
-    discoveryState.value =
-        const ScheduleDiscoveryState(running: true, message: '正在读取学年和学期选项…');
     var checked = 0;
     var total = 0;
     var failures = 0;
     try {
+      if (!force) {
+        final last = DateTime.tryParse(
+            await _collection.metadata(studentId, 'discoveryAttempt') ?? '');
+        final completed = DateTime.tryParse(
+            await _collection.metadata(studentId, 'discoveryCompleted') ?? '');
+        if (completed != null &&
+            (last == null || !completed.isBefore(last)) &&
+            now.difference(completed) < const Duration(hours: 24)) {
+          // Older versions could complete discovery without setting a primary.
+          if (await _collection.primaryKey(studentId) == null) {
+            await loadCachedSchedule();
+            await _initializeDiscoveredPrimary(studentId, generation);
+          }
+          return;
+        }
+        if (last != null && now.difference(last) < const Duration(minutes: 5)) {
+          return;
+        }
+      }
+      await _checkAccount(studentId, generation);
+      await _collection.setMetadata(
+          studentId, 'discoveryAttempt', now.toIso8601String());
+      discoveryState.value =
+          const ScheduleDiscoveryState(running: true, message: '正在读取学年和学期选项…');
       await loadCachedSchedule(); // Migrate the old cache before discovery.
       await _checkAccount(studentId, generation);
       final catalog = await _client.fetchTermCatalog();
@@ -434,7 +468,7 @@ extension AcademicScheduleCollection on AcademicScheduleRepository {
           final schedule =
               await _fetchTerm(catalog.currentTerm, studentId: studentId);
           await _checkAccount(studentId, generation);
-          await _acceptRemote(schedule, makePrimary: true);
+          await _acceptRemote(schedule);
           admissionYear = int.tryParse(schedule.term.admissionYearCode);
         } on AcademicAuthException {
           rethrow;
@@ -496,8 +530,7 @@ extension AcademicScheduleCollection on AcademicScheduleRepository {
           try {
             final schedule = await _fetchTerm(query, studentId: studentId);
             await _checkAccount(studentId, generation);
-            await _acceptRemote(schedule,
-                makePrimary: query.key == catalog.currentTerm.key);
+            await _acceptRemote(schedule);
             consecutiveFailures = 0;
           } on AcademicAuthException {
             rethrow;
@@ -511,26 +544,30 @@ extension AcademicScheduleCollection on AcademicScheduleRepository {
         checked++;
         final updated = await _collection.load(studentId, query.key);
         if (updated?.hasSavedSchedule == true) savedKeys.add(query.key);
+        if (consecutiveFailures >= 3) break;
         discoveryState.value = ScheduleDiscoveryState(
-          running: consecutiveFailures < 3,
+          running: true,
           checked: checked,
           total: total,
           saved: savedKeys.length,
           failed: failures,
-          message: consecutiveFailures >= 3 ? '连续多个学期请求失败，查找已暂停，可稍后重试' : null,
         );
-        if (consecutiveFailures >= 3) return;
       }
       await _checkAccount(studentId, generation);
+      final updatedRecords = await _collection.list(studentId);
+      await _initializeDiscoveredPrimary(studentId, generation,
+          records: updatedRecords);
       if (failures == 0) {
         await _collection.setMetadata(
             studentId, 'discoveryCompleted', now.toIso8601String());
       }
-      final saved = (await _collection.list(studentId))
-          .where((record) => record.hasSavedSchedule)
-          .length;
       discoveryState.value = ScheduleDiscoveryState(
-          checked: checked, total: total, saved: saved, failed: failures);
+        checked: checked,
+        total: total,
+        saved: updatedRecords.where((record) => record.hasSavedSchedule).length,
+        failed: failures,
+        message: consecutiveFailures >= 3 ? '连续多个学期请求失败，查找已暂停，可稍后重试' : null,
+      );
     } on AcademicAuthException {
       discoveryState.value = ScheduleDiscoveryState(
         checked: checked,

@@ -1,8 +1,11 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/services.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
 import 'package:material_ui/material_ui.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:shuyo/app/app_shell.dart';
@@ -11,6 +14,7 @@ import 'package:shuyo/data/demo/demo_repositories.dart';
 import 'package:shuyo/data/models/academic_progress.dart';
 import 'package:shuyo/data/models/academic_ranking.dart';
 import 'package:shuyo/data/models/academic_schedule.dart';
+import 'package:shuyo/data/models/academic_schedule_collection.dart';
 import 'package:shuyo/data/repositories/academic_progress_repository.dart';
 import 'package:shuyo/data/repositories/academic_ranking_repository.dart';
 import 'package:shuyo/data/repositories/academic_schedule_repository.dart';
@@ -153,7 +157,7 @@ void main() {
 
   Widget shell({
     required StartupOnboardingController controller,
-    required _TrackingSchedule schedule,
+    required AcademicScheduleRepository schedule,
     required _TrackingProgress progress,
     required _TrackingRanking ranking,
     required _LocalAuth auth,
@@ -219,6 +223,111 @@ void main() {
       if (!firstLogin) {
         expect(find.text('登录已恢复，请再次点击刷新更新数据'), findsOneWidget);
       }
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pumpAndSettle();
+      controller.dispose();
+    });
+  }
+
+  for (final springEmpty in [true, false]) {
+    testWidgets(
+        'JWXT first login selects the latest nonempty term '
+        '(default spring empty: $springEmpty)', (tester) async {
+      final controller = StartupOnboardingController();
+      final progress = _TrackingProgress();
+      final ranking = _TrackingRanking();
+      final auth = _LocalAuth();
+      const seasons = {'3': '秋', '16': '春', '32': '夏'};
+      final expected = springEmpty ? '3' : '32';
+      final waitForSchedule = Completer<void>();
+      final requests = <String>[];
+      final schedule = AcademicScheduleRepository(
+        apiClient: AcademicScheduleApiClient(
+          authService: auth,
+          httpClient: MockClient((request) async {
+            if (request.method == 'GET') {
+              return http.Response(
+                  '''
+                <select id="xnm"><option value="2026" selected>2026-2027</option></select>
+                <select id="xqm">
+                  <option value="3">秋</option>
+                  <option value="16" selected>春</option>
+                  <option value="32">夏</option>
+                </select>
+              ''',
+                  200,
+                  headers: {'content-type': 'text/html;charset=UTF-8'});
+            }
+            final form = Uri.splitQueryString(request.body);
+            expect(form['xnm'], '2026');
+            final term = form['xqm']!;
+            requests.add(term);
+            if (term == expected) await waitForSchedule.future;
+            final hasCourses =
+                term == expected || (!springEmpty && term == '16');
+            return http.Response(
+              jsonEncode({
+                'xsxx': {
+                  'XH': 'DEMO0001',
+                  'XNM': '2026',
+                  'XQM': term,
+                  'XNMC': '2026-2027',
+                  'XQMMC': seasons[term],
+                  'NJDM_ID': '2025',
+                },
+                'kbList': [
+                  if (hasCourses)
+                    {
+                      'kcmc': '测试课程',
+                      'xqj': '1',
+                      'jcs': '1-2',
+                      'zcd': '1-16周',
+                    },
+                ],
+                'sjkList': [],
+              }),
+              200,
+              headers: {'content-type': 'application/json;charset=UTF-8'},
+            );
+          }),
+        ),
+      );
+      Widget app(int signal) => shell(
+          controller: controller,
+          schedule: schedule,
+          progress: progress,
+          ranking: ranking,
+          auth: auth,
+          signal: signal);
+
+      await tester.pumpWidget(app(0));
+      await tester.pumpAndSettle();
+      await AcademicAccountStore().saveStudentId('DEMO0001');
+      await tester.pumpWidget(app(1));
+      await tester.pumpAndSettle();
+      expect(await schedule.loadPrimaryTermKey(), isNull);
+      await tester.tap(find.text('日程').last);
+      await tester.pumpAndSettle();
+
+      waitForSchedule.complete();
+      await tester.pumpAndSettle();
+
+      expect(requests, unorderedEquals(seasons.keys),
+          reason: schedule.discoveryState.value.description);
+      final spring = await schedule.loadTermRecord('2026:16');
+      expect(
+          spring?.availability,
+          springEmpty
+              ? ScheduleAvailability.empty
+              : ScheduleAvailability.available);
+      expect(await schedule.loadPrimaryTermKey(), '2026:$expected');
+      expect(find.text('2026-2027 ${seasons[expected]}'), findsOneWidget);
+      await tester.tap(find.text('首页').last);
+      await tester.pumpAndSettle();
+      expect(find.text('请先设置课表开学日期'), findsOneWidget);
+      expect(progress.requests, 1);
+      expect(ranking.requests, 1);
+      expect(tester.takeException(), isNull);
       await tester.pumpWidget(const SizedBox.shrink());
       await tester.pumpAndSettle();
       controller.dispose();

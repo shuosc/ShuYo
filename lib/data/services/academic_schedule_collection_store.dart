@@ -100,9 +100,12 @@ class AcademicScheduleCollectionStore {
   Future<String?> primaryKey(String studentId) async =>
       (await _preferencesLoader()).getString('${_prefix(studentId)}primary');
 
-  Future<void> setPrimaryKey(String studentId, String key) async {
-    await (await _preferencesLoader())
-        .setString('${_prefix(studentId)}primary', key);
+  Future<void> setPrimaryKey(String studentId, String key,
+      {bool onlyIfAbsent = false}) async {
+    final prefs = await _preferencesLoader();
+    final storageKey = '${_prefix(studentId)}primary';
+    if (onlyIfAbsent && prefs.getString(storageKey) != null) return;
+    await prefs.setString(storageKey, key);
     changes.value++;
   }
 

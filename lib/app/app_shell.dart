@@ -913,7 +913,15 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
         }
         return;
       }
-      await _syncScheduleAfterAcademicLogin();
+      // With no primary, discovery compares all available terms before
+      // selecting one. A foreground default-term sync would preempt that choice.
+      final repository = _scheduleRepository;
+      if (!resumeScheduleDiscovery ||
+          !repository.supportsTermDiscovery ||
+          await repository.loadPrimaryTermKey() != null) {
+        if (!_currentCampusAccount(revision) || !_hasAcademicSession) return;
+        await _syncScheduleAfterAcademicLogin();
+      }
       if (!_currentCampusAccount(revision) || !_hasAcademicSession) return;
       if (resumeScheduleDiscovery) unawaited(_resumeScheduleDiscovery());
       unawaited(_syncAcademicExtrasAfterLogin());
@@ -1075,26 +1083,44 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
         _academicSessionExpired) {
       return;
     }
-    await _scheduleRepository.discoverSchedules();
-    if (!_currentCampusAccount(revision) ||
-        !_hasAcademicSession ||
-        !_scheduleRepository.discoveryState.value.requiresLogin) {
+    final repository = _scheduleRepository;
+    bool sessionIsCurrent() =>
+        _currentCampusAccount(revision) && !_isGraduate && _hasAcademicSession;
+    final previousPrimary = await repository.loadPrimaryTermKey();
+    if (!sessionIsCurrent()) return;
+    await repository.discoverSchedules();
+    if (sessionIsCurrent() && repository.discoveryState.value.requiresLogin) {
+      // Background discovery can refresh a live SSO session, but must not open
+      // a login page on its own or recursively start another discovery queue.
+      final recovered = await _recoverInvalidAcademicSession(
+        resumeScheduleDiscovery: false,
+        interactive: false,
+      );
+      final lifecycle = WidgetsBinding.instance.lifecycleState;
+      if (recovered &&
+          sessionIsCurrent() &&
+          (lifecycle == null || lifecycle == AppLifecycleState.resumed)) {
+        await repository.discoverSchedules(force: true);
+      }
+    }
+    if (previousPrimary != null ||
+        !sessionIsCurrent() ||
+        await repository.loadPrimaryTermKey() == null ||
+        !sessionIsCurrent()) {
       return;
     }
-    // Background discovery can refresh a live SSO session, but must not open
-    // a login page on its own or recursively start another discovery queue.
-    final recovered = await _recoverInvalidAcademicSession(
-      resumeScheduleDiscovery: false,
-      interactive: false,
-    );
-    final lifecycle = WidgetsBinding.instance.lifecycleState;
-    if (!recovered ||
-        !_currentCampusAccount(revision) ||
-        !_hasAcademicSession ||
-        (lifecycle != null && lifecycle != AppLifecycleState.resumed)) {
-      return;
+    setState(() {
+      _scheduleDataRevision++;
+      _resetViewedSchedule();
+    });
+    await _refreshScheduleSummaryQuietly();
+    if (sessionIsCurrent()) {
+      try {
+        await _scheduleNotificationService.syncScheduleReminders();
+      } on Object {
+        // Reminder availability must not block the newly imported timetable.
+      }
     }
-    await _scheduleRepository.discoverSchedules(force: true);
   }
 
   Future<void> _refreshScheduleSummaryQuietly() async {
