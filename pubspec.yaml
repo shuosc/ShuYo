@@ -1,7 +1,7 @@
 name: shuyo
 description: An unofficial, all-in-one utility app for SHU.
 publish_to: "none"
-version: 1.0.0+25
+version: 1.0.0+26
 
 environment:
   sdk: ">=3.3.0 <4.0.0"
