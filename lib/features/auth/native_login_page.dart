@@ -21,6 +21,7 @@ import '../../data/services/wecom_auth_service.dart';
 import '../../data/demo/demo_session.dart';
 import '../../shared/navigation/shuyo_route.dart';
 import '../../shared/theme/shuyo_theme.dart';
+import '../../shared/widgets/wecom_icon.dart';
 import 'wecom_scan_page.dart';
 
 enum NativeLoginDestination {
@@ -444,7 +445,7 @@ class _NativeLoginPageState extends State<NativeLoginPage> {
                                     strokeWidth: 2,
                                   ),
                                 )
-                              : const Icon(Icons.qr_code_scanner_outlined),
+                              : const WeComIcon(),
                           label: const Text('使用企业微信登录'),
                           style: OutlinedButton.styleFrom(
                             minimumSize: const Size.fromHeight(50),

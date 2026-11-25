@@ -9,6 +9,7 @@ import 'package:shuyo/data/services/academic_native_auth_service.dart';
 import 'package:shuyo/data/services/student_identity_service.dart';
 import 'package:shuyo/data/services/wecom_auth_service.dart';
 import 'package:shuyo/features/auth/native_login_page.dart';
+import 'package:shuyo/shared/widgets/wecom_icon.dart';
 
 /// 企微扫码登录 WebVPN 的产物：握手已在扫码页内完成，回调地址是落地页。
 final _webVpnLandingResult = WeComRedeemResult(
@@ -52,6 +53,7 @@ void main() {
     );
     await tester.pumpAndSettle();
     expect(find.text('使用企业微信登录'), findsOneWidget);
+    expect(find.byType(WeComIcon), findsOneWidget);
   });
 
   testWidgets('campus login handles the reserved demo account locally',
@@ -93,6 +95,7 @@ void main() {
     );
     await tester.pumpAndSettle();
     expect(find.text('使用企业微信登录'), findsOneWidget);
+    expect(find.byType(WeComIcon), findsOneWidget);
   });
 
   testWidgets('booking login names the feature being authorized',
@@ -103,6 +106,7 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('登录图书馆预约'), findsOneWidget);
     expect(find.text('使用企业微信登录'), findsOneWidget);
+    expect(find.byType(WeComIcon), findsOneWidget);
   });
 
   testWidgets('data deletion uses a separate school login without QR reuse',
@@ -277,6 +281,7 @@ void main() {
 
     expect(find.text('登录失败'), findsOneWidget);
     expect(find.text('使用企业微信登录'), findsOneWidget);
+    expect(find.byType(WeComIcon), findsOneWidget);
     expect(find.byType(CircularProgressIndicator), findsNothing);
     expect(tester.widget<FilledButton>(continueButton).onPressed, isNotNull);
     expect(tester.widget<OutlinedButton>(weComButton).onPressed, isNotNull);
