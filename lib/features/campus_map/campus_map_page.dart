@@ -327,6 +327,12 @@ class _CampusMapPageState extends State<CampusMapPage>
     _stopWatching();
     _searchFocus.unfocus();
     try {
+      final providers = await _navigation.availableProviders();
+      if (!mounted) return;
+      if (providers.isEmpty) {
+        _showMessage('未检测到已安装的地图应用');
+        return;
+      }
       final provider = await showModalBottomSheet<CampusMapNavigationProvider>(
         context: context,
         showDragHandle: true,
@@ -336,9 +342,7 @@ class _CampusMapPageState extends State<CampusMapPage>
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Text('导航至 ${place.name}',
-                  style: Theme.of(context).textTheme.titleMedium),
-              for (final provider in CampusMapNavigationProvider.values)
+              for (final provider in providers)
                 ListTile(
                   leading: const Icon(Icons.directions_walk),
                   title: Text(provider.label),

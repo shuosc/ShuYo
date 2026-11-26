@@ -136,30 +136,81 @@ void main() {
 
   test('navigation keeps GCJ02 coordinates and requests walking routes', () {
     final place = data.placeById['place_baoshan_building-a']!;
+    final coords =
+        '${place.navigation!.latitude},${place.navigation!.longitude}';
     for (final provider in CampusMapNavigationProvider.values) {
       for (final isIOS in [true, false]) {
         final uri =
             CampusMapNavigationService.nativeUri(provider, place, isIOS: isIOS);
-        expect(uri.toString(), contains(Uri.encodeComponent(place.name)));
         switch (provider) {
+          case CampusMapNavigationProvider.apple:
+            expect(uri.scheme, 'maps');
+            expect(uri.queryParameters['daddr'], coords);
+            expect(uri.queryParameters['dirflg'], 'w');
           case CampusMapNavigationProvider.amap:
+            expect(uri.toString(), contains(Uri.encodeComponent(place.name)));
             expect(uri.queryParameters['t'], '2');
             expect(uri.queryParameters['dev'], '0');
             expect(
                 uri.queryParameters['dlat'], '${place.navigation!.latitude}');
           case CampusMapNavigationProvider.baidu:
+            expect(uri.toString(), contains(Uri.encodeComponent(place.name)));
             expect(uri.queryParameters['mode'], 'walking');
             expect(uri.queryParameters['coord_type'], 'gcj02');
           case CampusMapNavigationProvider.tencent:
+            expect(uri.toString(), contains(Uri.encodeComponent(place.name)));
             expect(uri.queryParameters['type'], 'walk');
-            expect(uri.queryParameters['tocoord'],
-                '${place.navigation!.latitude},${place.navigation!.longitude}');
+            expect(uri.queryParameters['tocoord'], coords);
+          case CampusMapNavigationProvider.google:
+            if (isIOS) {
+              expect(uri.scheme, 'comgooglemaps');
+              expect(uri.queryParameters['daddr'], coords);
+              expect(uri.queryParameters['directionsmode'], 'walking');
+            } else {
+              expect(uri.scheme, 'google.navigation');
+              expect(uri.toString(), contains('q=$coords'));
+              expect(uri.toString(), contains('mode=w'));
+            }
         }
       }
       final web = CampusMapNavigationService.webUri(provider, place);
       expect(web.scheme, 'https');
       expect(web.toString(), isNot(contains('driv')));
     }
+  });
+
+  test('availableProviders returns only installed map apps per platform',
+      () async {
+    final iosService = CampusMapNavigationService(
+      isIOS: true,
+      canLaunch: (uri) async =>
+          uri.scheme == 'maps' || uri.scheme == 'comgooglemaps',
+    );
+    expect(
+      await iosService.availableProviders(),
+      [
+        CampusMapNavigationProvider.apple,
+        CampusMapNavigationProvider.google,
+      ],
+    );
+
+    final probedAndroidSchemes = <String>[];
+    final androidService = CampusMapNavigationService(
+      isIOS: false,
+      canLaunch: (uri) async {
+        probedAndroidSchemes.add(uri.scheme);
+        if (uri.scheme == 'qqmap') throw StateError('query failed');
+        return uri.scheme == 'androidamap' || uri.scheme == 'google.navigation';
+      },
+    );
+    expect(
+      await androidService.availableProviders(),
+      [
+        CampusMapNavigationProvider.amap,
+        CampusMapNavigationProvider.google,
+      ],
+    );
+    expect(probedAndroidSchemes, isNot(contains('maps')));
   });
 
   test('navigation tries the native app before the external web fallback',
