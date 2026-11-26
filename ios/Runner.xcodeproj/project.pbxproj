@@ -14,6 +14,7 @@
 		B20000000000000000000002 /* CourseActivityAttributes.swift in Widget Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000005 /* CourseActivityAttributes.swift */; };
 		B20000000000000000000003 /* CourseLiveActivity.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000006 /* CourseLiveActivity.swift */; };
 		B20000000000000000000004 /* CourseLiveActivityController.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000007 /* CourseLiveActivityController.swift */; };
+		D40000000000000000000001 /* CampusMapLocationController.swift in Sources */ = {isa = PBXBuildFile; fileRef = D40000000000000000000002 /* CampusMapLocationController.swift */; };
 		A10000000000000000000001 /* ScheduleWidget.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000003 /* ScheduleWidget.swift */; };
 		A10000000000000000000002 /* ScheduleWidget.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = A10000000000000000000006 /* ScheduleWidget.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		1498D2341E8E89220040F4C2 /* GeneratedPluginRegistrant.m in Sources */ = {isa = PBXBuildFile; fileRef = 1498D2331E8E89220040F4C2 /* GeneratedPluginRegistrant.m */; };
@@ -75,6 +76,7 @@
 		B20000000000000000000005 /* CourseActivityAttributes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CourseActivityAttributes.swift; sourceTree = "<group>"; };
 		B20000000000000000000006 /* CourseLiveActivity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CourseLiveActivity.swift; sourceTree = "<group>"; };
 		B20000000000000000000007 /* CourseLiveActivityController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CourseLiveActivityController.swift; sourceTree = "<group>"; };
+		D40000000000000000000002 /* CampusMapLocationController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CampusMapLocationController.swift; sourceTree = "<group>"; };
 		A10000000000000000000003 /* ScheduleWidget.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScheduleWidget.swift; sourceTree = "<group>"; };
 		A10000000000000000000004 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		A10000000000000000000005 /* ScheduleWidget.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = ScheduleWidget.entitlements; sourceTree = "<group>"; };
@@ -196,6 +198,7 @@
 				1498D2331E8E89220040F4C2 /* GeneratedPluginRegistrant.m */,
 				74858FAE1ED2DC5600515810 /* AppDelegate.swift */,
 				B20000000000000000000007 /* CourseLiveActivityController.swift */,
+				D40000000000000000000002 /* CampusMapLocationController.swift */,
 				7884E8672EC3CC0400C636F2 /* SceneDelegate.swift */,
 				74858FAD1ED2DC5600515810 /* Runner-Bridging-Header.h */,
 			);
@@ -401,6 +404,7 @@
 				74858FAF1ED2DC5600515810 /* AppDelegate.swift in Sources */,
 				B20000000000000000000001 /* CourseActivityAttributes.swift in Runner Sources */,
 				B20000000000000000000004 /* CourseLiveActivityController.swift in Sources */,
+				D40000000000000000000001 /* CampusMapLocationController.swift in Sources */,
 				1498D2341E8E89220040F4C2 /* GeneratedPluginRegistrant.m in Sources */,
 				7884E8682EC3CC0700C636F2 /* SceneDelegate.swift in Sources */,
 			);

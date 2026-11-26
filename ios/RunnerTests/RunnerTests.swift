@@ -1,4 +1,7 @@
+import CoreLocation
+import Flutter
 import Foundation
+import UIKit
 import XCTest
 @testable import Runner
 
@@ -219,5 +222,254 @@ class RunnerTests: XCTestCase {
     var ledger = CourseActivityReservationLedger(stored: [:], legacyReservations: [:])
     ledger.record("course", visibleFrom: visibleFrom, expiresAt: now.addingTimeInterval(300))
     return ledger
+  }
+}
+
+private final class FakeCampusMapLocationManager: CampusMapLocationManaging {
+  weak var locationDelegate: CampusMapLocationManagerDelegate?
+  var desiredAccuracy: CLLocationAccuracy = kCLLocationAccuracyBest
+  var distanceFilter: CLLocationDistance = kCLDistanceFilterNone
+  var activityType: CLActivityType = .other
+  var pausesLocationUpdatesAutomatically = false
+  var authorizationStatus: CLAuthorizationStatus
+  var location: CLLocation?
+
+  var requestWhenInUseCount = 0
+  var requestLocationCount = 0
+  var startUpdatingCount = 0
+  var stopUpdatingCount = 0
+
+  init(authorizationStatus: CLAuthorizationStatus = .authorizedWhenInUse) {
+    self.authorizationStatus = authorizationStatus
+  }
+
+  func requestWhenInUseAuthorization() {
+    requestWhenInUseCount += 1
+  }
+
+  func requestLocation() {
+    requestLocationCount += 1
+  }
+
+  func startUpdatingLocation() {
+    startUpdatingCount += 1
+  }
+
+  func stopUpdatingLocation() {
+    stopUpdatingCount += 1
+  }
+
+  func simulateAuthorizationChange(_ status: CLAuthorizationStatus) {
+    authorizationStatus = status
+    locationDelegate?.locationManagerDidChangeAuthorization(self)
+  }
+
+  func simulateLocations(_ locations: [CLLocation]) {
+    location = locations.last
+    locationDelegate?.locationManager(self, didUpdateLocations: locations)
+  }
+
+  func simulateError(_ error: Error) {
+    locationDelegate?.locationManager(self, didFailWithError: error)
+  }
+}
+
+final class CampusMapLocationControllerTests: XCTestCase {
+  private func makeLocation(
+    latitude: Double = 31.3162,
+    longitude: Double = 121.3915,
+    accuracy: CLLocationAccuracy = 10,
+    ageSeconds: TimeInterval = 0
+  ) -> CLLocation {
+    CLLocation(
+      coordinate: CLLocationCoordinate2D(latitude: latitude, longitude: longitude),
+      altitude: 0,
+      horizontalAccuracy: accuracy,
+      verticalAccuracy: 0,
+      timestamp: Date().addingTimeInterval(-ageSeconds)
+    )
+  }
+
+  func testAuthorizationInterruptedByBackgroundDoesNotDeadlockNextLocate() {
+    let center = NotificationCenter()
+    let single = FakeCampusMapLocationManager(authorizationStatus: .notDetermined)
+    let controller = CampusMapLocationController(
+      makeManager: { single },
+      checkServicesEnabled: { $0(true) },
+      isAppActive: { true },
+      locateTimeoutSeconds: 5,
+      activeRecheckDelaySeconds: 0,
+      notificationCenter: center
+    )
+
+    var firstResponse: Any?
+    controller.handle(FlutterMethodCall(methodName: "locate", arguments: nil)) { firstResponse = $0 }
+    XCTAssertEqual(single.requestWhenInUseCount, 1)
+    XCTAssertNil(firstResponse)
+
+    center.post(name: UIApplication.didEnterBackgroundNotification, object: nil)
+    XCTAssertEqual((firstResponse as? FlutterError)?.code, "location_unavailable")
+
+    var secondResponse: Any?
+    controller.handle(FlutterMethodCall(methodName: "locate", arguments: nil)) { secondResponse = $0 }
+    XCTAssertEqual(single.requestWhenInUseCount, 2)
+    XCTAssertNil(secondResponse)
+
+    single.simulateAuthorizationChange(.authorizedWhenInUse)
+    XCTAssertEqual(single.requestLocationCount, 1)
+    single.simulateLocations([makeLocation()])
+
+    let payload = secondResponse as? [String: Double]
+    XCTAssertEqual(payload?["latitude"], 31.3162)
+    XCTAssertEqual(payload?["longitude"], 121.3915)
+  }
+
+  func testLocateWhenInactiveAndNotDeterminedFailsWithoutWedgingAuthorization() {
+    var active = false
+    let single = FakeCampusMapLocationManager(authorizationStatus: .notDetermined)
+    let controller = CampusMapLocationController(
+      makeManager: { single },
+      checkServicesEnabled: { $0(true) },
+      isAppActive: { active },
+      locateTimeoutSeconds: 5,
+      activeRecheckDelaySeconds: 0,
+      notificationCenter: NotificationCenter()
+    )
+
+    var firstResponse: Any?
+    controller.handle(FlutterMethodCall(methodName: "locate", arguments: nil)) { firstResponse = $0 }
+    XCTAssertEqual((firstResponse as? FlutterError)?.code, "location_unavailable")
+    XCTAssertEqual(single.requestWhenInUseCount, 0)
+
+    active = true
+    var secondResponse: Any?
+    controller.handle(FlutterMethodCall(methodName: "locate", arguments: nil)) { secondResponse = $0 }
+    XCTAssertEqual(single.requestWhenInUseCount, 1)
+    single.simulateAuthorizationChange(.denied)
+    XCTAssertEqual((secondResponse as? FlutterError)?.code, "permission_denied")
+  }
+
+  func testLocateWhileWatchingRequestsSingleLocationWhenCachedFixIsStaleOrCoarse() {
+    let single = FakeCampusMapLocationManager(authorizationStatus: .authorizedWhenInUse)
+    let watch = FakeCampusMapLocationManager(authorizationStatus: .authorizedWhenInUse)
+    var created = 0
+    let controller = CampusMapLocationController(
+      makeManager: {
+        created += 1
+        return created == 1 ? watch : single
+      },
+      checkServicesEnabled: { $0(true) },
+      isAppActive: { true },
+      locateTimeoutSeconds: 5,
+      notificationCenter: NotificationCenter()
+    )
+
+    var events: [Any?] = []
+    _ = controller.onListen(withArguments: nil) { events.append($0) }
+    XCTAssertEqual(watch.startUpdatingCount, 1)
+    // Stale (>5s) and coarse (>65m) cached fix from stationary/reduced-accuracy watch.
+    watch.location = makeLocation(accuracy: 120, ageSeconds: 12)
+
+    var locateResponse: Any?
+    controller.handle(FlutterMethodCall(methodName: "locate", arguments: nil)) { locateResponse = $0 }
+    XCTAssertEqual(single.requestLocationCount, 1)
+
+    single.simulateLocations([makeLocation(latitude: 31.32, longitude: 121.40, accuracy: 15)])
+    let payload = locateResponse as? [String: Double]
+    XCTAssertEqual(payload?["latitude"], 31.32)
+    XCTAssertEqual(payload?["longitude"], 121.40)
+    XCTAssertTrue(events.isEmpty)
+  }
+
+  func testOnCancelDoesNotInterruptInFlightSingleLocate() {
+    let single = FakeCampusMapLocationManager(authorizationStatus: .authorizedWhenInUse)
+    let watch = FakeCampusMapLocationManager(authorizationStatus: .authorizedWhenInUse)
+    var created = 0
+    let controller = CampusMapLocationController(
+      makeManager: {
+        created += 1
+        return created == 1 ? single : watch
+      },
+      checkServicesEnabled: { $0(true) },
+      isAppActive: { true },
+      locateTimeoutSeconds: 5,
+      notificationCenter: NotificationCenter()
+    )
+
+    var locateResponse: Any?
+    controller.handle(FlutterMethodCall(methodName: "locate", arguments: nil)) { locateResponse = $0 }
+    XCTAssertEqual(single.requestLocationCount, 1)
+
+    _ = controller.onListen(withArguments: nil) { _ in }
+    _ = controller.onCancel(withArguments: nil)
+    XCTAssertEqual(watch.stopUpdatingCount, 1)
+    XCTAssertEqual(single.stopUpdatingCount, 0)
+
+    single.simulateLocations([makeLocation()])
+    XCTAssertEqual((locateResponse as? [String: Double])?["accuracy"], 10)
+  }
+
+  func testRestrictedAuthorizationMapsToPermissionDeniedWithoutSettingsAction() {
+    let single = FakeCampusMapLocationManager(authorizationStatus: .restricted)
+    let controller = CampusMapLocationController(
+      makeManager: { single },
+      checkServicesEnabled: { $0(true) },
+      isAppActive: { true },
+      notificationCenter: NotificationCenter()
+    )
+
+    var response: Any?
+    controller.handle(FlutterMethodCall(methodName: "locate", arguments: nil)) { response = $0 }
+    XCTAssertEqual((response as? FlutterError)?.code, "permission_denied")
+  }
+
+  func testInvalidLocationsAreIgnoredAndTimeoutCompletesCleanly() {
+    let single = FakeCampusMapLocationManager(authorizationStatus: .authorizedWhenInUse)
+    let controller = CampusMapLocationController(
+      makeManager: { single },
+      checkServicesEnabled: { $0(true) },
+      isAppActive: { true },
+      locateTimeoutSeconds: 0.05,
+      notificationCenter: NotificationCenter()
+    )
+
+    let expectation = expectation(description: "locate timeout")
+    var response: Any?
+    controller.handle(FlutterMethodCall(methodName: "locate", arguments: nil)) {
+      response = $0
+      expectation.fulfill()
+    }
+
+    single.simulateLocations([
+      makeLocation(accuracy: -1),
+      makeLocation(accuracy: .infinity),
+      makeLocation(latitude: 999, longitude: 999, accuracy: 10),
+    ])
+    XCTAssertNil(response)
+
+    wait(for: [expectation], timeout: 1)
+    XCTAssertEqual((response as? FlutterError)?.code, "timeout")
+    XCTAssertEqual(single.stopUpdatingCount, 1)
+  }
+
+  func testWatchIgnoresTransientLocationUnknownAndStopsOnDenied() {
+    let watch = FakeCampusMapLocationManager(authorizationStatus: .authorizedWhenInUse)
+    let controller = CampusMapLocationController(
+      makeManager: { watch },
+      checkServicesEnabled: { $0(true) },
+      isAppActive: { true },
+      notificationCenter: NotificationCenter()
+    )
+
+    var events: [Any?] = []
+    _ = controller.onListen(withArguments: nil) { events.append($0) }
+    watch.simulateError(CLError(.locationUnknown))
+    XCTAssertTrue(events.isEmpty)
+    XCTAssertEqual(watch.stopUpdatingCount, 0)
+
+    watch.authorizationStatus = .denied
+    watch.simulateError(CLError(.denied))
+    XCTAssertEqual((events.last as? FlutterError)?.code, "permission_denied_forever")
+    XCTAssertEqual(watch.stopUpdatingCount, 1)
   }
 }
