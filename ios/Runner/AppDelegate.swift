@@ -13,6 +13,7 @@ import UserNotifications
   private var pendingImageSaveResult: FlutterResult?
   private var earlyClassAlarmSyncTask: Task<Void, Never>?
   private let courseLiveActivityController = CourseLiveActivityController()
+  private let campusMapLocationController = CampusMapLocationController()
 
   private static let earlyClassAlarmIdsKey = "early_class_alarm_ids"
   private static let earlyClassAlarmTitlesKey = "early_class_alarm_titles"
@@ -50,6 +51,16 @@ import UserNotifications
     ).setMethodCallHandler { [weak self] call, result in
       self?.courseLiveActivityController.handle(call, result: result)
     }
+    FlutterMethodChannel(
+      name: "work.shuyo.app/campus_map_location",
+      binaryMessenger: engineBridge.applicationRegistrar.messenger()
+    ).setMethodCallHandler { [weak self] call, result in
+      self?.campusMapLocationController.handle(call, result: result)
+    }
+    FlutterEventChannel(
+      name: "work.shuyo.app/campus_map_location/events",
+      binaryMessenger: engineBridge.applicationRegistrar.messenger()
+    ).setStreamHandler(campusMapLocationController)
   }
 
   private func handleEarlyClassAlarm(call: FlutterMethodCall, result: @escaping FlutterResult) {

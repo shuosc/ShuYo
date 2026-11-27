@@ -29,7 +29,8 @@ dependencies:
   url_launcher: ^6.3.2
   flutter_secure_storage: ^11.2.0
   flutter_markdown_plus: ^1.0.12
-  geolocator: ^14.1.1
+  geolocator_android: ^5.1.1+1
+  geolocator_platform_interface: ^4.4.0
   webview_flutter: ^4.14.1
   webview_flutter_android: ^4.14.1
 

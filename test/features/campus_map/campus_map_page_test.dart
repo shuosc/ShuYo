@@ -39,10 +39,12 @@ class _LocationService extends CampusMapLocationService {
   int calls = 0;
   int watches = 0;
   CampusMapLocationException? failure;
+  Completer<CampusMapLocation>? pendingLocate;
 
   @override
   Future<CampusMapLocation> locate() async {
     calls++;
+    if (pendingLocate != null) return pendingLocate!.future;
     if (failure != null) throw failure!;
     return const CampusMapLocation(
         longitude: 121.3915, latitude: 31.3162, accuracy: 15);
@@ -707,6 +709,42 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.widgetWithText(ListTile, 'A 楼'), findsWidgets);
     expect(location.controller.hasListener, isFalse);
+  });
+
+  testWidgets(
+      'location result and error arriving during inactive permission sheet are not dropped',
+      (tester) async {
+    location.pendingLocate = Completer<CampusMapLocation>();
+    await tester.pumpWidget(MaterialApp(home: map(initialCampus: '嘉定校区')));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byTooltip('定位到我的位置'));
+    await tester.pump();
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+    location.pendingLocate!.complete(
+      const CampusMapLocation(
+          longitude: 121.3915, latitude: 31.3162, accuracy: 15),
+    );
+    await tester.pumpAndSettle();
+    expect(canvas.campus.id, 'baoshan');
+    expect(canvas.location, isNotNull);
+    expect(location.controller.hasListener, isFalse);
+
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    await tester.pumpAndSettle();
+    expect(location.controller.hasListener, isTrue);
+
+    location.pendingLocate = Completer<CampusMapLocation>();
+    await tester.tap(find.byTooltip('定位到我的位置'));
+    await tester.pump();
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+    location.pendingLocate!.completeError(
+      const CampusMapLocationException('未获得定位权限，仍可浏览和搜索地图'),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('未获得定位权限，仍可浏览和搜索地图'), findsOneWidget);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    await tester.pumpAndSettle();
   });
 
   testWidgets('back closes search and keyboard together before leaving the map',

@@ -67,6 +67,13 @@ class _CampusMapPageState extends State<CampusMapPage>
       WidgetsBinding.instance.lifecycleState == null ||
       WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed;
 
+  bool get _notBackgrounded {
+    final state = WidgetsBinding.instance.lifecycleState;
+    return state == null ||
+        state == AppLifecycleState.resumed ||
+        state == AppLifecycleState.inactive;
+  }
+
   @override
   void initState() {
     super.initState();
@@ -195,7 +202,7 @@ class _CampusMapPageState extends State<CampusMapPage>
     setState(() => _locating = true);
     try {
       final position = await widget.locationService.locate();
-      if (!mounted || request != _locationRequest || !_foreground) return;
+      if (!mounted || request != _locationRequest || !_notBackgrounded) return;
       final campus = _data!.campusAt(position.coordinate);
       setState(() {
         _location = position;
@@ -219,11 +226,11 @@ class _CampusMapPageState extends State<CampusMapPage>
         _showMessage('当前定位精度较低，位置仅供参考');
       }
     } on CampusMapLocationException catch (error) {
-      if (mounted && request == _locationRequest && _foreground) {
+      if (mounted && request == _locationRequest && _notBackgrounded) {
         _showLocationError(error);
       }
     } catch (_) {
-      if (mounted && request == _locationRequest && _foreground) {
+      if (mounted && request == _locationRequest && _notBackgrounded) {
         _showMessage('定位失败，请检查定位权限后重试');
       }
     } finally {
