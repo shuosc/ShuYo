@@ -46,6 +46,11 @@
 	<key>LSApplicationQueriesSchemes</key>
 	<array>
 		<string>wxwork</string>
+		<string>maps</string>
+		<string>iosamap</string>
+		<string>baidumap</string>
+		<string>qqmap</string>
+		<string>comgooglemaps</string>
 	</array>
 	<key>NSPhotoLibraryAddUsageDescription</key>
 	<string>将 ShuYo 中的图片保存到系统相册。</string>
