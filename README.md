@@ -48,3 +48,10 @@ flutter build apk --debug --target-platform android-arm64
 ```
 
 开发约定：[LLM 使用政策](LLM_POLICY.md)
+
+## 致谢
+
+- 本项目的部分设计参考了 [旦挞校园助手](https://github.com/DanXi-Dev/DanXi)。
+- 校园地图功能的地图与地点数据来自上海大学交通社 [SHUMap](https://github.com/northleftt/SHUMap)。
+
+感谢以上项目作者与维护者的付出。
