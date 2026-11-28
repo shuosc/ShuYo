@@ -204,6 +204,7 @@ class _AcademicSchedulePageState extends State<AcademicSchedulePage> {
             icon: const Icon(Icons.edit_calendar_outlined),
           ),
           IconButton(
+            key: const ValueKey('schedule-more-menu'),
             tooltip: '更多',
             onPressed: _openMoreMenu,
             icon: const Icon(Icons.more_horiz),
@@ -651,16 +652,19 @@ class _AcademicSchedulePageState extends State<AcademicSchedulePage> {
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
+        key: const ValueKey('schedule-refresh-dialog'),
         title: Text(widget.isDemo ? '恢复演示课表' : '确认更新'),
         content: Text(
           widget.isDemo ? '恢复演示课程与开学日期。' : '点击确定后将更新正在查看的这一学期，不会保留本地编辑。',
         ),
         actions: [
           TextButton(
+            key: const ValueKey('schedule-refresh-cancel'),
             onPressed: () => Navigator.of(context).pop(false),
             child: const Text('取消'),
           ),
           FilledButton(
+            key: const ValueKey('schedule-refresh-confirm'),
             onPressed: () => Navigator.of(context).pop(true),
             child: const Text('确定'),
           ),
@@ -677,6 +681,7 @@ class _AcademicSchedulePageState extends State<AcademicSchedulePage> {
       context: context,
       builder: (context) {
         return AlertDialog(
+          key: const ValueKey('schedule-random-colors-dialog'),
           title: const Text('确认随机颜色'),
           content: Text(
             '点击确定后将为当前课表所有课程随机分配颜色。'
@@ -685,10 +690,12 @@ class _AcademicSchedulePageState extends State<AcademicSchedulePage> {
           ),
           actions: [
             TextButton(
+              key: const ValueKey('schedule-random-colors-cancel'),
               onPressed: () => Navigator.of(context).pop(false),
               child: const Text('取消'),
             ),
             FilledButton(
+              key: const ValueKey('schedule-random-colors-confirm'),
               onPressed: () => Navigator.of(context).pop(true),
               child: const Text('确定'),
             ),
@@ -1498,6 +1505,7 @@ class _AcademicSchedulePageState extends State<AcademicSchedulePage> {
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   ListTile(
+                    key: const ValueKey('schedule-refresh-action'),
                     leading: _refreshing
                         ? const SizedBox(
                             width: 22,
@@ -1518,6 +1526,7 @@ class _AcademicSchedulePageState extends State<AcademicSchedulePage> {
                           .pop(_ScheduleMenuAction.manageSchedules),
                     ),
                   ListTile(
+                    key: const ValueKey('schedule-random-colors-action'),
                     leading: const Icon(Icons.shuffle_outlined),
                     title: const Text('随机颜色'),
                     enabled: _schedule?.sessions.isNotEmpty ?? false,

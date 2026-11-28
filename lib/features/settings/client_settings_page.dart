@@ -141,6 +141,7 @@ class ClientSettingsPage extends StatelessWidget {
           ),
           if (isDemo || studentIdentityService != null)
             _SettingsRow(
+              key: const ValueKey('settings-privacy-data'),
               title: '隐私与数据',
               onTap: () => Navigator.of(context).push<void>(
                 shuyoRoute(
@@ -2155,6 +2156,7 @@ class _NotificationSettingsPageState extends State<_NotificationSettingsPage> {
 
 class _SettingsRow extends StatelessWidget {
   const _SettingsRow({
+    super.key,
     required this.title,
     required this.onTap,
   });

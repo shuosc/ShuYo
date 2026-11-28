@@ -154,6 +154,7 @@ class LibraryBookingPage extends StatefulWidget {
     this.onWebVpnRecoveryRequired,
     this.initialCampus = ClassroomCampus.defaultName,
     this.schoolClock,
+    this.bookingCache,
   })  : _accountService = accountService,
         _demoSession = null;
 
@@ -171,6 +172,7 @@ class LibraryBookingPage extends StatefulWidget {
         onCampusLoginRequired = null,
         onCampusSessionExpired = null,
         onWebVpnRecoveryRequired = null,
+        bookingCache = null,
         schoolClock = session.schoolClock;
 
   final UnifiedAccountService? _accountService;
@@ -187,6 +189,9 @@ class LibraryBookingPage extends StatefulWidget {
 
   /// Shanghai wall-clock time, overridable for deterministic time selection.
   final DateTime Function()? schoolClock;
+
+  /// Local history storage; defaults to the shared preferences cache.
+  final LibraryBookingCache? bookingCache;
 
   @override
   State<LibraryBookingPage> createState() => _LibraryBookingPageState();
@@ -326,7 +331,8 @@ class _LibraryBookingPageState extends State<LibraryBookingPage> {
   Map<String, dynamic>? _areaData;
   List<Map<String, dynamic>> _rooms = [];
   final List<Map<String, dynamic>> _recent = [];
-  final LibraryBookingCache _bookingCache = LibraryBookingCache();
+  late final LibraryBookingCache _bookingCache =
+      widget.bookingCache ?? LibraryBookingCache();
   List<Map<String, dynamic>> _homeRecent = [];
   List<Map<String, dynamic>> _cachedHistory = [];
   final Set<String> _homeRefreshedRoomTypes = {};

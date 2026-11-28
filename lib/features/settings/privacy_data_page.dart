@@ -30,6 +30,7 @@ class PrivacyDataPage extends StatelessWidget {
               ),
             ),
             ListTile(
+              key: const ValueKey('privacy-delete-data'),
               title: Text(
                 '删除 ShuYo 数据',
                 style: TextStyle(color: Theme.of(context).colorScheme.error),
@@ -143,6 +144,7 @@ class _DeleteShuYoDataPageState extends State<_DeleteShuYoDataPage> {
               ),
               const SizedBox(height: 20),
               FilledButton(
+                key: const ValueKey('privacy-verify-deletion'),
                 onPressed: widget.isDemo || _busy ? null : _verifyAndDelete,
                 child: _busy
                     ? const SizedBox.square(

@@ -23,6 +23,8 @@ import 'package:shuyo/features/auth/native_login_page.dart';
 import 'package:shuyo/features/home/academic_schedule_page.dart';
 import 'package:shuyo/features/onboarding/startup_onboarding.dart';
 
+import '../support/academic_schedule_actions.dart';
+
 final _callback =
     Uri.parse('https://jwxt.shu.edu.cn/jwglxt/ticketlogin?ticket=fake');
 final _jwxt = Uri.parse('https://jwxt.shu.edu.cn/jwglxt/');
@@ -189,15 +191,6 @@ void main() {
     await tester.pumpAndSettle();
   }
 
-  Future<void> refresh(WidgetTester tester) async {
-    await tester.tap(find.byTooltip('更多'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('更新课表'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('确定'));
-    await tester.pumpAndSettle();
-  }
-
   Future<void> closeShell(WidgetTester tester) async {
     await tester.pumpWidget(const SizedBox.shrink());
     await tester.pumpAndSettle();
@@ -208,7 +201,7 @@ void main() {
       (tester) async {
     await showShell(tester);
     final pageState = tester.state(find.byType(AcademicSchedulePage));
-    await refresh(tester);
+    await refreshSchedule(tester);
     expect(account.authorizations, 1);
     expect(native.exchanges, 1);
     expect(native.publications, 1);
@@ -267,7 +260,7 @@ void main() {
     account.pending = pending;
     await showShell(tester);
     expect(account.authorizations, 1);
-    await refresh(tester);
+    await refreshSchedule(tester);
     expect(account.authorizations, 1);
     pending.complete(_callback);
     await tester.pumpAndSettle();
