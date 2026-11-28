@@ -70,10 +70,7 @@ void main() {
       home: LibraryBookingPage(
         accountService: UnifiedAccountService(),
         thereClientFactory: (_) => client,
-        schoolClock: () {
-          final day = DateTime.parse(ThereBookingClient.schoolDay());
-          return DateTime.utc(day.year, day.month, day.day, 8);
-        },
+        schoolClock: bookingSchoolTime,
       ),
     ));
     await pumpBookingPage(tester);
@@ -132,7 +129,7 @@ void main() {
           thereClientFactory: (venue) =>
               clients.putIfAbsent(venue, () => CampusLoadingClient(venue)),
           chaoxingClient: library,
-          schoolClock: schoolMorning,
+          schoolClock: bookingSchoolTime,
         ),
       ));
       final campusBar = find.byType(TabBar);
@@ -166,7 +163,7 @@ void main() {
       accountService: UnifiedAccountService(),
       thereClientFactory: (_) => client,
       chaoxingClient: library,
-      schoolClock: schoolMorning,
+      schoolClock: bookingSchoolTime,
     )));
     for (var attempt = 0; attempt < 5 && client.started < 2; attempt++) {
       await tester.pump(const Duration(milliseconds: 20));
@@ -256,7 +253,7 @@ void main() {
               : VenueScopedBookingClient(venue),
         ),
         chaoxingClient: library,
-        schoolClock: schoolMorning,
+        schoolClock: bookingSchoolTime,
       ),
     ));
     await pumpBookingPage(tester);
@@ -281,7 +278,7 @@ void main() {
         home: LibraryBookingPage(
       accountService: UnifiedAccountService(),
       thereClientFactory: (_) => client,
-      schoolClock: schoolMorning,
+      schoolClock: bookingSchoolTime,
     )));
     await pumpBookingPage(tester);
     expect(find.text('仅查看座位情况'), findsNothing);
@@ -301,7 +298,7 @@ void main() {
         home: LibraryBookingPage(
       accountService: UnifiedAccountService(),
       thereClientFactory: (_) => client,
-      schoolClock: schoolMorning,
+      schoolClock: bookingSchoolTime,
     )));
     await pumpBookingPage(tester);
     await tester
@@ -328,7 +325,7 @@ void main() {
         home: LibraryBookingPage(
       accountService: UnifiedAccountService(),
       thereClientFactory: (_) => client,
-      schoolClock: schoolMorning,
+      schoolClock: bookingSchoolTime,
     )));
     await pumpBookingPage(tester);
     final rulesText = tester.widget<Text>(find.text('使用规则'));
@@ -439,7 +436,7 @@ void main() {
         home: LibraryBookingPage(
       accountService: UnifiedAccountService(),
       thereClientFactory: (_) => client,
-      schoolClock: schoolMorning,
+      schoolClock: bookingSchoolTime,
     )));
     await pumpBookingPage(tester);
     await tester
@@ -472,7 +469,7 @@ void main() {
         home: LibraryBookingPage(
       accountService: UnifiedAccountService(),
       thereClientFactory: (_) => client,
-      schoolClock: schoolMorning,
+      schoolClock: bookingSchoolTime,
     )));
     await tester
         .tap(find.text(LibraryBookingNames.venue(BookingVenue.library)));

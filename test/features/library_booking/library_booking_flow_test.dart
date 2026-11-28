@@ -91,13 +91,13 @@ class _DeferredDayRulesClient extends _ManyDaysClient {
       String areaId, String begin, String end) async {
     if (begin == end) {
       ruleDays.add(begin);
-      if (begin == ThereBookingClient.schoolDay()) {
+      if (begin == bookingDay()) {
         await todayRules.future;
       } else {
         await nextDayRules.future;
       }
       final data = await super.area(areaId, begin, end);
-      if (begin != ThereBookingClient.schoolDay()) {
+      if (begin != bookingDay()) {
         (data['bookingTimes'] as Map)['startHour'] = 12;
       }
       return data;
@@ -189,7 +189,7 @@ void main() {
         accountService: UnifiedAccountService(),
         thereClientFactory: (_) => client,
         chaoxingClient: library,
-        schoolClock: schoolMorning,
+        schoolClock: bookingSchoolTime,
       ),
     ));
     await pumpBookingPage(tester);
@@ -253,10 +253,10 @@ void main() {
     await tester.tap(find.text('2楼东侧'));
     await pumpBookingPage(tester);
     expect(find.text('宝山校区 - 本部图书馆 - 2楼东侧'), findsOneWidget);
-    expect(find.textContaining(ThereBookingClient.schoolDay()), findsNothing);
+    expect(find.textContaining(bookingDay()), findsNothing);
     await tester.tap(find.byKey(ValueKey(bookingDayKey())));
     await pumpBookingPage(tester);
-    expect(find.textContaining(ThereBookingClient.schoolDay()), findsNothing);
+    expect(find.textContaining(bookingDay()), findsNothing);
     expect(find.textContaining('最长 8 小时'), findsOneWidget);
     expect(client.detailAreaCalls, 1);
     expect(_boxValue(tester, 'start-hour'), '08');
@@ -278,7 +278,7 @@ void main() {
     expect(
         tester.widget<Scaffold>(find.byType(Scaffold).last).bottomNavigationBar,
         isA<Container>());
-    expect(find.textContaining(ThereBookingClient.schoolDay()), findsNothing);
+    expect(find.textContaining(bookingDay()), findsNothing);
     await tester.tap(find.text('2E015'));
     await pumpBookingPage(tester);
     final seatTile = find.byTooltip('2E015，可选');
@@ -351,7 +351,7 @@ void main() {
         home: LibraryBookingPage(
       accountService: UnifiedAccountService(),
       thereClientFactory: (_) => client,
-      schoolClock: schoolMorning,
+      schoolClock: bookingSchoolTime,
     )));
     await pumpBookingPage(tester);
     expect(find.textContaining('2E015'), findsNothing);
@@ -366,7 +366,7 @@ void main() {
         home: LibraryBookingPage(
       accountService: UnifiedAccountService(),
       thereClientFactory: (_) => client,
-      schoolClock: schoolMorning,
+      schoolClock: bookingSchoolTime,
     )));
     await tester
         .tap(find.text(LibraryBookingNames.venue(BookingVenue.library)));
@@ -438,7 +438,7 @@ void main() {
       home: LibraryBookingPage(
         accountService: UnifiedAccountService(),
         thereClientFactory: (_) => client,
-        schoolClock: schoolMorning,
+        schoolClock: bookingSchoolTime,
       ),
     ));
     await tester
@@ -510,7 +510,7 @@ void main() {
         home: LibraryBookingPage(
           accountService: UnifiedAccountService(),
           thereClientFactory: (_) => client,
-          schoolClock: schoolMorning,
+          schoolClock: bookingSchoolTime,
         ),
       ));
       await tester
@@ -545,7 +545,7 @@ void main() {
         home: LibraryBookingPage(
       accountService: UnifiedAccountService(),
       thereClientFactory: (_) => client,
-      schoolClock: schoolMorning,
+      schoolClock: bookingSchoolTime,
     )));
     await tester
         .tap(find.text(LibraryBookingNames.venue(BookingVenue.library)));
@@ -618,7 +618,7 @@ void main() {
         home: LibraryBookingPage(
       accountService: UnifiedAccountService(),
       thereClientFactory: (_) => client,
-      schoolClock: schoolMorning,
+      schoolClock: bookingSchoolTime,
     )));
     await tester
         .tap(find.text(LibraryBookingNames.venue(BookingVenue.library)));
@@ -636,14 +636,13 @@ void main() {
 
   testWidgets('today has no default after the final valid start',
       (tester) async {
-    final day = DateTime.parse(ThereBookingClient.schoolDay());
     final client = FakeThereBookingClient();
     addTearDown(client.dispose);
     await tester.pumpWidget(MaterialApp(
         home: LibraryBookingPage(
       accountService: UnifiedAccountService(),
       thereClientFactory: (_) => client,
-      schoolClock: () => DateTime.utc(day.year, day.month, day.day, 21, 46),
+      schoolClock: () => bookingSchoolTime(21, 46),
     )));
     await tester
         .tap(find.text(LibraryBookingNames.venue(BookingVenue.library)));
@@ -662,14 +661,13 @@ void main() {
   });
 
   testWidgets('today starts at the next selectable time', (tester) async {
-    final day = DateTime.parse(ThereBookingClient.schoolDay());
     final client = FakeThereBookingClient();
     addTearDown(client.dispose);
     await tester.pumpWidget(MaterialApp(
         home: LibraryBookingPage(
       accountService: UnifiedAccountService(),
       thereClientFactory: (_) => client,
-      schoolClock: () => DateTime.utc(day.year, day.month, day.day, 8, 7),
+      schoolClock: () => bookingSchoolTime(8, 7),
     )));
     await tester
         .tap(find.text(LibraryBookingNames.venue(BookingVenue.library)));
@@ -705,7 +703,7 @@ void main() {
         home: LibraryBookingPage(
       accountService: UnifiedAccountService(),
       thereClientFactory: (_) => client,
-      schoolClock: schoolMorning,
+      schoolClock: bookingSchoolTime,
     )));
     await tester
         .tap(find.text(LibraryBookingNames.venue(BookingVenue.library)));
@@ -751,14 +749,13 @@ void main() {
 
   testWidgets('early morning uses 08:00 and seat count follows the time',
       (tester) async {
-    final day = DateTime.parse(ThereBookingClient.schoolDay());
     final client = _ChangingSeatsClient();
     addTearDown(client.dispose);
     await tester.pumpWidget(MaterialApp(
         home: LibraryBookingPage(
       accountService: UnifiedAccountService(),
       thereClientFactory: (_) => client,
-      schoolClock: () => DateTime.utc(day.year, day.month, day.day, 2, 7),
+      schoolClock: () => bookingSchoolTime(2, 7),
     )));
     await tester
         .tap(find.text(LibraryBookingNames.venue(BookingVenue.library)));
@@ -826,7 +823,7 @@ void main() {
       home: LibraryBookingPage(
         accountService: UnifiedAccountService(),
         thereClientFactory: (_) => client,
-        schoolClock: schoolMorning,
+        schoolClock: bookingSchoolTime,
       ),
     ));
     await tester
@@ -910,7 +907,7 @@ void main() {
       home: LibraryBookingPage(
         accountService: UnifiedAccountService(),
         thereClientFactory: (_) => client,
-        schoolClock: schoolMorning,
+        schoolClock: bookingSchoolTime,
       ),
     ));
     await pumpBookingPage(tester);

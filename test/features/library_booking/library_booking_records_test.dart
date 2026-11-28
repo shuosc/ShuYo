@@ -107,17 +107,13 @@ class _InUseChaoxingBookingClient extends EmptyChaoxingBookingClient {
   @override
   Future<Map<String, dynamic>> home() async {
     homeCalls++;
-    final day = DateTime.parse(ThereBookingClient.schoolDay());
-    int schoolTime(int hour) => DateTime.utc(day.year, day.month, day.day, hour)
-        .subtract(const Duration(hours: 8))
-        .millisecondsSinceEpoch;
     Map<String, dynamic> reserve(int id, int status) => {
           'id': id,
           'secondLevelName': '钱伟长图书馆',
           'thirdLevelName': '阅览室',
           'seatNum': '00$id',
-          'startTime': schoolTime(6),
-          'endTime': schoolTime(7),
+          'startTime': bookingTimestamp(6),
+          'endTime': bookingTimestamp(7),
           'status': status,
         };
     return {
@@ -152,10 +148,6 @@ class _SignableChaoxingBookingClient extends EmptyChaoxingBookingClient {
   @override
   Future<Map<String, dynamic>> home() async {
     homeCalls++;
-    final day = DateTime.parse(ThereBookingClient.schoolDay());
-    final start = DateTime.utc(day.year, day.month, day.day, 10)
-        .subtract(const Duration(hours: 8))
-        .millisecondsSinceEpoch;
     return {
       'seatConfig': {'preSignDuration': 20, 'signDuration': 20},
       'curReserves': [
@@ -165,8 +157,8 @@ class _SignableChaoxingBookingClient extends EmptyChaoxingBookingClient {
           'thirdLevelName': '阅览室',
           'seatNum': '001',
           'roomId': 6508,
-          'startTime': start,
-          'endTime': start + const Duration(hours: 1).inMilliseconds,
+          'startTime': bookingTimestamp(10),
+          'endTime': bookingTimestamp(11),
           'status': signedId == null ? 0 : 1,
         },
       ],
@@ -290,7 +282,7 @@ void main() {
           accountService: UnifiedAccountService(),
           thereClientFactory: (_) => client,
           chaoxingClient: library,
-          schoolClock: schoolMorning,
+          schoolClock: bookingSchoolTime,
         ),
       ));
       await tester.pump(const Duration(milliseconds: 20));
@@ -302,7 +294,7 @@ void main() {
         client.records.completeError(const ThereBookingException(
             ThereFailureKind.unreachable, '预约暂时无法加载'));
       } else {
-        final day = ThereBookingClient.schoolDay();
+        final day = bookingDay();
         client.records.complete([
           for (var index = 0; index < scenario.count; index++)
             {
@@ -388,7 +380,7 @@ void main() {
           accountService: UnifiedAccountService(),
           thereClientFactory: (_) => client,
           chaoxingClient: library,
-          schoolClock: schoolMorning,
+          schoolClock: bookingSchoolTime,
         ));
     await tester.pumpWidget(page());
     await pumpBookingPage(tester);
@@ -449,8 +441,7 @@ void main() {
     final library = _SignableChaoxingBookingClient();
     addTearDown(there.dispose);
     addTearDown(library.dispose);
-    final day = DateTime.parse(ThereBookingClient.schoolDay());
-    var now = DateTime.utc(day.year, day.month, day.day, 9, 39);
+    var now = bookingSchoolTime(9, 39);
     await tester.pumpWidget(MaterialApp(
       home: LibraryBookingPage(
         accountService: UnifiedAccountService(),
@@ -472,7 +463,7 @@ void main() {
     await tester.tapAt(const Offset(20, 20));
     await pumpBookingPage(tester);
 
-    now = DateTime.utc(day.year, day.month, day.day, 9, 40);
+    now = bookingSchoolTime(9, 40);
     await tester.tap(find.byKey(bookingKey));
     await pumpBookingPage(tester);
     expect(find.text('取消预约'), findsOneWidget);
@@ -500,7 +491,7 @@ void main() {
         accountService: UnifiedAccountService(),
         thereClientFactory: (_) => there,
         chaoxingClient: library,
-        schoolClock: schoolMorning,
+        schoolClock: bookingSchoolTime,
       ),
     ));
     await pumpBookingPage(tester);
@@ -538,13 +529,12 @@ void main() {
     final library = _InUseChaoxingBookingClient();
     addTearDown(there.dispose);
     addTearDown(library.dispose);
-    final day = DateTime.parse(ThereBookingClient.schoolDay());
     await tester.pumpWidget(MaterialApp(
       home: LibraryBookingPage(
         accountService: UnifiedAccountService(),
         thereClientFactory: (_) => there,
         chaoxingClient: library,
-        schoolClock: () => DateTime.utc(day.year, day.month, day.day, 5),
+        schoolClock: () => bookingSchoolTime(5),
       ),
     ));
     await pumpBookingPage(tester);
@@ -574,7 +564,7 @@ void main() {
       accountService: UnifiedAccountService(),
       thereClientFactory: (_) => there,
       chaoxingClient: library,
-      schoolClock: schoolMorning,
+      schoolClock: bookingSchoolTime,
     )));
     await pumpBookingPage(tester);
     await tester.scrollUntilVisible(find.text('查看历史预约'), 180,
@@ -597,7 +587,7 @@ void main() {
       accountService: UnifiedAccountService(),
       thereClientFactory: (_) => client,
       chaoxingClient: library,
-      schoolClock: schoolMorning,
+      schoolClock: bookingSchoolTime,
     )));
     await pumpBookingPage(tester);
     expect(
@@ -623,8 +613,7 @@ void main() {
     );
     expect(find.byIcon(Icons.chevron_right), findsNWidgets(2));
     expect(find.byType(FadeTransition), findsWidgets);
-    final nextDay = DateTime.parse(ThereBookingClient.schoolDay())
-        .add(const Duration(days: 1));
+    final nextDay = DateTime.parse(bookingDay()).add(const Duration(days: 1));
     final day = '${nextDay.year}-${nextDay.month.toString().padLeft(2, '0')}-'
         '${nextDay.day.toString().padLeft(2, '0')}';
     expect(find.textContaining('$day 08:30'), findsNothing);
@@ -691,7 +680,7 @@ void main() {
       accountService: UnifiedAccountService(),
       thereClientFactory: (_) => client,
       chaoxingClient: library,
-      schoolClock: schoolMorning,
+      schoolClock: bookingSchoolTime,
     )));
     await pumpBookingPage(tester);
     final homeTile = find.byKey(const ValueKey<String>('home:CLOSE_ONLY'));
@@ -724,7 +713,7 @@ void main() {
     testWidgets(
         'shows cached bookings and actions while refreshing $ability data',
         (tester) async {
-      final day = ThereBookingClient.schoolDay();
+      final day = bookingDay();
       SharedPreferences.setMockInitialValues({
         AcademicAccountStore.studentIdKey: 'STUDENT_1',
       });
@@ -748,7 +737,7 @@ void main() {
         accountService: UnifiedAccountService(),
         thereClientFactory: (_) => client,
         chaoxingClient: library,
-        schoolClock: () => DateTime.parse('${day}T09:00:00'),
+        schoolClock: () => bookingSchoolTime(9),
       )));
       final tile = find.byKey(const ValueKey<String>('home:CACHED_ACTION'));
       for (var attempt = 0; attempt < 5 && tile.evaluate().isEmpty; attempt++) {
@@ -794,7 +783,7 @@ void main() {
       testWidgets(
           '${fromHistory ? 'history' : 'home'} $action refreshes only its venue after the write',
           (tester) async {
-        final day = ThereBookingClient.schoolDay();
+        final day = bookingDay();
         final clients = {
           for (final venue
               in BookingVenue.values.where((venue) => !venue.isChaoxing))
@@ -812,7 +801,7 @@ void main() {
           accountService: UnifiedAccountService(),
           thereClientFactory: (venue) => clients[venue]!,
           chaoxingClient: library,
-          schoolClock: () => DateTime.parse('${day}T09:00:00'),
+          schoolClock: () => bookingSchoolTime(9),
         )));
         await pumpBookingPage(tester);
         expect(find.byKey(const ValueKey<String>('home:HOME_ACTION')),
@@ -896,7 +885,7 @@ void main() {
       accountService: UnifiedAccountService(),
       thereClientFactory: (_) => client,
       chaoxingClient: library,
-      schoolClock: schoolMorning,
+      schoolClock: bookingSchoolTime,
     )));
     await pumpBookingPage(tester);
     await tester.scrollUntilVisible(find.text('查看历史预约'), 180,
@@ -925,7 +914,7 @@ void main() {
       accountService: UnifiedAccountService(),
       thereClientFactory: (_) => client,
       chaoxingClient: library,
-      schoolClock: schoolMorning,
+      schoolClock: bookingSchoolTime,
     )));
     await pumpBookingPage(tester);
     await tester.scrollUntilVisible(find.text('查看历史预约'), 180,

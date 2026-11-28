@@ -9,18 +9,19 @@ Future<void> pumpBookingPage(WidgetTester tester) async {
   await tester.pumpAndSettle();
 }
 
-DateTime schoolMorning() {
-  final day = DateTime.parse(ThereBookingClient.schoolDay());
-  return DateTime.utc(day.year, day.month, day.day, 8);
-}
+// Use a fixed Shanghai wall clock, independent of the test runner's time zone.
+DateTime bookingSchoolTime([int hour = 8, int minute = 0]) =>
+    DateTime.utc(2026, 11, 10, hour, minute);
 
-String bookingDay([int offset = 0]) {
-  final today = DateTime.parse(ThereBookingClient.schoolDay());
-  final date = today.add(Duration(days: offset));
-  return '${date.year.toString().padLeft(4, '0')}-'
-      '${date.month.toString().padLeft(2, '0')}-'
-      '${date.day.toString().padLeft(2, '0')}';
-}
+// The Chaoxing fixtures send an instant rather than a Shanghai clock reading.
+int bookingTimestamp(int hour) => bookingSchoolTime(hour)
+    .subtract(const Duration(hours: 8))
+    .millisecondsSinceEpoch;
+
+String bookingDay([int offset = 0]) => bookingSchoolTime()
+    .add(Duration(days: offset))
+    .toIso8601String()
+    .substring(0, 10);
 
 String bookingDayKey([int offset = 0]) => 'booking-day-${bookingDay(offset)}';
 
@@ -239,10 +240,7 @@ class CampusLoadingClient extends VenueScopedBookingClient {
 class HistoryClient extends FakeThereBookingClient {
   @override
   Future<List<Map<String, dynamic>>> recent() async {
-    final tomorrow = DateTime.parse(ThereBookingClient.schoolDay())
-        .add(const Duration(days: 1));
-    final day =
-        '${tomorrow.year}-${tomorrow.month.toString().padLeft(2, '0')}-${tomorrow.day.toString().padLeft(2, '0')}';
+    final day = bookingDay(1);
     return [
       {
         'id': 'UPCOMING',

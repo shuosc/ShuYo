@@ -87,7 +87,7 @@ class _GatedBookingClient extends FakeThereBookingClient {
   Future<List<Map<String, dynamic>>> recent() async {
     recentStarted = true;
     await gate.future;
-    final day = ThereBookingClient.schoolDay();
+    final day = bookingDay();
     return [
       {
         'id': 'LIB-LATE',
@@ -108,7 +108,6 @@ class _GatedChaoxingBookingClient extends EmptyChaoxingBookingClient {
   Future<Map<String, dynamic>> home() async {
     homeStarted = true;
     await gate.future;
-    final day = DateTime.parse(ThereBookingClient.schoolDay());
     return {
       'curReserves': [
         {
@@ -117,14 +116,23 @@ class _GatedChaoxingBookingClient extends EmptyChaoxingBookingClient {
           'thirdLevelName': '阅览室',
           'seatNum': 'CX-EARLY',
           'status': '0',
-          'startTime': DateTime.utc(day.year, day.month, day.day, 1)
-              .millisecondsSinceEpoch,
-          'endTime': DateTime.utc(day.year, day.month, day.day, 2)
-              .millisecondsSinceEpoch,
+          'startTime': bookingTimestamp(9),
+          'endTime': bookingTimestamp(10),
         },
       ],
       'nearReserves': <Map<String, dynamic>>[],
     };
+  }
+}
+
+class _RecordingBookingCache extends LibraryBookingCache {
+  final writtenRoomTypes = <String>[];
+
+  @override
+  Future<void> mergeVenue(String studentId, String roomType,
+      List<Map<String, dynamic>> recent) async {
+    await super.mergeVenue(studentId, roomType, recent);
+    writtenRoomTypes.add(roomType);
   }
 }
 
@@ -138,7 +146,6 @@ void main() {
     });
     final there = _GatewayRecoveryClient();
     final library = FakeLibraryRoomsClient();
-    final day = DateTime.parse(ThereBookingClient.schoolDay());
     var webVpnRecoveries = 0;
     addTearDown(there.dispose);
     addTearDown(library.dispose);
@@ -149,7 +156,7 @@ void main() {
         thereClientFactory: (_) => there,
         chaoxingClient: library,
         useWebVpn: true,
-        schoolClock: () => DateTime.utc(day.year, day.month, day.day, 8),
+        schoolClock: bookingSchoolTime,
         onWebVpnSessionRequired: () async {
           webVpnRecoveries++;
           there.gatewayLoginRequired = false;
@@ -192,7 +199,7 @@ void main() {
     late DateTime now;
 
     setUp(() {
-      now = schoolMorning();
+      now = bookingSchoolTime();
       clients = {
         for (final venue
             in BookingVenue.values.where((venue) => !venue.isChaoxing))
@@ -481,7 +488,7 @@ void main() {
                     ? gate
                     : null)),
         chaoxingClient: library,
-        schoolClock: schoolMorning,
+        schoolClock: bookingSchoolTime,
       ),
     ));
     await pumpBookingPage(tester);
@@ -537,7 +544,7 @@ void main() {
         accountService: UnifiedAccountService(),
         thereClientFactory: (_) => client,
         chaoxingClient: library,
-        schoolClock: schoolMorning,
+        schoolClock: bookingSchoolTime,
       ),
     ));
     await tester.pump(const Duration(milliseconds: 20));
@@ -565,7 +572,7 @@ void main() {
         thereClientFactory: (venue) =>
             clients.putIfAbsent(venue, () => VenueScopedBookingClient(venue)),
         chaoxingClient: library,
-        schoolClock: schoolMorning,
+        schoolClock: bookingSchoolTime,
       ),
     ));
     await pumpBookingPage(tester);
@@ -603,7 +610,7 @@ void main() {
         accountService: UnifiedAccountService(),
         thereClientFactory: (_) => client,
         chaoxingClient: library,
-        schoolClock: schoolMorning,
+        schoolClock: bookingSchoolTime,
       ),
     ));
     await pumpBookingPage(tester);
@@ -639,7 +646,7 @@ void main() {
               : VenueScopedBookingClient(venue),
         ),
         chaoxingClient: library,
-        schoolClock: schoolMorning,
+        schoolClock: bookingSchoolTime,
       ),
     ));
     await pumpBookingPage(tester);
@@ -669,7 +676,7 @@ void main() {
       home: LibraryBookingPage(
         accountService: UnifiedAccountService(),
         thereClientFactory: (_) => client,
-        schoolClock: schoolMorning,
+        schoolClock: bookingSchoolTime,
       ),
     ));
     await pumpBookingPage(tester);
@@ -689,7 +696,7 @@ void main() {
       home: LibraryBookingPage(
         accountService: UnifiedAccountService(),
         thereClientFactory: (_) => client,
-        schoolClock: schoolMorning,
+        schoolClock: bookingSchoolTime,
         useWebVpn: true,
         onWebVpnSessionRequired: () async {
           recoveries++;
@@ -718,7 +725,7 @@ void main() {
       accountService: UnifiedAccountService(),
       thereClientFactory: (_) => client,
       chaoxingClient: library,
-      schoolClock: schoolMorning,
+      schoolClock: bookingSchoolTime,
     )));
     await pumpBookingPage(tester);
     await tester.scrollUntilVisible(find.text('查看历史预约'), 180,
@@ -760,7 +767,7 @@ void main() {
         accountService: UnifiedAccountService(),
         thereClientFactory: (_) => there,
         chaoxingClient: library,
-        schoolClock: schoolMorning,
+        schoolClock: bookingSchoolTime,
       ),
     ));
     await pumpBookingPage(tester);
@@ -783,6 +790,7 @@ void main() {
     });
     final there = HistoryClient();
     final library = EmptyChaoxingBookingClient();
+    final cache = _RecordingBookingCache();
     addTearDown(there.dispose);
     addTearDown(library.dispose);
     await tester.pumpWidget(MaterialApp(
@@ -790,16 +798,14 @@ void main() {
         accountService: UnifiedAccountService(),
         thereClientFactory: (_) => there,
         chaoxingClient: library,
-        schoolClock: schoolMorning,
+        bookingCache: cache,
+        schoolClock: bookingSchoolTime,
       ),
     ));
     await pumpBookingPage(tester);
 
-    var saved = await LibraryBookingCache().load('STUDENT_1');
-    for (var attempt = 0; attempt < 10 && saved.length < 2; attempt++) {
-      await Future<void>.delayed(const Duration(milliseconds: 10));
-      saved = await LibraryBookingCache().load('STUDENT_1');
-    }
+    expect(cache.writtenRoomTypes, contains(BookingVenue.studySpace.roomType));
+    final saved = await cache.load('STUDENT_1');
     expect(saved.map((item) => item['id']),
         containsAll(['UPCOMING', 'FINISHED_EARLY']));
     expect(
@@ -817,7 +823,7 @@ void main() {
       accountService: UnifiedAccountService(),
       thereClientFactory: (_) => there,
       chaoxingClient: library,
-      schoolClock: schoolMorning,
+      schoolClock: bookingSchoolTime,
     )));
     await pumpBookingPage(tester);
     await tester.scrollUntilVisible(find.text('查看历史预约'), 180,
@@ -842,7 +848,7 @@ void main() {
       accountService: UnifiedAccountService(),
       thereClientFactory: (_) => there,
       chaoxingClient: library,
-      schoolClock: schoolMorning,
+      schoolClock: bookingSchoolTime,
     )));
     await tester.pump(const Duration(milliseconds: 300));
     await tester.scrollUntilVisible(find.text('查看历史预约'), 180,
