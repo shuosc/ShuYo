@@ -6,6 +6,8 @@ import 'package:shuyo/shared/theme/custom_background.dart';
 import 'package:shuyo/shared/theme/shuyo_theme.dart';
 
 void main() {
+  final loginEntry = find.byKey(const ValueKey('home-login-entry'));
+
   TextStyle renderedTextStyle(WidgetTester tester, String text) {
     final finder = find.text(text);
     return DefaultTextStyle.of(tester.element(finder))
@@ -122,6 +124,7 @@ void main() {
           String? displayName,
           ShuYoThemeSpec? theme,
           HomeLayout? layout,
+          VoidCallback? onLogin,
           VoidCallback? onOpenCampusCard,
           VoidCallback? onRefreshCampusCard,
           bool isCampusCardRefreshing = false,
@@ -141,7 +144,7 @@ void main() {
             academicSessionExpired: expired,
             academicDisplayName: loggedIn ? displayName ?? '25120000' : null,
             isAcademicLoginCompleting: syncing,
-            onLogin: () {},
+            onLogin: onLogin ?? () {},
             onOpenAcademicSystem: () {},
             onOpenAnnouncements: () {},
             onOpenEmptyClassroom: () {},
@@ -242,10 +245,14 @@ void main() {
     expect(greetingSubtitleStyle.fontWeight, moduleSubtitleStyle.fontWeight);
   });
 
-  testWidgets('logged out home invites campus login', (tester) async {
-    await tester.pumpWidget(page(loggedIn: false));
-    expect(find.text('立即登录'), findsOneWidget);
-    expect(find.text('登录后同步个人数据'), findsOneWidget);
+  testWidgets('tapping the logged-out account starts campus login',
+      (tester) async {
+    var loginCalls = 0;
+    await tester.pumpWidget(page(loggedIn: false, onLogin: () => loginCalls++));
+
+    expect(loginCalls, 0);
+    await tester.tap(loginEntry);
+    expect(loginCalls, 1);
   });
 
   for (final themeId in [
@@ -323,7 +330,13 @@ void main() {
         ),
       ),
     ));
-    expect(find.text('立即登录'), findsOneWidget);
+    expect(
+      find.descendant(
+        of: find.byKey(const ValueKey('home-account')),
+        matching: loginEntry,
+      ),
+      findsOneWidget,
+    );
     expect(find.text('今日课程'), findsNothing);
     expect(find.text('今日概览'), findsNothing);
     expect(find.byType(Card), findsOneWidget);
@@ -392,11 +405,26 @@ void main() {
   });
 
   testWidgets(
-      'expired account invites reauthentication while retaining local data',
+      'expired account can reauthenticate without hiding the course preview',
       (tester) async {
-    await tester.pumpWidget(page(loggedIn: false, expired: true));
-    expect(find.text('重新登录'), findsOneWidget);
-    expect(find.text('登录已失效，请重新登录'), findsOneWidget);
-    expect(find.text('今日无课'), findsOneWidget);
+    const coursePreview = '高等数学 · A101';
+    var loginCalls = 0;
+    await tester.pumpWidget(page(
+      loggedIn: false,
+      expired: true,
+      onLogin: () => loginCalls++,
+      todayCourseContent: coursePreview,
+    ));
+    expect(
+      find.descendant(
+        of: loginEntry,
+        matching: find.textContaining(RegExp(r'失效|过期')),
+      ),
+      findsOneWidget,
+    );
+    expect(find.text(coursePreview), findsOneWidget);
+
+    await tester.tap(loginEntry);
+    expect(loginCalls, 1);
   });
 }

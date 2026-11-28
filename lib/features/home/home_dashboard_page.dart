@@ -63,6 +63,7 @@ class HomeDashboardPage extends StatelessWidget {
         customBackground ? Colors.transparent : colors.background;
     final groups = (layout ?? HomeLayout.defaults()).visibleGroups;
     final accountRow = _HomeRow(
+      key: const ValueKey('home-login-entry'),
       title: isAcademicLoginCompleting
           ? '正在完成校园登录'
           : hasAcademicAccount
