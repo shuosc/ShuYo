@@ -12,6 +12,8 @@ import 'package:shuyo/data/services/academic_schedule_widget_service.dart';
 import 'package:shuyo/features/home/academic_schedule_page.dart';
 import 'package:shuyo/shared/theme/custom_background.dart';
 
+import '../../support/academic_schedule_actions.dart';
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
@@ -161,8 +163,7 @@ void main() {
     await tester.tapAt(const Offset(8, 8));
     await tester.pumpAndSettle();
 
-    await tester.tap(find.byTooltip('更多'));
-    await tester.pumpAndSettle();
+    await openScheduleMenu(tester);
     await tester.tap(find.text('显示设置'));
     await tester.pumpAndSettle();
     expect(find.text('显示非本周课程'), findsOneWidget);
@@ -230,8 +231,7 @@ void main() {
       greaterThan(tester.getTopLeft(find.text('本周课程')).dy),
     );
 
-    await tester.tap(find.byTooltip('更多'));
-    await tester.pumpAndSettle();
+    await openScheduleMenu(tester);
     await tester.tap(find.text('显示设置'));
     await tester.pumpAndSettle();
     expect(find.text('显示学分'), findsOneWidget);

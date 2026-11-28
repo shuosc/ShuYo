@@ -14,6 +14,8 @@ import 'package:shuyo/data/services/academic_schedule_widget_service.dart';
 import 'package:shuyo/features/home/academic_schedule_page.dart';
 import 'package:shuyo/shared/theme/shuyo_theme.dart';
 
+import '../../support/academic_schedule_actions.dart';
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
@@ -463,8 +465,7 @@ void main() {
       ),
     ));
     await tester.pumpAndSettle();
-    await tester.tap(find.byTooltip('更多'));
-    await tester.pumpAndSettle();
+    await openScheduleMenu(tester);
     await tester.tap(find.text('通知设置'));
     await tester.pumpAndSettle();
     expect(find.text('课程实时活动'), findsNothing);
@@ -495,8 +496,7 @@ void main() {
         ),
       ));
       await tester.pumpAndSettle();
-      await tester.tap(find.byTooltip('更多'));
-      await tester.pumpAndSettle();
+      await openScheduleMenu(tester);
       await tester.tap(find.text('通知设置'));
       await tester.pumpAndSettle();
 
@@ -544,8 +544,7 @@ void main() {
       await saveSettingsSheet(tester);
       expect((await notifications.loadSettings()).liveActivityEnabled, isTrue);
       expect(find.textContaining('课程实时活动已开启，提前 20 分钟显示'), findsOneWidget);
-      await tester.tap(find.byTooltip('更多'));
-      await tester.pumpAndSettle();
+      await openScheduleMenu(tester);
       await tester.tap(find.text('通知设置'));
       await tester.pumpAndSettle();
 

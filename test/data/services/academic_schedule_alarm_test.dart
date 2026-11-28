@@ -14,6 +14,8 @@ import 'package:shuyo/data/services/academic_schedule_notification_service.dart'
 import 'package:shuyo/data/services/academic_schedule_widget_service.dart';
 import 'package:shuyo/features/home/academic_schedule_page.dart';
 
+import '../../support/academic_schedule_actions.dart';
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
@@ -214,8 +216,7 @@ void main() {
           ),
         ),
       );
-      await tester.tap(find.byTooltip('更多'));
-      await tester.pumpAndSettle();
+      await openScheduleMenu(tester);
       await tester.tap(find.text('通知设置'));
       await tester.pumpAndSettle();
 

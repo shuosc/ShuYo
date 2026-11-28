@@ -12,6 +12,8 @@ import 'package:shuyo/features/home/shuyo_content_page.dart';
 import 'package:shuyo/features/library_booking/library_booking_page.dart';
 import 'package:shuyo/features/onboarding/startup_onboarding.dart';
 
+import '../support/academic_schedule_actions.dart';
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   setUp(() => SharedPreferences.setMockInitialValues({}));
@@ -157,7 +159,7 @@ void main() {
     expect(find.text(demo.schedule.term.displayName), findsOneWidget);
     expect(find.byTooltip('课表信息说明'), findsOneWidget);
     expect(find.byTooltip('分享与导入'), findsNothing);
-    expect(find.byTooltip('更多'), findsOneWidget);
+    expect(scheduleMoreButton, findsOneWidget);
     expect(find.byTooltip('Back'), findsNothing);
     expect(find.byTooltip('通知'), findsNothing);
 
@@ -167,12 +169,11 @@ void main() {
     await tester.tap(find.text('确定'));
     await tester.pumpAndSettle();
 
-    await tester.tap(find.byTooltip('更多'));
-    await tester.pumpAndSettle();
+    await openScheduleMenu(tester);
     expect(find.text('通知设置'), findsNothing);
-    await tester.tap(find.text('恢复演示课表'));
+    await tester.tap(scheduleRefreshAction);
     await tester.pumpAndSettle();
-    await tester.tap(find.text('确定'));
+    await tester.tap(scheduleRefreshConfirmButton);
     await tester.pumpAndSettle();
 
     for (final label in ['学业', '首页', '日程']) {

@@ -17,6 +17,8 @@ import 'package:shuyo/features/home/academic_schedule_page.dart';
 import 'package:shuyo/features/home/schedule_share_page.dart';
 import 'package:shuyo/shared/theme/shuyo_theme.dart';
 
+import '../../support/academic_schedule_actions.dart';
+
 const _current = AcademicTermQuery(
     yearCode: '2026',
     termCode: '3',
@@ -159,15 +161,6 @@ void main() {
     expect(find.byType(AcademicScheduleCollectionPage), findsOneWidget);
   }
 
-  Future<void> refreshViewedTerm(WidgetTester tester) async {
-    await tester.tap(find.byTooltip('更多'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('更新课表'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('确定'));
-    await tester.pumpAndSettle();
-  }
-
   Future<void> viewHistory(WidgetTester tester) async {
     await tester.tap(find.byKey(const ValueKey('schedule-term-picker')));
     await tester.pumpAndSettle();
@@ -253,7 +246,7 @@ void main() {
     await showPage(tester, onViewedScheduleChanged: snapshots.add);
     await viewHistory(tester);
     api.historicalName = '刷新后的历史课程';
-    await refreshViewedTerm(tester);
+    await refreshSchedule(tester);
     expect(snapshots.last!.term.yearCode, _history.yearCode);
     expect(snapshots.last!.sessions.first.courseName, '刷新后的历史课程');
     expect(await repository.loadPrimaryTermKey(), _current.key);
@@ -267,7 +260,7 @@ void main() {
     await showPage(tester, onViewedScheduleChanged: snapshots.add);
     await viewHistory(tester);
     api.emptyTerms.add(_history.key);
-    await refreshViewedTerm(tester);
+    await refreshSchedule(tester);
     await tester.tap(find.text('替换'));
     await tester.pumpAndSettle();
     expect(snapshots.last!.term.yearCode, _history.yearCode);
@@ -370,9 +363,11 @@ void main() {
         tester.view.resetDevicePixelRatio();
       });
       await showPage(tester, themeId: themeId);
-      await tester.tap(find.byTooltip('更多'));
-      await tester.pumpAndSettle();
-      final moreMenuText = find.text('更新课表');
+      await openScheduleMenu(tester);
+      final moreMenuText = find.descendant(
+        of: scheduleRefreshAction,
+        matching: find.byType(Text),
+      );
       final moreMenuStyle =
           DefaultTextStyle.of(tester.element(moreMenuText)).style;
       expect(moreMenuStyle.fontWeight, FontWeight.w400);
@@ -442,7 +437,7 @@ void main() {
       api.authExpired = false;
       return true;
     });
-    await refreshViewedTerm(tester);
+    await refreshSchedule(tester);
     expect(recoveries, 1);
     expect(legacyLogins, 0);
     expect(api.requests, requests + 2);
@@ -464,7 +459,7 @@ void main() {
     await viewHistory(tester);
     api.authExpired = true;
     final requests = api.requests;
-    await refreshViewedTerm(tester);
+    await refreshSchedule(tester);
     expect(recoveries, 1);
     expect(api.requests, requests + 2);
     expect(await repository.loadPrimaryTermKey(), _current.key);
@@ -485,7 +480,7 @@ void main() {
       return true;
     });
     api.authExpired = true;
-    await refreshViewedTerm(tester);
+    await refreshSchedule(tester);
     expect(api.requestedTerms.sublist(api.requestedTerms.length - 2),
         [_current.key, _current.key]);
     expect(await repository.loadPrimaryTermKey(), _history.key);
@@ -534,7 +529,7 @@ void main() {
       recoveries++;
       return false;
     });
-    await refreshViewedTerm(tester);
+    await refreshSchedule(tester);
     expect(recoveries, 1);
     expect(api.requests, requests + 1);
     expect((await repository.loadCachedSchedule())!.toJson(), cached);
@@ -555,7 +550,7 @@ void main() {
       recoveries++;
       return true;
     });
-    await refreshViewedTerm(tester);
+    await refreshSchedule(tester);
     expect(recoveries, 1);
     expect(legacyLogins, 0);
     expect(api.requests, requests + 2);
@@ -1049,7 +1044,7 @@ void main() {
     await showPage(tester, onViewedScheduleChanged: snapshots.add);
     api.refreshGate = Completer<void>();
     final requests = api.requests;
-    await refreshViewedTerm(tester);
+    await refreshSchedule(tester);
     await viewHistory(tester);
     snapshots.clear();
     api.refreshGate!.complete();
@@ -1072,7 +1067,7 @@ void main() {
     api.emptyTerms.add(_current.key);
     api.refreshGate = Completer<void>();
     final requests = api.requests;
-    await refreshViewedTerm(tester);
+    await refreshSchedule(tester);
     await viewHistory(tester);
     api.refreshGate!.complete();
     await tester.pumpAndSettle();
@@ -1096,7 +1091,7 @@ void main() {
     await showPage(tester);
     await viewHistory(tester);
     api.emptyTerms.add(_history.key);
-    await refreshViewedTerm(tester);
+    await refreshSchedule(tester);
     expect(find.text('教务返回空课表'), findsOneWidget);
     // Another completed sync makes the pending confirmation stale.
     api.emptyTerms.remove(_history.key);

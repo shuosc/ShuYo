@@ -10,9 +10,19 @@ import 'package:shuyo/data/services/academic_schedule_widget_service.dart';
 import 'package:shuyo/features/home/academic_schedule_page.dart';
 import 'package:shuyo/shared/theme/shuyo_theme.dart';
 
+import '../../support/academic_schedule_actions.dart';
+
+final _randomColorsAction =
+    find.byKey(const ValueKey('schedule-random-colors-action'));
+final _randomColorsDialog =
+    find.byKey(const ValueKey('schedule-random-colors-dialog'));
+final _randomColorsConfirm =
+    find.byKey(const ValueKey('schedule-random-colors-confirm'));
+final _randomColorsCancel =
+    find.byKey(const ValueKey('schedule-random-colors-cancel'));
+
 void main() {
-  testWidgets(
-      'update asks before replacing edits; random colors use the palette',
+  testWidgets('random colors use the palette and reuse a recent confirmation',
       (tester) async {
     SharedPreferences.setMockInitialValues({});
     final repository = _ScheduleRepository();
@@ -40,18 +50,15 @@ void main() {
       ),
     ));
     await tester.pumpAndSettle();
-    await tester.tap(find.byTooltip('更多'));
+    await openScheduleMenu(tester);
+    expect(tester.getTopLeft(scheduleRefreshAction).dy,
+        lessThan(tester.getTopLeft(_randomColorsAction).dy));
+    await tester.tap(_randomColorsAction);
     await tester.pumpAndSettle();
-    expect(find.text('更新课表'), findsOneWidget);
-    expect(find.text('随机颜色'), findsOneWidget);
-    expect(tester.getTopLeft(find.text('更新课表')).dy,
-        lessThan(tester.getTopLeft(find.text('随机颜色')).dy));
-    await tester.tap(find.text('随机颜色'));
-    await tester.pumpAndSettle();
-    expect(find.text('确认随机颜色'), findsOneWidget);
-    expect(find.textContaining('点击确定后将为当前课表所有课程随机分配颜色。'), findsOneWidget);
-    expect(find.textContaining('同时打开多彩显示。'), findsOneWidget);
-    await tester.tap(find.text('确定'));
+    expect(_randomColorsDialog, findsOneWidget);
+    expect(find.textContaining('为当前课表所有课程随机分配颜色'), findsOneWidget);
+    expect(find.textContaining('同时打开多彩显示'), findsOneWidget);
+    await tester.tap(_randomColorsConfirm);
     await tester.pumpAndSettle();
     final service = AcademicScheduleDisplaySettingsService();
     final state = await service.loadState(term: _schedule.term);
@@ -64,31 +71,36 @@ void main() {
         .fold<int>(0, (sum, unit) => (sum + unit) & 0x7fffffff);
     expect(assigned, isNot(palette[hash % palette.length].toARGB32()));
 
-    await tester.tap(find.byTooltip('更多'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('随机颜色'));
-    await tester.pumpAndSettle();
+    await _openRandomColors(tester);
     // Still inside the five-minute window opened by the confirmation above.
-    expect(find.text('确认随机颜色'), findsNothing);
+    expect(_randomColorsDialog, findsNothing);
     final second = await service.loadCourseColors(_schedule.term);
     expect(second['MATH101'], isNot(assigned));
+  });
 
-    await tester.tap(find.byTooltip('更多'));
+  testWidgets('refresh warns about local edits and requires confirmation',
+      (tester) async {
+    SharedPreferences.setMockInitialValues({});
+    final repository = _ScheduleRepository();
+    await _pumpColorSchedule(tester, repository, _schedule);
+    final refreshDialog = find.byKey(const ValueKey('schedule-refresh-dialog'));
+
+    await openScheduleRefreshConfirmation(tester);
+    expect(repository.refreshCalls, 0);
+    expect(
+      find.descendant(
+        of: refreshDialog,
+        matching: find.textContaining('不会保留本地编辑'),
+      ),
+      findsOneWidget,
+    );
+    await tester.tap(find.byKey(const ValueKey('schedule-refresh-cancel')));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('更新课表'));
-    await tester.pumpAndSettle();
-    expect(find.text('确认更新'), findsOneWidget);
-    expect(find.text('点击确定后将更新正在查看的这一学期，不会保留本地编辑。'), findsOneWidget);
-    await tester.tap(find.text('取消'));
-    await tester.pumpAndSettle();
+    expect(refreshDialog, findsNothing);
     expect(repository.refreshCalls, 0);
 
-    await tester.tap(find.byTooltip('更多'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('更新课表'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('确定'));
-    await tester.pumpAndSettle();
+    await refreshSchedule(tester);
+    expect(refreshDialog, findsNothing);
     expect(repository.refreshCalls, 1);
     expect(tester.takeException(), isNull);
   });
@@ -212,16 +224,13 @@ void main() {
       ),
     ));
     await tester.pumpAndSettle();
-    await tester.tap(find.byTooltip('更多'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('随机颜色'));
-    await tester.pumpAndSettle();
-    expect(find.text('确认随机颜色'), findsOneWidget);
+    await _openRandomColors(tester);
+    expect(_randomColorsDialog, findsOneWidget);
     // Nothing has been overridden yet, so the warning line stays out.
     expect(find.textContaining('已手动设置的颜色会被覆盖'), findsNothing);
-    await tester.tap(find.text('取消'));
+    await tester.tap(_randomColorsCancel);
     await tester.pumpAndSettle();
-    expect(find.text('确认随机颜色'), findsNothing);
+    expect(_randomColorsDialog, findsNothing);
     expect(
         await AcademicScheduleDisplaySettingsService()
             .loadCourseColors(_schedule.term),
@@ -247,7 +256,7 @@ void main() {
     await _pumpColorSchedule(tester, repository, _schedule);
 
     await _openRandomColors(tester);
-    await tester.tap(find.text('确定'));
+    await tester.tap(_randomColorsConfirm);
     await tester.pumpAndSettle();
     final autumnColor = _courseFill(tester, 'course-1');
     expect(autumnColor, isNot(manualColor));
@@ -255,9 +264,9 @@ void main() {
     await _viewTerm(tester, winter.term);
     expect(_courseFill(tester, 'course-1'), manualColor);
     await _openRandomColors(tester);
-    expect(find.text('确认随机颜色'), findsOneWidget);
+    expect(_randomColorsDialog, findsOneWidget);
     expect(find.textContaining('已手动设置的颜色会被覆盖'), findsOneWidget);
-    await tester.tap(find.text('取消'));
+    await tester.tap(_randomColorsCancel);
     await tester.pumpAndSettle();
     expect((await service.loadCourseColors(winter.term))['MATH101'],
         manualColor.toARGB32());
@@ -300,12 +309,9 @@ void main() {
     final manual = palette[3].toARGB32();
     await service.saveCourseColor(_schedule.term, 'MATH101', manual);
     await _pumpColorSchedule(tester, repository, _schedule, colorful: false);
-    await tester.tap(find.byTooltip('更多'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('随机颜色'));
-    await tester.pumpAndSettle();
+    await _openRandomColors(tester);
     expect(find.textContaining('已手动设置的颜色会被覆盖'), findsOneWidget);
-    await tester.tap(find.text('确定'));
+    await tester.tap(_randomColorsConfirm);
     await tester.pumpAndSettle();
     expect((await service.loadSettings()).colorful, isTrue);
     expect((await service.loadCourseColors(_schedule.term))['MATH101'],
@@ -383,9 +389,8 @@ Future<void> _pumpColorSchedule(
 }
 
 Future<void> _openRandomColors(WidgetTester tester) async {
-  await tester.tap(find.byTooltip('更多'));
-  await tester.pumpAndSettle();
-  await tester.tap(find.text('随机颜色'));
+  await openScheduleMenu(tester);
+  await tester.tap(_randomColorsAction);
   await tester.pumpAndSettle();
 }
 

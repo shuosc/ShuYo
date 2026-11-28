@@ -26,6 +26,8 @@ import 'package:shuyo/data/services/unified_account_service.dart';
 import 'package:shuyo/features/auth/native_login_page.dart';
 import 'package:shuyo/features/onboarding/startup_onboarding.dart';
 
+import '../../support/academic_schedule_actions.dart';
+
 final _schedule = AcademicSchedule(
   term: const AcademicTerm(
     yearCode: '2026',
@@ -410,14 +412,14 @@ void main() {
         await tester.pumpAndSettle();
         await tester.tap(find.text(tab).last);
         await tester.pumpAndSettle();
-        await tester.tap(find.byTooltip('更多'));
-        await tester.pumpAndSettle();
-        await tester.tap(find.text(tab == '学业' ? '刷新学业信息' : '更新课表'));
         if (tab == '日程') {
+          await refreshSchedule(tester);
+        } else {
+          await tester.tap(find.byTooltip('更多'));
           await tester.pumpAndSettle();
-          await tester.tap(find.text('确定'));
+          await tester.tap(find.text('刷新学业信息'));
+          await tester.pumpAndSettle();
         }
-        await tester.pumpAndSettle();
         expect(find.byType(NativeLoginPage), findsOneWidget);
         expect(controller.academicLoggedIn, isFalse);
         expect(controller.academicSessionExpired, isTrue);
