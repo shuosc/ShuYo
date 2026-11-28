@@ -15,8 +15,10 @@ import 'package:shuyo/data/services/academic_schedule_api_client.dart';
 import 'package:shuyo/data/services/academic_auth_service.dart';
 import 'package:shuyo/data/services/client_settings_service.dart';
 import 'package:shuyo/data/services/student_identity_service.dart';
+import 'package:shuyo/features/auth/native_login_page.dart';
 import 'package:shuyo/features/settings/client_settings_page.dart';
 import 'package:shuyo/features/settings/contributors_page.dart';
+import 'package:shuyo/features/settings/privacy_data_page.dart';
 import 'package:shuyo/features/settings/third_party_licenses_page.dart';
 import 'package:shuyo/shared/navigation/shuyo_route.dart';
 import 'package:shuyo/features/onboarding/startup_onboarding.dart';
@@ -34,21 +36,38 @@ void main() {
   final moduleSlider =
       find.byKey(const ValueKey('theme-module-opacity-slider'));
   final modulePreview = find.byKey(const ValueKey('theme-module-preview-card'));
+  final privacyEntry = find.byKey(const ValueKey('settings-privacy-data'));
+  final deleteDataEntry = find.byKey(const ValueKey('privacy-delete-data'));
+  final verifyDeletion = find.byKey(const ValueKey('privacy-verify-deletion'));
 
-  testWidgets('privacy and deletion stay separate from authentication status',
+  testWidgets('privacy explains data retention and deletion opens verification',
       (tester) async {
     final identity = StudentIdentityService();
     addTearDown(identity.dispose);
     await _pumpSettings(tester, studentIdentityService: identity);
-    await tester.tap(find.text('隐私与数据'));
+    await tester.tap(privacyEntry);
     await tester.pumpAndSettle();
-    expect(find.text('ShuYo 向学校核实当前登录账号的学号。撤销设备认证后，服务器会保留你使用反馈、课表分享等功能产生的数据。'),
-        findsOneWidget);
-    await tester.tap(find.text('删除 ShuYo 数据'));
+    expect(find.byType(PrivacyDataPage), findsOneWidget);
+    expect(
+      find.textContaining(RegExp(r'撤销设备认证后[^。]*服务器(?:仍会|会|将)?保留[^。]*数据')),
+      findsOneWidget,
+    );
+    await tester.tap(deleteDataEntry);
     await tester.pumpAndSettle();
-    expect(find.text('删除后，你的设备认证将全部失效；服务器当前保存的学号认证记录、反馈、活跃记录、课表分享码将被清除。'),
-        findsOneWidget);
-    expect(find.text('验证身份并继续'), findsOneWidget);
+    expect(find.textContaining('设备认证将全部失效'), findsOneWidget);
+    final deletionWarning = find.textContaining('将被清除');
+    expect(deletionWarning, findsOneWidget);
+    final warning = tester.widget<Text>(deletionWarning).data;
+    for (final kind in ['学号认证记录', '反馈', '活跃记录', '课表分享码']) {
+      expect(warning, contains(kind));
+    }
+
+    expect(find.byType(NativeLoginPage), findsNothing);
+    await tester.tap(verifyDeletion);
+    await tester.pumpAndSettle();
+    final login = tester.widget<NativeLoginPage>(find.byType(NativeLoginPage));
+    expect(login.destination, NativeLoginDestination.dataDeletion);
+    expect(login.studentIdentityService, same(identity));
   });
 
   testWidgets('custom theme opens without a photo and disables opacity',
@@ -814,18 +833,14 @@ void main() {
   testWidgets('demo settings still shows privacy and data deletion guidance',
       (tester) async {
     await _pumpSettings(tester, isDemo: true);
-    expect(find.text('隐私与数据'), findsOneWidget);
-
-    await tester.tap(find.text('隐私与数据'));
+    await tester.tap(privacyEntry);
     await tester.pumpAndSettle();
     expect(find.textContaining('当前为演示模式'), findsOneWidget);
 
-    await tester.tap(find.text('删除 ShuYo 数据'));
+    await tester.tap(deleteDataEntry);
     await tester.pumpAndSettle();
     expect(find.textContaining('未在 ShuYo 服务器保存个人数据'), findsOneWidget);
-    final action = tester.widget<FilledButton>(
-      find.widgetWithText(FilledButton, '演示模式无云端数据'),
-    );
+    final action = tester.widget<FilledButton>(verifyDeletion);
     expect(action.onPressed, isNull);
   });
 
