@@ -47,7 +47,7 @@ flutter test
 flutter build apk --debug --target-platform android-arm64
 ```
 
-开发约定：[LLM 使用政策](LLM_POLICY.md)
+开发约定：[测试说明](test/README.md) · [LLM 使用政策](LLM_POLICY.md)
 
 ## 致谢
 
